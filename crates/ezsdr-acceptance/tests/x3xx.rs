@@ -94,6 +94,34 @@ fn d3_the_two_providers_describe_one_layout_alike() {
 }
 
 #[test]
+fn d3_the_two_providers_refuse_a_transmit_rate_below_one_msps_alike() {
+    // KL-40: both Providers build their grid from the layout, so a transmit stream below 1 MS/s on `x3xx` is declared and refused alike:
+    // the capability is the 200 rates 1 to 200 MS/s, 0.5 MS/s is rejected with the same reason on both and never coerced to 1 MS/s, and a
+    // receive stream keeps 0.5 MS/s.
+    let elements = vec!["0:A:ubx:0".to_owned(), "0:B:ubx:0".to_owned()];
+    let selector = ezsdr_acceptance::layout::x3xx_selector(&elements, &elements);
+    let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
+    let device = Arc::new(FakeDevice::new(FakeConfig { front_ends: vec!["UBX", "UBX"], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
+    let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
+    let tx = Key::parse("radio.tx.s0.sample_rate_hz").unwrap();
+    for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
+        let CapabilityValue::AnyOf { values } = &provider.instance().tree.capabilities[&tx] else { panic!("a rate grid is AnyOf") };
+        assert_eq!(values.len(), 200);
+        assert_eq!((values[0].clone(), values[values.len() - 1].clone()), (Scalar::try_from(200e6).unwrap(), Scalar::try_from(1e6).unwrap()));
+        let id = provider.instance().id.clone();
+        let ask = |key: &str, rate: f64| Requested { resource: id.clone(), constraints: BTreeMap::from([(Key::parse(key).unwrap(), Constraint::Eq { value: Scalar::try_from(rate).unwrap() })]) };
+        let low = provider.coerce(&ask("radio.tx.s0.sample_rate_hz", 500_000.0)).unwrap();
+        assert_eq!(low.rejected.len(), 1, "{:?}", low.rejected);
+        assert!(low.rejected[0].reason.starts_with("RM-8: 500000 is outside 1000000..200000000"), "{}", low.rejected[0].reason);
+        assert!(low.coercions.is_empty() && !low.applied.contains_key(&tx));
+        let rx = provider.coerce(&ask("radio.rx.s0.sample_rate_hz", 500_000.0)).unwrap();
+        assert!(rx.rejected.is_empty() && rx.coercions.is_empty(), "receive keeps 0.5 MS/s: {rx:?}");
+    }
+    let (m, u) = (&mock as &dyn Provider, &uhd as &dyn Provider);
+    assert_eq!(m.instance().tree.capabilities[&tx], u.instance().tree.capabilities[&tx], "the two Providers declare one transmit grid");
+}
+
+#[test]
 fn d3_a_named_selector_gives_each_provider_its_unnamed_description() {
     // RM-28: within each Provider the named selector builds the tree of the plain one; across Providers
     // only the board-derived surfaces are compared, as D3 does (the Providers differ in command lead).

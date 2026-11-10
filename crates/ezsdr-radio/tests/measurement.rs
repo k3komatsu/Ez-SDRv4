@@ -532,3 +532,50 @@ fn rm_35_rule_labels_match_the_declared_comparison_classes() {
         assert_eq!(measurement::rule(key), Some(expected), "{key}");
     }
 }
+
+#[test]
+fn measurement_profile_value_of_a_transmit_stream_is_the_restricted_grid() {
+    // KL-40: the profile value of a transmit stream's rate is the transmit grid (1 MS/s up), the receive stream's the device grid, and a
+    // comparison is profile ⊆ measured, so the transmit grid is covered by measuring it or the device grid, and a receive stream measured on the transmit grid alone is not covered (R3-5).
+    let mut record = fixture_record();
+    let desc = description(&record, mock_terms());
+    let values = measurement::profile_values(&desc);
+    let tx = Key::parse("radio.tx.s0.sample_rate_hz").unwrap();
+    let rx = Key::parse("radio.rx.s0.sample_rate_hz").unwrap();
+    let listed = |grid: &Grid| match grid {
+        Grid::Values(values) => Worst::Grid(GridValue::Values { values: values.clone() }),
+        other => panic!("an enumerable grid: {other:?}"),
+    };
+    assert_eq!(values[&tx], listed(&desc.tx_rates));
+    assert_eq!(values[&rx], listed(&desc.rates));
+    assert_ne!(values[&tx], values[&rx]);
+    let index = record.values.iter().position(|value| key_of(value) == tx.as_str()).unwrap();
+    record.values[index] = ValueRecord::Measured { key: tx.clone(), worst: Worst::Number(0.0), trials: 1, condition: "baseline".to_owned(), test: "fixture".to_owned() };
+    let clear_of = |record: &Record, key: &Key| compare(record, &desc).iter().all(|violation| violation.key != key.as_str());
+    // The check is profile ⊆ measured. Measuring exactly the transmit grid is clean; so is measuring the whole device grid (a superset).
+    set_worst(
+        &mut record,
+        tx.as_str(),
+        match listed(&desc.tx_rates) {
+            Worst::Grid(grid) => Worst::Grid(grid),
+            other => other,
+        },
+    );
+    assert!(clear_of(&record, &tx), "the transmit grid measured exactly: {:?}", compare(&record, &desc));
+    set_worst(&mut record, tx.as_str(), listed(&desc.rates));
+    assert!(clear_of(&record, &tx), "the device grid measured covers the transmit grid");
+    // What separates the two grids: a receive stream measured only on the transmit grid does not cover the receive profile (the device grid).
+    let rx_index = record.values.iter().position(|value| key_of(value) == rx.as_str()).unwrap();
+    record.values[rx_index] = ValueRecord::Measured { key: rx.clone(), worst: Worst::Number(0.0), trials: 1, condition: "baseline".to_owned(), test: "fixture".to_owned() };
+    set_worst(&mut record, rx.as_str(), listed(&desc.tx_rates));
+    assert_rejected(&record, &desc, rx.as_str(), "not a subset");
+    // A condition that transmits at 0.5 MS/s is off the grid; one that receives at 0.5 MS/s is not.
+    let mut condition = fixture_record();
+    let transmit = condition.conditions[0].streams.iter().position(|stream| stream.direction == Direction::Tx).unwrap();
+    condition.conditions[0].streams[transmit].sample_rate_hz = 500_000.0;
+    assert_rejected(&condition, &desc, "conditions.baseline.streams.0.Tx", "rate grid");
+    let mut condition = fixture_record();
+    let receive = condition.conditions[0].streams.iter().position(|stream| stream.direction == Direction::Rx).unwrap();
+    condition.conditions[0].streams[receive].sample_rate_hz = 500_000.0;
+    assert!(compare(&condition, &desc).iter().all(|violation| !violation.reason.contains("rate grid")));
+}

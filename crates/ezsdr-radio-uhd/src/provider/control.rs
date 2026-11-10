@@ -219,7 +219,12 @@ impl Control {
                 }
             }
             for (k, line) in tx.iter().enumerate() {
-                streams.stream_mut(stream_key(Dir::Tx, k)).clock = start.tx.get(k).copied().flatten().map(|(clock, _)| clock);
+                let clock = start.tx.get(k).copied().flatten().map(|(clock, _)| clock);
+                let stream = streams.stream_mut(stream_key(Dir::Tx, k));
+                stream.clock = clock;
+                if let Some(clock) = clock {
+                    stream.arm_record(core.mcr, clock);
+                }
                 streams.lines.insert(stream_key(Dir::Tx, k), line.clone());
             }
         }
@@ -282,7 +287,7 @@ impl Control {
                     at.is_some(),
                     receipt,
                     |k| streams.line(stream_key(Dir::Rx, k as usize)).is_some_and(Line::streaming),
-                    |k| streams.tx.get(k as usize).map_or(Bookings::default(), |stream| stream.busy.clone()),
+                    |k| streams.tx.get(k as usize).map_or(Bookings::unarmed(), |stream| stream.busy.clone()),
                 );
                 drop(streams);
                 if let Err(refusal) = staged {
@@ -790,21 +795,21 @@ mod tests {
     #[test]
     fn ur_30_a_transmit_stop_records_the_bound_its_bookings_end_at() {
         // RM-16 (#83): the `tx_stop_applied` row holds the Stop's root instant and the bound the bookings end at, the values the
-        // parity test compares the repeat with. The bound is the first sample at or after `at + tx_in_flight`, plus three (as S3 states).
+        // parity test compares the repeat with. The bound is the first sample at or after `at + tx_in_flight`, plus five (as S3 states).
         let (core, mut control, time, _events) = tx_rig();
         book_tx_burst(&mut control, &core, 1, 10_000, true, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
         let stop = core.ticks(5_000_000);
         time.advance_to(core.at(stop)).unwrap();
         control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(crate::provider::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
         let clock = tx_clock(&core);
-        let bound = clock.instant(clock.at_or_after(stop + core.tx_in_flight()) + 3);
+        let bound = clock.instant(clock.at_or_after(stop + core.tx_in_flight()) + 5);
         let row = lock(&core.rec).timing.iter().find(|row| row["what"] == "tx_stop_applied").cloned().expect("the Stop row");
         assert_eq!((row["stream"].as_u64(), row["at"].as_i64(), row["bound"].as_i64()), (Some(0), Some(stop), Some(bound)));
     }
 
     #[test]
     fn ur_21_an_untimed_repeat_after_a_stop_starts_at_the_bound_or_its_ordinary_start() {
-        // RM-15, RM-16 (#83), on the controlled clock: a Stop at 5 ms bounds the stream at 10 ms of samples past it, plus three (the bound,
+        // RM-15, RM-16 (#83), on the controlled clock: a Stop at 5 ms bounds the stream at 10 ms of samples past it, plus five (the bound,
         // 15 ms here). An untimed repeat received inside that region (7 ms) starts at the bound; one received after it (20 ms) starts at
         // its ordinary start, which the device lead after its receipt sets. The test sets the instants, so no thread timing moves either.
         for (receipt_ms, inside) in [(7, true), (20, false)] {
@@ -814,7 +819,7 @@ mod tests {
             time.advance_to(core.at(stop)).unwrap();
             control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(crate::provider::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
             let clock = tx_clock(&core);
-            let bound = clock.at_or_after(stop + core.tx_in_flight()) + 3;
+            let bound = clock.at_or_after(stop + core.tx_in_flight()) + 5;
             let receipt = core.ticks(receipt_ms * 1_000_000);
             time.advance_to(core.at(receipt)).unwrap();
             let ordinary =
@@ -1838,7 +1843,7 @@ mod tests {
 
     #[test]
     fn ur_23_a_value_is_taken_only_after_a_stopped_repeat_s_in_flight_window() {
-        // S3: a repeat keeps the stream busy; a `Stop` at `s` leaves it busy until the first sample at or after `s + tx_in_flight`, plus three (RM-16), and a value at that bound is taken.
+        // S3: a repeat keeps the stream busy; a `Stop` at `s` leaves it busy until the first sample at or after `s + tx_in_flight`, plus five (RM-16), and a value at that bound is taken.
         let (core, mut control, time, events) = tx_rig();
         book_tx_burst(&mut control, &core, 1, 10_000, true, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
         book_value(&mut control, &core, 2, TX_FREQUENCY, frequency(2.4e9), None);
@@ -1847,7 +1852,7 @@ mod tests {
         time.advance_to(core.at(stop)).unwrap();
         control.book(Dispatched::new(ActionId(3), Action::Stop { target: Some(crate::provider::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
         let clock = tx_clock(&core);
-        let bound = clock.instant(clock.at_or_after(stop + core.tx_in_flight()) + 3);
+        let bound = clock.instant(clock.at_or_after(stop + core.tx_in_flight()) + 5);
         time.advance_to(core.at(bound - 1)).unwrap();
         book_value(&mut control, &core, 4, TX_FREQUENCY, frequency(2.5e9), None);
         assert_eq!(events_of(&events, kinds::COMMAND_REJECTED).len(), 1, "one tick before the bound is refused");
@@ -1865,7 +1870,7 @@ mod tests {
         time.advance_to(core.at(stop)).unwrap();
         lock(&core.streams).end(&core, stop, false, false);
         let clock = tx_clock(&core);
-        let bound = clock.instant(clock.at_or_after(stop + core.tx_in_flight()) + 3);
+        let bound = clock.instant(clock.at_or_after(stop + core.tx_in_flight()) + 5);
         time.advance_to(core.at(bound - 1)).unwrap();
         book_value(&mut control, &core, 2, TX_FREQUENCY, frequency(2.4e9), None);
         assert_eq!(events_of(&events, kinds::COMMAND_REJECTED).len(), 1, "one tick before the bound is refused");

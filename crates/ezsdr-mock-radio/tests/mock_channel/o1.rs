@@ -46,7 +46,7 @@ fn x3xx(waves: &[(u8, usize)]) -> M {
     let (sin, cos) = (tx[0] - rx[0]).sin_cos();
     // The Mock's profile in the oracle's terms: window 10 ms, device lead 2 ms (`min_timed_command_lead_ns`), and the emulated UHD allowance
     // (3 ms, MR-3) that RM-15's join deadline uses.
-    let p = o::Params { clock: o::Clock { origin: 0, n: 1_000 }, window: 10_000_000, lead: 2_000_000, allowance: 3_000_000 };
+    let p = o::Params { clock: o::Clock { origin: 0, n: 1_000 }, root_hz: 1_000_000_000, window: 10_000_000, lead: 2_000_000, allowance: 3_000_000 };
     let mut m = build(world, radio, p, X, 45, (sin, cos), waves);
     m.now = T0;
     m
@@ -59,7 +59,7 @@ fn ideal(waves: &[(u8, usize)]) -> M {
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
     step(&world, &mut [&mut radio], 0);
-    let p = o::Params { clock: o::Clock { origin: 0, n: 1_000 }, window: 0, lead: 0, allowance: 0 };
+    let p = o::Params { clock: o::Clock { origin: 0, n: 1_000 }, root_hz: 1_000_000_000, window: 0, lead: 0, allowance: 0 };
     build(world, radio, p, 0, 0, (0.0, 1.0), waves)
 }
 
@@ -223,7 +223,8 @@ fn end_of(end: BurstEnd) -> &'static str {
 }
 
 fn region_of(start: i64, len: i64) -> o::Region {
-    o::region(start, Some(len))
+    // Both Mock rigs run at 1 MS/s, so the closed short gap is 15 samples (RM-15); only the gap of the params is read.
+    o::region(&o::Params { clock: o::Clock { origin: 0, n: 1_000 }, root_hz: 1_000_000_000, window: 0, lead: 0, allowance: 0 }, start, Some(len))
 }
 
 // ------------------------------------------------------------------------------------------------------------ T1
@@ -452,12 +453,12 @@ fn o1_mock_t5_a_late_send_asap_and_an_untimed_booking_are_placed_exactly() {
     m.go(s);
     m.book(1, X + 11_500, false, LatePolicy::SendAsapAndFlag);
     let want = o::place(&m.p, &[a], m.tick(s), Some(X + 11_500), Some(200));
-    assert_eq!(want, X + 13_002);
+    assert_eq!(want, X + 13_004);
     m.go(X + 40_000);
     assert_eq!(m.rec_of(200), (want, Some(X + 11_500), true));
     assert_eq!(m.time_errors(), ["send_asap"]);
     m.check(&o::Slots { segs: vec![o::Seg::once(10, s, 3_000), o::Seg::once(11, want, 200)], cut: None }, s - 10, want + 300);
-    // (b) the same where the lead dominates: A (300 samples, front s + 302) is long done at 12 ms.
+    // (b) the same where the lead dominates: A (300 samples, front s + 304) is long done at 12 ms.
     let mut m = x3xx(&[(10, 300), (12, 200)]);
     m.book(0, s, false, LatePolicy::DropAndFlag);
     m.go(X + 12_000);
@@ -483,7 +484,7 @@ fn o1_mock_t5_a_late_send_asap_and_an_untimed_booking_are_placed_exactly() {
     m.go(s);
     m.book_untimed(1, X + 10_500);
     let want = o::place(&m.p, &[a], m.tick(s), Some(X + 10_500), Some(200));
-    assert_eq!(want, X + 13_002);
+    assert_eq!(want, X + 13_004);
     m.go(X + 40_000);
     assert_eq!(m.rec_of(200), (want, None, false));
     assert!(m.time_errors().is_empty());
@@ -516,10 +517,10 @@ fn before_stop(waves: &[(u8, usize)], extra: &[(usize, i64)]) -> (M, i64) {
 
 #[test]
 fn o1_mock_t6a_a_cancellation_that_starts_at_or_after_the_bound_leaves_no_region() {
-    // RM-16 as amended (a Stop that cancels a booking starting before B leaves [t, B)) (seq 6): H starts at X + 50 000, after B = X + 30 003,
+    // RM-16 as amended (a Stop that cancels a booking starting before B leaves [t, B)) (seq 6): H starts at X + 50 000, after B = X + 30 005,
     // so it is cancelled (a `rejected` note, not an event) and leaves no region: D, received after the Stop with start X + 26 000, is accepted.
     let (mut m, t) = before_stop(&[(1, 100), (3, 300), (4, 200)], &[(1, X + 50_000)]);
-    assert_eq!(m.p.stop_bound(t), (X + 20_000, X + 30_003));
+    assert_eq!(m.p.stop_bound(t), (X + 20_000, X + 30_005));
     assert_eq!(o::stop_region(&m.p, t, &[X + 50_000]), None);
     m.book(2, X + 26_000, false, LatePolicy::DropAndFlag);
     assert_eq!(o::admit(&m.p, &[], t, X + 26_000, Some(200)), o::Verdict::Accept);
@@ -534,12 +535,12 @@ fn o1_mock_t6a_a_cancellation_that_starts_at_or_after_the_bound_leaves_no_region
 fn o1_mock_t6b_a_cancellation_that_starts_before_the_bound_leaves_the_region() {
     // RM-16 (seq 6): H2 is booked ahead and starts in [window_end, B) (X + 30 001) or at window_end - 16 (X + 29 984, the case where the UHD
     // drops it with no note, issue #85: the Mock records the cancellation, as the spec says). Either way it is unhanded at the Stop, is
-    // cancelled (a note), starts in [t, B) and so leaves [X + 20 000, X + 30 003); every later booking is judged by it.
+    // cancelled (a note), starts in [t, B) and so leaves [X + 20 000, X + 30 005); every later booking is judged by it.
     for h2 in [X + 30_001, X + 29_984] {
         for case in ["drop inside", "send_asap inside", "untimed", "drop at B"] {
             let (mut m, t) = before_stop(&[(1, 100), (3, 300), (4, 200)], &[(1, h2)]);
             let region = o::stop_region(&m.p, t, &[h2]).expect("H2 starts in [t_k, B)");
-            assert_eq!((region.start, region.front), (X + 20_000, X + 30_003));
+            assert_eq!((region.start, region.front), (X + 20_000, X + 30_005));
             let want_start = match case {
                 "drop inside" => {
                     m.book(2, X + 29_000, false, LatePolicy::DropAndFlag);
@@ -555,9 +556,9 @@ fn o1_mock_t6b_a_cancellation_that_starts_before_the_bound_leaves_the_region() {
                     Some(o::place(&m.p, &[region], t, Some(X + 29_000), Some(200)))
                 }
                 _ => {
-                    m.book(2, X + 30_003, false, LatePolicy::DropAndFlag);
-                    assert_eq!(o::admit(&m.p, &[region], t, X + 30_003, Some(200)), o::Verdict::Accept);
-                    Some(X + 30_003)
+                    m.book(2, X + 30_005, false, LatePolicy::DropAndFlag);
+                    assert_eq!(o::admit(&m.p, &[region], t, X + 30_005, Some(200)), o::Verdict::Accept);
+                    Some(X + 30_005)
                 }
             };
             m.go(X + 60_000);
@@ -569,7 +570,7 @@ fn o1_mock_t6b_a_cancellation_that_starts_before_the_bound_leaves_the_region() {
                 Some(start) => {
                     assert!(refusals.is_empty(), "{case}: {refusals:?}");
                     assert_eq!(m.rec_of(200), (start, (case == "send_asap inside").then_some(X + 29_000), case == "send_asap inside"), "{case}");
-                    assert_eq!(start, X + 30_003, "{case}: the first sample past the region");
+                    assert_eq!(start, X + 30_005, "{case}: the first sample past the region");
                     m.check(&o::Slots { segs: vec![o::Seg::once(1, X + 10_000, 100), o::Seg::once(4, start, 200)], cut: None }, X + 9_990, start + 300);
                 }
             }

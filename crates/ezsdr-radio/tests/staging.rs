@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use ezsdr_kernel::event::ActionId;
 use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_radio::CancelReason;
-use ezsdr_radio::staging::{Bookings, Overlap, Read, Refusal, Settled, Staging, SwitchOutcome, TxList, Until, ordinary_k, repeat_boundary, stop_bound};
+use ezsdr_radio::staging::{Bookings, Overlap, Read, Refusal, Settled, Staging, SwitchOutcome, TxList, Until, closed_short_gap, ordinary_k, repeat_boundary, stop_bound};
 
 fn key(name: &str) -> Key {
     Key::parse(name).unwrap()
@@ -47,7 +47,21 @@ fn staging() -> Staging {
 }
 
 const NEVER: fn(u32) -> bool = |_| false;
-const IDLE: fn(u32) -> Bookings = |_| Bookings::default();
+const IDLE: fn(u32) -> Bookings = |_| Bookings::unarmed();
+
+/// RM-15: the samples a closed short burst's front keeps past its padded end at 1 MS/s on a 200 MHz root: ceil(15 µs × 1 MS/s).
+const GAP_1M: i64 = 15;
+
+/// A record armed for a stream at 1 MS/s on a 200 MHz root (`GAP_1M`).
+fn armed() -> Bookings {
+    armed_with(GAP_1M)
+}
+
+fn armed_with(gap: i64) -> Bookings {
+    let mut bookings = Bookings::unarmed();
+    bookings.arm(gap);
+    bookings
+}
 
 /// The settled switches as (id, outcome), for the assertions that do not read the moved boundary.
 fn settled(bookings: &mut Bookings) -> Vec<(ActionId, SwitchOutcome)> {
@@ -100,9 +114,9 @@ fn rm_21_the_last_staged_value_wins() {
 fn rm_21_a_peer_stream_s_state_does_not_matter() {
     // Transmit stream 0 is busy until tick 100, stream 1 is idle: a value for stream 1's channel is taken at receipt 50.
     let mut staging = transmit_staging();
-    let mut busy = Bookings::default();
+    let mut busy = armed();
     busy.book(Some(100));
-    let stream_0_busy = |stream: u32| if stream == 0 { busy.clone() } else { Bookings::default() };
+    let stream_0_busy = |stream: u32| if stream == 0 { busy.clone() } else { armed() };
     assert_eq!(staging.set(&key("radio.tx.c0.frequency_hz"), num(2.0e9), false, 50, NEVER, stream_0_busy), Err(Refusal::TxBusy { until: Until::At(100) }));
     assert_eq!(staging.set(&key("radio.tx.c1.frequency_hz"), num(2.0e9), false, 50, NEVER, stream_0_busy), Ok(()));
     assert_eq!(staging.tx_snapshot(1).0, 1, "stream 1 counts its own value");
@@ -163,7 +177,7 @@ fn rm_21_a_start_of_a_streaming_stream_is_refused_and_a_stopped_one_takes_the_sn
 
 #[test]
 fn rm_21_a_transmit_value_at_the_exclusive_end_is_accepted_and_one_sample_before_refused() {
-    let mut busy = Bookings::default();
+    let mut busy = armed();
     busy.book(Some(100));
     assert_eq!(busy.stageable(100), Ok(()));
     assert_eq!(busy.stageable(99), Err(Refusal::TxBusy { until: Until::At(100) }));
@@ -171,22 +185,22 @@ fn rm_21_a_transmit_value_at_the_exclusive_end_is_accepted_and_one_sample_before
 
 #[test]
 fn rm_21_a_transmit_value_after_the_end_is_accepted() {
-    let mut busy = Bookings::default();
+    let mut busy = armed();
     busy.book(Some(100));
     assert_eq!(busy.stageable(1_100), Ok(()));
-    assert_eq!(Bookings::default().stageable(0), Ok(()), "an idle stream takes a value");
+    assert_eq!(armed().stageable(0), Ok(()), "an idle stream takes a value");
 }
 
 #[test]
 fn rm_21_a_transmit_value_is_refused_while_a_booked_burst_has_not_ended() {
-    let mut busy = Bookings::default();
+    let mut busy = armed();
     busy.book(Some(100));
     assert_eq!(busy.stageable(50), Err(Refusal::TxBusy { until: Until::At(100) }));
 }
 
 #[test]
 fn rm_21_the_last_booked_burst_decides() {
-    let mut busy = Bookings::default();
+    let mut busy = armed();
     busy.book(Some(10));
     busy.book(Some(20));
     assert_eq!(busy.stageable(15), Err(Refusal::TxBusy { until: Until::At(20) }), "the later end counts");
@@ -196,7 +210,7 @@ fn rm_21_the_last_booked_burst_decides() {
 
 #[test]
 fn rm_21_a_transmit_value_is_refused_while_a_repeat_plays_and_taken_after_its_stop() {
-    let mut busy = Bookings::default();
+    let mut busy = armed();
     busy.book(None);
     assert_eq!(busy.stageable(1_000), Err(Refusal::TxBusy { until: Until::Open }));
     busy.book(Some(50));
@@ -208,34 +222,34 @@ fn rm_21_a_transmit_value_is_refused_while_a_repeat_plays_and_taken_after_its_st
 
 #[test]
 fn rm_21_a_stop_bounds_an_open_repeat_by_the_in_flight_window() {
-    // The identity clock: the bound is the first sample at or after 110, plus three, so one sample past the old bound is refused.
-    let mut busy = Bookings::default();
+    // The identity clock: the bound is the first sample at or after 110, plus five, so one sample past the old bound is refused.
+    let mut busy = armed();
     busy.book(None);
     busy.stop(stop_bound(100, 10, |t| t, |k| k));
-    assert_eq!(busy.stageable(112), Err(Refusal::TxBusy { until: Until::At(113) }));
-    assert_eq!(busy.stageable(113), Ok(()));
+    assert_eq!(busy.stageable(114), Err(Refusal::TxBusy { until: Until::At(115) }));
+    assert_eq!(busy.stageable(115), Ok(()));
 }
 
 #[test]
-fn rm_16_stop_bound_is_at_or_after_plus_three() {
-    // Grid 200, origin 7: the first sample at or after 2000 is 10 (at 2007), so the bound is sample 13 (root 2607).
+fn rm_16_stop_bound_is_at_or_after_plus_five() {
+    // Grid 200, origin 7: the first sample at or after 2000 is 10 (at 2007), so the bound is sample 15 (root 3007).
     let (origin, n) = (7, 200);
     let at_or_after = |t: i64| (t - origin + n - 1).div_euclid(n);
-    assert_eq!(stop_bound(1_000, 1_000, at_or_after, |k| origin + k * n), 2_607);
+    assert_eq!(stop_bound(1_000, 1_000, at_or_after, |k| origin + k * n), 3_007);
 }
 
 #[test]
 fn rm_16_stop_bound_rounds_up_on_a_fractional_window() {
-    // Grid 200, origin 0: `at + window` on a sample (2000) gives sample 13, and one tick past it (2001) gives sample 14.
+    // Grid 200, origin 0: `at + window` on a sample (2000) gives sample 15, and one tick past it (2001) gives sample 16.
     let (origin, n) = (0, 200);
     let at_or_after = |t: i64| (t - origin + n - 1).div_euclid(n);
-    assert_eq!(stop_bound(1_000, 1_000, at_or_after, |k| origin + k * n), 2_600);
-    assert_eq!(stop_bound(1_000, 1_001, at_or_after, |k| origin + k * n), 2_800);
+    assert_eq!(stop_bound(1_000, 1_000, at_or_after, |k| origin + k * n), 3_000);
+    assert_eq!(stop_bound(1_000, 1_001, at_or_after, |k| origin + k * n), 3_200);
 }
 
 #[test]
 fn rm_21_a_stop_never_extends_a_booked_end() {
-    let mut busy = Bookings::default();
+    let mut busy = armed();
     busy.book(Some(5));
     busy.stop(13);
     assert_eq!(busy.stageable(4), Err(Refusal::TxBusy { until: Until::At(5) }));
@@ -244,7 +258,7 @@ fn rm_21_a_stop_never_extends_a_booked_end() {
 
 #[test]
 fn rm_21_a_stop_leaves_an_idle_stream_idle() {
-    let mut busy = Bookings::default();
+    let mut busy = armed();
     busy.stop(15);
     assert_eq!(busy.stageable(0), Ok(()));
 }
@@ -277,7 +291,7 @@ fn rm_21_an_accepted_transmit_value_bumps_its_stream_s_generation() {
 #[test]
 fn rm_21_a_transmit_value_is_refused_by_the_booked_end_and_a_refusal_keeps_the_generation() {
     let mut staging = transmit_staging();
-    let mut busy = Bookings::default();
+    let mut busy = armed();
     busy.book(Some(100));
     let booked = |_: u32| busy.clone();
     assert_eq!(staging.set(&key("radio.tx.c0.frequency_hz"), num(2.0e9), false, 50, NEVER, booked), Err(Refusal::TxBusy { until: Until::At(100) }));
@@ -323,78 +337,85 @@ const GRID: (i64, i64) = (0, 10);
 
 #[test]
 fn rm_21_busy_is_max_accepted_end() {
-    let mut busy = Bookings::default();
+    let mut busy = armed();
     busy.book(Some(100));
     assert_eq!(busy.stageable(100), Ok(()), "a finite end equal to the receipt is accepted");
     busy.book(None);
     assert_eq!(busy.stageable(1_000), Err(Refusal::TxBusy { until: Until::Open }), "a playing repeat refuses");
-    let mut cancelled = Bookings::default();
+    let mut cancelled = armed();
     cancelled.book(Some(100));
     cancelled.stop(60);
     assert_eq!(cancelled.stageable(59), Err(Refusal::TxBusy { until: Until::At(60) }), "a stop caps the end, and the end still counts");
 }
 
 #[test]
-fn rm_15_1_to_3_sample_burst_front_is_transmitted_end_plus_ten() {
-    for len in 1..=3 {
-        let mut bookings = Bookings::default();
-        bookings.accept(0, Some(len), 0, ON_TIME, UNHANDED).unwrap();
-        for k in 4..=13 {
-            assert_eq!(bookings.accept(k, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "len {len}: {k} is inside the padded close and its ten samples");
+fn rm_15_1_to_3_sample_burst_front_is_transmitted_end_plus_gap() {
+    // Sequence 1: a head of 1 to 3 samples is padded to four and fronts at 4 plus the gap, at 1, 2 and 200 MS/s on a 200 MHz root.
+    for (ratio, gap) in [(200, 15), (100, 30), (1, 3000)] {
+        assert_eq!(closed_short_gap(200_000_000, ratio, 1), gap);
+        for len in 1..=3 {
+            let mut bookings = armed_with(gap);
+            bookings.accept(0, Some(len), 0, ON_TIME, UNHANDED).unwrap();
+            for k in 4..4 + gap {
+                assert_eq!(bookings.accept(k, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "ratio {ratio}, len {len}: {k} is inside the padded close and its gap");
+            }
+            assert_eq!(bookings.accept(4 + gap, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "ratio {ratio}, len {len}: the padded end 4 plus the gap is the front");
         }
-        assert_eq!(bookings.accept(14, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "len {len}: the padded end 4 plus ten is the front");
     }
 }
 
 #[test]
-fn rm_15_closed_burst_front_is_end_plus_ten() {
-    for len in 4..=32 {
-        let mut bookings = Bookings::default();
-        bookings.accept(0, Some(len), 0, ON_TIME, UNHANDED).unwrap();
-        for k in len..len + 10 {
-            assert_eq!(bookings.accept(k, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "len {len}: {k} is inside the close and its ten samples");
+fn rm_15_closed_burst_front_is_end_plus_gap() {
+    // Sequence 2: a head of 4 to 32 samples fronts at its end plus the gap, at 1 and 2 MS/s.
+    for gap in [15, 30] {
+        for len in 4..=32 {
+            let mut bookings = armed_with(gap);
+            bookings.accept(0, Some(len), 0, ON_TIME, UNHANDED).unwrap();
+            for k in len..len + gap {
+                assert_eq!(bookings.accept(k, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "gap {gap}, len {len}: {k} is inside the close and its gap");
+            }
+            assert_eq!(bookings.accept(len + gap, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "gap {gap}, len {len}: end + gap is the front");
         }
-        assert_eq!(bookings.accept(len + 10, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "len {len}: end + 10 is the front");
     }
-    let mut at_33 = Bookings::default();
+    let mut at_33 = armed();
     at_33.accept(0, Some(33), 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(at_33.accept(33, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "33 samples hold a tail: the booking at its end joins it");
 }
 
 #[test]
-fn rm_15_held_tail_front_is_end_plus_two() {
-    let mut head = Bookings::default();
+fn rm_15_held_tail_front_is_end_plus_four() {
+    let mut head = armed();
     head.accept(0, Some(33), 0, ON_TIME, UNHANDED).unwrap();
-    assert_eq!(head.accept(34, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "end + 1 is inside the tail");
-    assert_eq!(head.accept(35, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "end + 2 is the front");
-    let mut joined = Bookings::default();
+    assert_eq!(head.accept(36, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "end + 3 is inside the tail's close");
+    assert_eq!(head.accept(37, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "end + 4 is the front");
+    let mut joined = armed();
     joined.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     joined.accept(40, Some(5), 0, ON_TIME, UNHANDED).unwrap();
-    assert_eq!(joined.accept(46, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "a joined piece of 5 keeps the chain's front at its end + 2");
-    assert_eq!(joined.accept(47, Some(1), 0, ON_TIME, UNHANDED), Ok(()));
+    assert_eq!(joined.accept(48, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "a joined piece of 5 keeps the chain's front at its end + 4");
+    assert_eq!(joined.accept(49, Some(1), 0, ON_TIME, UNHANDED), Ok(()));
 }
 
 #[test]
 fn rm_15_contiguous_booking_joins_a_long_head() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(bookings.accept(40, Some(5), 0, ON_TIME, UNHANDED), Ok(()), "one chain: the booking at the end joins it");
-    assert_eq!(bookings.accept(46, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the joined chain ends at 45 and fronts at 47");
-    assert_eq!(bookings.accept(47, Some(1), 0, ON_TIME, UNHANDED), Ok(()));
+    assert_eq!(bookings.accept(48, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the joined chain ends at 45 and fronts at 49");
+    assert_eq!(bookings.accept(49, Some(1), 0, ON_TIME, UNHANDED), Ok(()));
 }
 
 #[test]
 fn rm_15_short_burst_joins_a_long_chain_with_the_chain_front() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(40, Some(10), 0, ON_TIME, UNHANDED).unwrap();
-    assert_eq!(bookings.accept(51, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "B's end + 1 is inside the device burst's tail");
-    assert_eq!(bookings.accept(52, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "B's end + 2 is the chain's front");
+    assert_eq!(bookings.accept(53, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "B's end + 3 is inside the device burst's close");
+    assert_eq!(bookings.accept(54, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "B's end + 4 is the chain's front");
 }
 
 #[test]
 fn rm_15_candidate_running_into_a_later_booking_is_refused() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(50, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(bookings.accept(0, Some(55), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "a candidate that runs into the later booking is refused");
     assert_eq!(bookings.accept(0, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "one that ends before it is accepted");
@@ -402,21 +423,21 @@ fn rm_15_candidate_running_into_a_later_booking_is_refused() {
 
 #[test]
 fn rm_15_back_to_back_bookings_are_accepted() {
-    let mut later = Bookings::default();
+    let mut later = armed();
     later.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
-    assert_eq!(later.accept(86, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "its front is 100, the chain's start");
-    let mut earlier = Bookings::default();
-    earlier.accept(86, Some(1), 0, ON_TIME, UNHANDED).unwrap();
+    assert_eq!(later.accept(81, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "its front is 100, the chain's start");
+    let mut earlier = armed();
+    earlier.accept(81, Some(1), 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(earlier.accept(100, Some(40), 0, ON_TIME, UNHANDED), Ok(()), "the front 100 is the next start");
 }
 
 #[test]
 fn rm_15_join_is_accepted_up_to_the_deadline_and_refused_after() {
     let deadline = |e: i64| 100 + e;
-    let mut at_deadline = Bookings::default();
+    let mut at_deadline = armed();
     at_deadline.accept(0, Some(40), 0, deadline, UNHANDED).unwrap();
     assert_eq!(at_deadline.accept(40, Some(5), 140, deadline, UNHANDED), Ok(()), "received exactly at J(e)");
-    let mut after = Bookings::default();
+    let mut after = armed();
     after.accept(0, Some(40), 0, deadline, UNHANDED).unwrap();
     assert_eq!(after.accept(40, Some(5), 141, deadline, UNHANDED), Err(Overlap::Booking), "one tick after J(e) it is refused");
 }
@@ -425,10 +446,10 @@ fn rm_15_join_is_accepted_up_to_the_deadline_and_refused_after() {
 fn rm_16_every_joined_piece_keeps_its_join_point_open() {
     // S1 (note 47 stage 5, sol-code): A(40), B(40) joined at 40, C(40) joined at 80, all received on time; the owner holds
     // A's tail at 40 before any of them is drained. The join at 40 stays open, though C is the newest piece.
-    let mut head = Bookings::default();
+    let mut head = armed();
     head.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     assert!(head.continuation_open(0, 0, ON_TIME), "a head alone is open at its own start");
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(40, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(80, Some(40), 0, ON_TIME, UNHANDED).unwrap();
@@ -440,22 +461,22 @@ fn rm_16_every_joined_piece_keeps_its_join_point_open() {
 #[test]
 fn rm_15_a_short_head_left_alone_is_closed_and_takes_no_join() {
     // S2 (UR-23, a consequence of a refused configure): A(40) at 100 with B(10) joined at 140. A is refused and leaves, so B is
-    // closed at its standalone front (160). A booking at B's end (150) received before the join deadline is refused, not joined.
-    let mut bookings = Bookings::default();
+    // closed at its standalone front (165). A booking at B's end (150) received before the join deadline is refused, not joined.
+    let mut bookings = armed();
     bookings.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(140, Some(10), 0, ON_TIME, UNHANDED).unwrap();
     bookings.drop_piece(100, Some(40));
     assert!(!bookings.continuation_open(150, 0, ON_TIME), "B is closed, so nothing continues it");
     assert_eq!(bookings.accept(150, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
-    assert_eq!(bookings.accept(159, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "B's front is 160, so 159 is inside it");
-    assert_eq!(bookings.accept(160, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "B's front is 160");
+    assert_eq!(bookings.accept(164, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "B's front is 165, so 164 is inside it");
+    assert_eq!(bookings.accept(165, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "B's front is 165");
 }
 
 #[test]
 fn rm_15_a_head_left_alone_with_joined_pieces_keeps_their_regions() {
     // S2 (Opus re-check): A(40) at 100 000 is refused and leaves. B(10) at 100 040 is the head, but C(4) at 100 050 and D(10) at
     // 100 054 remain: the chain keeps its front (D's, 100 066) and takes no join, so E(10) at 100 056, received before D is dispatched, is refused.
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(100000, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(100040, Some(10), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(100050, Some(4), 0, ON_TIME, UNHANDED).unwrap();
@@ -467,22 +488,22 @@ fn rm_15_a_head_left_alone_with_joined_pieces_keeps_their_regions() {
 
 #[test]
 fn rm_15_a_short_piece_left_behind_keeps_its_own_front() {
-    // S2 (Opus re-check): as above, with C one sample long. As a standalone head C fronts at 100 064 (its end plus ten), so a booking at 100 063 is refused.
-    let mut bookings = Bookings::default();
+    // S2 (Opus re-check): as above, with C one sample long. As a standalone head C fronts at 100 069 (its padded end plus the gap, 15), so a booking at 100 068 is refused.
+    let mut bookings = armed();
     bookings.accept(100000, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(100040, Some(10), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(100050, Some(1), 0, ON_TIME, UNHANDED).unwrap();
     bookings.drop_piece(100000, Some(40));
     assert_eq!(bookings.accept(100053, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
-    assert_eq!(bookings.accept(100063, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "C's own front is 100 064");
-    assert_eq!(bookings.accept(100064, Some(1), 0, ON_TIME, UNHANDED), Ok(()));
+    assert_eq!(bookings.accept(100068, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "C's own front is 100 069");
+    assert_eq!(bookings.accept(100069, Some(1), 0, ON_TIME, UNHANDED), Ok(()));
 }
 
 #[test]
 fn rm_16_a_passed_join_point_is_dropped_and_the_newest_is_kept() {
     // S1 (bound): B(10) at 140 and C(10) at 150 join A(40) at 100. Device time has passed 145, so B's join point is dropped; C,
     // the newest, stays, and a booking at C's end still joins the chain.
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(140, Some(10), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(150, Some(10), 0, ON_TIME, UNHANDED).unwrap();
@@ -497,12 +518,12 @@ fn rm_16_a_passed_join_point_is_dropped_and_the_newest_is_kept() {
 #[test]
 fn rm_16_continuation_is_open_to_its_deadline_and_close_ends_it() {
     let deadline = |e: i64| 100 + e;
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, Some(40), 0, deadline, UNHANDED).unwrap();
     assert!(bookings.continuation_open(40, 140, deadline), "a chain ending at 40 is open at its deadline");
     assert!(!bookings.continuation_open(40, 141, deadline), "one tick after the deadline it is not");
     assert!(!bookings.continuation_open(39, 0, deadline), "only the chain's end continues it");
-    assert_eq!(bookings.close(40), Some(42), "close returns the chain's front");
+    assert_eq!(bookings.close(40), Some(44), "close returns the chain's front");
     assert!(!bookings.continuation_open(40, 0, deadline), "a closed chain takes no join");
     assert_eq!(bookings.accept(40, Some(5), 0, deadline, UNHANDED), Err(Overlap::Booking), "so a booking at 40 is refused");
     assert_eq!(bookings.close(40), None, "a second close finds no open chain");
@@ -510,7 +531,7 @@ fn rm_16_continuation_is_open_to_its_deadline_and_close_ends_it() {
 
 #[test]
 fn rm_16_second_stop_keeps_the_earlier_bound() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     bookings.halt(100, 110);
     bookings.halt(105, 200);
@@ -520,12 +541,12 @@ fn rm_16_second_stop_keeps_the_earlier_bound() {
 
 #[test]
 fn rm_16_stop_cancels_bookings_starting_at_or_after_the_stop() {
-    let mut cancelled = Bookings::default();
+    let mut cancelled = armed();
     cancelled.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     cancelled.halt(100, 110);
     assert_eq!(cancelled.accept(105, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the cancelled span is refused by the Stop's region");
     assert_eq!(cancelled.accept(115, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "the booking at the Stop's instant is gone");
-    let mut kept = Bookings::default();
+    let mut kept = armed();
     kept.accept(99, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     kept.halt(100, 110);
     assert_eq!(kept.accept(109, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "a booking starting before the Stop keeps its front, capped at the bound");
@@ -534,7 +555,7 @@ fn rm_16_stop_cancels_bookings_starting_at_or_after_the_stop() {
 
 #[test]
 fn rm_16_stop_region_refuses_the_span_the_stop_cut() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.halt(100, 110);
     assert_eq!(bookings.accept(105, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the region [100, 110) holds the span the Stop cut");
@@ -544,7 +565,7 @@ fn rm_16_stop_region_refuses_the_span_the_stop_cut() {
 
 #[test]
 fn rm_16_a_later_booking_after_a_stop_on_a_long_burst_is_accepted() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, Some(1_000_000), 0, ON_TIME, UNHANDED).unwrap();
     bookings.halt(100_000, 110_003);
     assert_eq!(bookings.accept(110_003, Some(5), 0, ON_TIME, UNHANDED), Ok(()), "the kept burst's front is capped at the Stop's bound, not its end");
@@ -552,27 +573,29 @@ fn rm_16_a_later_booking_after_a_stop_on_a_long_burst_is_accepted() {
 
 #[test]
 fn rm_16_second_stop_that_drops_a_booking_extends_the_region_to_the_hull() {
-    let mut repeat = Bookings::default();
+    let mut repeat = armed();
     repeat.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     repeat.halt(100, 110);
     repeat.accept(110, Some(1000), 0, ON_TIME, UNHANDED).unwrap();
     repeat.halt(105, 200);
     assert_eq!(repeat.accept(111, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the booking the second Stop dropped leaves its span to the region");
-    // The first head (10 at 50, front 70) is cut by the first Stop, so its region is [50, 70); the second head (5 at 70, front 85) is
-    // dropped by the second Stop, and the hull is [50, 85): the second Stop's own front, not its bound 80, is the hull's end.
-    let mut hull = Bookings::default();
+    // The first head (10 at 50, front 75) is cut by the first Stop, so its region is [50, 75); the second head (5 at 75, front 95) is
+    // dropped by the second Stop, and the hull is [50, 95): the second head's own front, not its bound 85, is the hull's end.
+    let mut hull = armed();
     hull.accept(50, Some(10), 0, ON_TIME, UNHANDED).unwrap();
     hull.halt(50, 60);
-    hull.accept(70, Some(5), 0, ON_TIME, UNHANDED).unwrap();
-    hull.halt(55, 80);
-    assert_eq!(hull.accept(40, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "its own front 54 reaches the first cut at 50: the hull keeps that start");
+    hull.accept(75, Some(5), 0, ON_TIME, UNHANDED).unwrap();
+    hull.halt(55, 85);
+    assert_eq!(hull.accept(40, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "its own front 59 reaches the first cut at 50: the hull keeps that start");
+    assert_eq!(hull.accept(36, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "its own front 55 reaches 50, the hull's start, not the second Stop's 55");
     assert_eq!(hull.accept(70, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "inside the hull");
-    assert_eq!(hull.accept(85, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "the dropped head's own front");
+    assert_eq!(hull.accept(80, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "inside the hull's later half [75, 95), up to the dropped head's own front");
+    assert_eq!(hull.accept(95, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "the dropped head's own front");
 }
 
 #[test]
 fn rm_16_a_stop_that_drops_nothing_adds_no_region() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     bookings.halt(10, 20);
     bookings.accept(40, Some(5), 0, ON_TIME, UNHANDED).unwrap();
@@ -582,11 +605,11 @@ fn rm_16_a_stop_that_drops_nothing_adds_no_region() {
 
 #[test]
 fn rm_16_a_stop_that_cancels_a_booking_past_its_bound_adds_no_region() {
-    let mut far = Bookings::default();
+    let mut far = armed();
     far.accept(1_000_000, Some(100), 0, ON_TIME, UNHANDED).unwrap();
     far.halt(100, 10_103);
     assert_eq!(far.accept(5_000, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "the far booking was never handed: its cancel adds no region");
-    let mut head = Bookings::default();
+    let mut head = armed();
     head.accept(50, Some(1), 0, ON_TIME, UNHANDED).unwrap();
     head.halt(10, 20);
     assert_eq!(head.accept(15, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "a booking at or after the bound cancels no span before it");
@@ -594,7 +617,7 @@ fn rm_16_a_stop_that_cancels_a_booking_past_its_bound_adds_no_region() {
 
 #[test]
 fn rm_16_repeat_occupies_until_a_stop() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(bookings.accept(1_000, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
     assert_eq!(bookings.accept(-20, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "a booking whose region ends before the repeat's start");
@@ -605,41 +628,41 @@ fn rm_16_repeat_occupies_until_a_stop() {
 
 #[test]
 fn rm_16_first_free_skips_an_accepted_span() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
-    assert_eq!(bookings.first_free(110, true, 0, ON_TIME, UNHANDED), Some(142), "inside [100, 142) it returns the front");
+    assert_eq!(bookings.first_free(110, true, 0, ON_TIME, UNHANDED), Some(144), "inside [100, 144) it returns the front");
     assert_eq!(bookings.first_free(99, true, 0, ON_TIME, UNHANDED), Some(99), "before it, the instant is free");
     assert_eq!(bookings.first_free(140, true, 0, ON_TIME, UNHANDED), Some(140), "the chain's end is a join point");
-    assert_eq!(bookings.first_free(141, true, 0, ON_TIME, UNHANDED), Some(142));
+    assert_eq!(bookings.first_free(141, true, 0, ON_TIME, UNHANDED), Some(144));
     let deadline = |e: i64| e + 100;
     assert_eq!(bookings.first_free(140, true, 240, deadline, UNHANDED), Some(140), "received at J(e) it may still join");
-    assert_eq!(bookings.first_free(140, true, 241, deadline, UNHANDED), Some(142), "received after J(e) the join point is held: the front");
+    assert_eq!(bookings.first_free(140, true, 241, deadline, UNHANDED), Some(144), "received after J(e) the join point is held: the front");
     bookings.halt(120, 130);
     assert_eq!(bookings.first_free(125, true, 0, ON_TIME, UNHANDED), Some(130), "after a Stop the span is skipped to the capped front");
-    let mut open = Bookings::default();
+    let mut open = armed();
     open.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(open.first_free(5, true, 0, ON_TIME, UNHANDED), None, "an open repeat holds every later sample: no start is free");
 }
 
 #[test]
 fn rm_16_a_repeat_at_a_join_point_skips_it_to_the_front() {
-    // The ideal profile (no lead): 40 samples at 0, then a repeat targeted at 39 and decided at 40 is placed at the front, 42.
+    // The ideal profile (no lead): 40 samples at 0, then a repeat targeted at 39 and decided at 40 is placed at the front, 44.
     let at_its_deadline = |e: i64| e;
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(bookings.first_free(40, true, 40, at_its_deadline, UNHANDED), Some(40), "a booking with a length may join at its deadline");
-    assert_eq!(bookings.first_free(40, false, 40, at_its_deadline, UNHANDED), Some(42), "a repeat may not join: its first free sample is the front");
-    assert_eq!(bookings.accept(42, None, 40, at_its_deadline, UNHANDED), Ok(()), "and is accepted there");
+    assert_eq!(bookings.first_free(40, false, 40, at_its_deadline, UNHANDED), Some(44), "a repeat may not join: its first free sample is the front");
+    assert_eq!(bookings.accept(44, None, 40, at_its_deadline, UNHANDED), Ok(()), "and is accepted there");
 }
 
 #[test]
 fn rm_16_prune_keeps_a_chain_whose_front_is_past_the_receipt() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
-    bookings.prune(41);
-    assert_eq!(bookings.accept(41, Some(1), 41, ON_TIME, UNHANDED), Err(Overlap::Booking), "a chain whose front is one sample past the receipt still holds its span");
-    bookings.prune(42);
-    assert_eq!(bookings.accept(42, Some(1), 42, ON_TIME, UNHANDED), Ok(()), "once the receipt reaches its front the chain is dropped");
+    bookings.prune(43);
+    assert_eq!(bookings.accept(43, Some(1), 43, ON_TIME, UNHANDED), Err(Overlap::Booking), "a chain whose front is one sample past the receipt still holds its span");
+    bookings.prune(44);
+    assert_eq!(bookings.accept(44, Some(1), 44, ON_TIME, UNHANDED), Ok(()), "once the receipt reaches its front the chain is dropped");
 }
 
 #[test]
@@ -655,19 +678,19 @@ fn rm_16_ordinary_k_is_decide_s_threshold() {
 
 #[test]
 fn rm_15_a_booking_before_a_chain_inside_the_hand_over_horizon_is_refused() {
-    let mut inside = Bookings::default();
+    let mut inside = armed();
     inside.accept(9_999, Some(1), 0, ON_TIME, 10_000).unwrap();
     assert_eq!(inside.accept(2_000, Some(40), 0, ON_TIME, 10_000), Err(Overlap::Handed), "a chain one sample inside the horizon may already be on the device");
-    let mut repeat = Bookings::default();
+    let mut repeat = armed();
     repeat.accept(5_000, None, 0, ON_TIME, 10_000).unwrap();
     assert_eq!(repeat.accept(2_000, Some(40), 0, ON_TIME, 10_000), Err(Overlap::Handed), "a handable repeat is refused the same way");
-    let mut beyond = Bookings::default();
+    let mut beyond = armed();
     beyond.accept(10_000, Some(1), 0, ON_TIME, 10_000).unwrap();
     assert_eq!(beyond.accept(2_000, Some(40), 0, ON_TIME, 10_000), Ok(()), "one sample beyond the horizon is not handed: judged as before");
-    let mut after = Bookings::default();
+    let mut after = armed();
     after.accept(5_000, Some(40), 0, ON_TIME, 10_000).unwrap();
     assert_eq!(after.accept(6_000, Some(10), 0, ON_TIME, 10_000), Ok(()), "a booking after the chain is not before it: the region rule alone decides");
-    let mut cancelled = Bookings::default();
+    let mut cancelled = armed();
     cancelled.accept(5_000, Some(40), 0, ON_TIME, 10_000).unwrap();
     cancelled.halt(4_000, 4_010);
     assert_eq!(cancelled.accept(2_000, Some(40), 0, ON_TIME, 10_000), Ok(()), "a Stop cancelled the chain, so nothing is on the device there");
@@ -676,56 +699,72 @@ fn rm_15_a_booking_before_a_chain_inside_the_hand_over_horizon_is_refused() {
 #[test]
 fn rm_15_a_chain_behind_an_open_join_is_not_yet_handed() {
     let deadline = |e: i64| e + 100;
-    // The chain at 60 (front 102) is inside the horizon 70; a booking at 45 fronts at 59, which meets neither chain.
-    let mut bookings = Bookings::default();
+    // The chain at 70 (front 114) is inside the horizon 80; a booking at 45 fronts at 64, which meets neither chain.
+    let mut bookings = armed();
     bookings.accept(0, Some(40), 0, deadline, 0).unwrap();
-    bookings.accept(60, Some(40), 0, deadline, 70).unwrap();
-    assert_eq!(bookings.accept(45, Some(1), 0, deadline, 70), Ok(()), "the chain at 60 is held while the one ending at 40 may still be joined");
-    let mut expired = Bookings::default();
+    bookings.accept(70, Some(40), 0, deadline, 80).unwrap();
+    assert_eq!(bookings.accept(45, Some(1), 0, deadline, 80), Ok(()), "the chain at 70 is held while the one ending at 40 may still be joined");
+    let mut expired = armed();
     expired.accept(0, Some(40), 0, deadline, 0).unwrap();
-    expired.accept(60, Some(40), 0, deadline, 70).unwrap();
-    assert_eq!(expired.accept(45, Some(1), 141, deadline, 70), Err(Overlap::Handed), "past the join deadline the chain at 60 may be handed");
+    expired.accept(70, Some(40), 0, deadline, 80).unwrap();
+    assert_eq!(expired.accept(45, Some(1), 141, deadline, 80), Err(Overlap::Handed), "past the join deadline the chain at 70 may be handed");
 }
 
 #[test]
 fn rm_16_first_free_moves_past_a_chain_inside_the_hand_over_horizon() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(5_000, Some(40), 0, ON_TIME, UNHANDED).unwrap();
-    assert_eq!(bookings.first_free(2_000, true, 0, ON_TIME, 10_000), Some(5_042), "a start before the handable chain is refused, so the first free one is its front");
+    assert_eq!(bookings.first_free(2_000, true, 0, ON_TIME, 10_000), Some(5_044), "a start before the handable chain is refused, so the first free one is its front");
     assert_eq!(bookings.first_free(2_000, true, 0, ON_TIME, 5_000), Some(2_000), "a chain at the horizon is not handable: the instant is free");
-    assert_eq!(bookings.first_free(5_042, true, 0, ON_TIME, 10_000), Some(5_042), "from the front on, the instant is free");
-    let mut repeat = Bookings::default();
+    assert_eq!(bookings.first_free(5_044, true, 0, ON_TIME, 10_000), Some(5_044), "from the front on, the instant is free");
+    let mut repeat = armed();
     repeat.accept(5_000, None, 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(repeat.first_free(2_000, true, 0, ON_TIME, 10_000), None, "a handable repeat holds every later sample");
 }
 
 #[test]
 fn rm_16_stop_truncates_the_front_and_ends_the_join() {
-    let mut repeat = Bookings::default();
+    let mut repeat = armed();
     repeat.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     repeat.halt(50, 60);
     assert_eq!(repeat.accept(59, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
     assert_eq!(repeat.accept(60, Some(5), 0, ON_TIME, UNHANDED), Ok(()));
-    let mut finite = Bookings::default();
+    let mut finite = armed();
     finite.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     finite.halt(101, 110);
     assert_eq!(finite.accept(110, Some(5), 0, ON_TIME, UNHANDED), Ok(()), "the finite front is capped at the bound: 110 is free");
     assert_eq!(finite.accept(140, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "the Stop cleared the join: the booking at the old end is a new chain");
-    assert_eq!(finite.accept(143, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "its front is 145, not the joined 143");
+    assert_eq!(finite.accept(143, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "its front is 159, not the joined 143");
+    assert_eq!(finite.accept(146, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the booking at 140 is a standalone head (front 159), not a joined piece (front 145)");
+}
+
+#[test]
+fn rm_15_a_booking_at_the_end_of_a_long_chain_joins_it_before_its_deadline() {
+    // A booking at `e` received no later than `J(e)` joins the chain (its front is then the piece's end plus four), and one received after
+    // `J(e)` is refused (RM-15).
+    let deadline = |e: i64| e + 100;
+    let mut on_time = armed();
+    on_time.accept(0, Some(40), 0, deadline, UNHANDED).unwrap();
+    assert_eq!(on_time.accept(40, Some(5), 140, deadline, UNHANDED), Ok(()), "received at J(e) = 140: it joins");
+    assert_eq!(on_time.accept(48, Some(1), 140, deadline, UNHANDED), Err(Overlap::Booking), "the joined chain fronts at 49");
+    assert_eq!(on_time.accept(49, Some(1), 140, deadline, UNHANDED), Ok(()));
+    let mut late = armed();
+    late.accept(0, Some(40), 0, deadline, UNHANDED).unwrap();
+    assert_eq!(late.accept(40, Some(5), 141, deadline, UNHANDED), Err(Overlap::Booking), "received after J(e): refused");
 }
 
 #[test]
 fn rm_16_a_stop_that_cuts_nothing_adds_no_region() {
-    let mut idle = Bookings::default();
+    let mut idle = armed();
     idle.halt(10, 20);
     assert_eq!(idle.accept(10, Some(1), 0, ON_TIME, UNHANDED), Ok(()));
-    // A closed short head the Stop keeps keeps its own front (14), so the span up to it is held.
-    let mut ended = Bookings::default();
+    // A closed short head the Stop keeps keeps its own front (19), so the span up to it is held.
+    let mut ended = armed();
     ended.accept(0, Some(1), 0, ON_TIME, UNHANDED).unwrap();
     ended.halt(10, 20);
-    assert_eq!(ended.accept(10, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "its own front 14 is kept");
-    assert_eq!(ended.accept(14, Some(1), 0, ON_TIME, UNHANDED), Ok(()));
-    let mut cut = Bookings::default();
+    assert_eq!(ended.accept(10, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "its own front 19 is kept");
+    assert_eq!(ended.accept(19, Some(1), 0, ON_TIME, UNHANDED), Ok(()));
+    let mut cut = armed();
     cut.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     cut.halt(10, 20);
     assert_eq!(cut.accept(19, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "a Stop that cut the repeat leaves [10, 20)");
@@ -733,7 +772,7 @@ fn rm_16_a_stop_that_cuts_nothing_adds_no_region() {
 
 #[test]
 fn rm_16_a_stop_lowers_a_finite_front_to_its_bound() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.halt(10, 20);
     assert_eq!(bookings.accept(19, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the span before the bound is kept");
@@ -742,51 +781,56 @@ fn rm_16_a_stop_lowers_a_finite_front_to_its_bound() {
 
 #[test]
 fn rm_16_a_stop_keeps_an_uncut_short_head_s_front() {
-    // Sequence 5a (#82): a head of 1 to 3 samples starts at c - 1, so the Stop at c (start < c, kept) cuts nothing of it: its front stays c + 13.
+    // Sequence 4a (#82): a head of 1 to 3 samples starts at c - 1, so the Stop at c (start < c, kept) cuts nothing of it: its front stays
+    // c + 3 + gap (c + 18 at 1 MS/s), not the bound c + 5.
     let c = 100;
-    for len in 1..=3 {
-        let mut bookings = Bookings::default();
-        bookings.accept(c - 1, Some(len), 0, ON_TIME, UNHANDED).unwrap();
-        bookings.halt(c, c + 3);
-        for k in c + 3..=c + 12 {
-            assert_eq!(bookings.accept(k, Some(3), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "len {len}: {k} is inside the head's span");
+    for gap in [15, 30] {
+        for len in 1..=3 {
+            let mut bookings = armed_with(gap);
+            bookings.accept(c - 1, Some(len), 0, ON_TIME, UNHANDED).unwrap();
+            bookings.halt(c, c + 5);
+            for k in c + 3..c + 3 + gap {
+                assert_eq!(bookings.accept(k, Some(3), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "gap {gap}, len {len}: {k} is inside the head's span");
+            }
+            assert_eq!(bookings.accept(c + 3 + gap, Some(3), 0, ON_TIME, UNHANDED), Ok(()), "gap {gap}, len {len}: c + 3 + gap is the head's own front, not the bound c + 5");
         }
-        assert_eq!(bookings.accept(c + 13, Some(3), 0, ON_TIME, UNHANDED), Ok(()), "len {len}: c + 13 is the head's own front, not the bound c + 3");
     }
 }
 
 #[test]
 fn rm_16_a_stop_that_cuts_a_short_head_adds_its_front_to_the_region() {
-    // Sequence 5b (#82, Q1): the Stop at c - 1 drops the head of 1 at c - 1, which may have been handed (c - 1 < the handed bound c). Its own
-    // front c + 13 reaches past the Stop's bound c + 3: the region is [c - 1, c + 13).
+    // Sequence 4b (#82, Q1): the Stop at c - 1 drops the head of 1 at c - 1, which may have been handed (c - 1 < the handed bound c, with
+    // the bound c + 5). Its own front c + 3 + gap reaches past the Stop's bound: the region is [c - 1, c + 3 + gap).
     let c = 100;
-    let mut bookings = Bookings::default();
-    bookings.accept(c - 1, Some(1), 0, ON_TIME, UNHANDED).unwrap();
-    bookings.halt(c - 1, c + 3);
-    for k in c - 1..=c + 2 {
-        assert_eq!(bookings.accept(k, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{k} is inside the dropped head's region");
+    for gap in [15, 30] {
+        let mut bookings = armed_with(gap);
+        bookings.accept(c - 1, Some(1), 0, ON_TIME, UNHANDED).unwrap();
+        bookings.halt(c - 1, c + 5);
+        for k in c - 1..c + 5 {
+            assert_eq!(bookings.accept(k, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "gap {gap}: {k} is inside the dropped head's region");
+        }
+        for k in c + 5..c + 3 + gap {
+            assert_eq!(bookings.accept(k, Some(3), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "gap {gap}: {k} is inside the region, not only before the bound");
+        }
+        assert_eq!(bookings.accept(c + 3 + gap, Some(3), 0, ON_TIME, UNHANDED), Ok(()), "gap {gap}: the dropped head's own front");
     }
-    for k in c + 3..=c + 12 {
-        assert_eq!(bookings.accept(k, Some(3), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{k} is inside the region, not only before the bound");
-    }
-    assert_eq!(bookings.accept(c + 13, Some(3), 0, ON_TIME, UNHANDED), Ok(()), "the dropped head's own front");
 }
 
 #[test]
 fn rm_16_a_stop_inside_a_32_sample_head_keeps_its_front() {
-    // Sequence 5c (F1, Sol's counterexample): a closed head of 32 starts at 100 and the Stop at 101 (bound 104) keeps it: its payload was handed as
-    // one send, so its front is 142, not the bound.
-    let mut bookings = Bookings::default();
+    // Sequence 5c (F1, Sol's counterexample): a closed head of 32 starts at 100 and the Stop at 101 (bound 106) keeps it: its payload was handed as
+    // one send, so its front is 147, not the bound.
+    let mut bookings = armed();
     bookings.accept(100, Some(32), 0, ON_TIME, UNHANDED).unwrap();
-    bookings.halt(101, 104);
-    assert_eq!(bookings.accept(104, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "104 is inside the kept head's front 142");
-    assert_eq!(bookings.accept(142, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "the kept head's own front");
+    bookings.halt(101, 106);
+    assert_eq!(bookings.accept(106, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "106 is inside the kept head's front 147");
+    assert_eq!(bookings.accept(147, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "the kept head's own front");
 }
 
 #[test]
 fn rm_16_a_stop_caps_a_33_sample_head_at_the_bound() {
     // The length bound of a closed short head (m3): a head of 33 is not one, so the Stop caps its front (35) at its bound 20.
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, Some(33), 0, ON_TIME, UNHANDED).unwrap();
     bookings.halt(1, 20);
     assert_eq!(bookings.accept(19, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the span before the bound is kept");
@@ -796,55 +840,55 @@ fn rm_16_a_stop_caps_a_33_sample_head_at_the_bound() {
 #[test]
 fn rm_16_a_stop_keeps_a_short_head_s_front_with_joined_pieces() {
     // A head of at most 32 samples keeps its own front through a Stop, with pieces behind it (S2, Sol finding 1): the owner closes the
-    // head at its end plus ten, 160. C(150, 4) starts above the Stop's handed bound (143), so the owner has not handed it and the region
-    // ends at B's own front, 160, not C's 164. The Stop at 141 does not cap it at 146.
-    let mut bookings = Bookings::default();
+    // head at its end plus the gap, 165. C(150, 4) starts above the Stop's handed bound (141), so the owner has not handed it and the region
+    // ends at B's own front, 165, not C's 169. The Stop at 141 does not cap it at 146.
+    let mut bookings = armed();
     bookings.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(140, Some(10), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(150, Some(4), 0, ON_TIME, UNHANDED).unwrap();
     bookings.drop_piece(100, Some(40));
     bookings.halt(141, 146);
     assert_eq!(bookings.accept(145, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the span before the bound is kept");
-    assert_eq!(bookings.accept(146, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "not capped at the bound: the head keeps its front 160");
-    assert_eq!(bookings.accept(159, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the span up to B's own front is kept");
-    assert_eq!(bookings.accept(160, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "C, joined behind B and above the handed bound, does not extend it to 164");
+    assert_eq!(bookings.accept(146, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "not capped at the bound: the head keeps its front 165");
+    assert_eq!(bookings.accept(164, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the span up to B's own front is kept");
+    assert_eq!(bookings.accept(165, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "C, joined behind B and above the handed bound, does not extend it to 169");
 }
 
 #[test]
 fn rm_16_a_stop_keeps_a_short_head_s_own_front_past_its_joined_pieces() {
     // S2 (Sol finding 1): A(39 950, 40) is refused and leaves. B(39 990, 10) is the head and C(40 000, 4) joined behind it. The owner sends B as
-    // a standalone closed short burst fronting at 40 010 (its end plus ten, UR-22), and C fronts at 40 014. A Stop at 30 000 with bound 40 003
+    // a standalone closed short burst fronting at 40 015 (its end plus the gap, 15 samples at 1 MS/s, UR-22), and C fronts at 40 019. A Stop at 30 000 with bound 40 003
     // cancels B and C: the region reaches their front, so D(40 003, 40) received after the Stop is refused at receipt.
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(39950, Some(40), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.accept(39990, Some(10), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.accept(40000, Some(4), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.drop_piece(39950, Some(40));
     bookings.halt(30000, 40003);
-    assert_eq!(bookings.accept(40003, Some(40), 30000, ON_TIME, UNHANDED), Err(Overlap::Booking), "B's own front 40 010 is inside the region the Stop kept");
+    assert_eq!(bookings.accept(40003, Some(40), 30000, ON_TIME, UNHANDED), Err(Overlap::Booking), "B's own front 40 015 is inside the region the Stop kept");
 }
 
 #[test]
 fn rm_16_a_stop_cutting_a_dropped_short_head_stops_at_its_own_front_not_a_long_piece() {
     // Sol fix round, item 1: A(39 950, 40) is refused and leaves; B(39 990, 10) heads the chain with C(40 000, 100 000) joined behind it,
-    // whose front is 140 002. The owner sends B standalone, fronting at 40 010, and C is late at dispatch. A Stop at 30 000 with bound 40 003
+    // whose front is 140 004. The owner sends B standalone, fronting at 40 015, and C is late at dispatch. A Stop at 30 000 with bound 40 005
     // cancels B and C: the region ends at B's own front, so a booking inside it is refused and one after it is admitted as asked.
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(39950, Some(40), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.accept(39990, Some(10), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.accept(40000, Some(100_000), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.drop_piece(39950, Some(40));
-    bookings.halt(30000, 40003);
-    assert_eq!(bookings.accept(40005, Some(40), 30000, ON_TIME, UNHANDED), Err(Overlap::Booking), "inside B's own front 40 010");
-    assert_eq!(bookings.accept(40010, Some(40), 30000, ON_TIME, UNHANDED), Ok(()), "B's own front ends the region");
-    assert_eq!(bookings.accept(50000, Some(40), 30000, ON_TIME, UNHANDED), Ok(()), "C's front 140 002 does not hold the stream");
+    bookings.halt(30000, 40005);
+    assert_eq!(bookings.accept(40014, Some(40), 30000, ON_TIME, UNHANDED), Err(Overlap::Booking), "inside B's own front 40 015");
+    assert_eq!(bookings.accept(40015, Some(40), 30000, ON_TIME, UNHANDED), Ok(()), "B's own front ends the region");
+    assert_eq!(bookings.accept(50000, Some(40), 30000, ON_TIME, UNHANDED), Ok(()), "C's front 140 004 does not hold the stream");
 }
 
 #[test]
 fn rm_16_a_stop_keeping_a_short_head_keeps_its_own_front_not_a_long_piece() {
     // Sol fix round, item 1: the sequence of the test above, with a Stop at 39 995. B started before it and is kept, and the owner is idle
     // from B's front 40 010: a booking inside it is refused, and one at 50 000 is admitted as asked.
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(39950, Some(40), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.accept(39990, Some(10), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.accept(40000, Some(100_000), 30000, ON_TIME, UNHANDED).unwrap();
@@ -856,28 +900,29 @@ fn rm_16_a_stop_keeping_a_short_head_keeps_its_own_front_not_a_long_piece() {
 
 #[test]
 fn rm_16_a_long_piece_handed_before_the_bound_does_not_extend_a_short_head() {
-    // Sol fix round, item 1: the sequence of the dropped case, with a Stop at 30 000 and bound 40 010, so C(40 000, 100 000) starts below
+    // Sol fix round, item 1: the sequence of the dropped case, with a Stop at 30 000 and bound 40 012, so C(40 000, 100 000) starts below
     // the handed cursor (40 007). C is longer than a closed burst, so it is not a standalone short piece: the region ends at B's own front.
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(39950, Some(40), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.accept(39990, Some(10), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.accept(40000, Some(100_000), 30000, ON_TIME, UNHANDED).unwrap();
     bookings.drop_piece(39950, Some(40));
-    bookings.halt(30000, 40010);
-    assert_eq!(bookings.accept(40009, Some(1), 30000, ON_TIME, UNHANDED), Err(Overlap::Booking), "inside B's own front 40 010");
-    assert_eq!(bookings.accept(40010, Some(40), 30000, ON_TIME, UNHANDED), Ok(()), "C does not extend the region to 140 002");
+    bookings.halt(30000, 40012);
+    assert_eq!(bookings.accept(40014, Some(1), 30000, ON_TIME, UNHANDED), Err(Overlap::Booking), "inside B's own front 40 015");
+    assert_eq!(bookings.accept(40015, Some(40), 30000, ON_TIME, UNHANDED), Ok(()), "C does not extend the region to 140 004");
 }
 
 #[test]
 fn rm_16_a_stop_caps_a_33_sample_head_with_a_short_piece_at_the_bound() {
     // Sol fix round, item 1: a head of 33 is not a short head, so a short piece behind it does not give the Stop a front past the bound. The
-    // chain's front is 39 and the piece's own front 47, which is handed below the bound 38 (handed 35): the region is capped at 38.
-    let mut bookings = Bookings::default();
+    // chain's front is 41 (its joined end 37 plus four) and the piece's own front 52 (33 + 4 + the gap 15), which starts below the handed
+    // cursor 35 (the bound 40 less five): the front is capped at 40. Counted as a short head the chain would keep 41.
+    let mut bookings = armed();
     bookings.accept(0, Some(33), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(33, Some(4), 0, ON_TIME, UNHANDED).unwrap();
-    bookings.halt(1, 38);
-    assert_eq!(bookings.accept(37, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the span before the bound is kept");
-    assert_eq!(bookings.accept(38, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "capped at the bound, not the short piece's front 47");
+    bookings.halt(1, 40);
+    assert_eq!(bookings.accept(39, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the span before the bound is kept");
+    assert_eq!(bookings.accept(40, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "capped at the bound, not the joined end's front 41 or the short piece's 52");
 }
 
 #[test]
@@ -893,7 +938,7 @@ fn rm_13_repeat_boundary_is_the_first_boundary_at_or_after_the_bound() {
 fn rm_37_a_switch_taken_at_the_abandoned_cursor_is_cancelled() {
     // S4 (Opus re-check): the owner takes the switch at boundary 100, and the repeat is abandoned at the same handed cursor. The new
     // waveform never starts, so the switch is cancelled, not applied.
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
     assert!(bookings.install(ActionId(2), 100).is_some());
@@ -903,7 +948,7 @@ fn rm_37_a_switch_taken_at_the_abandoned_cursor_is_cancelled() {
 
 #[test]
 fn rm_16_switch_pending_until_the_boundary_is_reached() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
     assert!(bookings.install(ActionId(2), 10).is_some());
@@ -918,7 +963,7 @@ fn rm_16_switch_pending_until_the_boundary_is_reached() {
 
 #[test]
 fn rm_16_advance_runs_inside_every_call() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
     assert!(bookings.install(ActionId(2), 10).is_some());
@@ -928,7 +973,7 @@ fn rm_16_advance_runs_inside_every_call() {
     bookings.halt(150, 160);
     assert_eq!(settled(&mut bookings), [(ActionId(3), SwitchOutcome::Cancelled)], "a Stop before its boundary cancels it");
 
-    let mut direct = Bookings::default();
+    let mut direct = armed();
     direct.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(direct.switch(ActionId(2), GRID, 100, 10));
     assert!(direct.install(ActionId(2), 10).is_some());
@@ -938,7 +983,7 @@ fn rm_16_advance_runs_inside_every_call() {
 
 #[test]
 fn rm_16_a_stop_after_a_boundary_cuts_the_new_repeat_at_its_bound() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
     assert!(bookings.install(ActionId(2), 10).is_some());
@@ -950,7 +995,7 @@ fn rm_16_a_stop_after_a_boundary_cuts_the_new_repeat_at_its_bound() {
 
 #[test]
 fn rm_37_install_takes_only_the_pending_switch() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
     bookings.advance(120);
@@ -963,7 +1008,7 @@ fn rm_37_install_takes_only_the_pending_switch() {
 fn rm_37_install_at_the_boundary_is_not_a_move() {
     // UR-38: a cursor at the boundary takes it unmoved, so the settlement carries no `moved_to`; one sample past it is a move.
     for (cursor, moved_to) in [(100, None), (101, Some(110))] {
-        let mut bookings = Bookings::default();
+        let mut bookings = armed();
         bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
         assert!(bookings.switch(ActionId(2), GRID, 100, 10));
         assert_eq!(bookings.install(ActionId(2), cursor), Some(moved_to.unwrap_or(100)));
@@ -974,7 +1019,7 @@ fn rm_37_install_at_the_boundary_is_not_a_move() {
 
 #[test]
 fn rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_the_moved_one() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
     assert_eq!(bookings.install(ActionId(2), 101), Some(110), "the first boundary of the grid at or after the cursor");
@@ -982,7 +1027,7 @@ fn rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_t
     bookings.halt(105, 109);
     assert_eq!(bookings.take_settled(), [Settled { id: ActionId(2), outcome: SwitchOutcome::Cancelled, moved_to: Some(110) }], "a Stop bounded before the moved boundary cancels it");
 
-    let mut on_a_boundary = Bookings::default();
+    let mut on_a_boundary = armed();
     on_a_boundary.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(on_a_boundary.switch(ActionId(2), GRID, 100, 10));
     assert_eq!(on_a_boundary.install(ActionId(2), 111), Some(120), "one sample past a boundary takes the next");
@@ -993,7 +1038,7 @@ fn rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_t
         "a Stop bounded after the moved boundary lets it apply, and the settlement carries the moved boundary"
     );
 
-    let mut at_a_boundary = Bookings::default();
+    let mut at_a_boundary = armed();
     at_a_boundary.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(at_a_boundary.switch(ActionId(2), GRID, 100, 10));
     assert_eq!(at_a_boundary.install(ActionId(2), 120), Some(120), "a cursor on a boundary takes that boundary");
@@ -1001,17 +1046,17 @@ fn rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_t
 
 #[test]
 fn rm_16_switch_refused_unless_a_repeat_is_playing() {
-    let mut finite = Bookings::default();
+    let mut finite = armed();
     finite.accept(0, Some(10), 0, ON_TIME, UNHANDED).unwrap();
     assert!(!finite.switch(ActionId(2), GRID, 100, 5), "a finite burst");
-    let mut booked = Bookings::default();
+    let mut booked = armed();
     booked.accept(50, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(!booked.switch(ActionId(2), GRID, 100, 10), "a repeat booked but not started");
-    let mut stopped = Bookings::default();
+    let mut stopped = armed();
     stopped.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     stopped.halt(20, 30);
     assert!(!stopped.switch(ActionId(2), GRID, 100, 25), "a stopped repeat");
-    let mut playing = Bookings::default();
+    let mut playing = armed();
     playing.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(playing.switch(ActionId(2), GRID, 100, 0), "a repeat that has started");
 }
@@ -1025,45 +1070,45 @@ fn book_untimed(bookings: &mut Bookings, at: i64, ordinary: i64, len: Option<i64
 
 #[test]
 fn rm_15_an_untimed_booking_is_placed_after_the_booking_it_meets() {
-    // Sequence 3: B (len 10) at 100 is accepted, its front 120; an untimed A whose earliest start is 103 queues behind it, at 120.
-    let mut bookings = Bookings::default();
+    // Sequence 3: B (len 10) at 100 is accepted, its front 125; an untimed A whose earliest start is 103 queues behind it, at 125.
+    let mut bookings = armed();
     bookings.accept(100, Some(10), 0, ON_TIME, UNHANDED).unwrap();
-    assert_eq!(book_untimed(&mut bookings, 103, 0, Some(10), 0), Ok(120));
-    assert_eq!(bookings.accept(120, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the untimed booking is accepted at 120");
-    assert_eq!(bookings.accept(110, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "B's span reaches 120");
+    assert_eq!(book_untimed(&mut bookings, 103, 0, Some(10), 0), Ok(125));
+    assert_eq!(bookings.accept(125, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the untimed booking is accepted at 125");
+    assert_eq!(bookings.accept(110, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "B's span reaches 125");
 }
 
 #[test]
 fn rm_15_place_tests_the_full_front() {
-    // A candidate of len 40 at 100 has front 142, which a booking at 120 (front 140) meets though 100 is free: place jumps past its front, 140.
-    let mut bookings = Bookings::default();
+    // A candidate of len 40 at 100 has front 144, which a booking at 120 (front 145) meets though 100 is free: place jumps past its front, 145.
+    let mut bookings = armed();
     bookings.accept(120, Some(10), 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(bookings.first_free(100, true, 0, ON_TIME, UNHANDED), Some(100));
-    assert_eq!(bookings.place(100, Some(40), 0, ON_TIME, UNHANDED), Some(140));
+    assert_eq!(bookings.place(100, Some(40), 0, ON_TIME, UNHANDED), Some(145));
 }
 
 #[test]
 fn rm_15_an_untimed_booking_meeting_a_booking_beyond_the_horizon_is_placed_after_it() {
-    // Re-check (a): B (10 samples, front 140) at 120 is beyond the hand-over horizon (110), so first_free passes 100; A (30 samples) at 100 has
-    // front 140, which B's region meets. place moves A to B's front, 140; accepted at 100 it would be refused.
-    let mut bookings = Bookings::default();
+    // Re-check (a): B (10 samples, front 145) at 120 is beyond the hand-over horizon (110), so first_free passes 100; A (30 samples) at 100 has
+    // front 145, which B's region meets. place moves A to B's front, 145; accepted at 100 it would be refused.
+    let mut bookings = armed();
     bookings.accept(120, Some(10), 0, ON_TIME, 110).unwrap();
     assert_eq!(bookings.first_free(100, true, 0, ON_TIME, 110), Some(100));
-    assert_eq!(bookings.place_untimed(100, 100, Some(30), 0, ON_TIME, 110), Some(140));
+    assert_eq!(bookings.place_untimed(100, 100, Some(30), 0, ON_TIME, 110), Some(145));
     assert_eq!(bookings.clone().accept(100, Some(30), 0, ON_TIME, 110), Err(Overlap::Booking));
     assert_eq!(bookings.accept(131, Some(30), 0, ON_TIME, 110), Err(Overlap::Booking), "131 is inside B's span");
-    assert_eq!(bookings.accept(140, Some(30), 0, ON_TIME, 110), Ok(()));
+    assert_eq!(bookings.accept(145, Some(30), 0, ON_TIME, 110), Ok(()));
 }
 
 #[test]
 fn rm_16_untimed_booking_skips_the_stop_region() {
     // Shape 1: a repeat at 0 cut by a Stop at 10 with bound 20 keeps [0, 20); an untimed repeat at 12 starts at 20.
-    let mut repeat = Bookings::default();
+    let mut repeat = armed();
     repeat.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     repeat.halt(10, 20);
     assert_eq!(book_untimed(&mut repeat, 12, 12, None, 12), Ok(20));
     // Shape 2: a repeat at 15, cancelled by the Stop, adds the region [10, 20); an untimed burst at 12 starts at 20 (first_free sees it too).
-    let mut region = Bookings::default();
+    let mut region = armed();
     region.accept(15, None, 0, ON_TIME, UNHANDED).unwrap();
     region.halt(10, 20);
     assert_eq!(region.first_free(12, false, 12, ON_TIME, UNHANDED), Some(20));
@@ -1072,55 +1117,59 @@ fn rm_16_untimed_booking_skips_the_stop_region() {
 
 #[test]
 fn rm_15_an_untimed_repeat_on_a_playing_repeat_is_refused() {
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(book_untimed(&mut bookings, 5, 5, None, 5), Err(Overlap::Booking));
 }
 
 #[test]
 fn rm_15_an_untimed_repeat_meeting_a_later_booking_starts_after_it() {
-    // Re-check (b): a repeat from 50 would meet the booking at 100 (front 120), so it starts at 120, after that booking.
-    let mut bookings = Bookings::default();
+    // Re-check (b): a repeat from 50 would meet the booking at 100 (front 125), so it starts at 125, after that booking.
+    let mut bookings = armed();
     bookings.accept(100, Some(10), 0, ON_TIME, UNHANDED).unwrap();
-    assert_eq!(book_untimed(&mut bookings, 50, 50, None, 0), Ok(120));
+    assert_eq!(book_untimed(&mut bookings, 50, 50, None, 0), Ok(125));
 }
 
 #[test]
-fn rm_15_an_untimed_booking_after_a_padded_head_is_placed_at_end_plus_ten() {
-    // Sequence 4: a head of 1 or 3 samples at 0 is padded to four and fronts at 14; an untimed burst of 5 samples at 2 is placed at 14.
+fn rm_15_an_untimed_booking_after_a_padded_head_is_placed_at_end_plus_gap() {
+    // Sequence 3: a head of 1 or 3 samples at 0 is padded to four and fronts at 19; an untimed burst of 5 samples at 2 is placed at 19.
     for len in [1, 3] {
-        let mut bookings = Bookings::default();
+        let mut bookings = armed();
         bookings.accept(0, Some(len), 0, ON_TIME, UNHANDED).unwrap();
-        assert_eq!(book_untimed(&mut bookings, 2, 2, Some(5), 2), Ok(14), "len {len}: the padded end plus ten");
+        assert_eq!(book_untimed(&mut bookings, 2, 2, Some(5), 2), Ok(19), "len {len}: the padded end plus the gap");
     }
+    // After a 33-sample head (a held tail, join deadline passed) it is placed at the end plus four.
+    let mut long = armed();
+    long.accept(0, Some(33), 0, ON_TIME, UNHANDED).unwrap();
+    assert_eq!(long.place_untimed(2, 2, Some(5), 0, |_| i64::MIN, UNHANDED), Some(37), "a head of 33 fronts at its end plus four");
 }
 
 #[test]
 fn rm_16_an_untimed_booking_meeting_a_stop_region_from_before_the_stop_is_placed_after_it() {
-    // Re-check (c): a Stop at 10 with bound 20 cuts the head of 3 at 15, whose own front is 29 (its end plus ten): the region is [10, 29). A burst
-    // at 8 of 5 samples has its front (23) in it and is placed at 29.
-    let mut bookings = Bookings::default();
+    // Re-check (c): a Stop at 10 with bound 22 cuts the head of 3 at 15, whose own front is 34 (its padded end plus the gap): the region is
+    // [10, 34). A burst at 8 of 5 samples has its front (28) in it and is placed at 34.
+    let mut bookings = armed();
     bookings.accept(15, Some(3), 0, ON_TIME, UNHANDED).unwrap();
-    bookings.halt(10, 20);
-    assert_eq!(book_untimed(&mut bookings, 8, 8, Some(5), 8), Ok(29));
+    bookings.halt(10, 22);
+    assert_eq!(book_untimed(&mut bookings, 8, 8, Some(5), 8), Ok(34));
 }
 
 #[test]
 fn rm_16_a_timed_send_asap_moves_past_only_the_stop_region() {
-    // A Stop at 10 with bound 20 cancels the head of 3 at 15, leaving the region [10, 29) (its own front): a timed booking at 12 moves to 29.
-    let mut bookings = Bookings::default();
+    // A Stop at 10 with bound 22 cancels the head of 3 at 15, leaving the region [10, 34) (its own front): a timed booking at 12 moves to 34.
+    let mut bookings = armed();
     bookings.accept(15, Some(3), 0, ON_TIME, UNHANDED).unwrap();
-    bookings.halt(10, 20);
-    assert_eq!(bookings.region_move(12, Some(5), 0, ON_TIME, UNHANDED), Ok(29));
+    bookings.halt(10, 22);
+    assert_eq!(bookings.region_move(12, Some(5), 0, ON_TIME, UNHANDED), Ok(34));
 }
 
 #[test]
 fn rm_16_a_timed_send_asap_meeting_a_chain_is_refused() {
-    // A chain at 0 of length 4 (front 14) lies over 12, and the region [10, 29) is there too: the booking stays at 12 and accept refuses it.
-    let mut bookings = Bookings::default();
+    // A chain at 0 of length 4 (front 19) lies over 12, and the region [10, 38) is there too: the booking stays at 12 and accept refuses it.
+    let mut bookings = armed();
     bookings.accept(0, Some(4), 0, ON_TIME, UNHANDED).unwrap();
-    bookings.accept(15, Some(3), 0, ON_TIME, UNHANDED).unwrap();
-    bookings.halt(10, 20);
+    bookings.accept(19, Some(3), 0, ON_TIME, UNHANDED).unwrap();
+    bookings.halt(10, 25);
     assert_eq!(bookings.region_move(12, Some(5), 0, ON_TIME, UNHANDED), Ok(12));
     assert_eq!(bookings.accept(12, Some(5), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
 }
@@ -1128,7 +1177,7 @@ fn rm_16_a_timed_send_asap_meeting_a_chain_is_refused() {
 #[test]
 fn rm_16_a_moved_untimed_head_does_not_block_itself() {
     // At dispatch the head of 40 samples at 100 is moved to 100: its own span is removed before placing it.
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(bookings.move_untimed(100, 100, Some(40)), Some(100));
     assert_eq!(bookings.move_untimed(100, 110, Some(40)), Some(110), "the head's old span is gone, so it moves to 110");
@@ -1137,18 +1186,18 @@ fn rm_16_a_moved_untimed_head_does_not_block_itself() {
 #[test]
 fn rm_16_a_moved_untimed_head_goes_after_its_joined_pieces() {
     // Head H (40 at 100) with a joined piece P (10 at 140, joined front 152). Once H leaves, P is the only piece and at most 32
-    // samples, so it is closed at its standalone front (160, S2): H, moved to a bound of 120, lands after that.
-    let mut bookings = Bookings::default();
+    // samples, so it is closed at its standalone front (165, S2): H, moved to a bound of 120, lands after that.
+    let mut bookings = armed();
     bookings.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     bookings.accept(140, Some(10), 0, ON_TIME, UNHANDED).unwrap();
-    assert_eq!(bookings.move_untimed(100, 120, Some(40)), Some(160));
+    assert_eq!(bookings.move_untimed(100, 120, Some(40)), Some(165));
 }
 
 #[test]
 fn rm_15_a_front_past_the_clock_is_refused_without_a_panic_or_a_change() {
     // A start near i64::MAX has a front that overflows: place and region_move find no sample, and a move is refused with the record unchanged.
     let near = i64::MAX - 10;
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     assert_eq!(bookings.place(near, Some(40), 0, ON_TIME, UNHANDED), None);
     assert_eq!(bookings.region_move(near, Some(40), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
     bookings.accept(10, Some(5), 0, ON_TIME, UNHANDED).unwrap();
@@ -1160,16 +1209,16 @@ fn rm_15_a_front_past_the_clock_is_refused_without_a_panic_or_a_change() {
 
 #[test]
 fn rm_15_place_moves_a_booking_past_a_later_booking_its_region_meets() {
-    // A late SendAsap is placed with place: a candidate of 20 at 90 meets the booking at 100 (front 142) and moves to 142.
-    let mut bookings = Bookings::default();
+    // A late SendAsap is placed with place: a candidate of 20 at 90 meets the booking at 100 (front 144) and moves to 144.
+    let mut bookings = armed();
     bookings.accept(100, Some(40), 0, ON_TIME, UNHANDED).unwrap();
-    assert_eq!(bookings.place(90, Some(20), 0, ON_TIME, UNHANDED), Some(142));
+    assert_eq!(bookings.place(90, Some(20), 0, ON_TIME, UNHANDED), Some(144));
 }
 
 #[test]
 fn rm_15_place_honours_a_join_point() {
     // A chain of 40 at 0 (joinable, end 40) takes a booking of 5 at 40: the join is not a conflict, so place keeps 40.
-    let mut bookings = Bookings::default();
+    let mut bookings = armed();
     bookings.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(bookings.place(40, Some(5), 0, ON_TIME, UNHANDED), Some(40));
 }
@@ -1274,4 +1323,72 @@ fn txlist_halt_unread_ignores_bookings() {
     assert!(!list.halt_unread() && list.unread(), "a booking after the halt waits, the halt is read");
     list.read();
     assert!(!list.halt_unread() && !list.unread());
+}
+
+#[test]
+fn rm_15_closed_short_gap_is_fifteen_microseconds_or_three_samples() {
+    // On a 200 MHz root, root ticks per sample N: 1, 2, 2.857 (N = 70), 10, 100 and 200 MS/s.
+    for (ratio, gap) in [(200, 15), (100, 30), (70, 43), (20, 150), (2, 1500), (1, 3000)] {
+        assert_eq!(closed_short_gap(200_000_000, ratio, 1), gap, "ratio {ratio}");
+    }
+    // `ideal` at 100 kS/s on a 1 GHz root: 1.5 samples, ceil 2, floored to three.
+    assert_eq!(closed_short_gap(1_000_000_000, 10_000, 1), 3);
+    // A Mock-shaped ratio: root 10^9, N = 70 gives 350 root ticks a sample.
+    assert_eq!(closed_short_gap(1_000_000_000, 350, 1), 43);
+    // A non-integral ratio: `ideal` at 3 MS/s on a 1 GHz root is 1000/3 ticks a sample; a dropped denominator would give 15.
+    assert_eq!(closed_short_gap(1_000_000_000, 1000, 3), 45);
+}
+
+#[test]
+fn rm_15_an_unarmed_record_refuses_a_closed_short_head() {
+    let mut bookings = Bookings::unarmed();
+    assert_eq!(bookings.accept(0, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "no rate, no guard: a short head is refused, not booked with none");
+    assert_eq!(bookings.accept(0, Some(33), 0, ON_TIME, UNHANDED), Ok(()), "a head of 33 needs no gap");
+    assert_eq!(Bookings::unarmed().accept(100, None, 0, ON_TIME, UNHANDED), Ok(()), "nor does a repeat");
+    bookings.arm(15);
+    assert_eq!(bookings.accept(200, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "armed, the same head is accepted");
+}
+
+#[test]
+fn rm_15_arming_again_replaces_the_gap() {
+    let mut bookings = armed_with(15);
+    bookings.accept(0, Some(4), 0, ON_TIME, UNHANDED).unwrap();
+    assert_eq!(bookings.accept(18, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "armed at 15: the front is 4 + 15");
+    bookings.prune(19);
+    bookings.arm(30);
+    bookings.accept(100, Some(4), 100, ON_TIME, UNHANDED).unwrap();
+    assert_eq!(bookings.accept(133, Some(1), 100, ON_TIME, UNHANDED), Err(Overlap::Booking), "re-armed at 30: the front is 104 + 30");
+    assert_eq!(bookings.accept(134, Some(1), 100, ON_TIME, UNHANDED), Ok(()));
+    bookings.prune(135);
+    bookings.arm(15);
+    bookings.accept(200, Some(4), 200, ON_TIME, UNHANDED).unwrap();
+    assert_eq!(bookings.accept(218, Some(1), 200, ON_TIME, UNHANDED), Err(Overlap::Booking), "back at 15: the front is 204 + 15");
+    assert_eq!(bookings.accept(219, Some(1), 200, ON_TIME, UNHANDED), Ok(()));
+}
+
+#[test]
+fn rm_16_a_dropped_short_head_inside_five_of_the_bound_was_not_handed() {
+    // The Stop at 50 has bound 100, so the handed cursor is at most 95: a dropped head starting at 96 was never handed and leaves only
+    // [50, 100), not its own front 115 (a bound read as `stop - 3` would call it handed).
+    let mut bookings = armed();
+    bookings.accept(96, Some(1), 0, ON_TIME, UNHANDED).unwrap();
+    bookings.halt(50, 100);
+    assert_eq!(bookings.accept(99, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "inside the Stop's region");
+    assert_eq!(bookings.accept(100, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "the region ends at the bound");
+}
+
+#[test]
+fn rm_16_a_stop_cutting_a_repeat_fronts_at_the_cursor_plus_five() {
+    // Sequence 5: a Stop with no window at cursor c cuts a repeat; its two-zero close ends at c + 2 and the front is c + 5.
+    let c = 100;
+    let mut bookings = armed();
+    bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
+    bookings.halt(c, stop_sample_with_no_window(c));
+    assert_eq!(bookings.accept(c + 4, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "c + 4 is inside the close and its gap");
+    assert_eq!(bookings.accept(c + 5, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "c + 5 is the front");
+}
+
+/// The Stop bound at sample `c` with no in-flight window, on the identity clock.
+fn stop_sample_with_no_window(c: i64) -> i64 {
+    ezsdr_radio::staging::stop_sample(c, 0, |t| t)
 }

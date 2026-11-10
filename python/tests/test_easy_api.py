@@ -813,6 +813,15 @@ class EasyApi(unittest.TestCase):
         self.assertEqual(sets(rx={1: [1]}), ([-1, 1], [-1, -1], [[], [1]], [[], []]))
         self.assertEqual(sets(rx={1: [1], 0: [0]}, tx={0: []}), ([0, 1], [-1, -1], [[0], [1]], [[], []]))
 
+    def test_ea_16_a_transmit_rate_below_1_msps_is_refused_at_connect(self) -> None:
+        # KL-40: transmit rates start at 1 MS/s on x3xx (RM-8: 0.5 MS/s is outside the transmit grid, never coerced to 1 MS/s); receive keeps 0.5 MS/s.
+        with self.assertRaises(ezsdr.Error):
+            self.connect(tx={0: ezsdr.Stream([0], sample_rate=0.5e6)})
+        with self.connect(tx={0: ezsdr.Stream([0], sample_rate=1e6)}) as sdr:
+            self.assertEqual(sdr.tx.sample_rate, 1e6)
+        with self.connect(rx={0: ezsdr.Stream([0], sample_rate=0.5e6)}) as sdr:
+            self.assertEqual(sdr.rx.sample_rate, 0.5e6)
+
     def test_ea_16_connect_names_a_stream(self) -> None:
         # A name is the Easy API's: the server numbers it, the reply carries the table, and the
         # Kernel's Actions and the log keep numbers.

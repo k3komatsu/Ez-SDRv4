@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const MS: i64 = 200_000;
 
 fn params() -> o::Params {
-    o::Params { clock: o::Clock { origin: 0, n: 200 }, window: 10 * MS, lead: 2 * MS, allowance: 3 * MS }
+    o::Params { clock: o::Clock { origin: 0, n: 200 }, root_hz: 200_000_000, window: 10 * MS, lead: 2 * MS, allowance: 3 * MS }
 }
 
 fn at(rig: &SwitchRig, ticks: i64) {

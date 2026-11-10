@@ -635,10 +635,15 @@ struct Radio {
     active: bool,
     /// What the device burst's later packets do after its first packet was faulted (UR-33).
     burst: Burst,
-    /// Transmitted samples of the current device burst, summed over its accepted packets (UR-33).
+    /// Samples of the current device burst, summed over every packet the host sent for it, refused or dropped ones included (UR-33): the DUC
+    /// consumes them before the radio applies packet policy. It is the transmitted count unless a fault dropped packets, which can only raise it
+    /// (INFERRED for the hardware: the bench measured no faulted burst).
     burst_samples: i64,
-    /// Ticks before which an idle timed SOB is refused: ten samples past a closed device burst of at most 32 (UR-22, UR-33).
+    /// Ticks before which an idle timed SOB is refused: [`Radio::short_gap`] samples past a closed device burst of at most 32 samples (as
+    /// `burst_samples` counts them), three past a longer one (UR-22, UR-33).
     short_until: Option<i64>,
+    /// The master clock rate, for the gap in samples of a stream's rate.
+    mcr: i64,
     /// Whether the current device burst's SOB was accepted. Only an accepted burst's dropped close arms the guard (UR-33).
     accepted: bool,
     reports: VecDeque<TxReport>,
@@ -666,6 +671,10 @@ pub const MIN_OPEN_FIRST_SEND: usize = 32;
 /// The fake's own copy of UR-22's short-burst bound: the model states the bench's rule itself, not through the owner's or the record's
 /// `ezsdr_radio::staging::CLOSED_SHORT_MAX`, so a change to the shared constant fails these tests rather than being followed.
 const SHORT_BURST_MAX: i64 = 32;
+/// The fake's own copy of UR-22's gaps (as for `SHORT_BURST_MAX`): past a longer closed burst the next timed SOB keeps three samples; past a
+/// short one it keeps `max(3, ceil(15 µs × rate))` samples. Stricter than the bench at interpolation 4 and up, never looser at the rates the Modules allow, 1 MS/s and up; at 0.4 MS/s and below the bench saw closed bursts of at most four samples underflow themselves, which no gap models (UR-33).
+const LONG_CLOSE_GAP: i64 = 3;
+const SHORT_GAP_NANOS: i128 = 15_000;
 
 /// The model's threshold for that bench result (UR-33): an open first packet of fewer samples faults at interpolation 80 or more.
 /// 29 samples are not measured (design note 48, G3); the model keeps the bench's 30.
@@ -680,9 +689,17 @@ impl Radio {
         self.short_until = None;
     }
 
-    /// Arms the guard after a closed device burst that ended at `end`: ten samples past it, when it transmitted at most 32 (UR-22, UR-33).
+    /// The samples a closed short burst's successor keeps: `max(3, ceil(15 µs × rate))`, the rate being `mcr / ratio` (UR-22, UR-33).
+    fn short_gap(&self, ratio: i64) -> i64 {
+        let ticks = (SHORT_GAP_NANOS * i128::from(self.mcr) + 999_999_999) / 1_000_000_000;
+        i64::try_from((ticks + i128::from(ratio) - 1) / i128::from(ratio.max(1))).unwrap_or(i64::MAX).max(LONG_CLOSE_GAP)
+    }
+
+    /// Arms the guard after a closed device burst that ended at `end`: the short gap past it when it transmitted at most 32, three samples
+    /// past it otherwise (UR-22, UR-33).
     fn arm_short_guard(&mut self, end: i64, ratio: i64) {
-        self.short_until = (self.burst_samples <= SHORT_BURST_MAX).then(|| end + 10 * ratio);
+        let gap = if self.burst_samples <= SHORT_BURST_MAX { self.short_gap(ratio) } else { LONG_CLOSE_GAP };
+        self.short_until = Some(end + gap * ratio);
     }
 
     fn packet(&mut self, packet: &DucPacket, now: i64, channel_count: usize, drop_ack: bool, unended: &mut u64, restarts: &mut u64) -> Option<(i64, i64)> {
@@ -716,7 +733,7 @@ impl Radio {
             self.reports.push_back(TxReport { code: TxCode::Underflow, tick: Some(self.cursor), channel: 0 });
             self.active = false;
         }
-        // UR-33: an idle timed SOB less than ten samples after a closed device burst of at most 32 transmitted samples is refused.
+        // UR-33: an idle timed SOB inside the gap after a closed device burst (the short gap after at most 32 transmitted samples, three after more) is refused.
         if !self.active && packet.sob && packet.radio_time.is_some_and(|t| self.short_until.is_some_and(|until| t < until)) {
             for channel in 0..channel_count {
                 self.reports.push_back(TxReport { code: TxCode::TimeError, tick: packet.radio_time.map(|t| t.max(now)), channel });
@@ -810,8 +827,8 @@ impl Radio {
 }
 
 impl TxStreamer {
-    fn new(channels: Vec<usize>) -> TxStreamer {
-        let mut radio = Radio { cursor: 0, active: true, burst: Burst::Clean, burst_samples: 0, short_until: None, accepted: false, reports: VecDeque::new() };
+    fn new(channels: Vec<usize>, mcr: i64) -> TxStreamer {
+        let mut radio = Radio { cursor: 0, active: true, burst: Burst::Clean, burst_samples: 0, short_until: None, mcr, accepted: false, reports: VecDeque::new() };
         radio.reset_clock();
         TxStreamer { channels, duc: Duc { burst: false, has_time: false, time: None, eob_lost: false }, radio }
     }
@@ -1736,7 +1753,7 @@ impl Device for FakeDevice {
             }
             seen.push(*chan);
         }
-        st.tx.insert(stream, TxStreamer::new(channels.to_vec()));
+        st.tx.insert(stream, TxStreamer::new(channels.to_vec(), self.mcr()));
         st.opened[Dir::Tx as usize].extend(channels.iter().copied());
         Ok(())
     }
@@ -2517,6 +2534,8 @@ mod tests {
         // the burst ends a sample later, and a timed start one sample after its data is late
         // (`hw_b8_raw_empty_eob_gap`: 4 of 4), while after end-of-burst on the data it is not.
         for (empty, late) in [(true, true), (false, false)] {
+            // After the data's own end-of-burst the next timed start keeps three samples (UR-33, D3); after the empty one it is late at one.
+            let start = if empty { 101 } else { 103 };
             let device = manual(FakeConfig::default());
             participant(&device, move |device| {
                 device.set_time_zero(false).unwrap();
@@ -2527,13 +2546,13 @@ mod tests {
                 if empty {
                     device.tx_send(0, &[&[][..]], None, false, true, Duration::from_secs(1)).unwrap();
                 }
-                device.tx_send(0, &[&wave], Some(t0 + 101 * 200), true, true, Duration::from_secs(1)).unwrap();
-                let codes: Vec<_> = reports_until(&device, t0 + 201 * 200).into_iter().map(|r| r.code).collect();
+                device.tx_send(0, &[&wave], Some(t0 + start * 200), true, true, Duration::from_secs(1)).unwrap();
+                let codes: Vec<_> = reports_until(&device, t0 + 203 * 200).into_iter().map(|r| r.code).collect();
                 assert_eq!(codes.contains(&TxCode::TimeError), late, "empty end-of-burst {empty}: {codes:?}");
-                let seen = device.transmitted(t0, 102);
+                let seen = device.transmitted(t0, 104);
                 assert_eq!(seen[99], Some(wave[99]), "the burst's last sample: {seen:?}");
                 assert_eq!(seen[100], if empty { Some([0.0, 0.0]) } else { None }, "the empty end-of-burst's one zero sample: {seen:?}");
-                assert_eq!(seen[101], if late { None } else { Some(wave[0]) }, "the burst one sample later: {seen:?}");
+                assert_eq!(seen[start as usize], if late { None } else { Some(wave[0]) }, "the burst at {start}: {seen:?}");
             });
         }
     }
@@ -2541,8 +2560,9 @@ mod tests {
     #[test]
     fn ur_33_a_timed_start_at_the_previous_burst_s_end_is_late() {
         // design-notes §11 F3 (`hw_b8_raw_burst_gap`): at gap 0 the second burst is late and
-        // dropped, at one sample it is played. The late report's tick is at or after its time.
-        for (gap, late) in [(0i64, true), (1, false)] {
+        // dropped, at one and two samples it is refused by the guard, at three it is played. The late report's tick is at or after its time.
+        // After a long close (100 samples) the fake keeps three samples (UR-33, D3), stricter than the bench's one at 1 MS/s.
+        for (gap, late) in [(0i64, true), (1, true), (2, true), (3, false)] {
             let device = manual(FakeConfig::default());
             participant(&device, move |device| {
                 device.set_time_zero(false).unwrap();
@@ -3154,53 +3174,93 @@ mod tests {
         assert_eq!(reports(device), [TxCode::BurstAck], "the device burst that ended at {end} is acknowledged");
     }
 
-    /// A manual device at 1 MS/s (200 ticks a sample) with a closed device burst of `len` samples at `t0`, acknowledged. Returns its end.
-    fn closed_burst(device: &FakeDevice, len: usize) -> i64 {
+    /// A manual device at `rate` (`ratio` ticks a sample) with a closed device burst of `len` samples at t0, acknowledged. Returns its end.
+    fn closed_burst_at(device: &FakeDevice, rate: f64, ratio: i64, len: usize) -> i64 {
         device.set_time_zero(false).unwrap();
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
-        let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(rate), ..Settings::default() }).unwrap();
+        let t0 = (device.time_now().unwrap() / ratio + 20_000) * ratio;
         device.tx_send(0, &[&vec![[0.1f32, 0.0]; len]], Some(t0), true, true, Duration::from_secs(1)).unwrap();
-        let end = t0 + len as i64 * 200;
+        let end = t0 + len as i64 * ratio;
         acked(device, end);
         end
     }
 
+    /// A manual device at 1 MS/s (200 ticks a sample) with a closed device burst of `len` samples at `t0`, acknowledged. Returns its end.
+    fn closed_burst(device: &FakeDevice, len: usize) -> i64 {
+        closed_burst_at(device, 1e6, 200, len)
+    }
+
+    /// A timed closed SOB of four samples at `at` is refused: one TimeError, nothing transmitted. The clock does not move.
+    fn assert_refused(device: &FakeDevice, at: i64, case: &str) {
+        device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(at), true, true, Duration::from_secs(1)).unwrap();
+        assert_eq!(reports(device), [TxCode::TimeError], "{case}: refused at {at}");
+        assert_eq!(device.transmitted(at, 4), vec![None; 4], "{case}: nothing is transmitted");
+    }
+
+    /// A timed closed SOB of four samples at `at` plays: a BurstAck after its end, its samples transmitted. Moves the clock past it.
+    fn assert_plays(device: &FakeDevice, at: i64, ratio: i64, case: &str) {
+        device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(at), true, true, Duration::from_secs(1)).unwrap();
+        device.set_time(at + 4 * ratio + 1);
+        assert_eq!(reports(device), [TxCode::BurstAck], "{case}: plays at {at}");
+        assert_eq!(device.transmitted(at, 4), vec![Some([0.2, 0.0]); 4], "{case}");
+    }
+
     #[test]
-    fn ur_33_a_timed_sob_within_ten_of_a_closed_short_burst_is_refused() {
-        // UR-33 (F8): an idle timed SOB less than ten samples after a closed device burst of at most 32 transmitted samples is refused
-        // per channel and sets no BurstAck; ten samples after it plays.
+    fn ur_33_a_timed_sob_within_the_gap_of_a_closed_short_burst_is_refused() {
+        // UR-33 (F8): an idle timed SOB less than the gap (15 samples at 1 MS/s) after a closed device burst of at most 32 transmitted
+        // samples is refused per channel and sets no BurstAck; the gap after it plays.
         for len in [4usize, 32] {
             let device = manual(FakeConfig::default());
             participant(&device, move |device| {
                 let end = closed_burst(&device, len);
-                for gap in 1..=10i64 {
-                    let at = end + gap * 200;
-                    device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(at), true, true, Duration::from_secs(1)).unwrap();
-                    if gap < 10 {
-                        assert_eq!(reports(&device), [TxCode::TimeError], "len {len}, gap {gap}");
-                        assert_eq!(device.transmitted(at, 4), vec![None; 4], "len {len}, gap {gap}");
-                    } else {
-                        device.set_time(at + 4 * 200 + 1);
-                        assert_eq!(reports(&device), [TxCode::BurstAck], "len {len}: ten samples after the burst it plays");
-                        assert_eq!(device.transmitted(at, 4), vec![Some([0.2, 0.0]); 4], "len {len}");
-                    }
+                for gap in 1..15i64 {
+                    assert_refused(&device, end + gap * 200, &format!("len {len}, gap {gap}"));
                 }
+                assert_plays(&device, end + 15 * 200, 200, &format!("len {len}, gap 15"));
             });
         }
     }
 
     #[test]
-    fn ur_33_a_closed_burst_over_32_keeps_the_gap_of_one() {
-        // UR-33 (F8): the guard is for a device burst of at most 32 transmitted samples. A 33-sample closed burst, and a 32-sample
-        // open first send closed by a two-sample continuation (34 in all), are followed by a timed SOB one sample after their end, which plays.
+    fn ur_33_a_timed_sob_before_the_gap_after_a_closed_short_burst_is_refused_at_each_rate() {
+        // UR-33 (UR-22): the gap is max(3, ceil(15 µs x rate)) samples at the stream's rate, here written out: 15, 30, 43 (N = 70, 42.86
+        // rounded up), 150, 1 500 and 3 000 samples at 1, 2, 2.857, 10, 100 and 200 MS/s. One tick before it the SOB is refused; at it, it plays.
+        for (rate, ratio, gap) in [(1e6, 200i64, 15i64), (2e6, 100, 30), (200e6 / 70.0, 70, 43), (10e6, 20, 150), (100e6, 2, 1_500), (200e6, 1, 3_000)] {
+            let device = manual(FakeConfig::default());
+            participant(&device, move |device| {
+                let end = closed_burst_at(&device, rate, ratio, 4);
+                let case = format!("{rate} S/s, gap {gap}");
+                assert_refused(&device, end + gap * ratio - 1, &case);
+                assert_plays(&device, end + gap * ratio, ratio, &case);
+            });
+        }
+    }
+
+    #[test]
+    fn ur_33_the_fake_guard_has_a_floor_of_three_samples_at_a_slow_rate() {
+        // UR-33: at 98 kS/s (ratio 2 040) 15 µs is under two samples, so the floor of three decides. The raw fake takes the rate: the grid
+        // floor of 1 MS/s is the Provider's (RM-8), not the device's. This pins the formula's floor only: the bench saw closed bursts of at most four
+        // samples underflow themselves at 0.4 MS/s and below (and an unacknowledged flush at 0.25), a shape no gap models.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let end = closed_burst_at(&device, 200e6 / 2_040.0, 2_040, 4);
+            assert_refused(&device, end + 3 * 2_040 - 1, "98 kS/s");
+            assert_plays(&device, end + 3 * 2_040, 2_040, "98 kS/s");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_closed_burst_over_32_keeps_the_gap_of_three() {
+        // UR-33 (F8): the short guard is for a device burst of at most 32 transmitted samples. After a 33-sample closed burst, and after a
+        // 32-sample open first send closed by a two-sample continuation (34 in all), a timed SOB one or two samples past the end is refused,
+        // and three past it plays.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             let end = closed_burst(&device, 33);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 200), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(end + 200 + 4 * 200 + 1);
-            assert_eq!(reports(&device), [TxCode::BurstAck], "a 33-sample closed burst is followed one sample on");
-            assert_eq!(device.transmitted(end + 200, 4), vec![Some([0.2, 0.0]); 4]);
+            assert_refused(&device, end + 200, "33 samples, gap 1");
+            assert_refused(&device, end + 2 * 200, "33 samples, gap 2");
+            assert_plays(&device, end + 3 * 200, 200, "33 samples, gap 3");
         });
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
@@ -3212,11 +3272,23 @@ mod tests {
             device.tx_send(0, &[&[[0.1f32, 0.0]; 2]], None, false, true, Duration::from_secs(1)).unwrap();
             let end = t0 + 34 * 200;
             acked(&device, end);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 200), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(end + 200 + 4 * 200 + 1);
-            assert_eq!(reports(&device), [TxCode::BurstAck], "34 transmitted samples are not a short burst");
-            assert_eq!(device.transmitted(end + 200, 4), vec![Some([0.2, 0.0]); 4]);
+            assert_refused(&device, end + 2 * 200, "34 samples, gap 2");
+            assert_plays(&device, end + 3 * 200, 200, "34 samples, gap 3");
         });
+    }
+
+    #[test]
+    fn ur_33_a_timed_sob_within_three_samples_of_a_longer_close_is_refused() {
+        // UR-33 (D3): after a closed burst of more than 32 samples the next timed SOB keeps three samples at every ratio, at 1 and 200 MS/s alike
+        // (the bench needs fewer at interpolation 4 and up; the fake is stricter there, and never looser at 1 MS/s and up). The slow-rate test below pins the formula's floor only.
+        for (rate, ratio) in [(1e6, 200i64), (200e6, 1)] {
+            let device = manual(FakeConfig::default());
+            participant(&device, move |device| {
+                let end = closed_burst_at(&device, rate, ratio, 33);
+                assert_refused(&device, end + 3 * ratio - 1, &format!("{rate} S/s"));
+                assert_plays(&device, end + 3 * ratio, ratio, &format!("{rate} S/s"));
+            });
+        }
     }
 
     #[test]
@@ -3226,50 +3298,46 @@ mod tests {
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             let end = closed_burst(&device, 4);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 100]], Some(end + 9 * 200), true, false, Duration::from_secs(1)).unwrap();
-            assert_eq!(reports(&device), [TxCode::TimeError], "the open SOB at end + 9 is refused");
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 109 * 200), false, true, Duration::from_secs(1)).unwrap();
+            device.tx_send(0, &[&[[0.2f32, 0.0]; 100]], Some(end + 14 * 200), true, false, Duration::from_secs(1)).unwrap();
+            assert_eq!(reports(&device), [TxCode::TimeError], "the open SOB at end + 14 is refused");
+            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 114 * 200), false, true, Duration::from_secs(1)).unwrap();
             assert_eq!(reports(&device), [TxCode::TimeError], "a timed continuation is refused through its EOB");
-            assert_eq!(device.transmitted(end + 9 * 200, 104), vec![None; 104], "nothing of the refused burst is sent");
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 10 * 200), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(end + 14 * 200 + 1);
-            assert_eq!(reports(&device), [TxCode::BurstAck], "the next normal SOB plays");
-            assert_eq!(device.transmitted(end + 10 * 200, 4), vec![Some([0.2, 0.0]); 4]);
+            assert_eq!(device.transmitted(end + 14 * 200, 104), vec![None; 104], "nothing of the refused burst is sent");
+            assert_plays(&device, end + 15 * 200, 200, "the next normal SOB");
         });
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             let end = closed_burst(&device, 4);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 100]], Some(end + 9 * 200), true, false, Duration::from_secs(1)).unwrap();
+            device.tx_send(0, &[&[[0.2f32, 0.0]; 100]], Some(end + 14 * 200), true, false, Duration::from_secs(1)).unwrap();
             assert_eq!(reports(&device), [TxCode::TimeError]);
             device.tx_send(0, &[&[[0.2f32, 0.0]; 50]], None, false, false, Duration::from_secs(1)).unwrap();
             device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], None, false, true, Duration::from_secs(1)).unwrap();
             assert_eq!(reports(&device), [TxCode::TimeError], "an untimed continuation is refused once, then silent through the EOB");
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 10 * 200), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(end + 14 * 200 + 1);
-            assert_eq!(reports(&device), [TxCode::BurstAck], "the next normal SOB plays");
+            assert_plays(&device, end + 15 * 200, 200, "the next normal SOB");
         });
     }
 
     #[test]
     fn ur_33_a_refused_open_sob_s_dropped_close_leaves_the_short_guard() {
-        // UR-33 (Sol finding 2): only an accepted burst's dropped close arms the guard. A closed 4 guards ten samples past its end; a refused
+        // UR-33 (Sol finding 2): only an accepted burst's dropped close arms the guard. A closed 4 guards the gap (15 samples) past its end; a refused
         // 100-sample open SOB and its refused closing continuation (104 samples, over the bound) must not clear that guard.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             let end = closed_burst(&device, 4);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 100]], Some(end + 9 * 200), true, false, Duration::from_secs(1)).unwrap();
-            assert_eq!(reports(&device), [TxCode::TimeError], "the open SOB at end + 9 is refused");
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 109 * 200), false, true, Duration::from_secs(1)).unwrap();
+            device.tx_send(0, &[&[[0.2f32, 0.0]; 100]], Some(end + 14 * 200), true, false, Duration::from_secs(1)).unwrap();
+            assert_eq!(reports(&device), [TxCode::TimeError], "the open SOB at end + 14 is refused");
+            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 114 * 200), false, true, Duration::from_secs(1)).unwrap();
             assert_eq!(reports(&device), [TxCode::TimeError], "its timed closing continuation is refused");
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 200), true, true, Duration::from_secs(1)).unwrap();
-            assert_eq!(reports(&device), [TxCode::TimeError], "a timed SOB at end + 1 is still refused by the closed 4's guard");
+            // A dropped close armed from where the device stands (end + 4) would keep three samples (104 transmitted): end + 7. The closed 4's own guard
+            // holds until end + 15, so a SOB at end + 10 is refused only if the refused burst left it alone.
+            assert_refused(&device, end + 10 * 200, "a timed SOB at end + 10 is still refused by the closed 4's guard");
         });
     }
 
     #[test]
     fn ur_33_the_short_guard_counts_the_device_burst_not_its_last_packet() {
         // UR-33 (F8): the guard counts the transmitted samples of the whole device burst. A 30-sample open first packet (not armed) with a
-        // two-sample closing continuation is 32 and guarded; with a 32-sample first packet it is 34 and is not.
+        // two-sample closing continuation is 32 and guarded at the gap; with a 32-sample first packet it is 34 and keeps three.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
@@ -3280,11 +3348,8 @@ mod tests {
             device.tx_send(0, &[&[[0.1f32, 0.0]; 2]], None, false, true, Duration::from_secs(1)).unwrap();
             let end = t0 + 32 * 200;
             acked(&device, end);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 9 * 200), true, true, Duration::from_secs(1)).unwrap();
-            assert_eq!(reports(&device), [TxCode::TimeError], "32 transmitted samples: the SOB at end + 9 is refused");
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 10 * 200), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(end + 14 * 200 + 1);
-            assert_eq!(reports(&device), [TxCode::BurstAck], "and plays at end + 10");
+            assert_refused(&device, end + 14 * 200, "32 transmitted samples");
+            assert_plays(&device, end + 15 * 200, 200, "32 transmitted samples");
         });
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
@@ -3296,16 +3361,15 @@ mod tests {
             device.tx_send(0, &[&[[0.1f32, 0.0]; 2]], None, false, true, Duration::from_secs(1)).unwrap();
             let end = t0 + 34 * 200;
             acked(&device, end);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 200), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(end + 200 + 4 * 200 + 1);
-            assert_eq!(reports(&device), [TxCode::BurstAck], "34 transmitted samples: the SOB at end + 1 plays");
+            assert_refused(&device, end + 2 * 200, "34 transmitted samples, gap 2");
+            assert_plays(&device, end + 3 * 200, 200, "34 transmitted samples, gap 3");
         });
     }
 
     #[test]
     fn ur_33_an_abandoned_30_sample_open_send_is_guarded_as_a_short_burst() {
         // UR-33 (F8, the abandon exception): a 30-sample open first send (not armed) closed by its two-zero end packet is 32 transmitted
-        // samples and guarded at ten past its end; the owner's front for this close is ten past its padded end too (tx.rs), so they agree.
+        // samples and guarded at the gap past its end; the owner's front for this close is the gap past its padded end too (tx.rs), so they agree.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
@@ -3316,20 +3380,16 @@ mod tests {
             device.tx_send(0, &[&[[0.0f32, 0.0]; 2]], None, false, true, Duration::from_secs(1)).unwrap();
             let end = t0 + 32 * 200;
             acked(&device, end);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 3 * 200), true, true, Duration::from_secs(1)).unwrap();
-            assert_eq!(reports(&device), [TxCode::TimeError], "three past the end the SOB is refused");
-            assert_eq!(device.transmitted(end + 3 * 200, 4), vec![None; 4]);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 10 * 200), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(end + 14 * 200 + 1);
-            assert_eq!(reports(&device), [TxCode::BurstAck], "at ten past the end it plays");
-            assert_eq!(device.transmitted(end + 10 * 200, 4), vec![Some([0.2, 0.0]); 4]);
+            assert_refused(&device, end + 3 * 200, "three past the end");
+            assert_refused(&device, end + 14 * 200, "fourteen past the end");
+            assert_plays(&device, end + 15 * 200, 200, "at the gap past the end");
         });
     }
 
     #[test]
     fn ur_33_an_armed_burst_s_dropped_close_arms_the_short_guard() {
         // UR-33 (F8): a 20-sample open first packet at 1 MS/s is armed; its two-zero close, at a later device tick, is dropped by the fault.
-        // The 22 samples still close a device burst of at most 32, so it is guarded ten samples past where the device ran dry plus the close.
+        // The 22 samples still close a device burst of at most 32, so it is guarded at the gap (15 samples) past where the device ran dry plus the close.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
@@ -3341,18 +3401,16 @@ mod tests {
             device.tx_send(0, &[&[[0.0f32, 0.0]; 2]], None, false, true, Duration::from_secs(1)).unwrap();
             assert_eq!(reports(&device), [TxCode::Underflow, TxCode::TimeError], "the armed burst runs dry and its close is dropped");
             let end = t0 + 22 * 200;
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 5 * 200), true, true, Duration::from_secs(1)).unwrap();
-            assert_eq!(reports(&device), [TxCode::TimeError], "five samples past the end: refused");
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 10 * 200), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(end + 14 * 200 + 1);
-            assert_eq!(reports(&device), [TxCode::BurstAck], "ten past the end: it plays");
-            assert_eq!(device.transmitted(end + 10 * 200, 4), vec![Some([0.2, 0.0]); 4]);
+            assert_refused(&device, end + 5 * 200, "five samples past the end");
+            assert_refused(&device, end + 14 * 200, "fourteen past the end");
+            assert_plays(&device, end + 15 * 200, 200, "the gap past the end");
         });
     }
 
     #[test]
-    fn ur_33_a_30_sample_open_send_below_interpolation_80_is_guarded_at_ten_past_its_end() {
-        // UR-33 (F8): at 4 MS/s (interpolation 50) an open first packet is not armed; closed by two zeros it is 32 samples, guarded ten past its end.
+    fn ur_33_a_30_sample_open_send_below_interpolation_80_is_guarded_at_the_gap_past_its_end() {
+        // UR-33 (F8): at 4 MS/s (interpolation 50) an open first packet is not armed; closed by two zeros it is 32 samples, guarded 60 samples
+        // (15 µs at 4 MS/s) past its end.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
@@ -3363,18 +3421,16 @@ mod tests {
             device.tx_send(0, &[&[[0.0f32, 0.0]; 2]], None, false, true, Duration::from_secs(1)).unwrap();
             let end = t0 + 32 * 50;
             acked(&device, end);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 5 * 50), true, true, Duration::from_secs(1)).unwrap();
-            assert_eq!(reports(&device), [TxCode::TimeError], "five samples past the end: refused");
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 10 * 50), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(end + 14 * 50 + 1);
-            assert_eq!(reports(&device), [TxCode::BurstAck], "ten past the end: it plays");
+            assert_refused(&device, end + 5 * 50, "five samples past the end");
+            assert_refused(&device, end + 59 * 50, "59 past the end");
+            assert_plays(&device, end + 60 * 50, 50, "60 past the end");
         });
     }
 
     #[test]
     fn ur_33_a_new_sob_restarts_the_short_burst_count() {
         // UR-33 (F8): a closed 4-sample burst after a 32-sample one starts its own count, so its own guard holds. A count carried over
-        // (36 samples) would leave it unguarded.
+        // (36 samples) would leave it at three samples, not the gap.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
@@ -3385,12 +3441,11 @@ mod tests {
             device.tx_send(0, &[&[[0.0f32, 0.0]; 2]], None, false, true, Duration::from_secs(1)).unwrap();
             let end = t0 + 32 * 200;
             acked(&device, end);
-            let second = end + 10 * 200;
+            let second = end + 15 * 200;
             device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(second), true, true, Duration::from_secs(1)).unwrap();
             let second_end = second + 4 * 200;
             acked(&device, second_end);
-            device.tx_send(0, &[&[[0.3f32, 0.0]; 4]], Some(second_end + 5 * 200), true, true, Duration::from_secs(1)).unwrap();
-            assert_eq!(reports(&device), [TxCode::TimeError], "five samples past the second burst's end: refused");
+            assert_refused(&device, second_end + 5 * 200, "five samples past the second burst's end");
         });
     }
 
@@ -3409,8 +3464,8 @@ mod tests {
 
     #[test]
     fn ur_33_an_untimed_four_zero_flush_is_a_closed_short_burst() {
-        // UR-33: the owner's T3 flush (four zeros, untimed, SOB and EOB) is a closed short device burst: a timed start less than ten
-        // samples past its end is refused.
+        // UR-33: the owner's T3 flush (four zeros, untimed, SOB and EOB) is a closed short device burst: a timed start less than the gap
+        // (15 samples at 1 MS/s) past its end is refused.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
@@ -3420,11 +3475,9 @@ mod tests {
             device.tx_send(0, &[&[[0.0f32, 0.0]; 4]], None, true, true, Duration::from_secs(1)).unwrap();
             let end = start + 4 * 200;
             acked(&device, end);
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 5 * 200), true, true, Duration::from_secs(1)).unwrap();
-            assert_eq!(reports(&device), [TxCode::TimeError], "five samples past the flush: refused");
-            device.tx_send(0, &[&[[0.2f32, 0.0]; 4]], Some(end + 10 * 200), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(end + 14 * 200 + 1);
-            assert_eq!(reports(&device), [TxCode::BurstAck], "ten past the flush: it plays");
+            assert_refused(&device, end + 5 * 200, "five samples past the flush");
+            assert_refused(&device, end + 14 * 200, "fourteen past the flush");
+            assert_plays(&device, end + 15 * 200, 200, "the gap past the flush");
         });
     }
 

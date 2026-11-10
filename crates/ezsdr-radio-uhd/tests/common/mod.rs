@@ -48,6 +48,8 @@ pub mod tone;
 pub const MCR: i64 = 200_000_000;
 pub const ARGS: &str = "type=fake-rig";
 pub const SAFE_TX_HZ: std::ops::RangeInclusive<f64> = 999_500_000.0..=1_000_500_000.0;
+/// The highest transmit sample rate a raw bench probe may use (owner, 2026-11-10; bench.md): 200 MS/s on the cabled loopback.
+pub const SAFE_TX_MAX_RATE: f64 = 200e6;
 
 pub fn ms(n: i64) -> i64 {
     n * MCR / 1_000
@@ -200,7 +202,7 @@ pub fn bench_hz(device: &dyn Device) -> f64 {
     channel_hz(device, ezsdr_radio_uhd::Dir::Rx, 0)
 }
 
-/// bench.md's RF envelope around the bench frequency: every step that transmits carries
+/// bench.md's RF envelope around the bench frequency (999–1001 MHz at 1 GHz; it bounds the transmit centre frequency, the one automatic guard against a wrong retune): every step that transmits carries
 /// it (RM-19), so that nothing but the envelope holds the transmitter to the band. It has a band around each
 /// transmit channel's frequency and one `tx_enabled` entry each (RM-33).
 pub fn bench_envelope(device: &dyn Device) -> Json {
@@ -855,13 +857,22 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     (heard, looped)
 }
 
+/// The retune B7 expects the envelope to refuse: outside every bench band (999–1001 MHz at 1 GHz, 2.449–2.451 GHz at the CBX's 2.45 GHz).
+pub const RETUNE_HZ: f64 = 1.5e9;
+
+/// Whether `hz` lies outside every `allowed_bands` entry of a `radio.rf_envelope` value.
+pub fn outside_every_band(envelope: &Json, hz: f64) -> bool {
+    envelope["allowed_bands"].as_array().is_some_and(|bands| bands.iter().all(|band| !(band["lo_hz"].as_f64().unwrap() <= hz && hz <= band["hi_hz"].as_f64().unwrap())))
+}
+
 /// B7's shape from Rust: a Session that asks for transmit at connect, repeats a waveform,
 /// captures it ahead of the Run's time (EA-17), and is refused a retune outside the envelope
 /// during the Run (§58 #16).
 pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manifest {
     let dir = TempDir::new();
-    let hz = bench_hz(&*device);
     let envelope = bench_envelope(&*device);
+    // Before anything transmits: the refused retune must lie outside every band the envelope has (RM-19 admits a centre inside any band).
+    assert!(outside_every_band(&envelope["radio.rf_envelope"], RETUNE_HZ), "the refused retune {RETUNE_HZ} Hz lies inside a band of {envelope}");
     let profile = bench_profile(&*device, &dir, json!({}), envelope, true);
     let mut run = session_with(&profile, device, &rx0_tx0(&profile));
     past_t0(&mut run, ms(1));
@@ -873,7 +884,7 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", Value::from(5_000))]), None).unwrap()));
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
-    let refused = run.submit(set("radio.tx.c0.frequency_hz", Value::num(hz + 100e6).unwrap()), None).unwrap();
+    let refused = run.submit(set("radio.tx.c0.frequency_hz", Value::num(RETUNE_HZ).unwrap()), None).unwrap();
     assert!(matches!(&refused.outcome, Outcome::Rejected { violations } if violations.iter().any(|violation| violation.check.as_str() == "radio.rf_envelope")), "{refused:?}");
     if !exact {
         println!("B7 refused: {:?}", refused.outcome);

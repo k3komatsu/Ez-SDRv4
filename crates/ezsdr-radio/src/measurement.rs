@@ -348,7 +348,7 @@ fn profile_value(description: &channels::Description, key: &Key) -> Option<Worst
                     _ => return None,
                 })
             }
-            Concrete::Stream { .. } => Some(Worst::Grid(GridValue::from_grid(&description.rates))),
+            Concrete::Stream { rx, .. } => Some(Worst::Grid(GridValue::from_grid(channels::rate_grid(rx, description)))),
         };
     }
 
@@ -463,7 +463,7 @@ fn validate_condition(condition: &Condition, description: &channels::Description
         if stream.stream as usize >= count {
             reject(violations, &name, "stream number is outside this direction's channel count");
         }
-        if !stream.sample_rate_hz.is_finite() || !description.rates.contains(stream.sample_rate_hz) {
+        if !stream.sample_rate_hz.is_finite() || !channels::rate_grid(rx, description).contains(stream.sample_rate_hz) {
             reject(violations, &name, "sample rate is not on the description's rate grid");
         }
         let mut local = BTreeSet::new();

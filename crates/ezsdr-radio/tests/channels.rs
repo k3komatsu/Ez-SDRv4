@@ -396,7 +396,12 @@ fn rm_29_the_layout_description_builds_the_stream_tree() {
     assert_eq!(values.len(), rates.len());
     assert_eq!(values[0], num(200_000_000.0));
     assert_eq!(values[values.len() - 1], num(200_000_000.0 / 2040.0));
-    assert_eq!(capability("radio.tx.s1.sample_rate_hz"), capability("radio.rx.s0.sample_rate_hz"));
+    // Transmit starts at 1 MS/s (KL-40): its capability is the 200 values N = 200 down to 1, descending like the receive one.
+    let CapabilityValue::AnyOf { values: tx_values } = capability("radio.tx.s1.sample_rate_hz") else { panic!("a rate grid is AnyOf") };
+    assert_eq!(tx_values.len(), 200);
+    assert_eq!(tx_values[0], num(200_000_000.0));
+    assert_eq!(tx_values[tx_values.len() - 1], num(1_000_000.0));
+    assert_eq!(tx_values[..], values[..200], "the transmit grid is the top of the device grid");
 
     // The other two duplex boards keep their own rows: the OBX reaches 8.4 GHz, and the
     // CBX starts at 1.2 GHz, redraws its phase on every tune and defaults to 2.45 GHz.
@@ -835,4 +840,42 @@ fn rm_33_rm_19_per_channel_cases() {
         json!({"allowed_bands": [{"lo_hz": 2_400_000_000.0, "hi_hz": 2_500_000_000.0}]}),
     );
     assert_eq!(violation_keys(&violations), ["radio.tx.c0.frequency_hz"]);
+}
+
+#[test]
+fn rm_8_a_transmit_rate_below_one_msps_is_rejected_on_x3xx() {
+    let description = owner_description();
+    let id = ResourceId::parse("dev").unwrap();
+    let coerce = |pairs: &[(&str, Constraint)]| description.coerce(&id, &request(pairs)).unwrap();
+    let tx = "radio.tx.s0.sample_rate_hz";
+    // 0.5 MS/s (N = 400) is on the device grid but outside the transmit grid: rejected, never coerced to 1 MS/s.
+    let report = coerce(&[(tx, eq_num(500_000.0))]);
+    assert!(rejection(&report, tx).reason.starts_with("RM-8: 500000 is outside 1000000..200000000"), "{}", rejection(&report, tx).reason);
+    assert!(!report.applied.contains_key(&key(tx)) && report.coercions.is_empty());
+    // A value just below the minimum is outside it too; 1 MS/s (N = 200) and 200 MS/s (N = 1) are applied exactly.
+    assert!(coerce(&[(tx, eq_num(999_999.0))]).applied.is_empty());
+    for exact in [1_000_000.0, 200_000_000.0] {
+        let report = coerce(&[(tx, eq_num(exact))]);
+        assert_eq!(value_of(&report, tx), Value::from(num(exact)));
+        assert!(report.coercions.is_empty());
+    }
+    // Inside the range an off-grid value still coerces to the nearest grid value (RM-8).
+    let report = coerce(&[(tx, eq_num(1_000_001.0))]);
+    assert_eq!(value_of(&report, tx), Value::from(num(1_000_000.0)));
+    assert_eq!(report.coercions.len(), 1);
+    // `Min` resolves to the smallest grid value at or above the bound (not an error); `Max` below the grid is rejected.
+    let report = coerce(&[(tx, Constraint::Min { value: num(300_000.0) })]);
+    assert_eq!(value_of(&report, tx), Value::from(num(1_000_000.0)));
+    assert!(report.coercions.is_empty());
+    let report = coerce(&[(tx, Constraint::Max { value: num(500_000.0) })]);
+    assert!(rejection(&report, tx).reason.starts_with("RM-8: no grid value satisfies"));
+    // Receive keeps the whole device grid.
+    let rx = "radio.rx.s0.sample_rate_hz";
+    let report = coerce(&[(rx, eq_num(500_000.0))]);
+    assert_eq!(value_of(&report, rx), Value::from(num(500_000.0)));
+    assert!(report.coercions.is_empty());
+    // `ideal` is unchanged: every integer hertz, transmit included.
+    let ideal = Description::new(&Layout::Ideal { rx: 1, tx: 1 }, 2_000, &terms());
+    let report = ideal.coerce(&id, &request(&[(tx, eq_num(500_000.0))])).unwrap();
+    assert_eq!(value_of(&report, tx), Value::from(num(500_000.0)));
 }

@@ -1135,16 +1135,16 @@ fn rejected_runs_are_admission_rejections_not_group_failures() {
     // 400 MS/s is more than the bench profile's 10 GbE link carries: validate refuses the Run, which has no T0.
     let (device, _, mut plan) = raw_group_fixture(one_obx());
     plan.rx_rates_hz = vec![390_625, 400_000_000];
-    plan.tx_throughput_rates_hz = vec![390_625, 400_000_000];
+    plan.tx_throughput_rates_hz = vec![1_000_000, 400_000_000];
     let rx = measurement::measure_rx_throughput(device.clone(), &plan).unwrap();
     let tx = measurement::measure_tx_throughput(device.clone(), &plan).unwrap();
     for (group, name, key) in [(&rx, "provider_rx_throughput_400000000", "radio.perf.rx_bytes_per_s"), (&tx, "provider_tx_throughput_400000000", "radio.perf.tx_bytes_per_s")] {
         let row = group.observations.iter().find(|row| row.name == name).unwrap();
         assert_eq!(row.result["stage"]["trials"][0]["class"], "AdmissionRejection", "{:?}", row.result);
         assert!(row.result["run_termination"].as_str().is_some_and(|text| !text.is_empty()));
-        let accepted = group.observations.iter().find(|row| row.name == name.replace("400000000", "390625")).unwrap();
+        let accepted = group.observations.iter().find(|row| row.name == name.replace("400000000", if name.contains("_tx_") { "1000000" } else { "390625" })).unwrap();
         assert!(!accepted.result.contains_key("run_termination"), "the rate below the link's capacity ran");
-        let wire = 4.0 * 390_625.0;
+        let wire = 4.0 * if name.contains("_tx_") { 1_000_000.0 } else { 390_625.0 };
         assert!(
             group.values.iter().any(|row| matches!(row, ezsdr_radio::measurement::ValueRecord::Measured { key: found, worst: ezsdr_radio::measurement::Worst::Number(bytes), .. }
             if found.as_str() == key && *bytes == wire)),
@@ -1207,6 +1207,21 @@ fn ur_11_coerce_is_the_descriptions() {
     assert_eq!(report.coercions.len(), 1);
     assert!(!radio.coerce(&request(&[("radio.rx.c0.frequency_hz", Scalar::try_from(7e9).unwrap())])).unwrap().rejected.is_empty());
     assert!(!radio.coerce(&request(&[("radio.rx.c2.frequency_hz", Scalar::try_from(1e9).unwrap())])).unwrap().rejected.is_empty());
+}
+
+#[test]
+fn ur_11_a_transmit_rate_below_one_msps_is_rejected() {
+    // KL-40: a transmit stream on `x3xx` starts at 1 MS/s: 0.5 MS/s is rejected, not coerced to it; receive keeps 0.5 MS/s.
+    let radio = provider();
+    let key = Key::parse("radio.tx.s0.sample_rate_hz").unwrap();
+    let report = radio.coerce(&request(&[("radio.tx.s0.sample_rate_hz", Scalar::try_from(500_000.0).unwrap())])).unwrap();
+    assert_eq!(report.rejected.len(), 1, "{:?}", report.rejected);
+    assert_eq!(report.rejected[0].key, key);
+    assert!(report.coercions.is_empty() && !report.applied.contains_key(&key));
+    let report = radio.coerce(&request(&[("radio.tx.s0.sample_rate_hz", Scalar::try_from(1e6).unwrap())])).unwrap();
+    assert!(report.rejected.is_empty() && report.coercions.is_empty());
+    let report = radio.coerce(&request(&[("radio.rx.s0.sample_rate_hz", Scalar::try_from(500_000.0).unwrap())])).unwrap();
+    assert!(report.rejected.is_empty() && report.coercions.is_empty(), "{report:?}");
 }
 
 // ---------------------------------------------------------------- prepare, arm, start (UR-12…UR-16)
@@ -2796,7 +2811,7 @@ fn a_duplex_pair_that_does_not_flow_says_the_two_values_were_not_shown_to_hold()
         rx_condition: "rx-test".to_owned(),
         rx: vec![measurement::StreamPlan { channels: vec![0], rate_hz: 390_625 }],
         tx_condition: "tx-test".to_owned(),
-        tx: vec![measurement::StreamPlan { channels: vec![0], rate_hz: 390_625 }],
+        tx: vec![measurement::StreamPlan { channels: vec![0], rate_hz: 1_000_000 }],
     };
     let group = with_selector(two_channel_selector(), || {
         measurement::with_injected_fault(measurement::InjectedFault { starve_rx: Some(0), ..Default::default() }, || {
@@ -2845,6 +2860,18 @@ fn the_ma1_phase_is_read_against_the_waveform_and_a_weak_or_unsteady_loop_is_inc
     assert_eq!(tone::circular_spread_deg(&[170.0, -170.0]), Some(20.0));
     assert_eq!(tone::circular_spread_deg(&[10.0, 40.0, 25.0]), Some(30.0));
     assert_eq!(tone::circular_spread_deg(&[10.0]), None);
+}
+
+#[test]
+fn rehearsal_b7_refusal_holds_on_a_two_board_layout() {
+    // Each transmit channel has its own band, and RM-19 admits a centre inside any of them: with an OBX at 1 GHz and a CBX at 2.45 GHz the
+    // bands are 999–1001 MHz and 2.449–2.451 GHz, and B7's refused retune (1.5 GHz) is outside both.
+    with_selector(two_channel_selector(), || {
+        let device = fake(obx_and_cbx());
+        let envelope = bench_envelope(&*device);
+        assert_eq!(envelope["radio.rf_envelope"]["allowed_bands"].as_array().map(Vec::len), Some(2));
+        let _ = rehearse_session_loopback(device, true);
+    });
 }
 
 #[test]
@@ -2984,7 +3011,7 @@ fn ur_23_a_short_window_first_send_plays_clean_at_1_mhz() {
 
 #[test]
 fn ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played() {
-    // T2's held-tail close sends tail+zero, so the first safe start is c + 2. Both bursts are
+    // T2's held-tail close sends tail+zero, so the record's first safe start is c + 4 (the close ends at c + 1, plus three). Both bursts are
     // booked in the Spec before the Run starts; A's device burst includes the closing zero.
     let dir = TempDir::new();
     let device = fake(FakeConfig::default());
@@ -2997,7 +3024,7 @@ fn ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played() {
     spec["schedule"] = json!([
         { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "tx_burst", "target": target.clone(),
             "waveform": a, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
-        { "at": { "clock": "radio", "offset_ticks": 40_002 }, "action": { "kind": "tx_burst", "target": target,
+        { "at": { "clock": "radio", "offset_ticks": 40_004 }, "action": { "kind": "tx_burst", "target": target,
             "waveform": b, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } }
     ]);
     let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(ha, one), (hb, two)]));
@@ -3006,11 +3033,11 @@ fn ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played() {
     let _ = run.advance_to(TimePoint::new(t0.domain(), root + ms(100)));
     let manifest = run.finish();
     assert!(time_errors(&manifest).is_empty(), "{:?}; sends: {:?}", time_errors(&manifest), calls(&device, "tx_send"));
-    // The first safe sample after A's two-sample close is c + 2.
+    // The first safe sample after A's two-sample close is c + 4.
     let sends = tx_sends(&device);
     let device_bursts: Vec<&[Sent]> = sends.split_inclusive(|s| s.eob).collect();
     assert_eq!(device_bursts.len(), 2, "{sends:?}");
-    for (burst, at, len) in [(device_bursts[0], root + ms(10), 30_001), (device_bursts[1], root + ms(40) + 400, 1_001)] {
+    for (burst, at, len) in [(device_bursts[0], root + ms(10), 30_001), (device_bursts[1], root + ms(40) + 800, 1_001)] {
         assert!(burst[0].sob && burst[0].at == Some(at), "{sends:?}");
         assert!(burst[1..].iter().all(|s| !s.sob && s.at.is_some()), "{sends:?}");
         assert_eq!(burst.iter().map(|s| s.n).sum::<usize>(), len, "{sends:?}");
@@ -4888,6 +4915,29 @@ fn ur_13_arm_takes_the_rate_set_in_any_order() {
     assert_eq!(section(&manifest, "device")["rates_checked"], json!({ "rx": true, "tx": false }));
 }
 
+#[test]
+fn ur_13_a_transmit_stream_is_compared_with_the_whole_device_grid() {
+    // UR-13, KL-40: the transmit grid the profile declares starts at 1 MS/s, but the device still reports every rate it can make, so the
+    // comparison for a transmit stream is with the profile's whole device grid (`description.rates`): the whole set, in any order, passes;
+    // a device that reports only the 200 transmit rates is not the profile's rate set and is refused at `arm`.
+    let dir = TempDir::new();
+    let inner = fake(FakeConfig { serial: "ur13-tx-whole".to_owned(), ..FakeConfig::default() });
+    let mut reversed: Vec<(f64, f64, f64)> = ezsdr_radio::x3xx::rates(200_000_000).into_iter().rev().map(|rate| (rate, rate, 0.0)).collect();
+    reversed.dedup();
+    let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: None, tx: Some(reversed), failing: None });
+    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    running(&run);
+    assert_eq!(section(&run.finish(), "device")["rates_checked"], json!({ "rx": true, "tx": true }));
+
+    let dir = TempDir::new();
+    let inner = fake(FakeConfig { serial: "ur13-tx-restricted".to_owned(), ..FakeConfig::default() });
+    let restricted: Vec<(f64, f64, f64)> = ezsdr_radio::x3xx::tx_rates(200_000_000).into_iter().map(|rate| (rate, rate, 0.0)).collect();
+    let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner, rx: None, tx: Some(restricted), failing: None });
+    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }), "{:?}", run.state());
+    assert!(failure(&run.finish()).contains("UR-13"));
+}
+
 // ------------------------------------------------ 1b-4c: stream 0 of the layout's keys
 
 /// The selector of a two-channel-UBX layout, both directions (RM-28).
@@ -6476,7 +6526,7 @@ fn two_channel_selector() -> Json {
 fn two_rate_plan() -> measurement::MeasurementPlan {
     let mut plan = measurement::MeasurementPlan::rehearsal();
     plan.rx_rates_hz = vec![390_625, 781_250];
-    plan.tx_throughput_rates_hz = vec![390_625, 781_250];
+    plan.tx_throughput_rates_hz = vec![1_000_000, 2_000_000];
     plan
 }
 
@@ -6545,7 +6595,8 @@ fn reopened_receive_throughput_repeats_only_the_single_channel_sweep() {
 
 #[test]
 fn two_channel_transmit_throughput_runs_the_grouped_split_and_mixed_conditions() {
-    rehearse_two_channel_group("tx", &["grouped-390625hz", "grouped-781250hz", "split-390625hz", "split-781250hz", "mixed-781250hz-390625hz"], false, 6_250_000.0);
+    // Transmit starts at 1 MS/s on `x3xx` (KL-40): its two rates are 1 and 2 MS/s, and the capacity is two channels of 4-byte samples at 2 MS/s.
+    rehearse_two_channel_group("tx", &["grouped-1m", "grouped-2m", "split-1m", "split-2m", "mixed-2m-1m"], false, 16_000_000.0);
 }
 
 #[test]
@@ -6554,16 +6605,16 @@ fn the_duplex_pair_runs_the_two_measured_limits_together_once_and_decides_no_val
     let device = fake(obx_and_cbx());
     let plan = two_rate_plan();
     let mut plan = plan;
-    plan.tx_throughput_rates_hz = vec![390_625];
+    plan.tx_throughput_rates_hz = vec![1_000_000];
     let (limits, pair) = with_selector(two_channel_selector(), || {
         let mut group = measurement::measure_rx_throughput(device.clone(), &plan).unwrap();
         group.append(measurement::measure_tx_throughput(device.clone(), &plan).unwrap()).unwrap();
         let limits = measurement::duplex_limits(&group).unwrap();
         (limits.clone(), measurement::measure_duplex_at_limits(device.clone(), &plan, Ok(limits), 4).unwrap())
     });
-    // The two directions' values were held by different streams (receive up to 781 250, transmit only 390 625 on offer).
+    // The two directions' values were held by different streams (receive up to 781 250, transmit only 1 000 000 on offer).
     assert_eq!(limits.rx, [measurement::StreamPlan { channels: vec![0, 1], rate_hz: 781_250 }], "{limits:?}");
-    assert_eq!(limits.tx, [measurement::StreamPlan { channels: vec![0, 1], rate_hz: 390_625 }], "{limits:?}");
+    assert_eq!(limits.tx, [measurement::StreamPlan { channels: vec![0, 1], rate_hz: 1_000_000 }], "{limits:?}");
     assert!(pair.values.is_empty(), "the pair decides no value");
     assert_eq!(pair.conditions.iter().map(|condition| condition.id.as_str()).collect::<Vec<_>>(), [measurement::DUPLEX_PAIR]);
     assert_eq!(pair.conditions[0].streams.len(), limits.rx.len() + limits.tx.len());
@@ -6574,7 +6625,7 @@ fn the_duplex_pair_runs_the_two_measured_limits_together_once_and_decides_no_val
     assert_ne!(limits.rx_condition, limits.tx_condition);
     assert_eq!(
         (row.result["rx_streams"][0]["rate_hz"].as_u64(), row.result["tx_streams"][0]["rate_hz"].as_u64()),
-        (Some(781_250), Some(390_625)),
+        (Some(781_250), Some(1_000_000)),
         "each direction runs on its own limit: {:?}",
         row.result
     );
@@ -6619,7 +6670,7 @@ fn a_starved_stream_fails_its_stage_and_the_others_still_show_success() {
 
 #[test]
 fn a_partial_send_fails_the_transmit_stage() {
-    let stage = stage_of("tx-split-test", "split", &[], &[(&[0], 390_625), (&[1], 390_625)]);
+    let stage = stage_of("tx-split-test", "split", &[], &[(&[0], 1_000_000), (&[1], 1_000_000)]);
     let result = run_two_channel_stage(&stage, measurement::InjectedFault { short_tx: Some(0), ..Default::default() }).unwrap();
     assert_eq!(result.class, measurement::TrialClass::DeviceFailure, "{:?}", result.observation);
     let classes = stream_classes(&result);
@@ -6631,7 +6682,7 @@ fn a_partial_send_fails_the_transmit_stage() {
 
 #[test]
 fn a_burst_acknowledgement_that_never_comes_leaves_the_stream_incomplete() {
-    let stage = stage_of("tx-split-test", "split", &[], &[(&[0], 390_625), (&[1], 390_625)]);
+    let stage = stage_of("tx-split-test", "split", &[], &[(&[0], 1_000_000), (&[1], 1_000_000)]);
     let result = run_two_channel_stage(&stage, measurement::InjectedFault { swallow_ack: Some(1), ..Default::default() }).unwrap();
     let classes = stream_classes(&result);
     assert_eq!((classes[0].2.as_str(), classes[1].2.as_str()), ("Success", "Incomplete"), "{:?}", result.observation);
@@ -6641,7 +6692,7 @@ fn a_burst_acknowledgement_that_never_comes_leaves_the_stream_incomplete() {
 #[test]
 fn one_unacknowledged_channel_of_a_stream_leaves_it_incomplete() {
     // A stream of two channels is acknowledged once per channel; with channel 1's acknowledgement missing the stream shows none.
-    let stage = stage_of("tx-grouped-test", "grouped", &[], &[(&[0, 1], 390_625)]);
+    let stage = stage_of("tx-grouped-test", "grouped", &[], &[(&[0, 1], 1_000_000)]);
     let result = run_two_channel_stage(&stage, measurement::InjectedFault { swallow_ack_channel: Some(1), ..Default::default() }).unwrap();
     assert_eq!(stream_classes(&result), [("tx".to_owned(), 0, "Incomplete".to_owned())], "{:?}", result.observation);
     assert_eq!((result.observation["streams"][0]["burst_acks_found"].as_u64(), result.observation["streams"][0]["burst_acks_expected"].as_u64()), (Some(1), Some(2)));
@@ -6650,7 +6701,7 @@ fn one_unacknowledged_channel_of_a_stream_leaves_it_incomplete() {
 #[test]
 fn a_duplex_stage_fails_when_the_companion_direction_does_not_flow() {
     // The receive stream of the pair starves, so the stage is not a success; its own rows say which stream fell short.
-    let stage = stage_of("tx-duplex-test", "duplex", &[(&[0], 390_625)], &[(&[0], 390_625)]);
+    let stage = stage_of("tx-duplex-test", "duplex", &[(&[0], 390_625)], &[(&[0], 1_000_000)]);
     let result = run_two_channel_stage(&stage, measurement::InjectedFault { starve_rx: Some(0), ..Default::default() }).unwrap();
     assert_ne!(result.class, measurement::TrialClass::Success, "{:?}", result.observation);
     let classes = stream_classes(&result);
@@ -7774,7 +7825,10 @@ fn iii_restart_fill_probe_rehearses_on_the_fake() {
 /// judged by the same pure functions as on the bench. The tone verdicts are unit-tested in `iii.rs`.
 #[test]
 fn n47s5_front_rehearsal_on_the_fake() {
-    for rate in [1e6, 2e6] {
+    // The first four rates only: the fake's own `profile()` has the default 1 GbE link (100 MB/s), which refuses a stream at 100 and 200 MS/s
+    // (RM-32: 400 and 800 MB/s needed). The bench profile sets `link_gbps: [10]`, so `hw_n47s5_front_after_a_short_burst` runs all six.
+    for rate in &common::n47s5::FRONT_RATES[..4] {
+        let rate = *rate;
         for samples in [1usize, 2, 3, 4, 10, 32] {
             let dir = TempDir::new();
             let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()), Some(rate));
@@ -7782,6 +7836,22 @@ fn n47s5_front_rehearsal_on_the_fake() {
             println!("rehearsal T2 {samples} samples at {rate} S/s: {outcome:?}");
             assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "{samples} samples at {rate} S/s: {outcome:?}");
         }
+    }
+}
+
+#[test]
+fn n47s5_long_close_rehearsal_on_the_fake() {
+    // The long-close trial of the bench (`hw_n47s5_a_long_close_at_100_and_200_msps`) at the rates the fake's 1 GbE profile admits: no FAIL.
+    for rate in [1e6, 2e6] {
+        let dir = TempDir::new();
+        let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+        let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), Some(rate));
+        let trial = common::n47s5::long_close_trial(run, &probe, rate);
+        let outcome = common::n47s5::long_close_outcome(&trial);
+        println!("rehearsal long close at {rate} S/s: {outcome:?}");
+        assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "{rate} S/s: {outcome:?}");
+        // The shape assertion runs on the fake too: the Module closed with the held tail and one zero, and the front is the margin's three samples.
+        assert_eq!(common::iii::long_close_shape(&trial.sends, trial.per, 3), Ok(()), "{rate} S/s: {:?}", trial.sends);
     }
 }
 
@@ -7827,9 +7897,9 @@ fn n47s5_held_tail_and_stop_rehearsal_on_the_fake() {
     let dir = TempDir::new();
     let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
     let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
-    let separate = common::n47s5::held_tail_trial(run, probe, dir, 2, Some(0));
+    let separate = common::n47s5::held_tail_trial(run, probe, dir, 4, Some(0));
     let outcome = common::n47s5::held_played_verdict(&separate, 2);
-    println!("rehearsal T3 (f) C at e+2 after J(e): {outcome:?}");
+    println!("rehearsal T3 (f) C at e+4 after J(e): {outcome:?}");
     assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "{outcome:?}");
     let dir = TempDir::new();
     let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
@@ -7848,9 +7918,9 @@ fn n47s5_held_tail_and_stop_rehearsal_on_the_fake() {
     let dir = TempDir::new();
     let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
     let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
-    let late = common::n47s5::held_tail_trial(run, probe, dir, 2, Some(ms(9) / 2));
+    let late = common::n47s5::held_tail_trial(run, probe, dir, 4, Some(ms(9) / 2));
     let outcome = common::n47s5::held_played_verdict(&late, 2);
-    println!("rehearsal T3 (f) C at e+2 submitted at e − 0.5 ms: {outcome:?}");
+    println!("rehearsal T3 (f) C at e+4 submitted at e − 0.5 ms: {outcome:?}");
     assert!(matches!(outcome, common::tone::Verdict::Inconclusive(ref text) if text.contains("host latency")), "{outcome:?}");
     let dir = TempDir::new();
     let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
@@ -7874,15 +7944,16 @@ fn n47s5_stop_end_rehearsal_on_the_fake() {
     assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "{outcome:?}");
 }
 
-/// T3 (f)'s refusal and `hw_b8_burst_one_sample_after_a_burst`'s end + 1 on `FakeDevice`: the Provider refuses the booking at receipt
-/// (its event names the Action the Kernel admitted), and nothing plays late. Both cases must PASS.
+/// T3 (f)'s refusal and `hw_b8_burst_one_sample_after_a_burst`'s boundary on `FakeDevice`: the Provider refuses a booking at one to three
+/// samples past the end of a burst longer than 32 samples at receipt (its event names the Action the Kernel admitted), plays the one at four
+/// past, and nothing plays late. Every case must PASS, so a front the bench test no longer expects fails here first.
 #[test]
 fn n47s5_one_sample_after_a_burst_refusal_rehearsal_on_the_fake() {
-    for late_booking in [false, true] {
+    for (late_booking, offset) in [(false, 30_001), (true, 30_001), (false, 30_003), (true, 30_003), (false, 30_004), (true, 30_004)] {
         let dir = TempDir::new();
         let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()), None);
-        let outcome = common::n47s5::one_sample_after_a_burst(run, 30_001, late_booking);
-        println!("rehearsal B8 end + 1, booked late {late_booking}: {outcome:?}");
+        let outcome = common::n47s5::one_sample_after_a_burst(run, offset, late_booking);
+        println!("rehearsal B8 end + {}, booked late {late_booking}: {outcome:?}", offset - 30_000);
         assert!(matches!(outcome, common::tone::Verdict::Pass(_)), "booked late {late_booking}: {outcome:?}");
     }
 }

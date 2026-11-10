@@ -7,7 +7,7 @@ use oracle::*;
 
 /// The UHD rig's clock and profile: 1 MS/s on a 200 MHz root (200 ticks a sample), window 10 ms, device lead 2 ms, allowance 3 ms.
 fn uhd() -> Params {
-    Params { clock: Clock { origin: 0, n: 200 }, window: 2_000_000, lead: 400_000, allowance: 600_000 }
+    Params { clock: Clock { origin: 0, n: 200 }, root_hz: 200_000_000, window: 2_000_000, lead: 400_000, allowance: 600_000 }
 }
 
 fn ms(n: i64) -> i64 {
@@ -16,54 +16,59 @@ fn ms(n: i64) -> i64 {
 
 #[test]
 fn o1_oracle_rm_15_fronts() {
-    // RM-15: 1 to 3 samples pad to four, a closed head of 1 to 32 fronts at its padded end plus ten, longer at its end plus two.
-    assert_eq!(front_offset(1, false), 14);
-    assert_eq!(front_offset(3, false), 14);
-    assert_eq!(front_offset(4, false), 14);
-    assert_eq!(front_offset(20, false), 30);
-    assert_eq!(front_offset(32, false), 42);
-    assert_eq!(front_offset(33, false), 35);
-    assert_eq!(front_offset(3_000, false), 3_002);
-    assert_eq!(front_offset(10, true), 12, "a joined piece fronts at its end plus two");
-    assert_eq!(region(100, Some(1)).front, 114);
-    assert_eq!(region(100, None).front, i64::MAX);
+    // RM-15: 1 to 3 samples pad to four, a closed head of 1 to 32 fronts at its padded end plus the gap (15 at 1 MS/s), longer at its end plus four.
+    assert_eq!(uhd().gap(), 15);
+    assert_eq!(front_offset(1, false, 15), 19);
+    assert_eq!(front_offset(3, false, 15), 19);
+    assert_eq!(front_offset(4, false, 15), 19);
+    assert_eq!(front_offset(20, false, 15), 35);
+    assert_eq!(front_offset(32, false, 15), 47);
+    assert_eq!(front_offset(33, false, 15), 37);
+    assert_eq!(front_offset(3_000, false, 15), 3_004);
+    assert_eq!(front_offset(10, true, 15), 14, "a joined piece fronts at its end plus four");
+    assert_eq!(region(&uhd(), 100, Some(1)).front, 119);
+    assert_eq!(region(&uhd(), 100, None).front, i64::MAX);
+    // The gap follows the rate: 2 MS/s 30, 200 MS/s 3000, 3 MS/s on a 1 GHz root (ticks 1000/3 is n = 333.3: not integral here) is the Provider tests'.
+    assert_eq!(Params { clock: Clock { origin: 0, n: 100 }, ..uhd() }.gap(), 30);
+    assert_eq!(Params { clock: Clock { origin: 0, n: 1 }, ..uhd() }.gap(), 3_000);
+    assert_eq!(Params { clock: Clock { origin: 0, n: 10_000 }, root_hz: 1_000_000_000, ..uhd() }.gap(), 3, "100 kS/s: ceil(1.5) = 2, floored to three");
 }
 
 #[test]
 fn o1_oracle_rm_16_stop_bound_and_region() {
     let p = uhd();
-    // A Stop at 5 ms: t_k = 5000, B = the first sample at or after 5 ms + 10 ms, plus three.
-    assert_eq!(p.stop_bound(ms(5)), (5_000, 15_003));
-    assert_eq!(p.stop_bound(ms(5) + 1), (5_001, 15_004), "an instant inside a sample rounds up");
+    // A Stop at 5 ms: t_k = 5000, B = the first sample at or after 5 ms + 10 ms, plus five.
+    assert_eq!(p.stop_bound(ms(5)), (5_000, 15_005));
+    assert_eq!(p.stop_bound(ms(5) + 1), (5_001, 15_006), "an instant inside a sample rounds up");
     // A cancelled booking starting in [t_k, B) leaves the region; one starting at B leaves none.
-    assert_eq!(stop_region(&p, ms(5), &[9_000]), Some(Region { start: 5_000, end: 15_003, front: 15_003, len: 10_003 }));
-    assert_eq!(stop_region(&p, ms(5), &[15_003]), None);
+    assert_eq!(stop_region(&p, ms(5), &[9_000]), Some(Region { start: 5_000, end: 15_005, front: 15_005, len: 10_005 }));
+    assert_eq!(stop_region(&p, ms(5), &[15_005]), None);
     assert_eq!(stop_region(&p, ms(5), &[4_999]), None, "a booking before the Stop is kept, not cancelled");
 }
 
 #[test]
 fn o1_oracle_rm_15_join_is_inclusive_at_its_deadline() {
     let p = uhd();
-    let a = region(20_000, Some(3_000));
+    let a = region(&p, 20_000, Some(3_000));
     let e = 23_000;
     assert_eq!(p.join_by(e), ms(23) - ms(5), "the deadline is the start less the lead and the allowance");
     for (recv, want) in [(p.join_by(e) - 1, Verdict::Accept), (p.join_by(e), Verdict::Accept), (p.join_by(e) + 1, Verdict::Refuse)] {
         assert_eq!(admit(&p, &[a], recv, e, Some(500)), want, "recv {recv}");
     }
-    // At the front (end + 2) a booking is accepted, one sample before it refused.
-    assert_eq!(admit(&p, &[a], 0, 23_002, Some(500)), Verdict::Accept);
-    assert_eq!(admit(&p, &[a], 0, 23_001, Some(500)), Verdict::Refuse);
+    // At the front (end + 4) a booking is accepted, one sample before it refused.
+    assert_eq!(admit(&p, &[a], 0, 23_004, Some(500)), Verdict::Accept);
+    assert_eq!(admit(&p, &[a], 0, 23_003, Some(500)), Verdict::Refuse);
 }
 
 #[test]
 fn o1_oracle_rm_14_placement() {
     let p = uhd();
-    let a = region(10_000, Some(3_000));
-    // Received at 10 ms: ordinary = 10 000 + 2 000 = 12 000, inside A's region, so past its front 13 002.
+    let a = region(&p, 10_000, Some(3_000));
+    // Received at 10 ms: ordinary = 10 000 + 2 000 = 12 000, inside A's region, so past its front 13 004.
     assert_eq!(p.ordinary(ms(10)), 12_000);
-    assert_eq!(place(&p, &[a], ms(10), Some(11_500), Some(200)), 13_002);
-    // A late moved booking whose lead dominates: received at 12 ms, A (300 samples, front 10 302) long done.
-    let short = region(10_000, Some(300));
+    assert_eq!(place(&p, &[a], ms(10), Some(11_500), Some(200)), 13_004);
+    // A late moved booking whose lead dominates: received at 12 ms, A (300 samples, front 10 304) long done.
+    let short = region(&p, 10_000, Some(300));
     assert_eq!(place(&p, &[short], ms(12), Some(10_100), Some(200)), 14_000);
     // A receipt inside a sample decides at the next sample.
     assert_eq!(p.ordinary(ms(10) + 1), 12_001);
@@ -89,7 +94,7 @@ fn o1_oracle_rm_37_switch_boundary() {
 
 #[test]
 fn o1_oracle_mr_25_cut() {
-    let p = Params { clock: Clock { origin: 0, n: 1_000 }, window: 10_000_000, lead: 2_000_000, allowance: 0 };
+    let p = Params { clock: Clock { origin: 0, n: 1_000 }, root_hz: 1_000_000_000, window: 10_000_000, lead: 2_000_000, allowance: 0 };
     let t = 5_000_000;
     let we = 15_000; // at_or_after(t + W)
     let burst = |start, len, started| MBurst { start, len, started, before_stop: true };

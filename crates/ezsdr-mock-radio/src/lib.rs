@@ -231,7 +231,7 @@ impl TxStream {
             open: None,
             stop_cut: None,
             plan: None,
-            busy: Bookings::default(),
+            busy: Bookings::unarmed(),
             playing: None,
         }
     }
@@ -1928,7 +1928,7 @@ impl MockRadio {
             has_at,
             now,
             |k| lines.line(Self::rx_key(k as usize)).is_some_and(Line::streaming),
-            |k| tx.get(k as usize).map_or(Bookings::default(), |stream| stream.busy.clone()),
+            |k| tx.get(k as usize).map_or(Bookings::unarmed(), |stream| stream.busy.clone()),
         ) {
             Ok(()) => Ok(()),
             Err(refusal) => self.reject_action_at(Some(id), "update_parameter", &format!("MR-18: {}", refusal.reason()), now),
@@ -2132,6 +2132,8 @@ impl Provider for MockRadio {
             }
             let ratio = self.rate_ratio(root_rate, rate, "MR-7")?;
             let node = self.tx[k].node.clone();
+            // RM-15: the stream's record learns its closed short burst gap with its clock (the rate is fixed for the Run, RM-27).
+            self.tx[k].busy.arm(ezsdr_radio::staging::closed_short_gap(root_rate.num(), ratio.num(), ratio.den()));
             self.tx[k].clock = Some(ctx.clocks.declare_sample_clock(node, root, ratio).map_err(|error| self.reject(format!("MR-7: {error}")))?);
         }
         // MR-7, RM-29: every attached link is this fragment's, on one of its receive
@@ -2509,6 +2511,8 @@ mod cancellation_tests {
         radio.events = Some(events.clone());
         radio.tx[0].clock = Some(registered.handle.clone());
         radio.tx[0].tracker = Some(BurstTracker::new(registered.domain));
+        // As production arms a stream's record where its clock is registered: 1 MS/s on this 200 MHz root (RM-15).
+        radio.tx[0].busy.arm(ezsdr_radio::staging::closed_short_gap(200_000_000, 200, 1));
         radio.tx[0].registered = Some(registered);
         radio.tx[0].plan = Some(shared.clone());
         radio.tx[0].list.held.insert(20, held(20));

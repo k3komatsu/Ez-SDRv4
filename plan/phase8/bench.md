@@ -7,6 +7,7 @@ Phase 8 の BP0〜BP5 を実行する手順．shake-out の観測は診断用で
 - 対象は X300 #1（serial `347D545`，slot A に OBX，`addr=192.168.40.36`）と #2（serial `347D541`，slot A に UBX 等，`addr=192.168.47.37`）．NIC はそれぞれ `enp1s0f1np1`・`enp1s0f0np0`．実際の配線と serial を probe で確認する．同時接続は同じ `/24` の経路が重なるため，必要な `/32` route を owner が用意していない限り一台ずつ使う．
 - 送信する全ての段で，該当 board の **TX/RX → 30 dB 以上・18 GHz 定格の attenuator → 同じ board の RX2** を接続する．att は最大 TX 出力に対して十分な最大入力電力定格と余裕があることを銘板・仕様で確認し，型番と電力定格を記録する．アンテナはつながない．この日の装置では 40 dB attenuator を使用した．gain 0 dB，波形振幅 0.5 以下，通常の loopback は 1 GHz を使う．
 - coercion の TX gain sweep は **streamer を開かず，LO を 1 GHz にした状態で最大 gain まで**試す．ただし CBX の下限は 1.2 GHz なので，CBX では「1 GHz」は 1.1〜1.2 GHz に clip される（UHD は error を出さない．#1 の未知の board の cleanup が 0.0 Hz を読んだ例が shake-out 4 にある）．coercion の TX frequency read-back は **全周波数範囲の格子**（OBX 10 MHz–8.4 GHz，UBX 10 MHz–6 GHz，CBX 1.2–6 GHz．gain 0，sample を送らない）を読む（`SAFE_TX_HZ` の範囲ではない）．古い試験（`pn`）が送る波形の振幅は 0.566 までで，0.5 以下なのは 3c-3a 以降の送信（`transmit_waveform`）．いずれの送信条件も上記 attenuator が必要で，RF safety の例外ではない（仕様 41 §8）．
+- 送信の中心周波数を縛るのは bench の profile の `radio.rf_envelope`，送信 channel ごとの ±1 MHz の狭い band（1 GHz なら 999–1001 MHz）である．RM-19 が見るのは中心周波数だけで，この band は誤った retune に対する自動の防護になる（bench の retune は最大 ±400 kHz）．sample rate は band では制限されず，cabled loopback 上で **200 MS/s まで**使ってよい（owner 決定，2026-11-10；raw probe の上限は `SAFE_TX_MAX_RATE`）．安全は配線で担保する：30 dB 以上の attenuator（同軸と attenuator は 18 GHz 定格），gain 0 dB，振幅 0.5 以下，送信の前に owner が attenuator の接続を確認すること．`SAFE_TX_HZ`（中心 999.5–1000.5 MHz）は変えない．B7 の拒否確認は，Rust 版が 1.5 GHz，Python 版（`python/examples/bench_loopback.py:40`）が 2.4 GHz への retune で，どちらも全ての狭い band の外にある（Rust 版は実行前にそれを確認する）．
 - `run-record.sh` は各実行で接続を質問し，`yes` 以外なら Docker や装置を使わず停止する．確認を省略する option はない．
 
 ## BP1 → BP0：ホスト設定，その後に装置確認
@@ -1071,3 +1072,71 @@ fi
 
 - orchestrator に返すもの：commit，各ブロックの VERDICT 行（log の path），(b) の表の TIME_ERROR の数（case ごと），(c)1 の 12 行，(c)2 の raw 表（288 行，rate・n・gap・complete／incomplete・late の数），(d) の 6 行，(e) の 2 行と `switches` の行，(f) の 2 行，(g) の 3 行と `heard_until` − 記録上の終わり，(h) の 2 行と A の ACK の e からの差・B の onset の delta（tick），(i) の 3 行と `docker ps` の残り，#2 の monitor の state file と log，電源 cycle の有無．
 - repo へ写すのは，owner が確認したものだけ．log は `~/.cache/ezsdr-bench/<日付>/` に残す．ただし (i) の script の記録（`drop.log`，`rx-check.log`，`driver.log`）は `~/ezsdr-bench/<日付>/ssh-drop-*/` に，monitor の state file・log と console の log は `~/.cache/ezsdr-bench/<日付>/` に残る．両方を報告に書く．
+
+## <DATE> の手順（段階 F の後：時刻で決める前線と送信の rate の下限）
+
+`<COMMIT>` は段階 F（`reviews/stepF-*`）が `main` に入った commit．結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．出典：[bench-results.md](bench-results.md) の「2026-11-10」（UHD だけの掃引と owner の決定），[design/07](../../design/07-radio-model.md) RM-15・RM-16，[design/18](../../design/18-uhd-radio.md) UR-22・UR-23・UR-33，KL-36・KL-40．
+
+規則（記録，uhd-tx，FakeDevice で同じ）：32 sample 以下の閉じた device burst（1〜3 は 4 に詰める）の後の次の安全な開始は，閉じた send の排他的な終わり＋g，g = max(3, ⌈15 µs × rate⌉)．ほかの閉じの後は＋3（長い頭・継ぎの前線は payload の終わり＋4，Stop の境は＋5）．送信の rate は 1 MS/s 以上．
+
+| rate | 1 MS/s | 2 MS/s | 2.857 MS/s（N = 70） | 10 MS/s | 100 MS/s | 200 MS/s |
+|---|---|---|---|---|---|---|
+| g（sample） | 15 | 30 | 43 | 150 | 1500 | 3000 |
+
+### 構成と順番
+
+- 機材，接続，att は 2026-11-10 と同じ（#2 X300＋UBX slot A → #1 X300＋OBX slot A，ループバックの 30 dB，基準は内部）．試験は slot A だけ．
+- **送信の前に owner に att を確認する**（毎回）．送信の rate は 200 MS/s まで（ケーブルのループバックに限る，owner 2026-11-10）．bench の envelope は送信の channel ごとに ±1 MHz のまま（RM-19 は中心周波数だけを見る）．
+- 共通の準備（`hw` の関数，log の置き場，stop の規則）は「note 47 段階 5 の後」の節と同じ．
+- 時間は estimate．tone が時間で決まる（10 ms）ので，(c)1 は前より長い．
+
+### (a) host と装置の確認（送信なし）
+
+「note 47 段階 5 の後」の (a) と同じ．`uhd_usrp_probe` の serial，FPGA 39.3，slot A の board，frame 8000．開くときの `Reference Clock PLL failed to lock` は一度だけ開き直し，続けて出たら電源を入れ直す（2026-11-10 は #2 で 3 回，#1 で 2 回）．
+
+### (b) 回帰：T1 の 9 試験（TX あり）
+
+「note 47 段階 5 の後」の (b) と同じ試験と同じ盤の順．期待の変わった所：
+- `hw_b8_burst_one_sample_after_a_burst`：30 000 sample の burst の後，end＋3 は受付で拒否（`UR-21: the burst overlaps an accepted booking`），end＋4 は TIME_ERROR なしで鳴る（前は end＋1 と end＋2）．
+- `hw_b7_session_loopback`：envelope の外への同調し直しは 1.5 GHz（すべての band の外であることを送信の前に assert）．
+- ほかの 7 試験の期待は変わらない（段階 F で全 hardware 試験を点検した．B は頭や前の burst から十分離れているか，継ぎの規則で決まる）．
+
+### (c) 前線（TX あり）
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && run_all \
+  hw_n47s5_front_after_a_short_burst hw_n47s5_long_b_after_a_short_head_gap_below_and_at_the_front \
+  hw_n47s5_a_long_close_at_100_and_200_msps hw_n47s5_raw_front_gaps                         # #2 UBX slot A
+export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && run_all \
+  hw_n47s5_front_after_a_short_burst hw_n47s5_long_b_after_a_short_head_gap_below_and_at_the_front \
+  hw_n47s5_a_long_close_at_100_and_200_msps hw_n47s5_raw_front_gaps                         # 盤を替えて #1 OBX
+```
+
+- (c)1 `hw_n47s5_front_after_a_short_burst`：n ∈ {1, 2, 3, 4, 10, 32} × 6 rate = 36 行．予約は頭の詰めた終わり＋g．PASS：admitted，TIME_ERROR と underflow なし，BurstAck が 3 つ，tone の onset が予約から遅れ ± 50 sample．
+- N-H1 `hw_n47s5_long_b_after_a_short_head_gap_below_and_at_the_front`（raw，6 rate）：gap g で長い B が鳴る（BurstAck 2，late と underflow なし）．gap g − 1 は印字だけ．
+- `hw_n47s5_a_long_close_at_100_and_200_msps`：20 000 sample の Session の burst の閉じ（保持した尾＋0）の 3 sample 後に次の burst．PASS は閉じの形どおりで両方の ACK，late と underflow なし．形が違えば INCONCLUSIVE．**200 MS/s の＋3 は測った最小（余裕 0）**．FAIL なら止めて owner へ（＋3 の値を諮り直す）．
+- (c)2 `hw_n47s5_raw_front_gaps`：観測だけ（6 rate の表）．
+- stop：(c)1 の FAIL，想定外の TIME_ERROR，装置の詰まり → 電源を入れ直し owner へ．
+
+### (d) 保留の尾と Stop の領域：T3（TX あり）
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_n47s5_held_tail_and_stop   # #2
+export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_n47s5_held_tail_and_stop   # #1
+```
+
+- (f) の 3 行：J(e) の前の継ぎは一つの device burst．J(e) の後の C は e＋4（前は e＋2）で別の burst．e＋1 は受付で拒否．
+- (b) raw：two zeros の閉じ（cursor c）の後は c＋5 で判定（c＋3・c＋4 は印字だけ）．
+- (h) R5-m5：Stop が c − 1 で切った 1〜3 sample の頭（c＋3 まで詰める）の後，c＋3＋g に予約（rate ごと）．PASS は全試行で ACK 2，late と underflow なし．
+- Session の行は INCONCLUSIVE のまま（Provider の境が記録にない，前と同じ）．
+
+### 閉じ方と記録
+
+- **#81**：(c)1 の 36 行と N-H1 が両盤で PASS なら閉じる．
+- **#82**：(d) の R5-m5 が両盤の全 rate で PASS なら閉じる．
+- **＋3 の余裕**：`hw_n47s5_a_long_close_at_100_and_200_msps` が両盤で PASS．FAIL なら owner に値を諮る．
+- (b) の FAIL は回帰：止めて owner へ．
+
+### 流した後
+
+orchestrator に返すもの：commit，各試験の VERDICT 行と log の path，(c)1 の 36 行，N-H1 の行（gap g − 1 と g），長い閉じの行（形と ACK），(c)2 の表，(d) の行，電源の入れ直しの有無．log は `~/.cache/ezsdr-bench/<日付>/`．

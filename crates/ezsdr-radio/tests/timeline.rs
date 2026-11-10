@@ -886,7 +886,7 @@ fn rm_26_the_staging_oracle_agrees_with_staging() {
                         Leaf::Frequency => "radio.rx.c0.frequency_hz",
                         Leaf::Gain => "radio.rx.c0.gain_db",
                     };
-                    if staging.set(&key(name), Value::num(leaf.value(*v)).unwrap(), false, 0, |_| line.streaming(), |_| ezsdr_radio::staging::Bookings::default()).is_err() {
+                    if staging.set(&key(name), Value::num(leaf.value(*v)).unwrap(), false, 0, |_| line.streaming(), |_| ezsdr_radio::staging::Bookings::unarmed()).is_err() {
                         refused.push(index);
                     }
                 }

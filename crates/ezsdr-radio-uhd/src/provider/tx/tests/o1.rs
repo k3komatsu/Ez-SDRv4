@@ -14,7 +14,7 @@ const MS: i64 = 200_000;
 /// The UHD profile in the oracle's terms: the window 10 ms, the device lead 2 ms, the delivery allowance 3 ms (profile values:
 /// `x3xx::timing`, `DEVICE_LEAD_NS`, `DELIVERY_ALLOWANCE_NS`), on the rig's clock (origin 0, 200 ticks a sample).
 fn params() -> o::Params {
-    o::Params { clock: o::Clock { origin: 0, n: 200 }, window: 10 * MS, lead: 2 * MS, allowance: 3 * MS }
+    o::Params { clock: o::Clock { origin: 0, n: 200 }, root_hz: 200_000_000, window: 10 * MS, lead: 2 * MS, allowance: 3 * MS }
 }
 
 struct Rig {
@@ -148,7 +148,7 @@ impl Rig {
 }
 
 fn region_of(start: i64, len: i64) -> o::Region {
-    o::region(start, Some(len))
+    o::region(&params(), start, Some(len))
 }
 
 /// A Kernel burst record in full: `(target, samples, wraps, requested target, late_by in ns, end)`.
@@ -187,7 +187,7 @@ fn ids(rows: &[(i64, u64)], got: &Rig) {
 
 #[test]
 fn o1_uhd_t1_short_and_long_heads_front_table() {
-    // RM-15 (seq 1): a finite head of L samples fronts at its padded end plus ten (L <= 32, 1 to 3 padded to four) or its end plus two; a
+    // RM-15 (seq 1): a finite head of L samples fronts at its padded end plus the gap of its stream's rate (L <= 32, 1 to 3 padded to four; 15 samples at 1 MS/s) or its end plus four; a
     // booking at the front is accepted and plays exactly, one at front - 1 is refused. The 3 000-sample row spans two sends, which is
     // what a shifted waveform in the second send needs (mutation row O1-M1).
     let s = 10_000;
@@ -310,8 +310,8 @@ fn o1_uhd_t3_a_repeat_keeps_its_phase_across_wraps_and_a_stop_cuts_it_in_its_ran
 #[test]
 fn o1_uhd_t3b_a_stop_cannot_find_payload_past_its_bound() {
     // RM-16 (seq 3, mutation row O1-M5): the owner hands the repeat in 2 500-sample chunks from 20 000. At the Stop the window's edge is
-    // four samples short of the chunk boundary 25 000: `avail = window_cut - next` is 2 496, below the 2 500 the chunk needs, so the
-    // chunk [22 500, 25 000) is not handed and the cut is 22 500, inside [t_k, B = 24 999]. A window four samples wider would hand it and
+    // six samples short of the chunk boundary 25 000: `avail = window_cut - next` is 2 494, below the 2 500 the chunk needs, so the
+    // chunk [22 500, 25 000) is not handed and the cut is 22 500, inside [t_k, B = 24 999]. A window six samples wider would hand it and
     // cut at B + 1.
     let s = 20_000;
     let mut r = rig(&[(7, 1_000)], Vec::new());
@@ -320,12 +320,12 @@ fn o1_uhd_t3b_a_stop_cannot_find_payload_past_its_bound() {
     r.turn();
     // The chunk precondition, before the window-edge turn: the one handed chunk ends at s + 2 500.
     assert_eq!(r.sends().last().map(|(k, n, _)| k + n), Some(s + 2_500), "the first chunk is [s, s + 2 500): {:?}", r.sends());
-    let edge = s + 5_000 - 4;
+    let edge = s + 5_000 - 6;
     let t = r.p.clock.instant(edge) - r.p.window;
     r.at(t);
     r.turn();
     let (t_k, b) = r.p.stop_bound(t);
-    assert_eq!(b, s + 5_000 - 1, "B is the window edge plus three");
+    assert_eq!(b, s + 5_000 - 1, "B is the window edge plus five");
     r.stop();
     r.turns(15, 40);
     let slots = o::Slots { segs: vec![o::Seg::repeating(7, s, 1_000, i64::MAX).cuttable()], cut: Some((t_k, b)) };
@@ -441,7 +441,7 @@ fn o1_uhd_t4b_a_switch_taken_after_the_cursor_passed_its_boundary_moves_to_the_n
 
 #[test]
 fn o1_uhd_t4c_a_stop_before_the_boundary_cancels_the_switch() {
-    // RM-37 (seq 4): R from 2 000, a switch received at 3 ms (boundary 15 000), a Stop at 4 ms whose bound 14 003 is before it: the switch
+    // RM-37 (seq 4): R from 2 000, a switch received at 3 ms (boundary 15 000), a Stop at 4 ms whose bound 14 005 is before it: the switch
     // is cancelled and no sample of the new waveform sounds.
     let mut r = switched(1_000, 1_000, 3 * MS, 3_000);
     let b = o::switch_boundary(&r.p, 2_000, 1_000, 3 * MS, Some(3_000));
@@ -524,7 +524,7 @@ fn o1_uhd_t5_a_late_send_asap_and_an_untimed_booking_are_placed_exactly() {
     r.turn();
     assert_eq!(o::admit(&r.p, &[a], 10 * MS, 11_500, Some(200)), o::Verdict::Late);
     let want = o::place(&r.p, &[a], 10 * MS, Some(11_500), Some(200));
-    assert_eq!(want, 13_002);
+    assert_eq!(want, 13_004);
     r.turns(11, 30);
     assert_eq!(r.burst_of(200), (want, Some(11_500), true));
     assert_eq!(r.time_errors(), ["send_asap"]);
@@ -558,7 +558,7 @@ fn o1_uhd_t5_a_late_send_asap_and_an_untimed_booking_are_placed_exactly() {
     r.book_untimed(2, 1, 10_500);
     r.turn();
     let want = o::place(&r.p, &[a], 10 * MS, Some(10_500), Some(200));
-    assert_eq!(want, 13_002);
+    assert_eq!(want, 13_004);
     r.turns(11, 30);
     assert_eq!(r.burst_of(200), (want, None, false));
     assert!(r.time_errors().is_empty());
@@ -593,10 +593,10 @@ fn before_stop(waves: &[(u8, usize)], extra: &[(usize, i64)]) -> (Rig, i64) {
 
 #[test]
 fn o1_uhd_t6a_a_cancellation_that_starts_at_or_after_the_bound_leaves_no_region() {
-    // RM-16 as amended (a Stop that cancels a booking starting before B leaves [t, B)) (seq 6): H starts at 50 000, after B = 30 003, so
+    // RM-16 as amended (a Stop that cancels a booking starting before B leaves [t, B)) (seq 6): H starts at 50 000, after B = 30 005, so
     // it is cancelled (a `rejected` note, not an event) and leaves no region: D, received after the Stop with start 26 000, is accepted.
     let (mut r, t) = before_stop(&[(1, 100), (3, 300), (4, 200)], &[(1, 50_000)]);
-    assert_eq!(r.p.stop_bound(t), (20_000, 30_003));
+    assert_eq!(r.p.stop_bound(t), (20_000, 30_005));
     assert_eq!(o::stop_region(&r.p, t, &[50_000]), None);
     r.book(2, 2, 26_000, false, LatePolicy::DropAndFlag);
     assert_eq!(o::admit(&r.p, &[], t, 26_000, Some(200)), o::Verdict::Accept);
@@ -614,13 +614,13 @@ fn o1_uhd_t6a_a_cancellation_that_starts_at_or_after_the_bound_leaves_no_region(
 #[test]
 fn o1_uhd_t6b_a_cancellation_that_starts_before_the_bound_leaves_the_region() {
     // RM-16 (seq 6): H2 starts at window_end + 1 = 30 001, inside [window_end, B): the owner's window edge is 30 000, so it is not
-    // dispatched and is still held at the Stop, where it is cancelled (a `rejected` note); it starts in [t, B), so [20 000, 30 003) is a
+    // dispatched and is still held at the Stop, where it is cancelled (a `rejected` note); it starts in [t, B), so [20 000, 30 005) is a
     // Stop region. Every later booking is judged by it. (The plan's `window_end - 16` is dispatched by the owner into its open slot and
     // dropped by the Stop with no note and no record, where MR-25 records a cancellation: reported to the orchestrator, not tested.)
     for case in ["drop inside", "send_asap inside", "untimed", "drop at B"] {
         let (mut r, t) = before_stop(&[(1, 100), (3, 300), (4, 200)], &[(1, 30_001)]);
         let region = o::stop_region(&r.p, t, &[30_001]).expect("H2 starts in [t_k, B)");
-        assert_eq!((region.start, region.front), (20_000, 30_003));
+        assert_eq!((region.start, region.front), (20_000, 30_005));
         let want_start = match case {
             "drop inside" => {
                 r.book(2, 2, 29_000, false, LatePolicy::DropAndFlag);
@@ -636,9 +636,9 @@ fn o1_uhd_t6b_a_cancellation_that_starts_before_the_bound_leaves_the_region() {
                 Some(o::place(&r.p, &[region], t, Some(29_000), Some(200)))
             }
             _ => {
-                r.book(2, 2, 30_003, false, LatePolicy::DropAndFlag);
-                assert_eq!(o::admit(&r.p, &[region], t, 30_003, Some(200)), o::Verdict::Accept);
-                Some(30_003)
+                r.book(2, 2, 30_005, false, LatePolicy::DropAndFlag);
+                assert_eq!(o::admit(&r.p, &[region], t, 30_005, Some(200)), o::Verdict::Accept);
+                Some(30_005)
             }
         };
         r.turns(21, 60);
@@ -651,7 +651,7 @@ fn o1_uhd_t6b_a_cancellation_that_starts_before_the_bound_leaves_the_region() {
             Some(start) => {
                 assert!(refusals.is_empty(), "{case}: {refusals:?}");
                 assert_eq!(r.burst_of(200), (start, (case == "send_asap inside").then_some(29_000), case == "send_asap inside"), "{case}");
-                assert_eq!(start, 30_003, "{case}: the first sample past the region");
+                assert_eq!(start, 30_005, "{case}: the first sample past the region");
                 r.check(&o::Slots { segs: vec![o::Seg::once(1, 10_000, 100), o::Seg::once(4, start, 200)], cut: None }, 9_990, start + 300);
             }
         }
@@ -665,7 +665,7 @@ fn o1_uhd_t6b2_an_unhanded_open_booking_at_a_stop_is_cancelled_known_divergence_
     // but cannot hand its first 32 samples, so at the Stop it is unhanded. The spec: cancelled, one `rejected` cancellation note, no
     // sample, no burst record. Today's UHD drops it in `end_open` with no note (#85).
     let (mut r, t) = before_stop(&[(1, 100), (3, 300), (4, 200)], &[(1, 29_984)]);
-    assert_eq!(o::stop_region(&r.p, t, &[29_984]).map(|region| region.front), Some(30_003));
+    assert_eq!(o::stop_region(&r.p, t, &[29_984]).map(|region| region.front), Some(30_005));
     r.turns(21, 60);
     let spec = o::unhanded_booking_at_a_stop();
     assert_eq!(spec, o::Cancelled { notes: 1, records: 0, samples: false }, "the oracle's own answer, independent of the code");
@@ -809,7 +809,7 @@ fn o1_uhd_t7a_a_failed_send_ends_a_repeat_at_its_attempted_end_and_cancels_the_s
 }
 
 #[test]
-fn o1_uhd_t7a2_the_region_of_an_abandoned_repeat_is_its_cursor_plus_three() {
+fn o1_uhd_t7a2_the_region_of_an_abandoned_repeat_is_its_cursor_plus_five() {
     // RM-15 (seq 7): the same abandon as T7a, with the bookings made at 2 ms, right after it (the failing send is the owner's turn at 2 ms).
     let mut r = rig(&[(17, 1_000), (18, 400), (19, 100)], vec![FakeFault::FailSend(3)]);
     r.book(1, 0, 2_000, true, LatePolicy::DropAndFlag);
@@ -819,14 +819,38 @@ fn o1_uhd_t7a2_the_region_of_an_abandoned_repeat_is_its_cursor_plus_three() {
     r.turn();
     let (a, attempt) = failed_attempt(&r, 3, 9_500);
     let cursor = a + attempt;
-    let region = o::Region { start: 2_000, end: cursor, front: cursor + 3, len: cursor - 2_000 };
+    let region = o::Region { start: 2_000, end: cursor, front: cursor + 5, len: cursor - 2_000 };
     r.take();
-    r.book(5, 2, cursor + 2, false, LatePolicy::DropAndFlag);
-    assert_eq!(o::admit(&r.p, &[region], 2 * MS, cursor + 2, Some(100)), o::Verdict::Refuse);
+    r.book(5, 2, cursor + 4, false, LatePolicy::DropAndFlag);
+    assert_eq!(o::admit(&r.p, &[region], 2 * MS, cursor + 4, Some(100)), o::Verdict::Refuse);
     assert_eq!(r.refusals().len(), 1);
-    r.book(6, 2, cursor + 3, false, LatePolicy::DropAndFlag);
-    assert_eq!(o::admit(&r.p, &[region], 2 * MS, cursor + 3, Some(100)), o::Verdict::Accept);
+    r.book(6, 2, cursor + 5, false, LatePolicy::DropAndFlag);
+    assert_eq!(o::admit(&r.p, &[region], 2 * MS, cursor + 5, Some(100)), o::Verdict::Accept);
     assert!(r.refusals().is_empty());
+}
+
+#[test]
+fn ur_23_a_booking_at_the_records_abandon_front_waits_for_the_owner_front() {
+    // UR-22 (D1), through the real Control path (the stream's clock is set): the abandon of T7a leaves the record's region at the cursor plus
+    // five, but uhd-tx's own front is the cursor plus two plus the gap (15 samples at 1 MS/s, so cursor + 17). A SendAsapAndFlag booking at
+    // the record's front, cursor + 5, is admitted at receipt; the owner judges it late against its own front, moves it there with a
+    // `TIME_ERROR` (outcome `send_asap`), and sends it no earlier.
+    let mut r = rig(&[(17, 1_000), (18, 400), (19, 100)], vec![FakeFault::FailSend(3)]);
+    r.book(1, 0, 2_000, true, LatePolicy::DropAndFlag);
+    r.turns(0, 1);
+    r.at(2 * MS);
+    book_switch(&mut r.rig, 2, 2_000, 1);
+    r.turn();
+    let (a, attempt) = failed_attempt(&r, 3, 9_500);
+    let cursor = a + attempt;
+    r.take();
+    r.book(6, 2, cursor + 5, false, LatePolicy::SendAsapAndFlag);
+    assert!(r.refusals().is_empty(), "the record admits a booking at its front, cursor + 5");
+    let before = r.sends().len();
+    r.turns(3, 12);
+    assert_eq!(r.time_errors(), ["send_asap"], "the owner's front is past the booking: it is moved, not dropped");
+    let b_sends: Vec<_> = r.sends()[before..].to_vec();
+    assert!(b_sends.first().is_some_and(|(k, _, _)| *k >= cursor + 17), "the booking starts no earlier than the owner's front {}: {b_sends:?}", cursor + 17);
 }
 
 #[test]
@@ -856,19 +880,19 @@ fn o1_uhd_t7c_a_failed_send_that_carries_the_boundary_leaves_the_switch_applied_
 #[test]
 fn o1_uhd_t7b_an_abandoned_finite_booking_keeps_its_whole_region() {
     // UR-22, RM-15, KL-39 (seq 7): F is 3 001 samples from 2 000: a 2 500-sample send, then a 501-sample send whose last sample is held,
-    // so the failing send carries 500 (FailSend(1); the fake takes 250). The record counts the first send only; F keeps [2 000, 5 003):
-    // a booking at 4 900 is refused, one at the front 5 003 is accepted.
+    // so the failing send carries 500 (FailSend(1); the fake takes 250). The record counts the first send only; F keeps [2 000, 5 005):
+    // a booking at 4 900 is refused, one at the front 5 005 is accepted.
     let mut r = rig(&[(19, 3_001), (20, 100)], vec![FakeFault::FailSend(1)]);
     r.book(1, 0, 2_000, false, LatePolicy::DropAndFlag);
     r.turn();
     let sends = r.sends();
     assert!(sends.len() >= 2, "{sends:?}");
     assert_eq!((sends[1].0, 2 * sends[1].1), (4_500, 500), "the failing send is the second: {sends:?}");
-    r.check(&o::Slots { segs: vec![o::Seg { end: 4_500 + 250, ..o::Seg::once(19, 2_000, 3_001) }], cut: None }, 1_990, 5_003);
+    r.check(&o::Slots { segs: vec![o::Seg { end: 4_500 + 250, ..o::Seg::once(19, 2_000, 3_001) }], cut: None }, 1_990, 5_005);
     let rows = r.rows();
     assert_eq!((rows[0]["samples"].as_i64(), rows[0]["end"].as_str()), (Some(o::recorded(&[(2_000, 2_500)])), Some("stop")), "{rows:?}");
     let f = region_of(2_000, 3_001);
-    assert_eq!(f.front, 5_003);
+    assert_eq!(f.front, 5_005);
     r.take();
     r.book(2, 1, 4_900, false, LatePolicy::DropAndFlag);
     assert_eq!(o::admit(&r.p, &[f], 0, 4_900, Some(100)), o::Verdict::Refuse);

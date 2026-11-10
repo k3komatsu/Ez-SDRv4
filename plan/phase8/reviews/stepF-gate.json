@@ -1,0 +1,215 @@
+{
+  "verdict": "PASS",
+  "reasons": [],
+  "started": "2026-11-10T13:08:07+00:00",
+  "finished": "2026-11-10T13:27:35+00:00",
+  "renames": "plan/phase8/reviews/stepF-renames.txt",
+  "identity": {
+    "before": {
+      "head": "a8139cdd0fe6a96318ed530baa51d414b7a06f00",
+      "status": [],
+      "untracked": [],
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "after": {
+      "head": "a8139cdd0fe6a96318ed530baa51d414b7a06f00",
+      "status": [],
+      "untracked": [],
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "toolchain": {
+    "docker_image": "sha256:4ad5558bf9906e3b874d0a3e3638ba9c09be57201a9ca8116bc8eb790eb06452",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "rustfmt": "rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)",
+    "python314": "Python 3.14.4",
+    "python39": "Python 3.9.25",
+    "remote": "sim02"
+  },
+  "steps": [
+    {
+      "name": "fmt",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo fmt --all --check",
+      "exit": 0,
+      "seconds": 1.6,
+      "counts": {
+        "diffs": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/fmt.log",
+      "ok": true
+    },
+    {
+      "name": "test",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test --workspace --no-fail-fast",
+      "exit": 0,
+      "seconds": 209.1,
+      "counts": {
+        "passed": 2211,
+        "failed": 0,
+        "results": 71,
+        "failing": []
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/test.log",
+      "ok": true
+    },
+    {
+      "name": "clippy",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo clippy --workspace --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 0.7,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/clippy.log",
+      "ok": true
+    },
+    {
+      "name": "rules",
+      "command": "python3 plan/maintenance/tools/rules.py --base 698df19 --renames plan/phase8/reviews/stepF-renames.txt",
+      "exit": 0,
+      "seconds": 1.5,
+      "counts": {
+        "problems": 0,
+        "base": "698df19"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/rules.log",
+      "ok": true
+    },
+    {
+      "name": "rules-self-test",
+      "command": "python3 plan/maintenance/tools/rules.py --self-test",
+      "exit": 0,
+      "seconds": 0.0,
+      "counts": {
+        "ok": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/rules-self-test.log",
+      "ok": true
+    },
+    {
+      "name": "uhd-clippy",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo clippy -p ezsdr-radio-uhd --features uhd --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 0.8,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/uhd-clippy.log",
+      "ok": true
+    },
+    {
+      "name": "uhd-test",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test -p ezsdr-radio-uhd --features uhd --lib --test uhd_api",
+      "exit": 0,
+      "seconds": 12.2,
+      "counts": {
+        "passed": 511,
+        "failed": 0,
+        "results": 2,
+        "failing": []
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/uhd-test.log",
+      "ok": true
+    },
+    {
+      "name": "hw-build",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test -p ezsdr-radio-uhd --features uhd --test hardware --no-run",
+      "exit": 0,
+      "seconds": 3.8,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/hw-build.log",
+      "ok": true
+    },
+    {
+      "name": "py314",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- sh -c 'cargo build -p ezsdr-server && python3 -m unittest discover -s python/tests'",
+      "exit": 0,
+      "seconds": 8.2,
+      "counts": {
+        "ran": 110,
+        "result": "OK"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/py314.log",
+      "ok": true
+    },
+    {
+      "name": "py39",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 --image python:3.9-slim -- sh -c 'pip -q install --user numpy && EZSDR_SERVER=/cargo-target/debug/ezsdr-server PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s python/tests'",
+      "exit": 0,
+      "seconds": 9.4,
+      "counts": {
+        "ran": 110,
+        "result": "OK"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/py39.log",
+      "ok": true
+    },
+    {
+      "name": "mutation",
+      "command": "REMOTE_SSH='ssh -o BatchMode=yes' python3 plan/maintenance/tools/remote/remote_mutate.py all sim02:8,sim03:8",
+      "exit": 1,
+      "seconds": 920.1,
+      "counts": {
+        "passed": 2048,
+        "total": 2049
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-10-stepF/gate/mutation.log",
+      "ok": true
+    }
+  ],
+  "mutation": {
+    "lists": {
+      "maintenance": {
+        "passed": 1703,
+        "total": 1703
+      },
+      "phase3": {
+        "passed": 69,
+        "total": 69
+      },
+      "phase4": {
+        "passed": 38,
+        "total": 38
+      },
+      "phase5": {
+        "passed": 29,
+        "total": 29
+      },
+      "phase6": {
+        "passed": 63,
+        "total": 63
+      },
+      "phase7": {
+        "passed": 146,
+        "total": 147
+      }
+    },
+    "not_killed": [
+      "phase7/G09"
+    ],
+    "known": [
+      "phase7/G09"
+    ],
+    "unexpected": [],
+    "baseline_failed": [],
+    "broken": {},
+    "missing": [],
+    "missing_ids": [],
+    "notes": [],
+    "remote_exit": 1,
+    "hosts": "sim02:8,sim03:8",
+    "images": {
+      "sim02": "sha256:3a0a84309a3e75548f5ee86e0a04056271bd48c77f878bdab797af73f615b2c9",
+      "sim03": "sha256:36981dd3f83681c2160139aef39957a05e194a5682c95166eb9cf46b586fa6f6"
+    }
+  }
+}

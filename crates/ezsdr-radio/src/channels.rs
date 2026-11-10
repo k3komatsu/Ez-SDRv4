@@ -92,8 +92,10 @@ pub struct Channel {
 pub struct Description {
     /// The profile this describes (RM-20).
     pub profile: ProfileRef,
-    /// Every stream's rate grid.
+    /// The device's rate grid: every receive stream's, and what the device reports (UR-13).
     pub rates: Grid,
+    /// Every transmit stream's rate grid (RM-8, RM-29): `rates`, but on `x3xx` only from 1 MS/s up (KL-40).
+    pub tx_rates: Grid,
     /// Whether an `Eq` rate must be a whole number of hertz.
     pub whole_hertz_rates: bool,
     /// The receive channels, in logical-number order.
@@ -360,6 +362,7 @@ impl Description {
             Layout::X3xx { master_clock_hz, link_gbps, rx, tx, .. } => Description {
                 profile: x3xx::profile_ref(),
                 rates: Grid::Values(x3xx::rates(*master_clock_hz)),
+                tx_rates: Grid::Values(x3xx::tx_rates(*master_clock_hz)),
                 whole_hertz_rates: false,
                 rx: rx.iter().map(|element| Channel::of(*element, true, *master_clock_hz)).collect(),
                 tx: tx.iter().map(|element| Channel::of(*element, false, *master_clock_hz)).collect(),
@@ -374,6 +377,7 @@ impl Description {
             Layout::Ideal { rx, tx } => Description {
                 profile: ProfileRef { name: IDEAL_PROFILE.to_owned(), version: IDEAL_PROFILE_VERSION },
                 rates: Grid::Integer { lo: 1, hi: 1_000_000_000 },
+                tx_rates: Grid::Integer { lo: 1, hi: 1_000_000_000 },
                 whole_hertz_rates: true,
                 rx: (0..*rx).map(|_| Channel::ideal(true)).collect(),
                 tx: (0..*tx).map(|_| Channel::ideal(false)).collect(),
@@ -441,7 +445,7 @@ impl Description {
                 capabilities.insert(channel_setting(direction, number, "path_delay_samples"), one(Scalar::Int(channel.path_delay_samples)));
             }
             for k in 0..channels.len() {
-                capabilities.insert(stream_setting(direction, k as u32), rates(&self.rates));
+                capabilities.insert(stream_setting(direction, k as u32), rates(direction.grid(self)));
             }
         }
         for (name, value) in [
@@ -572,7 +576,7 @@ impl Description {
             report.rejected.push(rejected(key, constraint, format!("RM-4: no such stream s{number}")));
             return;
         }
-        match coerce_numeric(key, constraint, &self.rates, Some(&Value::from(num(DEFAULT_SAMPLE_RATE_HZ))), self.whole_hertz_rates) {
+        match coerce_numeric(key, constraint, direction.grid(self), Some(&Value::from(num(DEFAULT_SAMPLE_RATE_HZ))), self.whole_hertz_rates) {
             Ok((value, coercion)) => {
                 report.applied.insert(key.clone(), value);
                 if let Some(coercion) = coercion {
@@ -750,12 +754,25 @@ impl Direction {
         }
     }
 
+    /// The rate grid of a stream of this direction (RM-8).
+    pub(crate) fn grid(self, description: &Description) -> &Grid {
+        match self {
+            Direction::Rx => &description.rates,
+            Direction::Tx => &description.tx_rates,
+        }
+    }
+
     fn bytes_per_s(self, performance: &PerformanceEnvelope) -> i64 {
         match self {
             Direction::Rx => performance.rx_bytes_per_s,
             Direction::Tx => performance.tx_bytes_per_s,
         }
     }
+}
+
+/// The rate grid of a stream of the receive (`rx`) or transmit direction (RM-8): the one place that chooses it for callers outside this module.
+pub(crate) fn rate_grid(rx: bool, description: &Description) -> &Grid {
+    (if rx { Direction::Rx } else { Direction::Tx }).grid(description)
 }
 
 /// Whether `key` is one of RM-30's configuration keys, which `effective` holds.

@@ -515,7 +515,9 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         for direction in ["rx", "tx"] {
             let rates = &capabilities[&key(&format!("radio.{direction}.s0.sample_rate_hz"))];
             if x3xx {
-                let expected: Vec<_> = ezsdr_radio::x3xx::decimations().iter().map(|n| Scalar::try_from(200_000_000.0 / *n as f64).unwrap()).collect();
+                // Transmit starts at 1 MS/s (KL-40): its grid is the first 200 decimations; receive keeps all 639.
+                let count = if direction == "tx" { 200 } else { 639 };
+                let expected: Vec<_> = ezsdr_radio::x3xx::decimations().iter().take(count).map(|n| Scalar::try_from(200_000_000.0 / *n as f64).unwrap()).collect();
                 assert_eq!(*rates, ezsdr_kernel::spec::CapabilityValue::AnyOf { values: expected });
             } else {
                 assert_eq!(*rates, range(Scalar::try_from(1.0).unwrap(), Scalar::try_from(1_000_000_000.0).unwrap()));
@@ -1025,7 +1027,7 @@ fn mr_16_burst_refusals() {
     let records: Vec<ezsdr_kernel::stream::BurstRecord> =
         x3xx_move.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
     assert_eq!(records.len(), 2, "the x3xx front moves B after A instead of refusing it");
-    assert_eq!(records[1].target, TimePoint::new(domain, 2_003_014));
+    assert_eq!(records[1].target, TimePoint::new(domain, 2_003_019));
     assert_eq!(records[1].requested_target, Some(TimePoint::new(domain, 2_000_000)));
     let events = x3xx_move.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     let moved = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap();
@@ -1084,11 +1086,11 @@ fn mr_16_s1_a_booking_meeting_an_accepted_repeat_is_refused_at_receipt() {
     }
 }
 
-/// S2 (Mock): a booking at a finite burst's end, or one sample after, is refused at receipt; its end + 2 is the first sample it may start at.
+/// S2 (Mock): a booking at a finite burst's end, or one sample after, is refused at receipt, as is one up to three after; its end + 4 is the first sample it may start at.
 #[test]
 fn mr_16_s2_a_booking_at_or_one_after_a_finite_burst_s_end_is_refused() {
     let t0 = 2_000_000_000;
-    for (target, refused) in [(2_004_000, true), (2_004_001, true), (2_004_002, false)] {
+    for (target, refused) in [(2_004_000, true), (2_004_003, true), (2_004_004, false)] {
         let mut harness = tx_harness("x3xx");
         harness.arm_start(t0).unwrap();
         let domain = tx_domain(&harness);
@@ -1116,7 +1118,7 @@ fn mr_25_s7_stop_tail_refuses_until_bound() {
     let record: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()][0].clone()).unwrap();
     assert_eq!((record.samples, record.end), (6_000, BurstEnd::Stop));
 
-    for (target, refused) in [(2_010_000, true), (2_010_001, true), (2_010_002, true), (2_010_003, false)] {
+    for (target, refused) in [(2_010_000, true), (2_010_001, true), (2_010_002, true), (2_010_003, true), (2_010_004, true), (2_010_005, false)] {
         harness.actions.push(tx_action(domain, target, 2, false, LatePolicy::DropAndFlag));
         harness.step(t0).unwrap();
         let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
@@ -1128,7 +1130,7 @@ fn mr_25_s7_stop_tail_refuses_until_bound() {
     let records = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].as_array().unwrap();
     assert_eq!(records.len(), 2, "the bound's burst is admitted: {records:?}");
     let b: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(records[1].clone()).unwrap();
-    assert_eq!(b.target, TimePoint::new(domain, 2_010_003));
+    assert_eq!(b.target, TimePoint::new(domain, 2_010_005));
 }
 
 /// S6 (Mock): a booking late by receipt moves to `first_free(ordinary)`, the first sample past the accepted span it would start in, with one `TIME_ERROR{send_asap}`.
@@ -1150,7 +1152,7 @@ fn mr_16_s6_send_asap_moves_past_an_accepted_span() {
     harness.step(2_030_000_000).unwrap();
     let records = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].as_array().unwrap().clone();
     let moved_burst: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(records.iter().find(|record| record["samples"] == 40).unwrap().clone()).unwrap();
-    assert_eq!(moved_burst.target, TimePoint::new(domain, 2_004_002), "the move starts past the accepted span's front");
+    assert_eq!(moved_burst.target, TimePoint::new(domain, 2_004_004), "the move starts past the accepted span's front");
     assert_eq!(moved_burst.requested_target, Some(TimePoint::new(domain, 2_001_000)), "the record keeps the requested target");
 }
 
@@ -1191,7 +1193,7 @@ fn mr_16_s6_send_asap_past_a_later_booking_is_placed_after_it() {
     assert_eq!(outcomes, [serde_json::json!("send_asap")], "{events:?}");
     harness.step(2_030_000_000).unwrap();
     let moved_burst = bursts(&harness).into_iter().find(|record| record.requested_target.is_some()).unwrap();
-    assert_eq!(moved_burst.target, TimePoint::new(domain, 2_010_052), "the move starts past the later booking's front");
+    assert_eq!(moved_burst.target, TimePoint::new(domain, 2_010_054), "the move starts past the later booking's front");
     assert_eq!(moved_burst.requested_target, Some(TimePoint::new(domain, 2_001_000)), "the record keeps the requested target");
 }
 
@@ -1214,7 +1216,7 @@ fn mr_16_timed_send_asap_in_the_stop_region_moves_with_time_error() {
     assert_eq!(outcomes, [serde_json::json!("send_asap")], "{events:?}");
     harness.step(2_012_004_001).unwrap();
     let moved = bursts(&harness).into_iter().find(|record| record.samples == 2 && record.requested_target.is_some()).unwrap();
-    assert_eq!(moved.target, TimePoint::new(domain, 2_010_003), "the move starts at the Stop region's end");
+    assert_eq!(moved.target, TimePoint::new(domain, 2_010_005), "the move starts at the Stop region's end");
     assert_eq!(moved.requested_target, Some(TimePoint::new(domain, 2_010_001)));
 }
 
@@ -1253,8 +1255,8 @@ fn mr_16_untimed_repeat_after_stop_starts_at_the_stop_region_end() {
     harness.step(2_030_000_000).unwrap();
     harness.actions.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
     harness.step(2_030_000_000).unwrap();
-    let repeat = bursts(&harness).into_iter().find(|record| record.target == TimePoint::new(domain, 2_010_003)).unwrap_or_else(|| panic!("{:?}", bursts(&harness)));
-    assert_eq!(repeat.target, TimePoint::new(domain, 2_010_003));
+    let repeat = bursts(&harness).into_iter().find(|record| record.target == TimePoint::new(domain, 2_010_005)).unwrap_or_else(|| panic!("{:?}", bursts(&harness)));
+    assert_eq!(repeat.target, TimePoint::new(domain, 2_010_005));
     assert_eq!(repeat.requested_target, None);
 }
 
@@ -1291,7 +1293,7 @@ fn mr_16_untimed_finite_burst_queues_behind_the_booking() {
     assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED), "{events:?}");
     assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{events:?}");
     harness.step(2_030_000_000).unwrap();
-    let queued = bursts(&harness).into_iter().find(|record| record.target == TimePoint::new(domain, 2_010_020)).unwrap();
+    let queued = bursts(&harness).into_iter().find(|record| record.target == TimePoint::new(domain, 2_010_025)).unwrap();
     assert_eq!(queued.samples, 10);
 }
 
@@ -1314,7 +1316,7 @@ fn mr_16_untimed_drop_and_flag_is_placed_at_the_stop_region_end() {
     harness.step(2_030_000_000).unwrap();
     let placed: Vec<_> = bursts(&harness).into_iter().filter(|record| record.samples == 2).collect();
     assert_eq!(placed.len(), 1, "the late untimed burst is placed, not dropped: {:?}", bursts(&harness));
-    assert_eq!(placed[0].target, TimePoint::new(domain, 2_010_003));
+    assert_eq!(placed[0].target, TimePoint::new(domain, 2_010_005));
 }
 
 /// RM-15: an untimed burst is placed, never judged late, so its DropAndFlag policy is not consulted even when its instant has passed.
@@ -1372,7 +1374,7 @@ fn mr_16_aligned_send_asap_inside_the_stop_region_moves() {
     harness.actions.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
     harness.step(2_030_000_000).unwrap();
     let moved = bursts(&harness).into_iter().find(|record| record.requested_target == Some(TimePoint::new(domain, 2_010_001))).unwrap_or_else(|| panic!("{:?}", bursts(&harness)));
-    assert_eq!(moved.target, TimePoint::new(domain, 2_010_003), "the repeat starts at the Stop region's end");
+    assert_eq!(moved.target, TimePoint::new(domain, 2_010_005), "the repeat starts at the Stop region's end");
 }
 
 /// A booking the late policy drops occupies nothing: a later booking inside its span is on time (RM-15).
@@ -1456,11 +1458,11 @@ fn mr_17_ideal_closed_finite_burst_has_no_extra_gap() {
     assert_eq!(records[1].requested_target, None);
 }
 
-/// RM-16 (Mock, ideal): the Stop tail ends at `stop_k`, the instant's first sample plus the three-sample margin: a booking before it is refused, one at it is on time.
-/// RM-16 (Mock, ideal): the Stop tail ends at `stop_k`, the instant's sample plus the three-sample margin (the window is 0): a booking before it is refused, one at it is on time.
+/// RM-16 (Mock, ideal): the Stop tail ends at `stop_k`, the instant's first sample plus the five-sample margin: a booking before it is refused, one at it is on time.
+/// RM-16 (Mock, ideal): the Stop tail ends at `stop_k`, the instant's sample plus the five-sample margin (the window is 0): a booking before it is refused, one at it is on time.
 #[test]
 fn mr_17_ideal_stop_has_no_in_flight_gap() {
-    for (target, refused) in [(2_002, true), (2_003, false)] {
+    for (target, refused) in [(2_004, true), (2_005, false)] {
         let mut harness = tx_harness("ideal");
         harness.arm_start(0).unwrap();
         let domain = tx_domain(&harness);
@@ -1477,8 +1479,7 @@ fn mr_17_ideal_stop_has_no_in_flight_gap() {
     }
 }
 
-/// S2 (Mock): a finite burst's front is its end + 2; a booking inside it is refused, and one at the front is on time.
-/// S2 (Mock): a finite burst's front is its end + 2: a booking inside it is refused, and one at the front is on time.
+/// S2 (Mock): a finite burst's front is its end + 4: a booking inside it is refused, and one at the front is on time.
 /// A booking at exactly the end of a burst longer than 32 samples continues it (S4), so the refused one is inside the front.
 #[test]
 fn mr_17_a_finite_burst_front_stops_at_its_end() {
@@ -1487,8 +1488,8 @@ fn mr_17_a_finite_burst_front_stops_at_its_end() {
     harness.arm_start(t0).unwrap();
     let domain = tx_domain(&harness);
     harness.actions.push(tx_action(domain, 2_002_000, 6_000, false, LatePolicy::DropAndFlag));
-    harness.actions.push(tx_action(domain, 2_008_001, 2, false, LatePolicy::SendAsapAndFlag));
-    harness.actions.push(tx_action(domain, 2_008_002, 2, false, LatePolicy::SendAsapAndFlag));
+    harness.actions.push(tx_action(domain, 2_008_003, 2, false, LatePolicy::SendAsapAndFlag));
+    harness.actions.push(tx_action(domain, 2_008_004, 2, false, LatePolicy::SendAsapAndFlag));
     harness.step(t0).unwrap();
     let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
     let refused: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).map(|event| event.payload["action"].clone()).collect();
@@ -1499,7 +1500,7 @@ fn mr_17_a_finite_burst_front_stops_at_its_end() {
         harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
     assert_eq!(records.len(), 2);
     assert_eq!((records[0].samples, records[0].end), (6_000, BurstEnd::Eob));
-    assert_eq!(records[1].target, TimePoint::new(domain, 2_008_002));
+    assert_eq!(records[1].target, TimePoint::new(domain, 2_008_004));
     assert_eq!(records[1].requested_target, None);
 }
 
@@ -3152,14 +3153,14 @@ fn tx_root(harness: &Harness, k: i64) -> i64 {
     }
 }
 
-/// The root tick of a Stop's bound (RM-16): the first transmit sample at or after `at`, plus three.
+/// The root tick of a Stop's bound (RM-16): the first transmit sample at or after `at`, plus five.
 fn stop_bound(harness: &Harness, at: i64) -> i64 {
     let domain = tx_domain(harness);
     let k = match harness.clocks.convert(TimePoint::new(ROOT, at), domain).unwrap() {
         ezsdr_kernel::time::Converted::Exact { point } => point.ticks_in(domain).unwrap(),
         ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.ticks_in(domain).unwrap() + 1,
     };
-    tx_root(harness, k + 3)
+    tx_root(harness, k + 5)
 }
 
 fn tx_value(frequency: f64) -> Action {
@@ -3201,7 +3202,7 @@ fn mr_16_a_transmit_value_at_the_exclusive_end_is_accepted() {
 
 #[test]
 fn mr_25_a_transmit_value_after_a_stop_takes_effect_after_the_in_flight_window() {
-    // RM-21, S3: a repeat keeps the stream busy; a `Stop` at `s` bounds it to the first sample at or after `s + tx_in_flight` (10 ms on x3xx), plus three (RM-16), and the value at that bound is taken.
+    // RM-21, S3: a repeat keeps the stream busy; a `Stop` at `s` bounds it to the first sample at or after `s + tx_in_flight` (10 ms on x3xx), plus five (RM-16), and the value at that bound is taken.
     let mut harness = tx_harness("x3xx");
     harness.arm_start(2_000_000_000).unwrap();
     let domain = tx_domain(&harness);
@@ -3224,11 +3225,12 @@ fn mr_25_a_transmit_value_after_a_stop_takes_effect_after_the_in_flight_window()
 }
 
 /// RM-15, RM-16 (Mock, ideal, window 0; N-M5): a Stop at sample c = 2_000_000 keeps a one-sample head at c − 1, which the Stop does not
-/// cut. Its transmitted end is c + 3 and its front c + 13. A booking at c + 3 or c + 12 is refused at receipt for the overlap; c + 13 is admitted.
+/// cut. Its transmitted end is c + 3 and its front c + 18. A booking at c + 3 or c + 17 is refused at receipt for the overlap; c + 18 is admitted.
 #[test]
 fn mr_16_a_stop_keeps_an_uncut_short_head_s_front() {
     let c = 2_000_000;
-    for (target, refused) in [(c + 3, true), (c + 12, true), (c + 13, false)] {
+    // The head ends at c + 3 padded; at 1 MS/s the gap is 15, so its front is c + 18.
+    for (target, refused) in [(c + 3, true), (c + 17, true), (c + 18, false)] {
         let case = format!("booking at {target}");
         let mut harness = tx_harness("ideal");
         harness.arm_start(0).unwrap();
@@ -3250,7 +3252,7 @@ fn mr_16_a_stop_keeps_an_uncut_short_head_s_front() {
 }
 
 /// RM-15, RM-16 (Mock, window edge; N-P6): an untimed booking after a dropped window-edge short head is placed at the region's end,
-/// 2_010_013, with no `TIME_ERROR` and no refusal (the late policy is not consulted). The head is one sample at 2_009_999, the Stop at
+/// 2_010_018, with no `TIME_ERROR` and no refusal (the late policy is not consulted). The head is one sample at 2_009_999, the Stop at
 /// t0 = 2_000_000 cuts it, and its region reaches its own front.
 #[test]
 fn mr_25_an_untimed_booking_after_a_dropped_short_head_is_placed_at_its_front() {
@@ -3267,6 +3269,49 @@ fn mr_25_an_untimed_booking_after_a_dropped_short_head_is_placed_at_its_front() 
     assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED), "{events:?}");
     assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{events:?}");
     harness.step(t0 + 12_006_001).unwrap();
-    let placed = bursts(&harness).into_iter().find(|record| record.target == TimePoint::new(domain, 2_010_013)).unwrap_or_else(|| panic!("{:?}", bursts(&harness)));
+    let placed = bursts(&harness).into_iter().find(|record| record.target == TimePoint::new(domain, 2_010_018)).unwrap_or_else(|| panic!("{:?}", bursts(&harness)));
     assert_eq!(placed.samples, 1);
+}
+
+#[test]
+fn mr_16_a_short_head_front_follows_the_stream_s_rate() {
+    // RM-15: a one-sample head is padded to four and fronts at 4 plus max(3, ceil(15 us x rate)) samples: 15 at 1 MS/s and 30 at 2 MS/s on
+    // `x3xx`, and 45 for `ideal` at 3 MS/s, whose clock is 1000/3 root ticks a sample (a denominator of one would give 15).
+    for (profile, rate, gap) in [("x3xx", 1e6, 15), ("x3xx", 2e6, 30), ("ideal", 3e6, 45)] {
+        let (start, now) = if profile == "x3xx" { (2_000_000_000, (rate * 2.0 + rate * 0.02) as i64) } else { (0, (rate * 0.02) as i64) };
+        for (offset, refused) in [(4 + gap - 1, true), (4 + gap, false)] {
+            let case = format!("{profile} at {rate}, booking at head + {offset}");
+            let mut harness = Harness::new(profile, &[("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(rate).unwrap()))], &[], &[], None);
+            harness.arm_start(start).unwrap();
+            let domain = tx_domain(&harness);
+            harness.actions.push(tx_action(domain, now, 1, false, LatePolicy::DropAndFlag));
+            harness.actions.push(tx_action(domain, now + offset, 1, false, LatePolicy::DropAndFlag));
+            harness.step(start).unwrap();
+            let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+            let rejections = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count();
+            assert_eq!(rejections, usize::from(refused), "{case}: {events:?}");
+            assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{case}: on time");
+        }
+    }
+}
+
+#[test]
+fn mr_06_a_transmit_rate_below_one_msps_is_rejected_on_x3xx() {
+    // KL-40: a transmit stream on `x3xx` is rejected below 1 MS/s (never coerced to it); receive and `ideal` keep every rate.
+    let tx = |profile: &str, rate: f64| {
+        let radio = MockRadio::from_binding(&binding(profile)).unwrap();
+        radio.coerce(&request(&[("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(rate).unwrap()))])).unwrap()
+    };
+    let low = tx("x3xx", 500_000.0);
+    assert_eq!(low.rejected.len(), 1, "{:?}", low.rejected);
+    assert_eq!(low.rejected[0].key, key("radio.tx.s0.sample_rate_hz"));
+    assert!(low.rejected[0].reason.starts_with("RM-8: 500000 is outside"), "{}", low.rejected[0].reason);
+    assert!(low.coercions.is_empty());
+    let floor = tx("x3xx", 1_000_000.0);
+    assert!(floor.rejected.is_empty() && floor.coercions.is_empty(), "{floor:?}");
+    let radio = MockRadio::from_binding(&binding("x3xx")).unwrap();
+    let rx = radio.coerce(&request(&[("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(500_000.0).unwrap()))])).unwrap();
+    assert!(rx.rejected.is_empty() && rx.coercions.is_empty(), "receive keeps 0.5 MS/s: {rx:?}");
+    let ideal = tx("ideal", 500_000.0);
+    assert!(ideal.rejected.is_empty(), "{:?}", ideal.rejected);
 }

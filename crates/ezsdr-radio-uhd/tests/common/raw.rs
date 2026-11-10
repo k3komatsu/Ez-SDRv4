@@ -7,7 +7,7 @@ use std::time::{Duration as Wall, Instant};
 use ezsdr_radio_uhd::{Device, Dir, Settings};
 
 use super::n47;
-use super::{SAFE_TX_HZ, bench_hz, board_of};
+use super::{SAFE_TX_HZ, SAFE_TX_MAX_RATE, bench_hz, board_of};
 
 pub const TICKS_PER_MS: i64 = 200_000;
 
@@ -26,7 +26,7 @@ pub fn raw_rx(device: &dyn Device, rate: f64, freq: f64) {
 
 /// The transmitter inside bench.md's RF conditions, or a panic before anything is sent.
 pub fn raw_tx(device: &dyn Device, rate: f64, freq: f64) {
-    assert!(SAFE_TX_HZ.contains(&freq) && rate <= 2e6, "bench.md RF safety: {freq} Hz at {rate} S/s");
+    assert!(SAFE_TX_HZ.contains(&freq) && rate <= SAFE_TX_MAX_RATE, "bench.md RF safety: {freq} Hz at {rate} S/s");
     let settings = Settings { rate: Some(rate), freq: Some(freq), gain: Some(0.0), antenna: Some("TX/RX".to_owned()) };
     let applied = device.apply(Dir::Tx, d9_channel(), &settings).unwrap();
     assert!(applied.gain == 0.0 && SAFE_TX_HZ.contains(&applied.freq), "{applied:?}");

@@ -34,12 +34,21 @@ impl Clock {
 #[derive(Clone, Copy, Debug)]
 pub struct Params {
     pub clock: Clock,
+    /// The primary root's rate in hertz, so that one sample is `n / root_hz` seconds (RM-15's closed short gap is 15 µs of samples).
+    pub root_hz: i64,
     pub window: i64,
     pub lead: i64,
     pub allowance: i64,
 }
 
 impl Params {
+    /// RM-15: the samples past a closed short burst's padded end that its front keeps: `max(3, ceil(15 µs × rate))`, the rate being
+    /// `root_hz / n`. The oracle's own integer arithmetic, not `ezsdr_radio::staging`'s.
+    pub fn gap(&self) -> i64 {
+        let (num, den) = (15 * self.root_hz as i128, self.clock.n as i128 * 1_000_000);
+        (((num + den - 1) / den) as i64).max(3)
+    }
+
     /// RM-14's decision instant: the first transmit sample at or after the receipt, as an instant.
     pub fn decision(&self, recv: i64) -> i64 {
         self.clock.instant(self.clock.at_or_after(recv))
@@ -56,9 +65,9 @@ impl Params {
     }
 
     /// RM-16: a Stop at instant `t` closes at the first sample at or after `t` (`t_k`) and no later than `B`, the first sample at or
-    /// after `t + W`, plus three.
+    /// after `t + W`, plus five (the two-zero close ends at the cursor plus two, and the next burst keeps three more).
     pub fn stop_bound(&self, t: i64) -> (i64, i64) {
-        (self.clock.at_or_after(t), self.clock.at_or_after(t + self.window) + 3)
+        (self.clock.at_or_after(t), self.clock.at_or_after(t + self.window) + 5)
     }
 
     /// RM-14: whether a booking at `start`, received at `recv`, is late (its start is less than the device lead after the decision).
@@ -78,9 +87,9 @@ pub fn ramp(tag: u8, len: usize) -> Vec<Iq> {
 }
 
 /// RM-15: the samples past a booking's start that its region holds: a standalone closed device burst of 1 to 32 samples (1 to 3
-/// padded to four) its padded end plus ten; a head longer than 32 samples, or a joined piece, its end plus two.
-pub fn front_offset(len: i64, joined: bool) -> i64 {
-    if len <= SHORT && !joined { len.max(4) + 10 } else { len + 2 }
+/// padded to four) its padded end plus `gap` (`Params::gap`); a head longer than 32 samples, or a joined piece, its end plus four.
+pub fn front_offset(len: i64, joined: bool, gap: i64) -> i64 {
+    if len <= SHORT && !joined { len.max(4) + gap } else { len + 4 }
 }
 
 /// An accepted booking's footprint `[start, front)` (RM-15); `end` is its payload end, both `i64::MAX` for a repeat.
@@ -93,9 +102,9 @@ pub struct Region {
 }
 
 /// The region of a booking of `len` samples at `start` (`None`: a repeat).
-pub fn region(start: i64, len: Option<i64>) -> Region {
+pub fn region(p: &Params, start: i64, len: Option<i64>) -> Region {
     match len {
-        Some(len) => Region { start, end: start + len, front: start + front_offset(len, false), len },
+        Some(len) => Region { start, end: start + len, front: start + front_offset(len, false, p.gap()), len },
         None => Region { start, end: i64::MAX, front: i64::MAX, len: i64::MAX },
     }
 }
@@ -123,7 +132,7 @@ pub fn admit(p: &Params, regions: &[Region], recv: i64, start: i64, len: Option<
     if p.is_late(recv, start) {
         return Verdict::Late;
     }
-    let mine = region(start, len);
+    let mine = region(p, start, len);
     for r in regions {
         let joins = r.end == start && r.len > SHORT;
         if joins {
@@ -144,7 +153,7 @@ pub fn admit(p: &Params, regions: &[Region], recv: i64, start: i64, len: Option<
 pub fn place(p: &Params, regions: &[Region], recv: i64, at: Option<i64>, len: Option<i64>) -> i64 {
     let mut start = p.ordinary(recv).max(at.unwrap_or(i64::MIN));
     loop {
-        let mine = region(start, len);
+        let mine = region(p, start, len);
         match regions.iter().find(|r| start < r.front && r.start < mine.front) {
             Some(r) => start = r.front,
             None => return start,

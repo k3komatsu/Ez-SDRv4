@@ -75,11 +75,26 @@ pub enum Overlap {
     Handed,
 }
 
-/// RM-15: the longest standalone head that is one closed device burst (its front is then its padded end plus ten).
+/// RM-15: the longest standalone head that is one closed device burst (its front is then its padded end plus [`closed_short_gap`]).
 pub const CLOSED_SHORT_MAX: i64 = 32;
 
-/// RM-15 and UR-22: the samples past a closed short device burst's padded end that its front and the owner's guard keep.
-pub const CLOSED_SHORT_GAP: i64 = 10;
+/// RM-15, UR-22: the samples past any closing send's exclusive end that the next device burst keeps (every close but a short head's), and
+/// the floor of [`closed_short_gap`].
+pub const CLOSE_GAP: i64 = 3;
+
+/// RM-15: a head longer than 32 samples, or a joined piece, closes with its held tail and at most one zero, so its closing end is its payload
+/// end plus one and its front that plus [`CLOSE_GAP`].
+pub const HELD_TAIL_FRONT: i64 = 1 + CLOSE_GAP;
+
+/// RM-16: a Stop's two-zero close starts at the cursor and ends two samples later; the front is that end plus [`CLOSE_GAP`].
+pub const STOP_FRONT: i64 = 2 + CLOSE_GAP;
+
+/// RM-15: the samples past a closed short device burst's padded end that the next device burst keeps: `max(3, ceil(15 µs × rate))`, the
+/// stream's sample rate being `root_hz × ticks_den / ticks_num` (`ticks_num / ticks_den` root ticks per sample). Integer arithmetic.
+pub fn closed_short_gap(root_hz: u64, ticks_num: u64, ticks_den: u64) -> i64 {
+    let (num, den) = (u128::from(root_hz) * u128::from(ticks_den) * 15, u128::from(ticks_num.max(1)) * 1_000_000);
+    i64::try_from(num.div_ceil(den)).unwrap_or(i64::MAX).max(CLOSE_GAP)
+}
 
 /// One accepted booking's span on the stream's sample clock, and what may continue it (RM-15).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -117,10 +132,10 @@ impl Chain {
 
     /// The front a short head's region keeps at a Stop (RM-16): each piece of at most 32 samples that starts below `handed` fronts at its
     /// own standalone front, and a longer piece behind the head, which the owner never sends, does not extend it.
-    fn own_fronts(&self, handed: i64) -> i64 {
+    fn own_fronts(&self, handed: i64, gap: Option<i64>) -> i64 {
         let starts = std::iter::once(self.start).chain(self.joined.iter().copied());
         let ends = self.joined.iter().copied().chain(std::iter::once(self.end));
-        starts.zip(ends).filter(|&(s, e)| s < handed && e.checked_sub(s).is_some_and(|len| len <= CLOSED_SHORT_MAX)).filter_map(|(s, e)| front(s, Some(e - s), false)).max().unwrap_or(i64::MIN)
+        starts.zip(ends).filter(|&(s, e)| s < handed && e.checked_sub(s).is_some_and(|len| len <= CLOSED_SHORT_MAX)).filter_map(|(s, e)| front(gap, s, Some(e - s), false)).max().unwrap_or(i64::MIN)
     }
 
     /// A standalone short head: one closed device burst (RM-15), with no piece joined behind it.
@@ -272,8 +287,11 @@ impl<P> TxList<P> {
 /// keeps one per transmit stream. Two representations of the same accepted bookings: `until`
 /// is the value rule in root ticks (today's `Busy`, unchanged), and the chains and the stop
 /// region are the overlap rule in sample indices.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bookings {
+    /// The samples a closed short head's front keeps past its padded end ([`closed_short_gap`]); none until the stream's clock is known
+    /// ([`Bookings::arm`]): an unarmed record refuses a finite short head rather than book it with no guard.
+    gap: Option<i64>,
     until: Option<Until>,
     chains: Vec<Chain>,
     region: Option<(i64, i64)>,
@@ -282,6 +300,17 @@ pub struct Bookings {
 }
 
 impl Bookings {
+    /// A record whose stream's rate is not known yet: it refuses a short head until [`Bookings::arm`]. The value for a stream that books nothing.
+    pub fn unarmed() -> Bookings {
+        Bookings { gap: None, until: None, chains: Vec::new(), region: None, pending: None, settled: Vec::new() }
+    }
+
+    /// Sets the samples a closed short head's front keeps past its padded end, [`closed_short_gap`] of the stream's clock. The rate is fixed
+    /// for a Run (RM-27), so this is called where the stream's clock is registered; a later call replaces the gap.
+    pub fn arm(&mut self, gap: i64) {
+        self.gap = Some(gap);
+    }
+
     /// A booking accepted, after any booking-time move: its exclusive end in root ticks, or `None`
     /// for a repeat. The later end counts, and an open repeat stays open.
     pub fn book(&mut self, end: Option<i64>) {
@@ -322,7 +351,7 @@ impl Bookings {
     /// [`Bookings::prune`] at this receipt: a switch due by `now` is applied by then, and `accept` reads only the chains and the region.
     pub fn accept(&mut self, start: i64, len: Option<i64>, now: i64, join_by: impl Fn(i64) -> i64, horizon: i64) -> Result<(), Overlap> {
         let join = self.joinable(start, len, now, &join_by);
-        let front = front(start, len, join.is_some()).ok_or(Overlap::Booking)?;
+        let front = front(self.gap, start, len, join.is_some()).ok_or(Overlap::Booking)?;
         let early = self.chains.iter().any(|c| start < c.start && self.may_be_handed(c, now, horizon, &join_by));
         if self.meets(start, front, join) {
             return Err(Overlap::Booking);
@@ -379,7 +408,7 @@ impl Bookings {
         loop {
             let k = self.first_free(from, len.is_some(), now, &join_by, horizon)?;
             let join = self.joinable(k, len, now, &join_by);
-            match self.met_front(k, front(k, len, join.is_some())?, join) {
+            match self.met_front(k, front(self.gap, k, len, join.is_some())?, join) {
                 Some(i64::MAX) => return None,
                 Some(next) => from = next,
                 None => return Some(k),
@@ -400,7 +429,7 @@ impl Bookings {
     /// when no sample is free.
     pub fn region_move(&self, at: i64, len: Option<i64>, now: i64, join_by: impl Fn(i64) -> i64, horizon: i64) -> Result<i64, Overlap> {
         let join = self.joinable(at, len, now, &join_by);
-        let front = front(at, len, join.is_some()).ok_or(Overlap::Booking)?;
+        let front = front(self.gap, at, len, join.is_some()).ok_or(Overlap::Booking)?;
         if self.chain_front(at, front, join).is_some() || self.region_met(at, front).is_none() {
             return Ok(at);
         }
@@ -441,18 +470,19 @@ impl Bookings {
     /// any more, and bookings starting at or after `t` are cancelled. A cancelled booking may already
     /// be handed, so a Stop that cancels one starting before `stop` adds the region `[t, stop)` (hulled
     /// with an earlier region), and a cancelled short head that starts below the handed cursor's bound
-    /// (`stop - 3`) reaches the own fronts of its short pieces that start below that bound. A Stop that cancels nothing adds no region. A booking starting at or after
-    /// `stop` was never handed (the handed cursor is at most `stop - 3`), so it adds nothing.
+    /// (`stop - STOP_FRONT`) reaches the own fronts of its short pieces that start below that bound. A Stop that cancels nothing adds no region. A booking starting at or after
+    /// `stop` was never handed (the handed cursor is at most `stop - STOP_FRONT`), so it adds nothing.
     pub fn halt(&mut self, t: i64, stop: i64) {
         let pending = self.pending.take();
         // The handed cursor is at most `handed` (RM-16): a cancelled short head that starts below it may have been handed
         // as one send, so the region reaches the own fronts of its short pieces below it (`own_fronts`), not only `stop`.
-        let handed = stop - 3;
-        let cut = self.chains.iter().filter(|c| c.start >= t && c.start < stop).map(|c| if c.start < handed && c.short_head() { c.own_fronts(handed).max(stop) } else { stop }).max();
+        let handed = stop - STOP_FRONT;
+        let cut = self.chains.iter().filter(|c| c.start >= t && c.start < stop).map(|c| if c.start < handed && c.short_head() { c.own_fronts(handed, self.gap).max(stop) } else { stop }).max();
         self.chains.retain(|c| c.start < t);
+        let gap = self.gap;
         for c in &mut self.chains {
             // A kept short head was handed as one send, which a Stop does not recall: it keeps its own front, not a longer piece's.
-            c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop });
+            c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed, gap)) } else { stop });
             c.join = false;
         }
         match pending {
@@ -570,7 +600,7 @@ impl Bookings {
     /// not a chain's head is not moved here: the record does not reframe its chain (host lateness, RM-16).
     pub fn move_start(&mut self, old: i64, new: i64, len: Option<i64>) -> Result<(), Overlap> {
         // The hand-over horizon of `accept` does not apply: the owner hands in start order, so no chain after the moved head was handed before it.
-        self.move_head(old, len, |bookings| (!bookings.meets(new, front(new, len, false)?, None)).then_some(new)).map(|_| ()).ok_or(Overlap::Booking)
+        self.move_head(old, len, |bookings| (!bookings.meets(new, front(bookings.gap, new, len, false)?, None)).then_some(new)).map(|_| ()).ok_or(Overlap::Booking)
     }
 
     /// RM-14, RM-15, D24: takes the chain head `old` out of the record and puts it back at the start that `place` returns, with its
@@ -586,7 +616,8 @@ impl Bookings {
         if let Some(i) = head {
             self.remove_head(i, old, len);
         }
-        let placed = place(self).and_then(|start| Some((start, front(start, len, false)?)));
+        let gap = self.gap;
+        let placed = place(self).and_then(|start| Some((start, front(gap, start, len, false)?)));
         let Some((start, region_front)) = placed else {
             self.chains = saved;
             return None;
@@ -607,6 +638,7 @@ impl Bookings {
     /// surviving head of at most 32 samples with no piece behind it is one closed device burst (RM-15), so no later booking joins it
     /// (S2, UR-23). Pieces left behind keep their regions: the front stays, and each piece's own front is kept as well.
     fn remove_head(&mut self, i: usize, old: i64, len: Option<i64>) {
+        let gap = self.gap;
         match len {
             Some(len) if self.chains[i].last() != old => {
                 let c = &mut self.chains[i];
@@ -614,12 +646,12 @@ impl Bookings {
                 c.joined.retain(|&j| j > c.start);
                 if c.closed_short() {
                     c.join = false;
-                    c.front = front(c.start, Some(c.end - c.start), false).unwrap_or(c.front);
+                    c.front = front(gap, c.start, Some(c.end - c.start), false).unwrap_or(c.front);
                 } else if !c.joined.is_empty() {
                     c.join = false;
                     let starts = std::iter::once(c.start).chain(c.joined.iter().copied());
                     let ends = c.joined.iter().copied().chain(std::iter::once(c.end));
-                    let pieces = starts.zip(ends).filter_map(|(s, e)| front(s, Some(e - s), false)).max().unwrap_or(c.front);
+                    let pieces = starts.zip(ends).filter_map(|(s, e)| front(gap, s, Some(e - s), false)).max().unwrap_or(c.front);
                     c.front = c.front.max(pieces);
                 }
             }
@@ -677,15 +709,15 @@ impl Bookings {
 }
 
 /// RM-15: the exclusive front of a booking's region. A standalone head of at most 32 samples is
-/// one closed device burst, and its front is its transmitted end (padded to four) plus ten, the
-/// owner's safe start after it (UR-22); a head longer than 32 and a joined piece end in a held
-/// tail, `end + 2`; a repeat never ends. `None` when the front does not fit in an `i64`: the
-/// booking is refused, not wrapped.
-fn front(start: i64, len: Option<i64>, joined: bool) -> Option<i64> {
+/// one closed device burst, and its front is its transmitted end (padded to four) plus `gap`
+/// ([`closed_short_gap`]), the safe start after it (UR-22); a head longer than 32 and a joined piece end in a held
+/// tail, `end + HELD_TAIL_FRONT`; a repeat never ends. `None` when the front does not fit in an `i64`
+/// (the booking is refused, not wrapped), or when a short head's `gap` is not known ([`Bookings::unarmed`]).
+fn front(gap: Option<i64>, start: i64, len: Option<i64>, joined: bool) -> Option<i64> {
     match len {
         None => Some(i64::MAX),
-        Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(2),
-        Some(len) => start.checked_add(len.max(4))?.checked_add(CLOSED_SHORT_GAP),
+        Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),
+        Some(len) => start.checked_add(len.max(4))?.checked_add(gap?),
     }
 }
 
@@ -697,10 +729,10 @@ pub fn ordinary_k(decided: i64, lead: i64, at_or_after: impl Fn(i64) -> i64, ins
 }
 
 /// RM-16: the first sample a booking may start at after a `Stop` at `at` (note 47 stage 5, §0):
-/// the first sample at or after `at + in_flight`, plus three. The window `in_flight` is the
+/// the first sample at or after `at + in_flight`, plus [`STOP_FRONT`]. The window `in_flight` is the
 /// profile's; `at_or_after` is the stream's clock, which each Provider passes in.
 pub fn stop_sample(at: i64, in_flight: i64, at_or_after: impl Fn(i64) -> i64) -> i64 {
-    at_or_after(at.saturating_add(in_flight)).saturating_add(3)
+    at_or_after(at.saturating_add(in_flight)).saturating_add(STOP_FRONT)
 }
 
 /// RM-16: the root tick a `Stop` at `at` bounds a transmit stream by: [`stop_sample`] in root ticks.

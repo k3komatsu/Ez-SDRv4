@@ -6949,10 +6949,10 @@
   } ,
   {
    "id": "P640",
-   "name": "UHD leaves one sample between an EOB with the last payload and its restart (UR-23)",
+   "name": "uhd-tx's two-zero close fronts at close_start + 2, not close_start + 5 (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(3));",
-    "new": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
+    "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP));",
+    "new": "self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
@@ -6961,8 +6961,8 @@
     "id": "P641",
     "name": "an empty Stop EOB needs the gap after its two closing samples (UR-23)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(3));",
-    "new": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
+    "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP));",
+    "new": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP - 1));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
@@ -6971,8 +6971,8 @@
    "id": "P642",
    "name": "Stop retains the UHD cursor as a front for a later burst (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(3));",
-    "new": "                    self.chain.advance_front(clock.domain, close_start);",
+    "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP));",
+    "new": "self.chain.advance_front(clock.domain, close_start);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
@@ -7061,7 +7061,7 @@
    "id": "P657",
    "name": "an abandoned send's front is its padded end plus the gap, not its padded end (UR-22, UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "cursor.saturating_add(2).saturating_add(CLOSED_SHORT_GAP)",
+    "old": "cursor.saturating_add(2).saturating_add(self.short_gap(clock))",
     "new": "cursor.saturating_add(2)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -10579,8 +10579,8 @@
        "id": "P1186",
         "name": "a held-tail EOB rejects the sample before its safe start (UR-23)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(3));",
-       "new": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
+       "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP));",
+       "new": "self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played"
@@ -13025,8 +13025,8 @@
       "id": "N48S1-02",
       "name": "the reopen front is the flush end plus the gap, plus two (UR-22, TBD-d2)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "clock.at_or_after(tick.saturating_sub(1)).saturating_add(CLOSED_SHORT_GAP)",
-      "new": "clock.at_or_after(tick.saturating_sub(1)).saturating_add(CLOSED_SHORT_GAP).saturating_add(2)",
+      "old": "clock.at_or_after(tick.saturating_sub(1)).saturating_add(self.short_gap(clock))",
+      "new": "clock.at_or_after(tick.saturating_sub(1)).saturating_add(self.short_gap(clock)).saturating_add(2)",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_22_a_failed_one_sample_padded_eob_is_not_safe_until_flush_recovery"
@@ -13823,8 +13823,8 @@
     "id": "N47S4-40",
     "name": "the transmit stream's clock is not registered at arm (RM-25, one clock for the Run)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "streams.stream_mut(stream_key(Dir::Tx, k)).clock = start.tx.get(k).copied().flatten().map(|(clock, _)| clock);",
-    "new": "streams.stream_mut(stream_key(Dir::Tx, k)).clock = None;",
+    "old": "let clock = start.tx.get(k).copied().flatten().map(|(clock, _)| clock);",
+    "new": "let clock = start.tx.get(k).copied().flatten().map(|(clock, _)| clock).filter(|_| false);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_25_a_transmit_stream_has_one_clock_for_the_run"
@@ -13893,8 +13893,8 @@
     "id": "N47S4-08",
     "name": "the receipt answer ignores the stream's Busy, as if it read a hand-over (RM-21, F2, #79)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "map_or(Bookings::default(), |stream| stream.busy.clone())",
-    "new": "map_or(Bookings::default(), |stream| Bookings::default())",
+    "old": "map_or(Bookings::unarmed(), |stream| stream.busy.clone())",
+    "new": "map_or(Bookings::unarmed(), |stream| Bookings::unarmed())",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_a_value_after_the_hand_over_and_before_the_end_is_refused"
@@ -13993,8 +13993,8 @@
     "id": "N47S4-48",
     "name": "MockRadio's receipt answer ignores the stream's Busy (RM-21, S2)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "map_or(Bookings::default(), |stream| stream.busy.clone())",
-    "new": "map_or(Bookings::default(), |stream| Bookings::default())",
+    "old": "map_or(Bookings::unarmed(), |stream| stream.busy.clone())",
+    "new": "map_or(Bookings::unarmed(), |stream| Bookings::unarmed())",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_21_a_transmit_value_while_a_burst_is_booked_is_refused_with_its_id"
@@ -14054,7 +14054,7 @@
     "name": "a refused burst is removed from its stream's Bookings, end included (P4, F9, C6)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
     "old": "lock(&core.streams).stream_mut(key).busy.drop_piece(held.k, held.record_len());",
-    "new": "lock(&core.streams).stream_mut(key).busy = Default::default();",
+    "new": "lock(&core.streams).stream_mut(key).busy = ezsdr_radio::staging::Bookings::unarmed();",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_a_refused_burst_stays_counted_until_its_booked_end"
@@ -14143,7 +14143,7 @@
     "id": "N47S4-09c",
     "name": "a Stop's closing two samples are not counted in the device end (owner guard (c), m9)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(3));",
+    "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP));",
     "new": "self.chain.advance_front(clock.domain, close_start);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -14329,33 +14329,33 @@
   },
   {
     "id": "N47S5-02",
-    "name": "5a: a closed burst of 4 to 32 samples fronts at its transmitted end, not ten past it (RM-15)",
+    "name": "5a: a closed burst of 4 to 32 samples fronts at its transmitted end, not the gap past it (RM-15)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "start.checked_add(len.max(4))?.checked_add(CLOSED_SHORT_GAP)",
+    "old": "start.checked_add(len.max(4))?.checked_add(gap?)",
     "new": "Some(start.checked_add(len.max(4))?)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
-    "filter": "rm_15_closed_burst_front_is_end_plus_ten"
+    "filter": "rm_15_closed_burst_front_is_end_plus_gap"
   },
   {
     "id": "N47S5-03",
-    "name": "5a: a burst of 1 to 3 samples fronts ten past start plus 3, not past start plus 4 (RM-15, the padded first send)",
+    "name": "5a: a burst of 1 to 3 samples fronts the gap past start plus 3, not past start plus 4 (RM-15, the padded first send)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "start.checked_add(len.max(4))?.checked_add(CLOSED_SHORT_GAP)",
-    "new": "start.checked_add(len.max(3))?.checked_add(CLOSED_SHORT_GAP)",
+    "old": "start.checked_add(len.max(4))?.checked_add(gap?)",
+    "new": "start.checked_add(len.max(3))?.checked_add(gap?)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
-    "filter": "rm_15_1_to_3_sample_burst_front_is_transmitted_end_plus_ten"
+    "filter": "rm_15_1_to_3_sample_burst_front_is_transmitted_end_plus_gap"
   },
   {
     "id": "N47S5-04",
-    "name": "5a: a held tail fronts at its end plus 1, not 2 (RM-15)",
+    "name": "5a: a held tail fronts at its end plus 1, not plus 4 (RM-15)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(2),",
-    "new": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(1),",
+    "old": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),",
+    "new": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT - 1),",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
-    "filter": "rm_15_held_tail_front_is_end_plus_two"
+    "filter": "rm_15_held_tail_front_is_end_plus_four"
   },
   {
     "id": "N47S5-05",
@@ -14451,21 +14451,21 @@
     "id": "N47S5-14",
     "name": "5a: a Stop leaves a chain joinable at its end",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop }); c.join = false;",
-    "new": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop }); c.join = c.join;",
+    "old": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed, gap)) } else { stop }); c.join = false;",
+    "new": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed, gap)) } else { stop }); c.join = c.join;",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_stop_truncates_the_front_and_ends_the_join"
   },
   {
     "id": "N47S5-16",
-    "name": "5b-1: a Stop bound is the first sample at or after the window, without the three-sample margin (RM-16)",
+    "name": "5b-1: a Stop bound is the first sample at or after the window, without the five-sample margin (RM-16)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "at_or_after(at.saturating_add(in_flight)).saturating_add(3)",
+    "old": "at_or_after(at.saturating_add(in_flight)).saturating_add(STOP_FRONT)",
     "new": "at_or_after(at.saturating_add(in_flight))",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
-    "filter": "rm_16_stop_bound_is_at_or_after_plus_three"
+    "filter": "rm_16_stop_bound_is_at_or_after_plus_five"
   },
   {
     "id": "N47S5-17",
@@ -14651,7 +14651,7 @@
     "id": "N47S5-62",
     "name": "5a: a Stop never lowers a finite front (the superseded M2 rule; a kept chain is capped at the Stop's bound, rev 4)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop });",
+    "old": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed, gap)) } else { stop });",
     "new": "c.front = c.front;",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -15153,7 +15153,7 @@
     "id": "N47S5-88",
     "name": "5i (F10): a dispatch move is accepted without the clash test, so a pruned head moved into a later booking is not refused (retargeted in rev 29, F49)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "(!bookings.meets(new, front(new, len, false)?, None)).then_some(new)",
+    "old": "(!bookings.meets(new, front(bookings.gap, new, len, false)?, None)).then_some(new)",
     "new": "Some(new)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -15394,7 +15394,7 @@
    "crate": "ezsdr-radio",
    "test_bin": "staging",
    "filter": "rm_15_place_tests_the_full_front",
-   "old": "front(k, len, join.is_some())?",
+   "old": "front(self.gap, k, len, join.is_some())?",
    "new": "k + 1"
  },
  {
@@ -15601,8 +15601,8 @@
     "id": "N47S5-137",
     "name": "rev 29 (F50): a booking whose front overflows the clock panics (debug) instead of being refused: the checked front is replaced by a plain sum",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(2),",
-    "new": "Some(len) if joined || len > CLOSED_SHORT_MAX => Some(start + len + 2),",
+    "old": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),",
+    "new": "Some(len) if joined || len > CLOSED_SHORT_MAX => Some(start + len + HELD_TAIL_FRONT),",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_a_front_past_the_clock_is_refused_without_a_panic_or_a_change"
@@ -15641,7 +15641,7 @@
     "id": "N47S5-141",
     "name": "rev 30 (S2): a surviving short head keeps its joined front, not its standalone one (remove_head does not set the front)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.front = front(c.start, Some(c.end - c.start), false).unwrap_or(c.front);",
+    "old": "c.front = front(gap, c.start, Some(c.end - c.start), false).unwrap_or(c.front);",
     "new": "let _ = c.end - c.start;",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -15795,7 +15795,7 @@
     "new": "bookings.accept(start, Some(len + 1), 0, |_| 0, i64::MIN)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
-    "filter": "the_record_front_is_ten_samples_past_the_transmitted_end_of_a_head"
+    "filter": "the_record_front_is_the_gap_past_the_transmitted_end_of_a_head"
   },
   {
     "id": "N47S5-160",
@@ -16043,14 +16043,14 @@
   },
   {
     "id": "N47S5-184",
-    "name": "stage 5 bench (T3 (b) raw): a late report after the close at c+3 or c+4 does not fail (iii::close_pair_verdict)",
+    "name": "stage 5 bench (T3 (b) raw): a late report after the close at c+5 does not fail (iii::close_pair_verdict)",
     "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
     "old": "if !late.is_empty() {",
     "new": "if false {",
     "scope": "pub fn close_pair_verdict",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
-    "filter": "a_close_is_judged_at_c_plus_three_and_four_and_c_plus_two_is_only_printed"
+    "filter": "a_close_is_judged_at_c_plus_five_and_c_plus_three_and_four_are_only_printed"
   },
   {
     "id": "N47S5-185",
@@ -16188,29 +16188,29 @@
   },
   {
     "id": "N49B-01",
-    "name": "5a (B1): a closed short burst of 1 to 32 samples fronts nine past its transmitted end, not ten (RM-15)",
+    "name": "5a (B1): a closed short burst of 1 to 32 samples fronts nine past its transmitted end, not the gap (15 at 1 MS/s, RM-15)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "start.checked_add(len.max(4))?.checked_add(CLOSED_SHORT_GAP)",
+    "old": "start.checked_add(len.max(4))?.checked_add(gap?)",
     "new": "start.checked_add(len.max(4))?.checked_add(9)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
-    "filter": "rm_15_closed_burst_front_is_end_plus_ten"
+    "filter": "rm_15_closed_burst_front_is_end_plus_gap"
   },
   {
     "id": "N49B-02",
-    "name": "5a (B1): a 32-sample closed head is not short (its front is its end plus two)",
+    "name": "5a (B1): a 32-sample closed head is not short (its front is its end plus four, not the gap)",
     "file": "crates/ezsdr-radio/src/staging.rs",
     "old": "Some(len) if joined || len > CLOSED_SHORT_MAX =>",
     "new": "Some(len) if joined || len >= CLOSED_SHORT_MAX =>",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
-    "filter": "rm_15_closed_burst_front_is_end_plus_ten"
+    "filter": "rm_15_closed_burst_front_is_end_plus_gap"
   },
   {
     "id": "N49B-03",
     "name": "5a (B1): a Stop caps a kept closed short head at its bound (RM-16, #82: the kept head keeps its own front)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop }",
+    "old": "if c.short_head() { stop.max(c.own_fronts(handed, gap)) } else { stop }",
     "new": "stop",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -16220,7 +16220,7 @@
     "id": "N49B-04",
     "name": "5a (B1): a Stop's region of a dropped short head reaches only the Stop's bound, not the head's own front (RM-16, Q1)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.own_fronts(handed).max(stop) } else { stop }",
+    "old": "c.own_fronts(handed, self.gap).max(stop) } else { stop }",
     "new": "stop } else { stop }",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -16248,33 +16248,33 @@
   },
   {
     "id": "N49B-05",
-    "name": "B2: the owner's short-burst discriminator is dropped, so a closed first send of at most 32 samples fronts at +1 (UR-22)",
+    "name": "step F: the owner's short-burst discriminator is dropped, so a closed first send of at most 32 samples fronts at +3 (UR-22)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { CLOSED_SHORT_GAP } else { 1 };",
-    "new": "let gap = 1;",
+    "old": "let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { self.short_gap(clock) } else { CLOSE_GAP };",
+    "new": "let gap = CLOSE_GAP;",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_23_a_closed_short_burst_s_owner_front_is_ten_past_its_end"
+    "filter": "ur_23_a_closed_short_burst_s_owner_front_is_gap_past_its_end"
   },
   {
     "id": "N49B-06",
-    "name": "B2: the FakeDevice's short-burst guard is nine samples, not ten (UR-33)",
+    "name": "step F: the FakeDevice's guard is one sample short of the gap (UR-33)",
     "file": "crates/ezsdr-radio-uhd/src/device.rs",
-    "old": "end + 10 * ratio",
-    "new": "end + 9 * ratio",
+    "old": "Some(end + gap * ratio)",
+    "new": "Some(end + (gap - 1) * ratio)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_33_a_timed_sob_within_ten_of_a_closed_short_burst_is_refused"
+    "filter": "ur_33_a_timed_sob_within_the_gap_of_a_closed_short_burst_is_refused"
   },
   {
     "id": "N49B-07",
-    "name": "B2: the FakeDevice sets the short-burst guard after every closed burst, not only one of at most 32 samples (UR-33)",
+    "name": "step F: the FakeDevice gives every closed burst the short-burst gap, not only one of at most 32 samples (UR-33)",
     "file": "crates/ezsdr-radio-uhd/src/device.rs",
-    "old": "(self.burst_samples <= SHORT_BURST_MAX)",
-    "new": "(true)",
+    "old": "self.burst_samples <= SHORT_BURST_MAX",
+    "new": "true",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_33_a_closed_burst_over_32_keeps_the_gap_of_one"
+    "filter": "ur_33_a_closed_burst_over_32_keeps_the_gap_of_three"
   },
   {
     "id": "N49B-08",
@@ -16298,13 +16298,13 @@
   },
   {
     "id": "N49B-10",
-    "name": "B2: the owner's short-burst test ignores the SOB framing, so a continuation closing a 32-sample burst fronts at +10 (UR-22, Q5)",
+    "name": "step F: the owner's short-burst test ignores the SOB framing, so a continuation closing a 32-sample burst fronts at +g (UR-22, Q5)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { CLOSED_SHORT_GAP } else { 1 };",
-    "new": "let gap = if device_count as i64 <= CLOSED_SHORT_MAX { CLOSED_SHORT_GAP } else { 1 };",
+    "old": "let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { self.short_gap(clock) } else { CLOSE_GAP };",
+    "new": "let gap = if device_count as i64 <= CLOSED_SHORT_MAX { self.short_gap(clock) } else { CLOSE_GAP };",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_23_a_continuation_that_closes_a_burst_keeps_the_front_one_past_its_end"
+    "filter": "ur_23_a_continuation_that_closes_a_burst_keeps_the_front_three_past_its_end"
   },
   {
     "id": "N49B-13",
@@ -16330,8 +16330,8 @@
     "id": "N49B-15",
     "name": "B (Sol finding 1): a Stop caps a kept short head with joined pieces at the Stop (RM-16)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.short_head() { stop.max(c.own_fronts(handed)) } else { stop }",
-    "new": "c.closed_short() { stop.max(c.own_fronts(handed)) } else { stop }",
+    "old": "c.short_head() { stop.max(c.own_fronts(handed, gap)) } else { stop }",
+    "new": "c.closed_short() { stop.max(c.own_fronts(handed, gap)) } else { stop }",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_a_stop_keeps_a_short_head_s_front_with_joined_pieces"
@@ -16370,7 +16370,7 @@
     "id": "N49B-19",
     "name": "Sol fix round, item 1: a Stop cuts a cancelled short head at the front of its long piece, not its own front (RM-16)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.own_fronts(handed).max(stop)",
+    "old": "c.own_fronts(handed, self.gap).max(stop)",
     "new": "c.front.max(stop)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -16380,7 +16380,7 @@
     "id": "N49B-20",
     "name": "Sol fix round, item 1: a Stop keeps a short head's front past its own front, through a long piece behind it (RM-16)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop });",
+    "old": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed, gap)) } else { stop });",
     "new": "c.front = if c.short_head() { c.front } else { c.front.min(stop) };",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -16468,10 +16468,10 @@
   },
   {
     "id": "O1-M5",
-    "name": "O1a: the owner's window is four samples wider, so it hands payload past the Stop bound (RM-16)",
+    "name": "O1a: the owner's window is ten samples wider, so it hands payload past the Stop bound (RM-16)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
     "old": "let window_cut = clock.at_or_after(now.saturating_add(window));",
-    "new": "let window_cut = clock.at_or_after(now.saturating_add(window)) + 4;",
+    "new": "let window_cut = clock.at_or_after(now.saturating_add(window)) + 10;",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "o1_uhd_t3b_a_stop_cannot_find_payload_past_its_bound"
@@ -16705,5 +16705,275 @@
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_channel",
     "filter": "e1_mock_q10_a_booking_a_stop_and_a_booking_in_one_step"
-  }
+  },
+  {
+    "id": "N49F-01",
+    "name": "closed_short_gap rounds down instead of up",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "num.div_ceil(den)",
+    "new": "num / den",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_closed_short_gap_is_fifteen_microseconds_or_three_samples"
+  },
+  {
+    "id": "N49F-02",
+    "name": "closed_short_gap has no floor of three samples",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": ".unwrap_or(i64::MAX).max(CLOSE_GAP)",
+    "new": ".unwrap_or(i64::MAX)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_closed_short_gap_is_fifteen_microseconds_or_three_samples"
+  },
+  {
+    "id": "N49F-03",
+    "name": "closed_short_gap keeps 10 microseconds, not 15",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "u128::from(ticks_den) * 15",
+    "new": "u128::from(ticks_den) * 10",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_closed_short_gap_is_fifteen_microseconds_or_three_samples"
+  },
+  {
+    "id": "N49F-04",
+    "name": "closed_short_gap drops the denominator of a non-integral clock ratio",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "u128::from(ticks_den)",
+    "new": "1",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_closed_short_gap_is_fifteen_microseconds_or_three_samples"
+  },
+  {
+    "id": "N49F-05",
+    "name": "a short head's front keeps one fixed gap, whatever the stream's rate",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": ".checked_add(gap?)",
+    "new": ".checked_add(gap.map(|_| 15)?)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_1_to_3_sample_burst_front_is_transmitted_end_plus_gap"
+  },
+  {
+    "id": "N49F-06",
+    "name": "an unarmed record books a short head with no guard",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": ".checked_add(gap?)",
+    "new": ".checked_add(gap.unwrap_or(0))",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_an_unarmed_record_refuses_a_closed_short_head"
+  },
+  {
+    "id": "N49F-07",
+    "name": "a Stop's handed bound is read as the stop minus three",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "let handed = stop - STOP_FRONT;",
+    "new": "let handed = stop - 3;",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_dropped_short_head_inside_five_of_the_bound_was_not_handed"
+  },
+  {
+    "id": "N49F-08",
+    "name": "the transmit grid stops short of decimation 200",
+    "file": "crates/ezsdr-radio/src/x3xx.rs",
+    "old": "**n <= TX_MAX_DECIMATION",
+    "new": "**n < TX_MAX_DECIMATION",
+    "crate": "ezsdr-radio",
+    "test_bin": "device",
+    "filter": "x3xx_the_transmit_grid_is_the_ddc_s_up_to_decimation_200"
+  },
+  {
+    "id": "N49F-09",
+    "name": "the transmit grid is built descending (a Values grid is ascending)",
+    "file": "crates/ezsdr-radio/src/x3xx.rs",
+    "old": ".filter(|n| **n <= TX_MAX_DECIMATION).rev()",
+    "new": ".filter(|n| **n <= TX_MAX_DECIMATION)",
+    "crate": "ezsdr-radio",
+    "test_bin": "device",
+    "filter": "x3xx_the_transmit_grid_is_the_ddc_s_up_to_decimation_200"
+  },
+  {
+    "id": "N49F-10",
+    "name": "a transmit stream's rate is coerced on the device grid",
+    "file": "crates/ezsdr-radio/src/channels.rs",
+    "old": "constraint, direction.grid(self), Some(",
+    "new": "constraint, &self.rates, Some(",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_8_a_transmit_rate_below_one_msps_is_rejected_on_x3xx"
+  },
+  {
+    "id": "N49F-11",
+    "name": "a transmit stream declares the device grid as its capability",
+    "file": "crates/ezsdr-radio/src/channels.rs",
+    "old": "rates(direction.grid(self))",
+    "new": "rates(&self.rates)",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_29_the_layout_description_builds_the_stream_tree"
+  },
+  {
+    "id": "N49F-12",
+    "name": "the measurement validator judges a transmit condition's rate on the device grid",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "!channels::rate_grid(rx, description).contains(stream.sample_rate_hz)",
+    "new": "!description.rates.contains(stream.sample_rate_hz)",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "measurement_profile_value_of_a_transmit_stream_is_the_restricted_grid"
+  },
+  {
+    "id": "N49F-13",
+    "name": "the profile value of a transmit stream's rate is the device grid",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "Worst::Grid(GridValue::from_grid(channels::rate_grid(rx, description)))",
+    "new": "Worst::Grid(GridValue::from_grid(&description.rates))",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "measurement_profile_value_of_a_transmit_stream_is_the_restricted_grid"
+  },
+  {
+    "id": "N49F-14",
+    "name": "UR-13 compares a transmit stream with the restricted transmit grid, not the device's",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "rate_set_matches(&self.description.rates, &ranges)",
+    "new": "rate_set_matches(if dir == Dir::Tx { &self.description.tx_rates } else { &self.description.rates }, &ranges)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "ur_13_a_transmit_stream_is_compared_with_the_whole_device_grid"
+  },
+  {
+    "id": "N49F-15",
+    "name": "the Mock arms its record with a fixed 15-sample gap",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "ezsdr_radio::staging::closed_short_gap(root_rate.num(), ratio.num(), ratio.den())",
+    "new": "15",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_a_short_head_front_follows_the_stream_s_rate"
+  },
+  {
+    "id": "N49F-16",
+    "name": "the Mock arms its record with a denominator of one",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "closed_short_gap(root_rate.num(), ratio.num(), ratio.den())",
+    "new": "closed_short_gap(root_rate.num(), ratio.num(), 1)",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_a_short_head_front_follows_the_stream_s_rate"
+  },
+  {
+    "id": "N49F-17",
+    "name": "the Mock arms every transmit stream with the gap of stream 0's rate (2 MS/s)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "closed_short_gap(root_rate.num(), ratio.num(), ratio.den())",
+    "new": "closed_short_gap(root_rate.num(), 500, 1)",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_layout",
+    "filter": "mr_16_two_transmit_streams_each_front_at_their_own_gap"
+  },
+  {
+    "id": "N49F-18",
+    "name": "the UHD stream's record is armed with a fixed 15-sample gap",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "stream.arm_record(core.mcr, clock);",
+    "new": "stream.busy.arm(15);",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "s1_parity_short_head_region_is_end_plus_gap"
+  },
+  {
+    "id": "N49F-19",
+    "name": "a second arm keeps the first gap",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.gap = Some(gap);",
+    "new": "self.gap.get_or_insert(gap);",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_arming_again_replaces_the_gap"
+  },
+  {
+    "id": "N49F-20",
+    "name": "the transmit grid is not capped at decimation 200 (widened to 255)",
+    "file": "crates/ezsdr-radio/src/x3xx.rs",
+    "old": "**n <= TX_MAX_DECIMATION",
+    "new": "**n <= 255",
+    "crate": "ezsdr-radio",
+    "test_bin": "device",
+    "filter": "x3xx_the_transmit_grid_is_the_ddc_s_up_to_decimation_200"
+  },
+ {
+  "id": "N49F-21",
+  "name": "step F: uhd-tx's gap ignores the stream's rate (a constant 1 MS/s)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "super::core::stream_gap(self.core.mcr, clock)",
+  "new": "15",
+  "filter": "ur_23_a_closed_short_burst_s_owner_front_is_gap_past_its_end",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib"
+ },
+ {
+  "id": "N49F-22",
+  "name": "step F: the FakeDevice's gap rounds down (42 for 43 at N = 70)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "(ticks + i128::from(ratio) - 1) / i128::from(ratio.max(1))",
+  "new": "ticks / i128::from(ratio.max(1))",
+  "filter": "ur_33_a_timed_sob_before_the_gap_after_a_closed_short_burst_is_refused_at_each_rate",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib"
+ },
+ {
+  "id": "N49F-23",
+  "name": "step F: the FakeDevice's gap has no floor of three samples",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": ".unwrap_or(i64::MAX).max(LONG_CLOSE_GAP)",
+  "new": ".unwrap_or(i64::MAX)",
+  "filter": "ur_33_the_fake_guard_has_a_floor_of_three_samples_at_a_slow_rate",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib"
+ },
+ {
+  "id": "N49F-24",
+  "name": "step F: the FakeDevice keeps no gap after a closed burst of more than 32 samples",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "else { LONG_CLOSE_GAP }",
+  "new": "else { 0 }",
+  "filter": "ur_33_a_timed_sob_within_three_samples_of_a_longer_close_is_refused",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib"
+ },
+ {
+  "id": "N49F-25",
+  "name": "step F: the FakeDevice keeps one sample, not three, after a closed burst of more than 32 samples",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "else { LONG_CLOSE_GAP }",
+  "new": "else { 1 }",
+  "filter": "ur_33_a_timed_sob_within_three_samples_of_a_longer_close_is_refused",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib"
+ },
+ {
+  "id": "N49F-26",
+  "name": "step F: uhd-tx's abandon fronts at the cursor + 2 + 3, not + g (D1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "cursor.saturating_add(2).saturating_add(self.short_gap(clock))",
+  "new": "cursor.saturating_add(2).saturating_add(CLOSE_GAP)",
+  "filter": "ur_23_the_abandon_front_follows_the_rate",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib"
+ },
+ {
+  "id": "N49F-27",
+  "name": "step F: the record is armed with a constant 1 MS/s gap, not the stream's",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "self.busy.arm(stream_gap(mcr, clock));",
+  "new": "self.busy.arm(15);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_short_head_front_follows_the_stream_s_rate"
+ }
 ]

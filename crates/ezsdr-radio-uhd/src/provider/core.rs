@@ -14,7 +14,7 @@ use ezsdr_kernel::stream::{DataLink, Direction};
 use ezsdr_kernel::time::{ClockRegistry, Duration, Rescaled, TimeAuthority, TimeError, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::CommandRejectedPayload;
-use ezsdr_radio::staging::{Bookings, TxList, stop_bound, stop_sample};
+use ezsdr_radio::staging::{Bookings, TxList, closed_short_gap, stop_bound, stop_sample};
 use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, StreamKey};
 use serde_json::{Value as Json, json};
 
@@ -356,7 +356,6 @@ impl Drop for Claim {
 
 /// One stream's own state (RM-29, design 33 D15): stream `k` of its direction, and not the
 /// instance's other streams.
-#[derive(Default)]
 pub(crate) struct StreamState {
     /// The configuration each segment begins with, by the command that began it (UR-25).
     pub configs: BTreeMap<u64, Arc<ColdConfig>>,
@@ -396,7 +395,37 @@ pub(crate) struct Playing {
     pub period: i64,
 }
 
+impl Default for StreamState {
+    /// A stream with no clock yet: its record is unarmed (RM-15) until [`StreamState::arm_record`].
+    fn default() -> StreamState {
+        StreamState {
+            configs: BTreeMap::new(),
+            set: DeviceSet::default(),
+            generation: 0,
+            configured: None,
+            claims: Claims::default(),
+            delivered: None,
+            clock: None,
+            busy: Bookings::unarmed(),
+            list: TxList::default(),
+            playing: None,
+        }
+    }
+}
+
+/// RM-15, UR-22: the samples a closed short device burst's successor keeps on a stream with `clock` (one root tick is one master-clock tick, so
+/// the rate is `mcr / n`). The one place uhd-tx's own front and the record's arming read it.
+pub fn stream_gap(mcr: u64, clock: Clock) -> i64 {
+    closed_short_gap(mcr, clock.n as u64, 1)
+}
+
 impl StreamState {
+    /// RM-15: a transmit stream's record learns its closed short burst gap from its clock (one root tick is one master-clock tick, so the
+    /// stream's rate is `mcr / n`). Called wherever the stream's clock is registered; the rate is fixed for the Run (RM-27).
+    pub fn arm_record(&mut self, mcr: u64, clock: Clock) {
+        self.busy.arm(stream_gap(mcr, clock));
+    }
+
     /// RM-16: a `Stop` taking effect at root tick `at` ends the stream's transmit bookings: the
     /// value rule and the overlap rule are both bounded by the stream's clock. A stream with no clock has none.
     /// Returns the root tick the bookings end at (the `tx_stop_applied` timing row).
@@ -1415,7 +1444,11 @@ impl Core {
         let ratio = ezsdr_kernel::time::Rational::new(n as u64, 1).map_err(|e| e.to_string())?;
         let handle = self.clocks.declare_sample_clock(stream, self.root, ratio).map_err(|e| e.to_string())?;
         let domain = self.clocks.register_sample_clock(&handle, origin).map_err(|e| e.to_string())?;
-        Ok(Clock { domain, origin, n })
+        let clock = Clock { domain, origin, n };
+        if dir == Dir::Tx {
+            lock(&self.streams).stream_mut(stream_key(Dir::Tx, k)).arm_record(self.mcr, clock);
+        }
+        Ok(clock)
     }
 }
 

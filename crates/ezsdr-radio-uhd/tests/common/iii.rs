@@ -672,10 +672,46 @@ pub fn timed_sends_verdict(faults: Verdict, sends: &TimedSends) -> Verdict {
     }
 }
 
-/// The record's front of a standalone head of `len` samples at `start` (RM-15, `staging.rs` `front`), read through `Bookings`: the
-/// head is accepted and the first sample a booking after it may take is asked of the record.
-pub fn head_front(start: i64, len: i64) -> i64 {
-    let mut bookings = Bookings::default();
+/// The closed short gap at `rate` S/s on the device's 200 MHz root, `max(3, ceil(15 us x rate))` (RM-15), as the Providers arm their record.
+pub fn gap_at(rate: f64) -> i64 {
+    ezsdr_radio::staging::closed_short_gap(MCR as u64, (MCR as f64 / rate).round() as u64, 1)
+}
+
+/// The record of a transmit stream at `rate` S/s on the device's 200 MHz root, armed with [`gap_at`] as the Providers arm theirs.
+pub fn armed_record(rate: f64) -> Bookings {
+    let mut bookings = Bookings::unarmed();
+    bookings.arm(gap_at(rate));
+    bookings
+}
+
+/// The shape a long close must have for the 3-sample margin check (step F): among the transmit sends `sends` of a probe (`ProbeDevice::rows`,
+/// flushes left out), the send before the last start of burst is the held tail and one zero, two samples on every channel with
+/// end-of-burst and no start, and that start is timed exactly `gap` samples (`per` ticks each) past the close's exclusive end. `Err` says what
+/// differed, so the trial reports INCONCLUSIVE: a delayed turn that sends the last payload with its own end-of-burst closes differently.
+pub fn long_close_shape(sends: &[Json], per: i64, gap: i64) -> Result<(), String> {
+    let starts: Vec<usize> = sends.iter().enumerate().filter(|(_, row)| row["sob"] == true).map(|(i, _)| i).collect();
+    let (Some(&second), true) = (starts.last(), starts.len() >= 2) else {
+        return Err(format!("{} start(s) of burst, two needed", starts.len()));
+    };
+    let close = &sends[second - 1];
+    let counts: Vec<u64> = close["sample_counts"].as_array().map(|counts| counts.iter().filter_map(Json::as_u64).collect()).unwrap_or_default();
+    if close["eob"] != true || close["sob"] == true || counts.is_empty() || counts.iter().any(|count| *count != 2) {
+        return Err(format!("the send before the second burst is not a two-sample close: {close}"));
+    }
+    let (Some(close_at), Some(start_at)) = (close["at"].as_i64(), sends[second]["at"].as_i64()) else {
+        return Err("the close or the second burst is not timed".to_owned());
+    };
+    let found = (start_at - close_at) / per - 2;
+    if (start_at - close_at) % per != 0 || found != gap {
+        return Err(format!("the second burst starts {found} samples past the close's end, {gap} planned"));
+    }
+    Ok(())
+}
+
+/// The record's front of a standalone head of `len` samples at `start` on a stream at `rate` (RM-15, `staging.rs` `front`), read through
+/// `Bookings`: the head is accepted and the first sample a booking after it may take is asked of the record.
+pub fn head_front(start: i64, len: i64, rate: f64) -> i64 {
+    let mut bookings = armed_record(rate);
     bookings.accept(start, Some(len), 0, |_| 0, i64::MIN).expect("the first booking is accepted");
     bookings.first_free(start, false, 0, |_| 0, i64::MIN).expect("a front")
 }
@@ -769,13 +805,14 @@ pub fn stop_edge(power: &[(i64, f64)], step: i64, steady: usize, quiet: usize) -
 }
 
 /// T3 (b) raw (S3): the late reports after a burst closed with the Module's two zeros at cursor `c`, and the next burst at `c + offset`
-/// (`trials` are `(offset, async codes)`). PASS when every trial at `c+3` and `c+4` has two acknowledgements and no late or underflow
-/// report; FAIL when one of them is late or underflows; INCONCLUSIVE when a trial lacks its acknowledgements. `c+2` is a control the
-/// caller prints and does not judge here.
+/// (`trials` are `(offset, async codes)`). PASS when every trial at `c+5`, the front (the close's end `c+2` plus three), has two
+/// acknowledgements and no late or underflow report; FAIL when one of them is late or underflows; INCONCLUSIVE when a trial lacks its
+/// acknowledgements. `c+3` and `c+4` are observations the caller prints and does not judge here (the sweep of 2026-11-10 needs one sample
+/// at 50 MS/s and below and two or three at 100 and 200 MS/s).
 pub fn close_pair_verdict(trials: &[(i64, Vec<String>)]) -> Verdict {
-    let judged: Vec<&(i64, Vec<String>)> = trials.iter().filter(|(offset, _)| *offset == 3 || *offset == 4).collect();
+    let judged: Vec<&(i64, Vec<String>)> = trials.iter().filter(|(offset, _)| *offset == 5).collect();
     if judged.is_empty() {
-        return Verdict::Inconclusive("no trial at c+3 or c+4".to_owned());
+        return Verdict::Inconclusive("no trial at c+5".to_owned());
     }
     let late: Vec<String> = judged
         .iter()
@@ -786,9 +823,9 @@ pub fn close_pair_verdict(trials: &[(i64, Vec<String>)]) -> Verdict {
     }
     let incomplete = judged.iter().filter(|(_, codes)| codes.iter().filter(|code| code.as_str() == "BurstAck").count() != 2).count();
     if incomplete > 0 {
-        Verdict::Inconclusive(format!("{incomplete} of {} trial(s) at c+3 or c+4 without two acknowledgements", judged.len()))
+        Verdict::Inconclusive(format!("{incomplete} of {} trial(s) at c+5 without two acknowledgements", judged.len()))
     } else {
-        Verdict::Pass(format!("{} trial(s) at c+3 and c+4, each with two acknowledgements and no late or underflow report", judged.len()))
+        Verdict::Pass(format!("{} trial(s) at c+5, each with two acknowledgements and no late or underflow report", judged.len()))
     }
 }
 
@@ -1265,30 +1302,34 @@ mod stage5_tests {
     }
 
     #[test]
-    fn the_record_front_is_ten_samples_past_the_transmitted_end_of_a_head() {
-        assert_eq!(head_front(0, 1), 14);
-        assert_eq!(head_front(0, 3), 14);
-        assert_eq!(head_front(0, 4), 14);
-        assert_eq!(head_front(0, 10), 20);
-        assert_eq!(head_front(0, 32), 42);
-        assert_eq!(head_front(0, 30_000), 30_002);
-        for (n, padded) in [(1i64, 4i64), (2, 4), (3, 4), (4, 4), (10, 10), (32, 32)] {
-            assert_eq!(head_front(0, n) - padded, 10, "a standalone head of {n} samples");
+    fn the_record_front_is_the_gap_past_the_transmitted_end_of_a_head() {
+        // At 1 MS/s the gap is 15 samples; a head longer than 32 fronts at its end plus four.
+        assert_eq!(head_front(0, 1, 1e6), 19);
+        assert_eq!(head_front(0, 3, 1e6), 19);
+        assert_eq!(head_front(0, 4, 1e6), 19);
+        assert_eq!(head_front(0, 10, 1e6), 25);
+        assert_eq!(head_front(0, 32, 1e6), 47);
+        assert_eq!(head_front(0, 30_000, 1e6), 30_004);
+        // The gap follows the rate: max(3, ceil(15 us x rate)), written out here from the arithmetic, not from `closed_short_gap`.
+        for (rate, gap) in [(1e6, 15), (2e6, 30), (200e6 / 70.0, 43), (10e6, 150), (100e6, 1_500), (200e6, 3_000)] {
+            for (n, padded) in [(1i64, 4i64), (2, 4), (3, 4), (4, 4), (10, 10), (32, 32)] {
+                assert_eq!(head_front(0, n, rate) - padded, gap, "a standalone head of {n} samples at {rate} S/s");
+            }
         }
     }
 
     #[test]
     fn a_booking_after_a_head_the_stop_cuts_waits_for_its_front() {
-        // R5-m5 (h): the head at c−1 starts at the Stop's cut t and is dropped; the region holds it to its own front (RM-16), not to c+3 = stop.
-        let (c, stop) = (1_000, 1_003);
-        let mut bookings = Bookings::default();
+        // R5-m5 (h): the head at c−1 starts at the Stop's cut t and is dropped; the region holds it to its own front (RM-16), not to c+5 = stop.
+        let (c, stop) = (1_000, 1_005);
+        let mut bookings = armed_record(1e6);
         bookings.accept(c - 1, Some(1), 0, |_| 0, i64::MIN).unwrap();
         bookings.halt(c - 1, stop);
-        // The head is handed over (start c − 1 < stop − 3), so the region reaches its own front, c + 13 (RM-16).
-        for k in 3..13 {
+        // The head is handed over (start c − 1 < stop − 5), so the region reaches its own front, c + 3 + 15 = c + 18 (RM-16).
+        for k in 3..18 {
             assert!(bookings.accept(c + k, Some(3), 0, |_| 0, i64::MIN).is_err(), "a booking at c + {k} is inside the head's front");
         }
-        assert!(bookings.accept(c + 13, Some(3), 0, |_| 0, i64::MIN).is_ok(), "c + 13 is the front");
+        assert!(bookings.accept(c + 18, Some(3), 0, |_| 0, i64::MIN).is_ok(), "c + 18 is the front");
     }
 
     #[test]
@@ -1371,14 +1412,33 @@ mod stage5_tests {
     }
 
     #[test]
-    fn a_close_is_judged_at_c_plus_three_and_four_and_c_plus_two_is_only_printed() {
+    fn a_long_close_has_the_held_tail_and_one_zero_and_a_second_burst_three_samples_past_it() {
+        let send = |at: i64, count: u64, sob: bool, eob: bool| json!({ "call": "tx_send", "at": at, "sample_counts": [count], "sob": sob, "eob": eob });
+        let per = 200;
+        let first = send(1_000, 20_000, true, false);
+        let close = send(1_000 + 19_999 * per, 2, false, true);
+        let end = 1_000 + 20_001 * per;
+        assert_eq!(long_close_shape(&[first.clone(), close.clone(), send(end + 3 * per, 1_000, true, true)], per, 3), Ok(()));
+        assert!(long_close_shape(&[first.clone(), close.clone(), send(end + 4 * per, 1_000, true, true)], per, 3).is_err(), "four past is not the margin");
+        assert!(
+            long_close_shape(&[first.clone(), send(1_000 + 19_998 * per, 20_000, false, true), send(end + 2 * per, 1_000, true, true)], per, 3).is_err(),
+            "the last payload sent with its own end-of-burst"
+        );
+        assert!(long_close_shape(&[first, close], per, 3).is_err(), "one burst only");
+    }
+
+    #[test]
+    fn a_close_is_judged_at_c_plus_five_and_c_plus_three_and_four_are_only_printed() {
         let ok = |codes: &[&str]| codes.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>();
-        assert!(matches!(close_pair_verdict(&[(3, ok(&["BurstAck", "BurstAck"])), (4, ok(&["BurstAck", "BurstAck"]))]), Verdict::Pass(_)));
-        assert!(matches!(close_pair_verdict(&[(2, ok(&["BurstAck", "TimeError", "BurstAck"])), (3, ok(&["BurstAck", "BurstAck"]))]), Verdict::Pass(_)), "a late c+2 is the control, not the verdict");
-        assert!(matches!(close_pair_verdict(&[(3, ok(&["BurstAck", "TimeError", "BurstAck"]))]), Verdict::Fail(_)));
-        assert!(matches!(close_pair_verdict(&[(4, ok(&["BurstAck", "UnderflowInPacket"]))]), Verdict::Fail(_)));
-        assert!(matches!(close_pair_verdict(&[(3, ok(&["BurstAck"]))]), Verdict::Inconclusive(_)));
-        assert!(matches!(close_pair_verdict(&[(2, ok(&["BurstAck", "BurstAck"]))]), Verdict::Inconclusive(_)), "no judged trial");
+        assert!(matches!(close_pair_verdict(&[(5, ok(&["BurstAck", "BurstAck"])), (5, ok(&["BurstAck", "BurstAck"]))]), Verdict::Pass(_)));
+        assert!(
+            matches!(close_pair_verdict(&[(3, ok(&["BurstAck", "TimeError", "BurstAck"])), (5, ok(&["BurstAck", "BurstAck"]))]), Verdict::Pass(_)),
+            "a late c+3 is an observation, not the verdict"
+        );
+        assert!(matches!(close_pair_verdict(&[(5, ok(&["BurstAck", "TimeError", "BurstAck"]))]), Verdict::Fail(_)));
+        assert!(matches!(close_pair_verdict(&[(5, ok(&["BurstAck", "UnderflowInPacket"]))]), Verdict::Fail(_)));
+        assert!(matches!(close_pair_verdict(&[(5, ok(&["BurstAck"]))]), Verdict::Inconclusive(_)));
+        assert!(matches!(close_pair_verdict(&[(4, ok(&["BurstAck", "BurstAck"]))]), Verdict::Inconclusive(_)), "no judged trial");
     }
 
     #[test]

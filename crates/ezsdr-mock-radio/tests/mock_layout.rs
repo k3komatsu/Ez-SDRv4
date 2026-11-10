@@ -438,9 +438,11 @@ fn mr_38_the_tree_and_capabilities_are_the_layout_s() {
     assert_eq!(tree.capabilities[&key("radio.rx.c2.stream")], range(-1.0, 2.0));
     // Every stream's rate is the motherboard's grid, and the current keys are gone.
     let decimations: Vec<Scalar> = ezsdr_radio::x3xx::decimations().iter().map(|n| Scalar::try_from(200_000_000.0 / *n as f64).unwrap()).collect();
-    for stream in ["radio.rx.s0.sample_rate_hz", "radio.rx.s1.sample_rate_hz", "radio.rx.s2.sample_rate_hz", "radio.tx.s0.sample_rate_hz"] {
+    for stream in ["radio.rx.s0.sample_rate_hz", "radio.rx.s1.sample_rate_hz", "radio.rx.s2.sample_rate_hz"] {
         assert_eq!(tree.capabilities[&key(stream)], ezsdr_kernel::spec::CapabilityValue::AnyOf { values: decimations.clone() }, "{stream}");
     }
+    // Transmit starts at 1 MS/s (KL-40): the first 200 decimations.
+    assert_eq!(tree.capabilities[&key("radio.tx.s0.sample_rate_hz")], ezsdr_kernel::spec::CapabilityValue::AnyOf { values: decimations[..200].to_vec() });
     assert!(
         !tree.capabilities.contains_key(&key("radio.rx.channels")) && !tree.capabilities.contains_key(&key("radio.rx.antenna")) && !tree.capabilities.contains_key(&key("radio.rx.sample_rate_hz"))
     );
@@ -589,6 +591,49 @@ fn mr_09_each_transmit_stream_has_its_own_clock_and_line() {
     assert!(reasons[0].starts_with("MR-25: cancelled by stop"), "{reasons:?}");
     harness.step(T0 + 4_100_000_000).unwrap();
     assert_eq!(harness.section("bursts").len(), 3);
+}
+
+#[test]
+fn mr_16_two_transmit_streams_each_front_at_their_own_gap() {
+    // RM-15: a one-sample head is padded to four and fronts at 4 plus the gap of its own stream's rate: stream 0 at 2 MS/s keeps 30 samples,
+    // stream 1 at 1 MS/s keeps 15. A record armed with one stream's gap for both would refuse or accept the other's probe wrongly.
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c1.stream", eq(Scalar::from(1))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(2_000_000.0).unwrap())),
+        ("radio.tx.s1.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+    ];
+    let mut harness = built(Layout {
+        profile: "x3xx",
+        id: "mock",
+        rx: elements(&["0:A:ubx:0"]),
+        tx: elements(&["0:A:ubx:0", "0:B:basic_tx:0"]),
+        selector: &[],
+        constraints: &constraints,
+        env: &[],
+        ports: &["rx0"],
+    });
+    harness.arm_start(T0).unwrap();
+    let (s0, s1) = (harness.clocks_of("mock/tx/s0")[0].domain, harness.clocks_of("mock/tx/s1")[0].domain);
+    let (a0, a1) = (6_000_000, 4_000_000);
+    harness.push(burst("mock/tx/s0", s0, a0, 1));
+    harness.push(burst("mock/tx/s1", s1, a1, 1));
+    // One sample before each front: refused; at each front: accepted.
+    harness.push(burst("mock/tx/s0", s0, a0 + 4 + 29, 1));
+    harness.push(burst("mock/tx/s1", s1, a1 + 4 + 14, 1));
+    harness.push(burst("mock/tx/s0", s0, a0 + 4 + 30, 1));
+    harness.push(burst("mock/tx/s1", s1, a1 + 4 + 15, 1));
+    harness.step(T0 + 200_000_000).unwrap();
+    let reasons = harness.rejected();
+    assert_eq!(reasons.len(), 2, "{reasons:?}");
+    assert!(reasons.iter().all(|reason| reason.contains("overlaps an accepted booking")), "{reasons:?}");
+    // Which probes played pins which were refused: each head and the probe at its own stream's front, not the other stream's.
+    harness.step(T0 + 3_000_000_000).unwrap();
+    let mut targets: Vec<i64> = harness.section("bursts").iter().map(|row| row["target"]["ticks"].as_i64().unwrap()).collect();
+    targets.sort_unstable();
+    let mut expected = vec![a0, a1, a0 + 4 + 30, a1 + 4 + 15];
+    expected.sort_unstable();
+    assert_eq!(targets, expected, "the refused probes are s0 + 33 and s1 + 18, not the other way round");
 }
 
 #[test]

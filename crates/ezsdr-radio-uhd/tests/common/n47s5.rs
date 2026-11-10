@@ -26,6 +26,10 @@ use super::*;
 /// B6's loop delay (INFERRED). The stage 5 verdicts measure their own per trial; this is printed beside them and used by the older B tests.
 pub const LOOPBACK_DELAY_SAMPLES: i64 = 44;
 
+/// The transmit rates the front tests run at (step F): 1, 2, 2.857 142 857 (N = 70, the largest measured guard), 10, 100 and 200 MS/s. Each is
+/// `200 MHz / N` for an integer N, as `x3xx::tx_rates` computes it, so it lands on the grid.
+pub const FRONT_RATES: [f64; 6] = [1e6, 2e6, 200e6 / 70.0, 10e6, 100e6, 200e6];
+
 pub const ONSET_TOLERANCE: i64 = 50;
 
 pub const TONE_TOLERANCE_HZ: f64 = 10e3;
@@ -154,8 +158,9 @@ pub fn transmit_run(profile: &Json, device: Arc<dyn Device>, rate: Option<f64>) 
     run
 }
 
-/// One trial of T2's Module case. A calibration burst of 2 000 samples at 100 kHz starts at 15 ms, the head of `samples` samples at
-/// 40 ms, and a 10 000-sample 100 kHz tone at the record's front after it (`iii::head_front`); all are booked before the head is handed.
+/// One trial of T2's Module case. A calibration burst of 2 ms at 100 kHz starts at 15 ms, the head of `samples` samples at
+/// 40 ms, and a 10 ms 100 kHz tone at the record's front after it (`iii::head_front`); the two long bursts are lengths of time, not of
+/// samples, so that each spans many 25 µs capture windows at 200 MS/s too; all are booked before the head is handed.
 /// The calibration burst is the trial's first burst, so its onset is the loop delay of the trial (S5); the capture starts at 5 ms (S7).
 pub struct FrontTrial {
     pub admitted: bool,
@@ -167,14 +172,15 @@ pub struct FrontTrial {
 }
 
 pub fn front_trial(mut run: RunHandle, samples: usize, rate: f64) -> FrontTrial {
-    let (calibration, _) = waveform_of(&tone_wave(rate, 2_000, 100e3));
+    let per_ms = (rate / 1e3).round() as usize;
+    let (calibration, _) = waveform_of(&tone_wave(rate, 2 * per_ms, 100e3));
     let (head, _) = waveform_of(&vec![(0.4f32, 0.0f32); samples]);
-    let (tone, _) = waveform_of(&tone_wave(rate, 10_000, 100e3));
+    let (tone, _) = waveform_of(&tone_wave(rate, 10 * per_ms, 100e3));
     let cal = tx_at(&run, ms(15));
     let a = tx_at(&run, ms(40));
     let domain = a.domain();
     let a_k = a.ticks_in(domain).unwrap();
-    let b = TimePoint::new(domain, a_k + iii::head_front(0, samples as i64));
+    let b = TimePoint::new(domain, a_k + iii::head_front(0, samples as i64, rate));
     let capture_at = after_ticks(&run, ms(5));
     assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(80_000))]), None).unwrap()));
     assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(cal), &[]), Some(&calibration)).unwrap()));
@@ -192,6 +198,56 @@ pub fn front_trial(mut run: RunHandle, samples: usize, rate: f64) -> FrontTrial 
 pub fn front_outcome(trial: &FrontTrial) -> Verdict {
     let onset = tone_onset_of(&trial.manifest, trial.burst - ms(2), 100e3).map(|t| (t - trial.burst) / PER_1MSPS);
     iii::front_case_verdict(trial.admitted, &trial.refusals, iii::run_faults(&trial.manifest), burst_acks(&trial.manifest), 3, onset, first_delay_samples(&trial.manifest, 100e3), ONSET_TOLERANCE)
+}
+
+/// One trial of the long close at `rate` (step F, the margin check of the bench's 3-sample minimum at 200 MS/s): a Session burst of
+/// `LONG_CLOSE_SAMPLES` samples, so that the Module's first send is large and the device burst closes with its held tail, then a 1 ms
+/// burst booked at the record's front after it, the payload end plus four (`iii::head_front`).
+pub struct LongCloseTrial {
+    pub admitted: bool,
+    pub refusals: Vec<String>,
+    pub manifest: Manifest,
+    /// The probe's transmit sends and the ticks of a sample, for the shape check ([`iii::long_close_shape`]).
+    pub sends: Vec<Json>,
+    pub per: i64,
+}
+
+/// The samples of the long burst of [`long_close_trial`].
+pub const LONG_CLOSE_SAMPLES: usize = 20_000;
+
+pub fn long_close_trial(mut run: RunHandle, probe: &ProbeDevice, rate: f64) -> LongCloseTrial {
+    let (first, _) = waveform_of(&tone_wave(rate, LONG_CLOSE_SAMPLES, 100e3));
+    let (second, _) = waveform_of(&tone_wave(rate, (rate / 1e3).round() as usize, 100e3));
+    let a = tx_at(&run, ms(40));
+    let domain = a.domain();
+    let b = TimePoint::new(domain, a.ticks_in(domain).unwrap() + iii::head_front(0, LONG_CLOSE_SAMPLES as i64, rate));
+    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&first)).unwrap()));
+    let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&second)).unwrap();
+    wait(&mut run, ms(80));
+    let manifest = run.finish();
+    LongCloseTrial { admitted: admitted(&entry), refusals: refusals_of(&manifest, &entry), manifest, sends: data_sends(probe), per: (MCR as f64 / rate).round() as i64 }
+}
+
+/// The verdict of a long close: the booking at the front is admitted and not refused, no late or underflow report, and both bursts
+/// are acknowledged once.
+pub fn long_close_outcome(trial: &LongCloseTrial) -> Verdict {
+    let admission = iii::admission_verdict(trial.admitted, &trial.refusals);
+    if matches!(admission, Verdict::Fail(_)) {
+        return admission;
+    }
+    let clean = iii::fault_verdict(iii::run_faults(&trial.manifest), 0);
+    if matches!(clean, Verdict::Fail(_)) {
+        return clean;
+    }
+    // The margin is shown only when the run took the shape the check is about: the close is the held tail and one zero, and the second burst
+    // starts three samples past its end (the record's front, the payload end plus four).
+    if let Err(why) = iii::long_close_shape(&trial.sends, trial.per, 3) {
+        return Verdict::Inconclusive(format!("admitted and clean, but the run did not take the long-close shape: {why}"));
+    }
+    match burst_acks(&trial.manifest) {
+        2 => Verdict::Pass("the held tail and one zero closed the first burst, the second started three samples past it; both acknowledged, no late or underflow report".to_owned()),
+        acks => Verdict::Inconclusive(format!("{acks} BurstAck(s) for 2 bursts")),
+    }
 }
 
 /// One trial of T4: a 100 kHz repeat of 1 100 samples, then the switch to a 200 kHz repeat of 1 100 samples, untimed (`timed` false) or
@@ -335,11 +391,12 @@ pub fn untimed_burst_outcome(mut run: RunHandle) -> Verdict {
     let onset = placed.and_then(|k| tone_onset_of(&manifest, origin + k * per - ms(2), 200e3).map(|t| (t - (origin + k * per)) / per));
     let delay = first_delay_samples(&manifest, 100e3);
     println!("T5 (2): the untimed burst placed at sample {placed:?} after the timed one at {a_k}; onset {onset:?}; loop delay {delay:?} samples");
-    iii::untimed_burst_verdict(admitted(&b), &refusals_of(&manifest, &b), placed, iii::head_front(a_k, 30_000), iii::run_faults(&manifest), onset, delay, ONSET_TOLERANCE)
+    iii::untimed_burst_verdict(admitted(&b), &refusals_of(&manifest, &b), placed, iii::head_front(a_k, 30_000, 1e6), iii::run_faults(&manifest), onset, delay, ONSET_TOLERANCE)
 }
 
 /// `hw_b8_burst_one_sample_after_a_burst` for one case: a 30 000-sample burst A plays, and a 1 000-sample burst is booked at sample
-/// `offset` after A's start (30 001 is A's end + 1, refused at receipt by the Provider, RM-15; 30 002 plays on time). `late_booking`
+/// `offset` after A's start (30 001 to 30 003 are A's end + 1 to + 3, refused at receipt by the Provider, RM-15: the front after a held-tail
+/// close is the payload end plus four; 30 004 plays on time). `late_booking`
 /// books it after A's last buffer went out (8 ms before A's end).
 pub fn one_sample_after_a_burst(mut run: RunHandle, offset: i64, late_booking: bool) -> Verdict {
     wait(&mut run, ms(1));
@@ -369,7 +426,7 @@ pub fn one_sample_after_a_burst(mut run: RunHandle, offset: i64, late_booking: b
     );
     let faults = iii::late_control_verdict(iii::run_faults(&manifest), &iii::time_error_causes(&manifest), 0);
     let refusals = refusals_of(&manifest, &entry);
-    if offset == 30_001 { iii::all_of(vec![iii::refusal_verdict(&refusals), faults]) } else { iii::all_of(vec![iii::admission_verdict(admitted(&entry), &refusals), faults]) }
+    if offset < 30_004 { iii::all_of(vec![iii::refusal_verdict(&refusals), faults]) } else { iii::all_of(vec![iii::admission_verdict(admitted(&entry), &refusals), faults]) }
 }
 
 /// One trial of T3 (f): a 30 000-sample tone burst A at `a`, ending at `e` (its held tail closes at `J(e)` = `e` − 5 ms, `join_by` in

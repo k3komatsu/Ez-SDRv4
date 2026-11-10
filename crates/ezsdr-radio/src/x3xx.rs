@@ -56,6 +56,16 @@ pub fn rates(master_clock_hz: u64) -> Vec<f64> {
     decimations().iter().rev().map(|n| master_clock_hz as f64 / *n as f64).collect()
 }
 
+/// The largest decimation a transmit stream may use: transmit rates start at 1 MS/s on a 200 MHz master clock (KL-40; the
+/// 2026-11-10 bench: at 0.4 MS/s and below a closed burst of at most four samples underflows itself, and at 0.25 MS/s and below a two-zero flush is not acknowledged).
+pub const TX_MAX_DECIMATION: u64 = 200;
+
+/// The transmit rate grid of a `master_clock_hz` X3xx, ascending by rate like [`rates`]: `master_clock_hz / N` for the decimations
+/// `N` from [`TX_MAX_DECIMATION`] down to 1 (RM-8, RM-29).
+pub fn tx_rates(master_clock_hz: u64) -> Vec<f64> {
+    decimations().iter().filter(|n| **n <= TX_MAX_DECIMATION).rev().map(|n| master_clock_hz as f64 / *n as f64).collect()
+}
+
 /// `N` such that `rate` is exactly `master_clock_hz / N` for a decimation `N` (RM-8,
 /// UR-12); none when `rate` is off the grid.
 pub fn decimation(master_clock_hz: u64, rate: f64) -> Option<u64> {

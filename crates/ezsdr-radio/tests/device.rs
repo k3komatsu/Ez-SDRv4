@@ -44,3 +44,22 @@ fn ur_13_the_rate_set_comparison_expands_ranges_and_ignores_order() {
     assert!(rate_set_matches(&Grid::Step { lo: 1.0, hi: 4.0, step: 1.5 }, &[(1.0, 2.5, 1.5), (4.0, 4.0, 0.0)]));
     assert!(!rate_set_matches(&Grid::Step { lo: 0.0, hi: 1.0, step: 0.0 }, &[(1.0, 1.0, 0.0)]), "an interval is not a finite set");
 }
+
+#[test]
+fn x3xx_the_transmit_grid_is_the_ddc_s_up_to_decimation_200() {
+    // The transmit grid is the top of the device grid: N = 200 (1 MS/s) up to N = 1 (200 MS/s), ascending (a `Values` grid is).
+    let tx = x3xx::tx_rates(200_000_000);
+    assert_eq!(tx.len(), 200);
+    assert_eq!(tx[0], 1_000_000.0);
+    assert_eq!(*tx.last().unwrap(), 200_000_000.0);
+    assert!(tx.windows(2).all(|pair| pair[0] < pair[1]), "strictly ascending");
+    for (i, rate) in tx.iter().enumerate() {
+        assert_eq!(*rate, 200e6 / (200 - i) as f64, "N = {}", 200 - i);
+    }
+    assert_eq!(x3xx::rates(200_000_000).len(), 639, "the device grid is unchanged");
+    let grid = Grid::Values(tx);
+    assert_eq!((grid.min(), grid.max()), (1_000_000.0, 200_000_000.0));
+    assert_eq!(grid.nearest(1_000_000.0), Some(1_000_000.0));
+    assert_eq!(grid.nearest(200_000_000.0), Some(200_000_000.0));
+    assert_eq!(grid.nearest(500_000.0), None);
+}

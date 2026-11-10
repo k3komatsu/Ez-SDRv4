@@ -658,7 +658,8 @@ impl MeasurementPlan {
             timed_command_leads_ns: vec![1_000_000, 2_000_000],
             rx_start_leads_ns: vec![3_000_000, 5_000_000],
             rx_rates_hz: vec![390_625],
-            tx_throughput_rates_hz: vec![390_625],
+            // Transmit starts at 1 MS/s on `x3xx` (KL-40); receive keeps 390.625 kS/s.
+            tx_throughput_rates_hz: vec![1_000_000],
             overflow_rates_hz: vec![1_000_000],
             overflow_stall_ms: vec![300],
             overflow_after_ms: 200,
