@@ -2072,6 +2072,8 @@ fn ur_21_s19_untimed_switch_takes_the_first_grid_boundary_after_its_receipt_wind
     let receipt = rows[0]["selected_at"]["ticks"].as_i64().unwrap() - origin_ticks;
     let bound = (receipt + 12_000 * 200 + 199).div_euclid(200);
     assert_eq!(rows[0]["boundary"].as_i64().unwrap(), ezsdr_radio::staging::repeat_boundary(grid, 1_024, bound));
+    // #86: an untimed switch has no requested instant (RS-19), so its new repeat's record carries no requested target.
+    assert_eq!(bursts(&manifest)[1].requested_target, None, "{:?}", bursts(&manifest));
 }
 
 #[test]
@@ -7861,9 +7863,19 @@ fn n47s5_repeat_switch_rehearsal_on_the_fake() {
         let dir = TempDir::new();
         let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
         let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
-        let outcome = common::n47s5::repeat_switch_verdict(&common::n47s5::repeat_switch_trial(run, probe, timed));
+        let trial = common::n47s5::repeat_switch_trial(run, probe, timed);
+        let outcome = common::n47s5::repeat_switch_verdict(&trial);
         println!("rehearsal T4 timed {timed}: {outcome:?}");
         assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "timed {timed}: {outcome:?}");
+        // The bench's expectations (E2a-3, #86): nothing refused, the row has no `moved_to`, and no record carries a requested target,
+        // since the timed switch asks 40 ms ahead, past its receipt's bound (on its own grid point), and the untimed one asks nothing.
+        assert!(trial.refusals.is_empty(), "timed {timed}: {:?}", trial.refusals);
+        let rows = section(&trial.manifest, "switches").as_array().unwrap().clone();
+        assert_eq!(rows.len(), 1, "timed {timed}: {rows:?}");
+        assert!(rows[0].get("moved_to").is_none(), "timed {timed}: {rows:?}");
+        let records = bursts(&trial.manifest);
+        assert_eq!(records.len(), 2, "timed {timed}: the repeat and its successor: {records:?}");
+        assert!(records.iter().all(|record| record.requested_target.is_none() && record.late_by.is_none()), "timed {timed}: {records:?}");
     }
 }
 

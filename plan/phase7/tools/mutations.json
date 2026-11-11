@@ -587,8 +587,8 @@
   "id": "U16",
   "name": "a repetition sent with start-of-burst",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let first = open.first;\n",
-  "new": "        let first = open.first || (open.held.repeat && offset == 0);\n",
+  "old": "let continuing = first && !device_sob;",
+  "new": "let first = first || (open.booking.repeat && offset == 0); let continuing = first && !device_sob;",
   "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_22_repeat_wrap_is_not_a_new_burst_start"
@@ -1030,8 +1030,8 @@
   "id": "B10",
   "name": "a Stop leaves a device burst held for a continuation open (Review N, T3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let device_open = self.open.as_ref().map_or(continuing.is_some(), |open| !open.first || continuing == Some(open.held.k));",
-  "new": "        let device_open = self.open.as_ref().is_some_and(|open| !open.first || continuing == Some(open.held.k));",
+  "old": "let device_open = open.map_or(continuing.is_some(), |(first, k, _)| !first || continuing == Some(k));",
+  "new": "let device_open = open.is_some_and(|(first, k, _)| !first || continuing == Some(k));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_a_stop_while_the_device_burst_waits_for_a_continuation_ends_it"
@@ -1100,8 +1100,8 @@
       "id": "B19",
   "name": "a device burst begun by a first send cut short not ended (Review P, NB-1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "                let result = self.abandon(was_open || accepted > 0, accepted, !device_eob);",
-      "new": "                let result = self.abandon(was_open, accepted, !device_eob);",
+      "old": "let result = self.abandon(was_open || accepted > 0, Some(cursor), !device_eob);",
+      "new": "let result = self.abandon(was_open, Some(cursor), !device_eob);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
@@ -1160,8 +1160,8 @@
    "id": "B25",
   "name": "a first send that fails taken for no device burst (Review Q, NB-Q1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                let result = self.abandon(true, device_count, !device_eob);",
-   "new": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                let result = self.abandon(was_open, device_count, !device_eob);",
+   "old": "if device_sob { self.remember_burst(TimePoint::new(clock.domain, start)); } let result = self.abandon(true, Some(cursor), !device_eob);",
+   "new": "if device_sob { self.remember_burst(TimePoint::new(clock.domain, start)); } let result = self.abandon(was_open, Some(cursor), !device_eob);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
@@ -1170,8 +1170,8 @@
    "id": "B26",
   "name": "a first send that fails not counted for its report (Review Q, NB-Q1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                let result = self.abandon(true, device_count, !device_eob);",
-   "new": "                let result = self.abandon(true, device_count, !device_eob);",
+   "old": "if device_sob { self.remember_burst(TimePoint::new(clock.domain, start)); } let result = self.abandon(true, Some(cursor), !device_eob);",
+   "new": "let result = self.abandon(true, Some(cursor), !device_eob);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_22_a_first_send_cut_short_keeps_the_reports_paired"
@@ -1218,10 +1218,10 @@
  },
  {
       "id": "B31",
-  "name": "a held sample's failed send ahead of a continuation not abandoned (Review R, TG-R1)",
+  "name": "a held sample's failed send ahead of a continuation not abandoned (Review R, TG-R1); since E2a-2a the failed tail is taken as sent, so the payload follows it: base's literal `return true` would leave the send in flight, and the next `issue` panics",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true, 0, true);\n                    }",
-      "new": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return true;\n                    }",
+      "old": "Err(error) => { self.core.device_failed(None, \"tx_burst\", &error); false }",
+      "new": "Err(error) => { self.core.device_failed(None, \"tx_burst\", &error); true }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"

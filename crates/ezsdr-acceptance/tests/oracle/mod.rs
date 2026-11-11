@@ -173,9 +173,10 @@ fn grid(origin: i64, period: i64, bound: i64) -> i64 {
     origin + (d + period - 1).div_euclid(period) * period
 }
 
-/// UR-38: where the owner moves a switch whose handed cursor passed its boundary: the first grid point at or after the cursor.
-pub fn moved_boundary(origin: i64, period: i64, cursor: i64) -> i64 {
-    grid(origin, period, cursor)
+/// RM-37 (#86): the requested target a switch's burst record carries: its `at` when it is timed and the receipt pushed its boundary past
+/// the grid point `at` alone gives; none for an untimed switch (RS-19) or one on that grid point.
+pub fn switch_requested_target(p: &Params, origin: i64, period: i64, recv: i64, at: i64, untimed: bool) -> Option<i64> {
+    (!untimed && switch_boundary(p, origin, period, recv, Some(at)) != grid(origin, period, at)).then_some(at)
 }
 
 /// A burst the oracle expects on the device: waveform `tag` of `len` samples from `start`, repeating or not, until `end` (exclusive).
@@ -310,15 +311,10 @@ pub fn outcome_after_abandon(b: i64, cursor: i64) -> Outcome {
     if b >= cursor { Outcome::Cancelled } else { Outcome::Applied }
 }
 
-/// RM-37: a Provider that drops the repeat at dispatch under its late policy cancels the switch.
-pub fn outcome_after_repeat_dropped() -> Outcome {
-    Outcome::Cancelled
-}
-
-/// RM-14, UR-38, SC-29a: a switch moved under SendAsap (the owner's cursor passed its boundary) records the instant it asked for (`at`) as
-/// its requested target, not the boundary chosen at receipt.
-pub fn requested_target_of_a_moved_switch(at: i64) -> Option<i64> {
-    Some(at)
+/// UR-38 (#84): a switch on a repeat that has not started on the device is refused at receipt: no row, and the repeat it would replace
+/// is left as it is (a Provider whose repeats start at acceptance never refuses it).
+pub fn switch_refused_unstarted() -> bool {
+    true
 }
 
 /// What a Stop leaves of a booking that was not handed to the device (RM-16 "cancel held bursts not handed", MR-25 "cancelled into

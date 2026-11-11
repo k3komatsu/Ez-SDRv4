@@ -253,8 +253,8 @@
   "id": "M26",
   "name": "MR-25 stop emits no partial block",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            if self.tx[k].open.is_some() {\n                self.emit_tx_until(k, now, Some(cut))?;\n            }\n            if self.tx[k].open.is_some() { break; }",
-  "new": "            if false && self.tx[k].open.is_some() {\n                self.emit_tx_until(k, now, Some(cut))?;\n            }\n            if self.tx[k].open.is_some() { break; }",
+  "old": "if self.tx[k].book.open.is_some() { self.emit_tx_until(k, now, Some(cut))?; } if self.tx[k].book.open.is_some() { break; }",
+  "new": "if false && self.tx[k].book.open.is_some() { self.emit_tx_until(k, now, Some(cut))?; } if self.tx[k].book.open.is_some() { break; }",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_25_a_stopped"
@@ -573,8 +573,8 @@
  {
   "name": "MR-25 stop cut one tick later",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "if let Some(at_stop) = time::k_at_or_after(origin, ratio, now) {",
-  "new": "if let Some(at_stop) = time::k_at_or_after(origin, ratio, now + 1) {",
+  "old": "time::k_at_or_after(origin, ratio, now).map(|at_stop|",
+  "new": "time::k_at_or_after(origin, ratio, now + 1).map(|at_stop|",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_25_a_stop_on_a_sample_instant_does_not_transmit_that_sample",
@@ -634,8 +634,8 @@
   "id": "M76",
   "name": "MR-25 a stop opens at most one held burst before the cut",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        loop {\n            if self.tx[k].open.is_some() {\n                self.emit_tx_until(k, now, Some(cut))?;\n            }\n            if self.tx[k].open.is_some() { break; }\n            let Some(start) = self.tx[k].list.held.keys().next().copied().filter(|start| *start < cut) else { break };",
-  "new": "        let mut opened = 0;\n        loop {\n            if self.tx[k].open.is_some() {\n                self.emit_tx_until(k, now, Some(cut))?;\n            }\n            if self.tx[k].open.is_some() { break; }\n            opened += 1;\n            let Some(start) = self.tx[k].list.held.keys().next().copied().filter(|start| *start < cut && opened <= 1) else { break };",
+  "old": "loop { if self.tx[k].book.open.is_some() { self.emit_tx_until(k, now, Some(cut))?; } if self.tx[k].book.open.is_some() { break; } let Some(start) = self.tx[k].book.list.held.keys().next().copied().filter(|start| *start < cut) else { break };",
+  "new": "let mut opened = 0; loop { if self.tx[k].book.open.is_some() { self.emit_tx_until(k, now, Some(cut))?; } if self.tx[k].book.open.is_some() { break; } opened += 1; let Some(start) = self.tx[k].book.list.held.keys().next().copied().filter(|start| *start < cut && opened <= 1) else { break };",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_25_a_stop_transmits_every_held"

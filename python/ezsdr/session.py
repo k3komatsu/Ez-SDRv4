@@ -498,7 +498,8 @@ class Tx(_Stream):
         next boundary of the playing repeat's period after the Provider's lead, and the old one stops there. ``x``
         must have this stream's channel count, and nothing else is sent: the stream keeps its values. Raises
         ``Rejected`` when the Provider refuses it at booking: no repeat plays on this stream (none, a stopped one, a
-        finite burst) or a switch is already pending."""
+        finite burst), a switch is already pending, or the radio has not yet sent the repeat it would replace (a host
+        or configure delay held its start back; retry once it sounds, KL-41)."""
         channels, data = _cf32(x)
         self._check_channels(channels)
         action = {

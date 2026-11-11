@@ -696,6 +696,7 @@ impl Provider for UhdRadio {
             let at = core.now();
             streams.stop = Some((at, mode));
             streams.end(&core, at, mode == StopMode::Abort, false);
+            core.release_streams(streams);
             at
         };
         self.join(&core, "uhd-control");

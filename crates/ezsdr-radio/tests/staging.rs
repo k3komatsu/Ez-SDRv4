@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use ezsdr_kernel::event::ActionId;
 use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_radio::CancelReason;
-use ezsdr_radio::staging::{Bookings, Overlap, Read, Refusal, Settled, Staging, SwitchOutcome, TxList, Until, closed_short_gap, ordinary_k, repeat_boundary, stop_bound};
+use ezsdr_radio::staging::{
+    Booked, Bookings, Outcome, Overlap, Playing, Read, Refusal, STOP_FRONT, Settle, Settled, Staging, Started, SwitchAccepted, SwitchOutcome, SwitchRefusal, TxBook, TxList, TxSend, Until,
+    closed_short_gap, ordinary_k, repeat_boundary, stop_bound,
+};
 
 fn key(name: &str) -> Key {
     Key::parse(name).unwrap()
@@ -63,7 +66,7 @@ fn armed_with(gap: i64) -> Bookings {
     bookings
 }
 
-/// The settled switches as (id, outcome), for the assertions that do not read the moved boundary.
+/// The settled switches as (id, outcome), for the assertions that do not read the boundary.
 fn settled(bookings: &mut Bookings) -> Vec<(ActionId, SwitchOutcome)> {
     bookings.take_settled().into_iter().map(|settled| (settled.id, settled.outcome)).collect()
 }
@@ -332,8 +335,6 @@ fn rm_21_the_last_transmit_value_wins_on_an_empty_stream() {
 const ON_TIME: fn(i64) -> i64 = |_| i64::MAX;
 /// The horizon of a receipt before any booking is handed (RM-15): no start is refused for an earlier-starting booking.
 const UNHANDED: i64 = i64::MIN;
-/// The replaced repeat's grid in the switch tests: origin 0, period 10.
-const GRID: (i64, i64) = (0, 10);
 
 #[test]
 fn rm_21_busy_is_max_accepted_end() {
@@ -940,9 +941,8 @@ fn rm_37_a_switch_taken_at_the_abandoned_cursor_is_cancelled() {
     // waveform never starts, so the switch is cancelled, not applied.
     let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    assert!(bookings.install(ActionId(2), 100).is_some());
-    assert!(bookings.cancel_switch_from(100));
+    assert!(bookings.switch(ActionId(2), 100, 10, true).is_ok());
+    assert_eq!(bookings.abandon(100, 105 * 200), [Settled { id: ActionId(2), outcome: SwitchOutcome::Cancelled, boundary: 100 }]);
     assert_eq!(settled(&mut bookings), [(ActionId(2), SwitchOutcome::Cancelled)]);
 }
 
@@ -950,9 +950,8 @@ fn rm_37_a_switch_taken_at_the_abandoned_cursor_is_cancelled() {
 fn rm_16_switch_pending_until_the_boundary_is_reached() {
     let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    assert!(bookings.install(ActionId(2), 10).is_some());
-    assert!(!bookings.switch(ActionId(3), GRID, 200, 99), "pending before its boundary: a second switch is refused");
+    assert!(bookings.switch(ActionId(2), 100, 10, true).is_ok());
+    assert!(bookings.switch(ActionId(3), 200, 99, true).is_err(), "pending before its boundary: a second switch is refused");
     bookings.advance(99);
     assert_eq!(settled(&mut bookings), [], "not applied before its boundary");
     bookings.advance(100);
@@ -965,19 +964,17 @@ fn rm_16_switch_pending_until_the_boundary_is_reached() {
 fn rm_16_advance_runs_inside_every_call() {
     let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    assert!(bookings.install(ActionId(2), 10).is_some());
+    assert!(bookings.switch(ActionId(2), 100, 10, true).is_ok());
     bookings.prune(101);
     assert_eq!(settled(&mut bookings), [(ActionId(2), SwitchOutcome::Applied)], "a receipt at 101 applies the switch due at 100");
-    assert!(bookings.switch(ActionId(3), GRID, 200, 101), "a second switch after the first boundary is not refused by a stale pending");
+    assert!(bookings.switch(ActionId(3), 200, 101, true).is_ok(), "a second switch after the first boundary is not refused by a stale pending");
     bookings.halt(150, 160);
     assert_eq!(settled(&mut bookings), [(ActionId(3), SwitchOutcome::Cancelled)], "a Stop before its boundary cancels it");
 
     let mut direct = armed();
     direct.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(direct.switch(ActionId(2), GRID, 100, 10));
-    assert!(direct.install(ActionId(2), 10).is_some());
-    assert!(direct.switch(ActionId(3), GRID, 200, 101), "the switch itself applies the first switch due at 100");
+    assert!(direct.switch(ActionId(2), 100, 10, true).is_ok());
+    assert!(direct.switch(ActionId(3), 200, 101, true).is_ok(), "the switch itself applies the first switch due at 100");
     assert_eq!(settled(&mut direct), [(ActionId(2), SwitchOutcome::Applied)]);
 }
 
@@ -985,8 +982,7 @@ fn rm_16_advance_runs_inside_every_call() {
 fn rm_16_a_stop_after_a_boundary_cuts_the_new_repeat_at_its_bound() {
     let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    assert!(bookings.install(ActionId(2), 10).is_some());
+    assert!(bookings.switch(ActionId(2), 100, 10, true).is_ok());
     bookings.halt(150, 160);
     assert_eq!(settled(&mut bookings), [(ActionId(2), SwitchOutcome::Applied)], "a switch whose boundary the Stop has passed is applied");
     assert_eq!(bookings.accept(159, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the new repeat holds up to the bound");
@@ -994,71 +990,20 @@ fn rm_16_a_stop_after_a_boundary_cuts_the_new_repeat_at_its_bound() {
 }
 
 #[test]
-fn rm_37_install_takes_only_the_pending_switch() {
-    let mut bookings = armed();
-    bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    bookings.advance(120);
-    assert_eq!(settled(&mut bookings), [], "a switch the owner has not taken is not applied");
-    assert!(bookings.install(ActionId(3), 50).is_none(), "another id is not pending");
-    assert_eq!(bookings.accept(100, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the old repeat keeps playing: nothing was applied");
-}
-
-#[test]
-fn rm_37_install_at_the_boundary_is_not_a_move() {
-    // UR-38: a cursor at the boundary takes it unmoved, so the settlement carries no `moved_to`; one sample past it is a move.
-    for (cursor, moved_to) in [(100, None), (101, Some(110))] {
-        let mut bookings = armed();
-        bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-        assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-        assert_eq!(bookings.install(ActionId(2), cursor), Some(moved_to.unwrap_or(100)));
-        bookings.advance(200);
-        assert_eq!(bookings.take_settled(), [Settled { id: ActionId(2), outcome: SwitchOutcome::Applied, moved_to }], "cursor {cursor}");
-    }
-}
-
-#[test]
-fn rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_the_moved_one() {
-    let mut bookings = armed();
-    bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    assert_eq!(bookings.install(ActionId(2), 101), Some(110), "the first boundary of the grid at or after the cursor");
-    assert_eq!(settled(&mut bookings), [], "installed at 110, not settled");
-    bookings.halt(105, 109);
-    assert_eq!(bookings.take_settled(), [Settled { id: ActionId(2), outcome: SwitchOutcome::Cancelled, moved_to: Some(110) }], "a Stop bounded before the moved boundary cancels it");
-
-    let mut on_a_boundary = armed();
-    on_a_boundary.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(on_a_boundary.switch(ActionId(2), GRID, 100, 10));
-    assert_eq!(on_a_boundary.install(ActionId(2), 111), Some(120), "one sample past a boundary takes the next");
-    on_a_boundary.halt(105, 121);
-    assert_eq!(
-        on_a_boundary.take_settled(),
-        [Settled { id: ActionId(2), outcome: SwitchOutcome::Applied, moved_to: Some(120) }],
-        "a Stop bounded after the moved boundary lets it apply, and the settlement carries the moved boundary"
-    );
-
-    let mut at_a_boundary = armed();
-    at_a_boundary.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(at_a_boundary.switch(ActionId(2), GRID, 100, 10));
-    assert_eq!(at_a_boundary.install(ActionId(2), 120), Some(120), "a cursor on a boundary takes that boundary");
-}
-
-#[test]
 fn rm_16_switch_refused_unless_a_repeat_is_playing() {
     let mut finite = armed();
     finite.accept(0, Some(10), 0, ON_TIME, UNHANDED).unwrap();
-    assert!(!finite.switch(ActionId(2), GRID, 100, 5), "a finite burst");
+    assert!(finite.switch(ActionId(2), 100, 5, true).is_err(), "a finite burst");
     let mut booked = armed();
     booked.accept(50, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(!booked.switch(ActionId(2), GRID, 100, 10), "a repeat booked but not started");
+    assert!(booked.switch(ActionId(2), 100, 10, true).is_err(), "a repeat booked but not started");
     let mut stopped = armed();
     stopped.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     stopped.halt(20, 30);
-    assert!(!stopped.switch(ActionId(2), GRID, 100, 25), "a stopped repeat");
+    assert!(stopped.switch(ActionId(2), 100, 25, true).is_err(), "a stopped repeat");
     let mut playing = armed();
     playing.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(playing.switch(ActionId(2), GRID, 100, 0), "a repeat that has started");
+    assert!(playing.switch(ActionId(2), 100, 0, true).is_ok(), "a repeat that has started");
 }
 
 /// What both Providers do for an untimed booking: place it, then accept it at the placed start.
@@ -1309,23 +1254,6 @@ fn txlist_held_is_by_first_sample() {
 }
 
 #[test]
-fn txlist_halt_unread_ignores_bookings() {
-    let mut list = TxList::<u32>::default();
-    assert!(!list.halt_unread());
-    list.book(1);
-    assert!(!list.halt_unread());
-    list.halt(CancelReason::Stop);
-    list.book(2);
-    assert!(list.halt_unread());
-    list.read();
-    assert!(list.halt_unread(), "the halt is still unread after the booking before it");
-    list.read();
-    assert!(!list.halt_unread() && list.unread(), "a booking after the halt waits, the halt is read");
-    list.read();
-    assert!(!list.halt_unread() && !list.unread());
-}
-
-#[test]
 fn rm_15_closed_short_gap_is_fifteen_microseconds_or_three_samples() {
     // On a 200 MHz root, root ticks per sample N: 1, 2, 2.857 (N = 70), 10, 100 and 200 MS/s.
     for (ratio, gap) in [(200, 15), (100, 30), (70, 43), (20, 150), (2, 1500), (1, 3000)] {
@@ -1391,4 +1319,553 @@ fn rm_16_a_stop_cutting_a_repeat_fronts_at_the_cursor_plus_five() {
 /// The Stop bound at sample `c` with no in-flight window, on the identity clock.
 fn stop_sample_with_no_window(c: i64) -> i64 {
     ezsdr_radio::staging::stop_sample(c, 0, |t| t)
+}
+
+// TxBook (note 49 stage E2a): the book writes the record, the list, `playing` and the open booking.
+
+const PLAYING: Playing = Playing { id: ActionId(1), origin: 0, period: 10, started: true };
+
+/// A booking as the book reads it: a payload number, the Action that booked it and whether it is a switch's new waveform.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Pl {
+    n: u32,
+    id: Option<ActionId>,
+    switch: bool,
+}
+
+impl Booked for Pl {
+    fn id(&self) -> Option<ActionId> {
+        self.id
+    }
+
+    fn is_switch(&self) -> bool {
+        self.switch
+    }
+}
+
+/// Payload `n`, booked by no Action the book knows.
+fn pl(n: u32) -> Pl {
+    Pl { n, id: None, switch: false }
+}
+
+/// The new waveform of switch `id`.
+fn switch_pl(n: u32, id: u64) -> Pl {
+    Pl { n, id: Some(ActionId(id)), switch: true }
+}
+
+/// An empty book of a Provider whose repeats start at their first issue (UHD).
+fn new_book() -> TxBook<Pl> {
+    TxBook::new(Started::AtFirstIssue)
+}
+
+/// The `TxBook` reach of a Stop at sample `c`: a bound of 200 root ticks a sample, and the Stop region `[c, c + STOP_FRONT)`.
+fn reach(c: i64) -> (i64, Option<(i64, i64)>) {
+    (c * 200 + STOP_FRONT * 200, Some((c, c + STOP_FRONT)))
+}
+
+#[test]
+fn txbook_a_repeat_booking_sets_playing_and_a_finite_one_does_not() {
+    let mut book = new_book();
+    book.record.arm(GAP_1M);
+    book.record.accept(100, Some(10), 0, ON_TIME, UNHANDED).unwrap();
+    book.play(false, ActionId(1), 0, 10);
+    book.book(pl(7), Some(20_000));
+    assert_eq!(book.playing, None, "a finite booking is not a repeat");
+    book.record.accept(400, None, 0, ON_TIME, UNHANDED).unwrap();
+    book.play(true, ActionId(1), 0, 10);
+    book.book(pl(8), None);
+    assert_eq!(book.playing, Some(Playing { started: false, ..PLAYING }), "a repeat becomes the playing one, not started before its first issue");
+    book.play(false, ActionId(3), 0, 10);
+    book.book(pl(9), Some(30_000));
+    assert_eq!(book.playing, Some(Playing { started: false, ..PLAYING }), "a later finite booking leaves it");
+    let mut mock = TxBook::<Pl>::new(Started::AtAcceptance);
+    mock.play(true, ActionId(1), 0, 10);
+    assert_eq!(mock.playing, Some(PLAYING), "a Provider whose repeats start at acceptance");
+    let mut manual = armed();
+    manual.accept(100, Some(10), 0, ON_TIME, UNHANDED).unwrap();
+    manual.book(Some(20_000));
+    manual.accept(400, None, 0, ON_TIME, UNHANDED).unwrap();
+    manual.book(None);
+    manual.book(Some(30_000));
+    assert_eq!(book.record, manual, "the record's end is booked with the booking");
+    let read: Vec<u32> = std::iter::from_fn(|| book.list.read()).filter_map(|read| if let Read::Booking(b) = read { Some(b.n) } else { None }).collect();
+    assert_eq!(read, [7, 8, 9], "the list receives the bookings in order");
+}
+
+#[test]
+fn txbook_stop_applies_the_record_stop_and_its_region() {
+    let mut book = new_book();
+    book.record.arm(GAP_1M);
+    book.record.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
+    book.record.book(None);
+    let mut manual = book.record.clone();
+    book.stop(reach(20));
+    manual.stop(20 * 200 + STOP_FRONT * 200);
+    manual.halt(20, 20 + STOP_FRONT);
+    assert_eq!(book.record, manual, "stop is the record's stop and its halt");
+    let mut no_region = new_book();
+    no_region.record.arm(GAP_1M);
+    no_region.record.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
+    no_region.record.book(None);
+    let mut manual = no_region.record.clone();
+    no_region.stop((4_000, None));
+    manual.stop(4_000);
+    assert_eq!(no_region.record, manual, "no region without a first sample");
+}
+
+/// The root tick bound of an abandon at sample `c` on the identity clock of 200 root ticks a sample: `c + STOP_FRONT`.
+fn abandon_bound(c: i64) -> i64 {
+    (c + STOP_FRONT) * 200
+}
+
+/// A repeat R (id 1) at `start`, booked.
+fn repeat_at(start: i64) -> Bookings {
+    let mut r = armed();
+    r.accept(start, None, 0, ON_TIME, UNHANDED).unwrap();
+    r.book(None);
+    r
+}
+
+/// R at 0 with switch 2 at boundary 10 on its grid, taken at receipt.
+fn switch_pending() -> Bookings {
+    let mut r = repeat_at(0);
+    assert!(r.switch(ActionId(2), 10, 0, true).is_ok());
+    r
+}
+
+/// The same switch applied by the record (device time reached 10).
+fn switch_applied() -> Bookings {
+    let mut r = switch_pending();
+    r.advance(10);
+    r
+}
+
+/// Records whose abandon at the given cursors equals today's (`cancel_switch_from`, then a Stop at the cursor with no window), each by
+/// name, with whether a pending switch is cancelled first (today's `cancel_switch_from`: boundary 10 at or after the cursor).
+fn abandon_rows() -> Vec<(&'static str, Bookings, Vec<i64>)> {
+    let mut stopped = repeat_at(0);
+    stopped.stop(1_000);
+    stopped.halt(30, 30 + STOP_FRONT);
+    let mut finite = armed();
+    finite.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
+    finite.book(Some(8_000));
+    let mut before = armed();
+    before.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
+    before.book(Some(8_000));
+    before.accept(100, None, 0, ON_TIME, UNHANDED).unwrap();
+    before.book(None);
+    vec![
+        ("R alone", repeat_at(0), vec![5, 10, 15]),
+        ("R open after a Stop", stopped, vec![5, 10, 15]),
+        ("finite alone", finite, vec![5, 10, 15]),
+        ("pending S", switch_pending(), vec![5, 10, 15]),
+        ("applied S, abandoned past its boundary", switch_applied(), vec![15]),
+        // c == r: the repeat's own first send took nothing, so its chain goes and the Stop region [r, r + 5) stays (today's answer).
+        ("R abandoned at its own start", repeat_at(10), vec![10]),
+        ("R behind a finite booking, at its own start", before, vec![100]),
+    ]
+}
+
+/// Today's abandon of `record` at `c` (E2a-1): `cancel_switch_from(c)`, then a Stop at `c` with no window.
+fn abandon_today(record: &Bookings, pending_at: Option<i64>, c: i64) -> Bookings {
+    let mut today = record.clone();
+    if pending_at.is_some_and(|b| b >= c) {
+        assert!(today.cancel_switch());
+    }
+    today.stop(abandon_bound(c));
+    today.halt(c, c + STOP_FRONT);
+    today
+}
+
+#[test]
+fn txbook_abandon_equals_a_stop_at_the_cursor_except_the_named_differences() {
+    // P10: with no chain after the abandoned repeat, the scoped abandon is today's except in the cells below.
+    for (name, record, cursors) in abandon_rows() {
+        let pending_at = name.contains("pending S");
+        for c in cursors {
+            let mut book = TxBook { record: record.clone(), ..new_book() };
+            book.abandon(true, Some(ActionId(1)), c, abandon_bound(c));
+            let mut today = abandon_today(&record, pending_at.then_some(10), c);
+            assert_eq!(book.record, today, "{name}, cursor {c}");
+            assert_eq!(book.record.take_settled(), today.take_settled(), "{name}, cursor {c}: the settled switches");
+        }
+    }
+    // (c) An applied switch at or after the cursor never started: settled cancelled, whether its payload was held or is the unsent open
+    // booking (the record does not know which; today only a held payload's row was cancelled, by uhd-tx). The record is today's.
+    let mut book = TxBook { record: switch_applied(), ..new_book() };
+    book.abandon(true, Some(ActionId(1)), 5, abandon_bound(5));
+    let mut today = abandon_today(&switch_applied(), None, 5);
+    assert_eq!(settled(&mut today), [(ActionId(2), SwitchOutcome::Applied)], "today's record leaves it applied");
+    assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "(c): cancelled");
+    assert_eq!(book.record, today, "past the cursor's footprint: the record is today's");
+    // (b) R + applied S with c <= b < c + 5: R's front is set to its footprint c + 5, where today a separate Stop region [c, c + 5) is
+    // left with R's front at b, so a SendAsap booking in [b, c + 5) is refused at receipt instead of moved. P12 has the cell.
+    for c in [7, 10] {
+        let mut book = TxBook { record: switch_applied(), ..new_book() };
+        book.abandon(true, Some(ActionId(2)), c, abandon_bound(c));
+        let mut today = abandon_today(&switch_applied(), None, c);
+        assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "cursor {c}");
+        assert_eq!(settled(&mut today), [(ActionId(2), SwitchOutcome::Applied)], "cursor {c}");
+        // Today's record with R's front (its first chain's, at b = 10) set to c + STOP_FRONT; the Stop region [c, c + 5) stays.
+        let want = format!("{today:?}").replacen("front: 10,", &format!("front: {},", c + STOP_FRONT), 1);
+        assert_ne!(want, format!("{today:?}"), "cursor {c}: today's R fronts at b");
+        assert_eq!(format!("{:?}", book.record), want, "cursor {c}: the named difference (b)");
+    }
+}
+
+#[test]
+fn txbook_abandon_keeps_a_later_booking_its_chain_playing_and_busy_end() {
+    // P11 (#80): R plays from 0 and a Stop at 30 cuts it (front 35, the value rule at the Stop's bound); B is accepted after the Stop.
+    // The owner's send fails at cursor 20: R ends at its footprint 25, and B keeps its chain, its busy end and, as a repeat, `playing`.
+    let stopped = || {
+        let mut r = repeat_at(0);
+        r.stop(35 * 200);
+        r.halt(30, 30 + STOP_FRONT);
+        r
+    };
+    let b_repeat = Playing { id: ActionId(3), origin: 300, period: 10, started: true };
+    for (case, len) in [("B finite", Some(10)), ("B repeat", None)] {
+        let mut record = stopped();
+        record.accept(300, len, 0, ON_TIME, UNHANDED).unwrap();
+        record.book(len.map(|len| (300 + len) * 200));
+        let playing = if len.is_none() { b_repeat } else { PLAYING };
+        let mut book = TxBook { record, playing: Some(playing), ..new_book() };
+        book.abandon(true, Some(ActionId(1)), 20, abandon_bound(20));
+        assert_eq!(book.record.accept(300, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}: B's chain stays");
+        assert_eq!(book.record.accept(24, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}: R's footprint is [0, 25)");
+        assert_eq!(book.record.clone().accept(25, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "{case}: 25 is free");
+        match len {
+            Some(_) => {
+                assert_eq!(book.record.stageable(310 * 200 - 1), Err(Refusal::TxBusy { until: Until::At(310 * 200) }), "{case}: busy until B's end");
+                assert_eq!(book.playing, None, "{case}: R was the playing repeat");
+            }
+            None => {
+                assert_eq!(book.record.stageable(i64::MAX), Err(Refusal::TxBusy { until: Until::Open }), "{case}: B is open");
+                assert_eq!(book.playing, Some(b_repeat), "{case}: B stays the playing repeat");
+            }
+        }
+    }
+    // With no later booking, the value rule is capped at the abandon's bound (today's).
+    let mut book = TxBook { record: stopped(), playing: Some(PLAYING), ..new_book() };
+    book.abandon(true, Some(ActionId(1)), 20, abandon_bound(20));
+    assert_eq!(book.record.stageable(abandon_bound(20)), Ok(()));
+    assert_eq!(book.record.stageable(abandon_bound(20) - 1), Err(Refusal::TxBusy { until: Until::At(abandon_bound(20)) }));
+    assert_eq!(book.playing, None);
+}
+
+#[test]
+fn txbook_abandon_at_a_switch_boundary_extends_the_old_repeat_to_its_footprint() {
+    // P12 (F3, RM-15): R plays from 0 and its switch S at 10 is applied in the record; the owner abandons at c (S never started). The
+    // footprint of R is [0, c + 5): a SendAsap booking at b + 1 meets R's chain and stays where it asked, so it is refused (today it met
+    // only the Stop region and moved past it). The pending twin (S taken, not applied) answers the same, as today.
+    for (case, record, c) in [("applied, c == b", switch_applied(), 10), ("applied, c < b < c + 5", switch_applied(), 7), ("pending, c == b", switch_pending(), 10)] {
+        let mut book = TxBook { record, ..new_book() };
+        book.abandon(true, Some(ActionId(1)), c, abandon_bound(c));
+        assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "{case}");
+        assert_eq!(book.record.region_move(11, Some(100), 0, ON_TIME, UNHANDED), Ok(11), "{case}: not moved");
+        assert_eq!(book.record.accept(11, Some(100), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}: refused at receipt");
+        assert_eq!(book.record.accept(c + STOP_FRONT, Some(100), 0, ON_TIME, UNHANDED), Ok(()), "{case}: the footprint ends at c + 5");
+    }
+}
+
+#[test]
+fn txbook_a_finite_abandon_changes_nothing() {
+    // P13 (KL-39, RM-15): a finite booking abandoned at its cursor keeps its whole region, and a switch pending on a repeat behind it is
+    // left as it is: the record, its settled switches and `playing` are unchanged.
+    let mut record = armed();
+    record.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
+    record.book(Some(40 * 200));
+    record.accept(100, None, 0, ON_TIME, UNHANDED).unwrap();
+    record.book(None);
+    assert!(record.switch(ActionId(2), 120, 100, true).is_ok());
+    let mut book = TxBook { record: record.clone(), playing: Some(PLAYING), ..new_book() };
+    book.abandon(false, Some(ActionId(5)), 20, abandon_bound(20));
+    assert_eq!((&book.record, book.playing), (&record, Some(PLAYING)));
+    assert!(settled(&mut book.record).is_empty());
+}
+
+#[test]
+fn txbook_halt_cancels_an_open_booking_that_issued_nothing_and_keeps_one_that_did() {
+    // P14 (#85, RM-16): a halt read from the list cancels the held bookings and an open booking with nothing issued; an open booking that
+    // has sent keeps what it handed (nothing handed is recalled), so it is not cancelled and stays open for the executor to end.
+    for (case, sent) in [("nothing issued", false), ("a send completed", true)] {
+        let mut book = open_book();
+        if sent {
+            book.issue(TxSend { count: 10, device_count: 10, ends: false });
+            assert_eq!(book.complete(Outcome::Accepted(10)), Settle::Sent);
+        }
+        book.list.held.insert(300, pl(9));
+        book.list.halt(CancelReason::Stop);
+        let Some(Read::Halt { reason, cancelled }) = book.read() else { panic!("{case}: the halt") };
+        assert_eq!(reason, CancelReason::Stop);
+        let want: BTreeMap<i64, Pl> = if sent { [(300, pl(9))].into() } else { [(100, pl(7)), (300, pl(9))].into() };
+        assert_eq!(cancelled, want, "{case}");
+        assert_eq!(book.open.is_some(), sent, "{case}: only a booking that sent stays open");
+    }
+    let mut book = open_book();
+    assert_eq!(book.cancel_all(), [(100, pl(7))].into(), "Provider::stop's cancellation is the same rule");
+}
+
+#[test]
+fn txbook_dispatched_verdicts_equal_the_record_calls() {
+    let mut base = armed();
+    for (at, len) in [(100, Some(10)), (130, Some(10)), (400, None)] {
+        base.accept(at, len, 0, ON_TIME, UNHANDED).unwrap();
+        base.book(len.map(|len| (at + len) * 200));
+    }
+    // A move that fits, untimed and timed; and a refused move, which drops the piece.
+    let mut book = TxBook { record: base.clone(), ..new_book() };
+    let mut manual = base.clone();
+    assert_eq!(book.move_untimed(None, 130, 160, Some(10)), manual.move_untimed(130, 160, Some(10)));
+    assert_eq!(book.record, manual, "untimed move");
+    assert_eq!(book.move_start(None, 130, 104, Some(10)).is_ok(), manual.move_start(130, 104, Some(10)).is_ok(), "the first move");
+    let mut book = TxBook { record: base.clone(), ..new_book() };
+    let mut manual = base.clone();
+    assert_eq!(book.move_start(None, 130, 170, Some(10)), manual.move_start(130, 170, Some(10)));
+    assert_eq!(book.record, manual, "timed move");
+    let mut book = TxBook { record: base.clone(), ..new_book() };
+    let mut manual = base.clone();
+    let refused = manual.move_start(130, 105, Some(10));
+    assert!(refused.is_err());
+    manual.drop_piece(130, Some(10));
+    assert_eq!(book.move_start(None, 130, 105, Some(10)), refused);
+    assert_eq!(book.record, manual, "a refused move drops the piece");
+    // Drop: the piece leaves the record (no switch waits on a repeat dropped at dispatch: UR-38).
+    let mut book = TxBook { record: base.clone(), ..new_book() };
+    let mut manual = base.clone();
+    manual.drop_piece(100, Some(10));
+    book.drop_piece(100, Some(10));
+    assert_eq!(book.record, manual, "drop");
+}
+
+#[test]
+fn txbook_clock_ended_cancels_the_pending_switch_and_configure_refused_drops_the_piece() {
+    let mut repeat = armed();
+    repeat.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
+    repeat.book(None);
+    repeat.switch(ActionId(2), 10, 0, true).unwrap();
+    let mut book = TxBook { record: repeat, ..new_book() };
+    book.clock_ended();
+    assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "W7: the pending switch is cancelled");
+    let mut book = new_book();
+    book.record.arm(GAP_1M);
+    book.record.accept(100, Some(10), 0, ON_TIME, UNHANDED).unwrap();
+    book.record.book(Some(110 * 200));
+    assert_eq!(book.record.accept(100, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
+    book.drop_piece(100, Some(10));
+    assert_eq!(book.record.accept(100, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "W6: the refused configure's region is gone");
+}
+
+/// A book whose record holds a repeat with a pending switch, `playing` set, and booking 7 open at sample 100.
+fn open_book() -> TxBook<Pl> {
+    let mut record = armed();
+    record.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
+    record.book(None);
+    record.switch(ActionId(2), 10, 0, true).unwrap();
+    let mut book = TxBook { record, playing: Some(PLAYING), ..new_book() };
+    book.take(pl(7), 100);
+    book
+}
+
+#[test]
+#[should_panic(expected = "send in flight")]
+fn txbook_issue_twice_panics() {
+    let mut book = open_book();
+    book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    book.issue(TxSend { count: 10, device_count: 10, ends: false });
+}
+
+#[test]
+#[should_panic(expected = "no send in flight")]
+fn txbook_complete_without_issue_panics() {
+    // The second `complete` of one send is a `complete` with none issued.
+    let mut book = open_book();
+    book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    assert_eq!(book.complete(Outcome::Accepted(10)), Settle::Sent);
+    book.complete(Outcome::Accepted(10));
+}
+
+#[test]
+fn txbook_outcomes_give_the_cursors_the_executor_gives_today() {
+    // UR-22: 10 samples from 100, handed as 12 (padding); a held-tail send hands 0. The cursor is what the device has nothing past.
+    let send = TxSend { count: 10, device_count: 12, ends: false };
+    for (case, send, outcome, settle, next) in [
+        ("whole", send, Outcome::Accepted(12), Settle::Sent, Some((110, false))),
+        ("whole, its last", TxSend { ends: true, ..send }, Outcome::Accepted(12), Settle::Sent, None),
+        ("a held tail only", TxSend { count: 1, device_count: 0, ends: false }, Outcome::Accepted(0), Settle::Sent, Some((101, false))),
+        ("short", send, Outcome::Accepted(5), Settle::Abandon { cursor: 105 }, Some((100, true))),
+        ("failed", send, Outcome::Failed, Settle::Abandon { cursor: 112 }, Some((100, true))),
+        ("the tail before it failed", send, Outcome::TailShort, Settle::Abandon { cursor: 100 }, Some((100, true))),
+    ] {
+        let mut book = open_book();
+        book.issue(send);
+        assert_eq!(book.complete(outcome), settle, "{case}");
+        assert_eq!(book.open.as_ref().map(|open| (open.next, open.first)), next, "{case}");
+        if next.is_some() {
+            book.issue(send);
+        }
+    }
+}
+
+#[test]
+fn txbook_take_untake_and_end_open_keep_one_open_booking_and_change_no_record() {
+    let mut book = open_book();
+    let (record, playing) = (book.record.clone(), book.playing);
+    book.untake();
+    assert!(book.open.is_none());
+    assert_eq!(book.list.held.get(&100), Some(&pl(7)), "the booking is held again at its first sample");
+    let held = book.list.held.remove(&100).unwrap();
+    book.take(held, 100);
+    book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    assert_eq!(book.end_open(), Some(pl(7)));
+    assert!(book.open.is_none() && book.end_open().is_none());
+    assert_eq!((&book.record, book.playing), (&record, playing), "ending the open booking with no outcome changes no record");
+    assert!(settled(&mut book.record).is_empty(), "and settles no switch");
+    book.take(pl(8), 200);
+    book.issue(TxSend { count: 10, device_count: 10, ends: false });
+}
+
+// E2a-3: switches decided at receipt (RM-37, UR-38).
+
+/// A book whose record plays R (id 1, period 10, from 0), `playing` R with `started`.
+fn playing_book(started: bool) -> TxBook<Pl> {
+    TxBook { record: repeat_at(0), playing: Some(Playing { started, ..PLAYING }), ..new_book() }
+}
+
+#[test]
+fn txbook_receive_switch_takes_the_boundary_at_receipt() {
+    // P16: the boundary is the first of R's grid at or after both `at` and the bound; the switch is pending (not applied before device
+    // time reaches it, applied once it does) and is the playing repeat from receipt, on its own grid, not started before its own issue.
+    let mut book = playing_book(true);
+    assert_eq!(book.switch_boundary(3, 15), Some(20));
+    assert_eq!(book.receive_switch(ActionId(2), 7, 3, 15, false, 0), Ok(SwitchAccepted { boundary: 20, requested_target: Some(3) }));
+    assert_eq!(book.playing, Some(Playing { id: ActionId(2), origin: 20, period: 7, started: false }));
+    book.advance(19);
+    assert_eq!(settled(&mut book.record), [], "pending before its boundary");
+    book.advance(20);
+    assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Applied)], "applied at its boundary");
+    let mut later = playing_book(true);
+    assert_eq!(later.receive_switch(ActionId(2), 7, 33, 15, false, 0).map(|accepted| accepted.boundary), Ok(40), "an `at` past the bound decides");
+    assert_eq!(new_book().switch_boundary(3, 15), None, "no repeat plays");
+}
+
+#[test]
+fn txbook_a_refused_switch_changes_nothing() {
+    // P17: each refusal, in its order (no playing repeat, then a pending switch, then not started), leaves the record, its settled
+    // switches, `playing` and the list as they were.
+    let mut stopped = repeat_at(0);
+    stopped.halt(20, 25);
+    let mut finite = armed();
+    finite.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
+    let mut pending = playing_book(true);
+    pending.receive_switch(ActionId(2), 10, 0, 15, false, 0).unwrap();
+    let cases = [
+        ("none playing", new_book(), SwitchRefusal::NoPlayingRepeat),
+        ("a finite burst", TxBook { record: finite, playing: Some(PLAYING), ..new_book() }, SwitchRefusal::NoPlayingRepeat),
+        ("a stopped repeat", TxBook { record: stopped, playing: Some(PLAYING), ..new_book() }, SwitchRefusal::NoPlayingRepeat),
+        ("a pending switch, itself not started", pending, SwitchRefusal::PendingSwitch),
+        ("not started", playing_book(false), SwitchRefusal::NotStarted),
+    ];
+    for (case, mut book, refusal) in cases {
+        book.list.held.insert(500, pl(5));
+        book.list.book(pl(6));
+        let (record, playing) = (book.record.clone(), book.playing);
+        assert_eq!(book.receive_switch(ActionId(3), 10, 0, 15, false, 1), Err(refusal), "{case}");
+        assert_eq!((&book.record, book.playing), (&record, playing), "{case}");
+        assert_eq!(book.list.held, [(500, pl(5))].into(), "{case}");
+        assert!(matches!(book.list.read(), Some(Read::Booking(p)) if p == pl(6)) && !book.list.unread(), "{case}");
+    }
+}
+
+#[test]
+fn txbook_receive_switch_requested_target_rule() {
+    // P18 (#86): a timed switch the bound pushed past the grid point its `at` alone gives records its `at`; one on that grid point, or
+    // untimed, records none.
+    let requested = |at: i64, untimed: bool| playing_book(true).receive_switch(ActionId(2), 10, at, 15, untimed, 0).unwrap().requested_target;
+    assert_eq!(requested(3, false), Some(3), "pushed from 10 to 20");
+    assert_eq!(requested(10, false), Some(10), "on a grid point, pushed to the next");
+    assert_eq!(requested(20, false), None, "at the bound's own grid point");
+    assert_eq!(requested(12, false), None, "before the bound, but the bound's grid point is its own");
+    assert_eq!(requested(33, false), None, "past the bound, between grid points: the grid point of `at`");
+    assert_eq!(requested(-5, false), Some(-5), "an `at` before the receipt");
+    assert_eq!(requested(3, true), None, "untimed: no requested instant");
+}
+
+#[test]
+fn txbook_cancel_switch_removes_its_payload_from_held_and_unread_and_clears_playing_once() {
+    // P19 (A1, F1): once the record has settled a switch cancelled (here as `Bookings::abandon` does), the book's cancellation ends it as
+    // the playing repeat and removes its payload, held or unread; the other entries keep their order. A second call changes nothing.
+    for unread in [false, true] {
+        let mut book = playing_book(true);
+        book.receive_switch(ActionId(2), 10, 0, 15, false, 0).unwrap();
+        book.list.held.insert(50, pl(5));
+        book.list.book(pl(6));
+        if unread {
+            book.list.book(switch_pl(1, 2));
+        } else {
+            book.list.held.insert(20, switch_pl(1, 2));
+        }
+        book.list.halt(CancelReason::Stop);
+        book.list.book(pl(7));
+        assert!(book.record.cancel_switch(), "unread {unread}: the record settles it");
+        assert!(book.cancel_switch(ActionId(2)), "unread {unread}");
+        assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "unread {unread}");
+        assert_eq!(book.playing, None, "unread {unread}");
+        assert_eq!(book.list.held, [(50, pl(5))].into(), "unread {unread}");
+        assert!(!book.cancel_switch(ActionId(2)), "unread {unread}: nothing left to cancel");
+        assert_eq!(settled(&mut book.record), [], "unread {unread}");
+        let read: Vec<String> = std::iter::from_fn(|| book.list.read())
+            .map(|read| match read {
+                Read::Booking(p) => format!("book {}", p.n),
+                Read::Halt { reason, .. } => format!("halt {reason:?}"),
+            })
+            .collect();
+        assert_eq!(read, ["book 6", "halt Stop", "book 7"], "unread {unread}");
+    }
+}
+
+#[test]
+fn txbook_dispatched_move_moves_the_playing_origin_of_that_repeat_only() {
+    // P20 (#88): a repeat moved at dispatch repeats from its new start; a move of another booking, or a refused move, leaves the grid.
+    let mut base = armed();
+    base.accept(100, Some(10), 0, ON_TIME, UNHANDED).unwrap();
+    base.accept(400, None, 0, ON_TIME, UNHANDED).unwrap();
+    let r = Playing { id: ActionId(3), origin: 400, period: 10, started: false };
+    let mut book = TxBook { record: base.clone(), playing: Some(r), ..new_book() };
+    assert_eq!(book.move_start(Some(ActionId(1)), 100, 130, Some(10)), Ok(()));
+    assert_eq!(book.playing, Some(r), "another booking moved");
+    assert!(book.move_start(Some(ActionId(3)), 400, 105, None).is_err());
+    assert_eq!(book.playing, Some(r), "a refused move");
+    let mut book = TxBook { record: base.clone(), playing: Some(r), ..new_book() };
+    assert_eq!(book.move_start(Some(ActionId(3)), 400, 455, None), Ok(()));
+    assert_eq!(book.playing, Some(Playing { origin: 455, ..r }), "a timed move");
+    let mut book = TxBook { record: base, playing: Some(r), ..new_book() };
+    assert_eq!(book.move_untimed(Some(ActionId(3)), 400, 461, None), Some(461));
+    assert_eq!(book.playing, Some(Playing { origin: 461, ..r }), "an untimed move");
+}
+
+#[test]
+fn txbook_issue_starts_the_playing_repeat_and_a_switch_s_own_payload() {
+    // P21 (D3, UR-38): the first issue of the playing repeat starts it, and a switch is the playing repeat from receipt, started only by
+    // the first issue of its own payload; another booking's issue starts neither.
+    let mut book = TxBook { record: repeat_at(0), ..new_book() };
+    book.play(true, ActionId(1), 0, 10);
+    book.take(Pl { n: 0, id: Some(ActionId(5)), switch: false }, 0);
+    book.issue(TxSend { count: 10, device_count: 10, ends: true });
+    assert_eq!(book.playing.map(|playing| playing.started), Some(false), "another booking's issue");
+    book.complete(Outcome::Accepted(10));
+    assert_eq!(book.receive_switch(ActionId(2), 10, 0, 15, false, 0), Err(SwitchRefusal::NotStarted));
+    book.take(Pl { n: 1, id: Some(ActionId(1)), switch: false }, 10);
+    book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    assert_eq!(book.playing.map(|playing| playing.started), Some(true), "R's first issue");
+    assert_eq!(book.complete(Outcome::Accepted(10)), Settle::Sent);
+    assert!(book.receive_switch(ActionId(2), 10, 0, 15, false, 0).is_ok());
+    assert_eq!(book.playing.map(|playing| (playing.id, playing.started)), Some((ActionId(2), false)));
+    book.advance(20);
+    assert_eq!(book.receive_switch(ActionId(3), 10, 0, 35, false, 21), Err(SwitchRefusal::NotStarted), "S applied in the record, not issued");
+    book.end_open();
+    book.take(switch_pl(2, 2), 20);
+    book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    assert_eq!(book.playing.map(|playing| (playing.id, playing.started)), Some((ActionId(2), true)), "S's own first issue");
+    assert!(book.receive_switch(ActionId(3), 10, 0, 35, false, 21).is_ok());
 }

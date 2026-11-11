@@ -446,7 +446,7 @@ D′ が決めるのは送信の状態の持ち主と，実行役との protocol
 | RM-15 | 同じ．§6 の 4 の文を足す（N0．振る舞いは変えない） | C1：KL-38 の例外を消す（拒まれた予約の後ろは区切り直す） |
 | RM-16 | 同じ（発行した所で閉じる．保持した尾は閉じの send で出る，§5.4.8） | Stop (a) は今は採らない（§11.8．C4 は owner が後で承認した時だけ） |
 | RM-21 | 同じ | — |
-| RM-37 | 規則も文も同じ．「the owner moves it only under its late policy when its cursor has passed it」（`design/07-radio-model.md:346`）の移動は，E2a で UHD も受付で取り込むので起きなくなるが，文は偽にならない（INFERRED，§5.4.5） | C2：outcome を境目を送ったかで決める（`uncertain` を足す） |
+| RM-37 | E2a で文を改めた（2026-11-11）：差し替えは受付で取り込み，動かさない（移動の文と `moved_to` を消した）．UHD は置き換える repeat の最初の send を発行する前の差し替えを受付で拒む（N2 = (b1)，UR-38，KL-41）．時刻を指定して受付が境目を押した差し替えだけが `requested_target = at` を持つ（#86）．Own が読む前に Stop が来て b < B なら行は `applied` のまま新しい波形は出ない（KL-42，C2 で直す） | C2：outcome を境目を送ったかで決める（`uncertain` を足す） |
 | UR-21，UR-22，UR-23，UR-36，UR-38 | 実行役と操作として書き直す（意味は同じ）．UR-22 の装置の規則と打ち切りの後の記録の範囲はそのまま．UR-38 の取り込みは受付の時に発行した cursor で（E2a，§5.4.5） | C1，C2 |
 | UR-25，UR-26 | configure の turn は `Configure` の操作に（順序は同じ） | C1 |
 | UR-28 | 同じ（照合は今と同じ材料） | — |
@@ -643,3 +643,4 @@ D′ の段階は送信の行（N47S5 の 185 本と N48S1・N48S3・N47S4 の�
 | 2026-11-10 | orchestrator：O1 は済（記録 `reviews/o1-dispositions.md`）．oracle は spec の文から書き，今のコードの三つの食い違いを issue にして固定した：#84（N0 で立てた），#85（Stop が dispatch 済みで未送信の burst を記録なしに消す．E1・E2a で一つの列から取り消す），#86（動かした差し替えの記録の `requested_target`．どの値かは E2a で RM-37・UR-38 の文として決める）．RM-16・MR-25 の Stop の範囲と MR-3・RM-15 の Mock の J(e) の allowance は文をコードに合わせた．次は E1．E2a の前に実機（handoff §2） |
 | 2026-11-10 | orchestrator：E1 は済（記録 `reviews/e1-dispositions.md`，形の素描 `reviews/e1-sketch.md`）．§12.1 の E1 の見込みのうち二つは違った：`cancel_unstarted`（ClockEnded）は reopen の失敗の後の受付で今も届く（残した．消したのは `end_clock` の取り消しと clock の不一致の枝），`continuation_open` の継ぎの節は step の未読の確認と close の間に継ぎが受け付けられうるので残る（Sol）．step の確認は未読の halt だけ（予約の未読でも読むと差し替えの取り込みが早まり，UR-38 の移動の道が E2a より前に消える）．#85 は E1 では直らない（送る前の burst は列の外の `open`），E2a で直す |
 | 2026-11-10 | orchestrator：段階 F は済（記録 `reviews/stepF-dispositions.md`）．§3 の R3・R6・R8・U2 の前線は「32 sample 以下の閉じた device burst の後は終わり＋g，g = max(3, ⌈15 µs × rate⌉)，ほかの閉じの後は＋3」（段階 B の＋10 は 1 MS/s の値だった，bench-results の「2026-11-10」）．`Bookings` は stream の rate から g を持つ．D′ の区切りの関数はこの規則を profile の値でなく rate の関数として受け取る（§6 の 6）．送信の rate は `x3xx` で 1 MS/s 以上 |
+| 2026-11-11 | orchestrator：E2a は済（記録 `reviews/e2a-dispositions.md`，設計 `reviews/e2a-sketch.md` と Fable 5.2 の設計レビュー `reviews/e2a-fable-design.md`）．`TxBook` が予約の記録・受付の一覧・`playing`・開いた予約・一つの in-flight の send を持ち，uhd-tx は lock の中で計画し lock の外で device を呼ぶ．打ち切りは自分の repeat と置き換える差し替えだけに届く（#80，F3 の footprint），halt は何も発行していない開いた予約を取り消す（#85），開いた device burst のない遅い underflow は何も変えず，その burst の最初の tick より前の underflow は打ち切らない（#93）．差し替えは受付で決まる（(b1)，#84，#86，#88）．§12.1 の見込みと違った点：lock の中の emit が二つあった（直した），R9 は advance で当てた状態では差が見えない（Stop で当てた状態に替えた） |

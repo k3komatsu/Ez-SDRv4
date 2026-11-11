@@ -87,9 +87,6 @@ fn o1_oracle_rm_37_switch_boundary() {
     assert_eq!(switch_boundary(&p, 2_000, 700, ms(4) + 200, None), 16_700, "bound 16 001 moves to the next grid point");
     // An explicit `at` later than the receipt's bound takes the grid point at or after it.
     assert_eq!(switch_boundary(&p, 2_000, 700, ms(4), Some(16_100)), 16_700);
-    // UR-38: the first grid point at or after the cursor.
-    assert_eq!(moved_boundary(2_000, 1_000, 17_000), 17_000);
-    assert_eq!(moved_boundary(2_000, 1_000, 17_001), 18_000);
 }
 
 #[test]
@@ -152,7 +149,7 @@ fn o1_oracle_rm_37_outcomes() {
     assert_eq!(outcome_after_abandon(14_000, 12_000), Outcome::Cancelled);
     assert_eq!(outcome_after_abandon(14_000, 14_000), Outcome::Cancelled, "a cursor at b has not handed the sample at b");
     assert_eq!(outcome_after_abandon(14_000, 16_500), Outcome::Applied);
-    assert_eq!(outcome_after_repeat_dropped().as_str(), "cancelled");
+    assert!(switch_refused_unstarted(), "#84: a switch on a repeat not started on the device is refused at receipt");
 }
 
 #[test]
@@ -161,6 +158,12 @@ fn o1_oracle_an_unhanded_booking_at_a_stop_is_cancelled_with_one_note() {
 }
 
 #[test]
-fn o1_oracle_a_moved_switch_records_its_asked_instant_as_its_requested_target() {
-    assert_eq!(requested_target_of_a_moved_switch(3_000), Some(3_000));
+fn o1_oracle_a_pushed_timed_switch_records_its_at_and_an_untimed_one_none() {
+    // #86: received at 3 ms, the bound is 15 000. An `at` of 3 000 alone gives grid point 3 000, so the receipt pushed it: `at` is recorded.
+    // An `at` of 16 000 is past the bound and on its own grid point: none. An untimed switch records none whatever its instant.
+    let p = uhd();
+    assert_eq!(switch_requested_target(&p, 2_000, 1_000, ms(3), 3_000, false), Some(3_000));
+    assert_eq!(switch_requested_target(&p, 2_000, 1_000, ms(3), 16_000, false), None);
+    assert_eq!(switch_requested_target(&p, 2_000, 1_000, ms(3), 15_500, false), None, "between grid points past the bound: on its own grid point");
+    assert_eq!(switch_requested_target(&p, 2_000, 1_000, ms(3), 3_000, true), None);
 }

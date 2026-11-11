@@ -286,7 +286,7 @@ pub fn repeat_switch_verdict(trial: &SwitchEvidence) -> Verdict {
     }
     let row = section(&trial.manifest, "switches").as_array().and_then(|rows| rows.first()).cloned();
     let outcome = row.as_ref().map(|row| row["outcome"].as_str().unwrap_or("").to_owned());
-    let boundary = row.as_ref().and_then(|row| row["moved_to"].as_i64().or(row["boundary"].as_i64()));
+    let boundary = row.as_ref().and_then(|row| row["boundary"].as_i64());
     let (origin, per) = stream_clock(&trial.manifest, "usrp/tx/s0");
     let windows = windows_of(&trial.manifest);
     let delay = first_delay(&trial.manifest, 100e3);

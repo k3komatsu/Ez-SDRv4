@@ -1,0 +1,17 @@
+# E2a test plan — dispositions of Sol's review (sol-plan.md, verdict FAIL)
+
+1. **Major, adopted (corrected).** The scoped abandon's rule §2.3 contradicts its own oracle claim. VERIFIED by the orchestrator: today `halt` lowers a kept chain's front only by `min` (`staging.rs:483-487`), so after an applied switch at `b = c` the old repeat R keeps front `b` and `[b, s)` is a separate Stop region (`staging.rs:496-501`). A SendAsap booking there is moved (F36, `region_move` `staging.rs:430-436`); in the pending case (R's chain reaches `c + STOP_FRONT`) it is refused. D4's `front = s` makes both cases refuse.
+   - Decision: keep D4's `front = s`, because it is what the owner-adopted F3 asks for. F3 says to align the two cases with RM-15's footprint ("a repeat that UR-22 abandoned keeps it up to its cursor plus five", `design/07-radio-model.md:163`; "a booking that is not late and meets a footprint is refused at receipt"), as a named change. Sol's evidence does not refute F3's premise; it shows that the plan failed to name the change. No owner decision is reopened.
+   - §2.3 then has two named differences from today: #80's `retain`, and F3's applied-switch cell, where a SendAsap booking in `[b, s)` is refused at receipt as the footprint, where today it is moved. P10 lists both cells, and every other cell must equal today's output.
+   - Drop rule 4 (the hull of `[c, s)`). With R's front at `s`, the footprint already covers `[b, s)` for every removed switch chain with `b < s`, and a chain at `b >= s` needs no region. Keeping both would be two representations of one fact (AGENTS §9 Maintainability 2).
+   - R9 expects both the DropAndFlag and the SendAsap booking at `b + 1` to be refused at receipt. A rig whose abandon really happens at `c = b` with the switch applied in the record replaces `t7a3`'s state: `t7a3` runs only to 8 ms, before its 14 ms boundary (`o1.rs:770-780,857-865`). Add the pending twin (switch not yet applied) with the same answers.
+   - Text: RM-15 already states the footprint. Add an RM-16/UR-22 sentence only if one becomes false; list the named change in the report.
+2. **Major, adopted.** `hw_n47s5_repeat_switch`'s timed trial asks for `now + 40 ms` (`n47s5.rs:270-273`), past the receipt bound, so the switch takes `grid(at)` and records `requested_target = None`. The rehearsal expects **None** in both variants. The pushed-timed `Some(at)` case stays in R18/M3 (rig tests). This corrects the audit, not the #86 decision.
+3. **Minor, adopted.** R4 books H before the Stop for the cancellation case and adds a survivor H′ booked after the Stop (FIFO, `staging.rs:239-242,268-272`).
+4. **Minor, adopted.**
+   - The TailShort-cursor row's killer is `ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned` (`tx.rs:4265-4296`).
+   - The "`issue` never sets `started` for a switch's payload" row names `ur_21_s9_switch_different_length_sets_the_new_period` as its killer. R16 gains the positive chained case: once S1 is issued, S2 is accepted.
+   - N47S5-90: if the `!switch` gate it mutates no longer exists after E2a-3, delete the row with that reason. Otherwise name a killer in which a switch is accepted.
+5. **Minor, adopted.** The trace comparison also logs, at the entry of `FakeDevice`'s send (before it forces EOB for short sends or drops the timestamp on a zero-accepted failure), the attempted `sob`, `eob`, `at`, `n` and channel count, and compares that log too.
+
+The D1 premise holds (Sol found no receipt-side writer of `held`, `open` or `chain`).

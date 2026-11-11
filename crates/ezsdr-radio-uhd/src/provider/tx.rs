@@ -15,11 +15,11 @@ use ezsdr_kernel::stream::{BlockFlags, BlockHeader, BurstOpen, BurstStep, BurstT
 use ezsdr_kernel::time::{Duration, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload};
-use ezsdr_radio::staging::{CLOSE_GAP, CLOSED_SHORT_MAX, Read};
+use ezsdr_radio::staging::{CLOSE_GAP, CLOSED_SHORT_MAX, Outcome, Read, STOP_FRONT, Settle, TxBook, TxSend};
 use serde_json::json;
 
 use super::control::ColdConfig;
-use super::core::{Clock, Core, Playing, Streams, lock, stream_key};
+use super::core::{Clock, Core, Locked, Streams, lock, stream_key};
 use crate::device::{Dir, Iq, MIN_FIRST_SEND, MIN_OPEN_FIRST_SEND, TxCode, TxReport};
 use crate::host::HostClock;
 use crate::profile::DEVICE_LEAD_NS;
@@ -32,7 +32,7 @@ pub(crate) struct Held {
     pub samples: Arc<Vec<Vec<Iq>>>,
     pub waveform_len: usize,
     pub repeat: bool,
-    /// The burst is a repeat switch (RM-37): the owner takes it into the device burst at its boundary, or refuses it.
+    /// The burst is a repeat switch (RM-37), taken at receipt at its boundary (`k`): the owner continues the device burst into it there.
     pub switch: bool,
     /// The burst has no requested instant (RS-19, RM-15): a late one moves at dispatch, silently, and no late policy applies.
     pub untimed: bool,
@@ -41,6 +41,16 @@ pub(crate) struct Held {
     pub target: TimePoint,
     /// The values the burst takes, booked with it (RM-21); the owner applies them at its turn.
     pub settings: Arc<ColdConfig>,
+}
+
+impl ezsdr_radio::staging::Booked for Held {
+    fn id(&self) -> Option<ezsdr_kernel::event::ActionId> {
+        self.settings.action()
+    }
+
+    fn is_switch(&self) -> bool {
+        self.switch
+    }
 }
 
 impl Held {
@@ -74,12 +84,6 @@ pub(crate) enum TxCmd {
     Shutdown,
 }
 
-struct Open {
-    held: Held,
-    next: i64,
-    first: bool,
-}
-
 struct PendingReport {
     target: TimePoint,
     channels: BTreeSet<usize>,
@@ -104,6 +108,8 @@ enum DeviceBurst {
     #[default]
     Closed,
     Open {
+        /// The root tick of the device burst's first sample, its start-of-burst send's instant.
+        first: i64,
         next: i64,
         tail: Option<Tail>,
     },
@@ -146,6 +152,15 @@ impl TxChain {
         matches!(self.burst, DeviceBurst::Open { .. })
     }
 
+    /// Whether an underflow report reaches the open device burst: one is open, and `tick` is none or not before the burst's first sample
+    /// (an earlier tick is the device burst before's, #93).
+    fn underflowed(&self, tick: Option<i64>) -> bool {
+        match self.burst {
+            DeviceBurst::Closed => false,
+            DeviceBurst::Open { first, .. } => tick.is_none_or(|tick| tick >= first),
+        }
+    }
+
     fn front(&self) -> Option<(ClockDomainId, i64)> {
         self.front
     }
@@ -159,14 +174,14 @@ impl TxChain {
         self.recovery == Recovery::ReopenNeeded
     }
 
-    fn open_device_burst(&mut self, next: i64, tail: Option<Tail>) {
+    fn open_device_burst(&mut self, first: i64, next: i64, tail: Option<Tail>) {
         assert!(matches!(self.burst, DeviceBurst::Closed));
-        self.burst = DeviceBurst::Open { next, tail };
+        self.burst = DeviceBurst::Open { first, next, tail };
     }
 
     fn continue_device_burst(&mut self, next: i64, tail: Option<Tail>) {
-        assert!(self.burst_is_open());
-        self.burst = DeviceBurst::Open { next, tail };
+        let DeviceBurst::Open { first, .. } = self.burst else { panic!("a device burst is open") };
+        self.burst = DeviceBurst::Open { first, next, tail };
     }
 
     fn close_device_burst(&mut self) {
@@ -216,7 +231,6 @@ pub(crate) struct Tx {
     /// UR-28): the record's generation as this owner last read it, so that a streamer opened
     /// since is told from this one's.
     streamer: u64,
-    open: Option<Open>,
     tracker: Option<BurstTracker>,
     /// The root tick of the current clock's cut, from the stream's one segment as the last pass
     /// read it (UR-25): the origin when a loss or `Provider::stop` ended the clock at or before it.
@@ -263,7 +277,6 @@ impl Tx {
             clock,
             channels,
             streamer,
-            open: None,
             cut: None,
             unacked: VecDeque::new(),
             late_reported: HashSet::new(),
@@ -317,9 +330,27 @@ impl Tx {
         self.step()
     }
 
+    /// The stream's book, under the streams lock: this owner writes its held and open bookings only through it.
+    fn with_book<R>(&self, f: impl FnOnce(&mut TxBook<Held>) -> R) -> R {
+        f(&mut lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).book)
+    }
+
+    /// The streams lock for a send's plan or result, with its host-clock wait kept as the longest (note 49 §12).
+    fn lock_for_send(&self) -> Locked<'_, Streams> {
+        let asked = self.host.now();
+        let streams = lock(&self.core.streams);
+        self.core.stat_max("tx_lock_wait_max_ns", i64::try_from(self.host.now().saturating_sub(asked).as_nanos()).unwrap_or(i64::MAX));
+        streams
+    }
+
+    /// The first sample the device has nothing past: the open booking's next sample, or the open device burst's.
+    fn cursor(&self) -> Option<i64> {
+        self.with_book(|book| book.open.as_ref().map(|open| open.next)).or_else(|| self.chain.next())
+    }
+
     /// The stream's held bookings (read, not yet taken), under the streams lock beside the record; this owner is their one writer.
     fn with_held<R>(&self, f: impl FnOnce(&mut BTreeMap<i64, Held>) -> R) -> R {
-        f(&mut lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).list.held)
+        f(&mut lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).book.list.held)
     }
 
     fn held_first(&self) -> Option<i64> {
@@ -342,7 +373,7 @@ impl Tx {
     pub(super) fn read_list(&mut self) {
         loop {
             // Bound first: a `while let` on the lock keeps the guard through the body, which locks again.
-            let read = lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).list.read();
+            let read = lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).book.read();
             match read {
                 None => break,
                 Some(Read::Booking(held)) => self.receive(held),
@@ -358,40 +389,7 @@ impl Tx {
             return self.cancel_unstarted();
         };
         debug_assert_eq!(clock.domain, held.domain, "receipt refuses another SampleClock");
-        if held.switch && !self.install(&mut held) {
-            self.core.command_rejected(held.settings.action(), "tx_burst", "UR-21: the repeat switch was not taken: the repeat it replaces has no handed cursor or it was cancelled");
-            return;
-        }
         self.hold(held);
-    }
-
-    /// UR-36, UR-38, RM-37: takes the switch `held` at the handed cursor: the open repeat's next sample, or the device burst's when none
-    /// is open. A cursor past the boundary moves the switch to its next boundary, which `held.k` takes, and reports one
-    /// `TIME_ERROR { send_asap }` naming the switch. False when the switch is no longer pending or has no cursor to take it at.
-    fn install(&self, held: &mut Held) -> bool {
-        let cursor = self.open.as_ref().map(|open| open.next).or_else(|| self.chain.next());
-        let (Some(id), Some(clock)) = (held.settings.action(), self.clock) else { return false };
-        let mut streams = lock(&self.core.streams);
-        let stream = streams.stream_mut(stream_key(Dir::Tx, self.k));
-        // A switch with no cursor to take it at is refused like any other, so its row is settled (S4).
-        let Some((cursor, boundary)) = cursor.and_then(|cursor| stream.busy.install(id, cursor).map(|boundary| (cursor, boundary))) else {
-            stream.busy.refuse(id);
-            return false;
-        };
-        // RM-37: the new repeat replaces the one playing once the owner takes it; a refused switch leaves that one playing.
-        stream.playing = Some(Playing { id, origin: boundary, period: held.waveform_len as i64 });
-        drop(streams);
-        if boundary != held.k {
-            // UR-38: the amount by which the cursor passed the boundary the switch was chosen at; the burst's record reads it like any late burst's.
-            let late_by = self.core.late_by(clock, cursor - held.k).unwrap_or(Duration::new(ClockDomainId::HOST_MONOTONIC, i64::MAX));
-            let late_by_ns = late_by.ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap_or(i64::MAX);
-            let payload =
-                serde_json::to_value(TimeErrorPayload { cause: TimeErrorCause::Late, outcome: TimeErrorOutcome::SendAsap, late_by_ns, target: held.target, action: Some(id) }).expect("a payload");
-            self.core.emit(&self.core.stream_node(Dir::Tx, self.k), kinds::TIME_ERROR, Severity::Error, payload);
-            held.open.late = Some(LateOutcome::SendAsap { late_by });
-            held.k = boundary;
-        }
-        true
     }
 
     /// UR-25: the cut of the stream's one segment, read in the caller's section of the instance's
@@ -468,14 +466,15 @@ impl Tx {
             return false;
         }
         let Some(clock) = self.clock else { return false };
-        // `now` is read in the section that finds no halt unread: every hand-over of this turn is bounded by an instant read while no Stop waited, so a Stop received later cuts at or after it (RM-16).
+        // `now` is read in the section that finds nothing unread: every hand-over of this turn is bounded by an instant read while no Stop
+        // waited, so a Stop received later cuts at or after it (RM-16), and a switch received later has its boundary past it (RM-37).
         let now = {
             let mut streams = lock(&self.core.streams);
             let stream = streams.stream_mut(stream_key(Dir::Tx, self.k));
-            (!stream.list.halt_unread()).then(|| {
+            (!stream.book.list.unread()).then(|| {
                 let now = self.core.now();
-                // RM-37: the record applies a taken switch once device time reaches its boundary, whether or not a booking comes.
-                stream.busy.advance(clock.at_or_after(now));
+                // RM-37: the record applies a pending switch once device time reaches its boundary, whether or not a booking comes.
+                stream.book.advance(clock.at_or_after(now));
                 now
             })
         };
@@ -486,22 +485,21 @@ impl Tx {
         };
         let window = self.core.ticks(self.core.description.timing.tx_in_flight_ns);
         let window_cut = clock.at_or_after(now.saturating_add(window));
-        if self.open.is_none() && self.cut.is_some_and(|cut| now >= cut) {
+        let open = self.with_book(|book| book.open.as_ref().map(|open| (open.next, open.first, open.booking.k, open.booking.policy)));
+        if open.is_none() && self.cut.is_some_and(|cut| now >= cut) {
             self.end_clock();
             return true;
         }
-        if let Some(next) = self.open.as_ref().map(|o| o.next) {
+        if let Some((next, first, k, policy)) = open {
             // UR-21: a first send not yet handed over, whose start is no longer a device lead away, is judged by its late policy again.
-            let late_start =
-                self.open.as_ref().is_some_and(|open| open.first && !self.chain.continues_at(next) && !matches!(self.start_outcome(clock, open.held.k, open.held.policy), Ok(LateOutcome::OnTime {})));
+            let late_start = first && !self.chain.continues_at(next) && !matches!(self.start_outcome(clock, k, policy), Ok(LateOutcome::OnTime {}));
             if late_start {
-                let open = self.open.take().expect("a burst is open");
-                self.hold(open.held);
+                self.with_book(TxBook::untake);
                 return true;
             }
             if clock.instant(next) < now {
                 self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
-                self.abandon(true, 0, true);
+                self.abandon(true, self.cursor(), true);
                 return true;
             }
             if self.held_first() == Some(next) {
@@ -514,7 +512,7 @@ impl Tx {
             if let Some(h) = stale {
                 let held = self.take_held(h).expect("the first key");
                 self.refuse(&held, Duration::new(ClockDomainId::HOST_MONOTONIC, 0), "UR-21: the burst starts before the open burst's next sample; it is refused");
-                lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).busy.drop_piece(h, held.record_len());
+                lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).book.drop_piece(h, held.record_len());
                 return true;
             }
             let held_cut = self.held_first();
@@ -523,7 +521,7 @@ impl Tx {
         if let Some(c) = self.chain.next() {
             if clock.instant(c) < now {
                 self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
-                self.abandon(true, 0, true);
+                self.abandon(true, self.cursor(), true);
                 return true;
             }
             match self.held_first() {
@@ -561,7 +559,7 @@ impl Tx {
                     return true;
                 }
                 let next = held.k;
-                self.open = Some(Open { held, next, first: true });
+                self.with_book(|book| book.take(held, next));
                 let held_cut = self.held_first();
                 return self.send(clock, held_cut, window_cut);
             }
@@ -574,11 +572,9 @@ impl Tx {
     /// booking received after the close is refused at receipt. False while a booking can still join.
     fn close_unjoined(&mut self, clock: Clock, e: i64) -> bool {
         let mut streams = lock(&self.core.streams);
-        let busy = &mut streams.stream_mut(stream_key(Dir::Tx, self.k)).busy;
-        if busy.continuation_open(e, self.core.now(), |k| self.core.join_by(clock, k)) {
+        let Some(record_front) = streams.stream_mut(stream_key(Dir::Tx, self.k)).book.close_unjoined(e, self.core.now(), |k| self.core.join_by(clock, k)) else {
             return false;
-        }
-        let record_front = busy.close(e);
+        };
         drop(streams);
         self.end_open(true);
         if record_front.is_some_and(|front| self.chain.front().is_some_and(|(domain, device)| domain == clock.domain && device > front)) {
@@ -633,7 +629,7 @@ impl Tx {
         match result {
             Ok(()) => self.hold(held),
             Err(error) => {
-                lock(&core.streams).stream_mut(key).busy.drop_piece(held.k, held.record_len());
+                lock(&core.streams).stream_mut(key).book.drop_piece(held.k, held.record_len());
                 core.device_failed(held.settings.action(), "tx_burst", &error);
             }
         }
@@ -641,43 +637,38 @@ impl Tx {
     }
 
     /// Hands the next buffer of the open burst to the device (UR-22, UR-23). False, with nothing handed over, while the window
-    /// cannot yet take all that the other limits allow, except for the burst's first timed buffer, which takes what fits.
+    /// cannot yet take all that the other limits allow, except for the burst's first timed buffer, which takes what fits. The send is
+    /// planned and issued in one section under the streams lock, made with no lock held, and completed in another section (UR-25).
     fn send(&mut self, clock: Clock, held_cut: Option<i64>, window_cut: i64) -> bool {
         if self.chain.needs_reopen() {
             return false;
         }
         let min_open = MIN_OPEN_FIRST_SEND as i64;
         let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(min_open, TX_SEND_CAP);
-        let (start, first) = {
-            let open = self.open.as_ref().expect("a burst is open");
-            (open.held.k, open.first)
-        };
+        let mut streams = self.lock_for_send();
+        let book = &mut streams.stream_mut(stream_key(Dir::Tx, self.k)).book;
+        let open = book.open.as_ref().expect("a burst is open");
+        let (start, first) = (open.booking.k, open.first);
         let device_sob = first && !self.chain.continues_at(start);
-        let open = self.open.as_mut().expect("a burst is open");
-        let len = open.held.waveform_len as i64;
-        let offset = if open.held.repeat { (open.next - start).rem_euclid(len) } else { open.next - start };
-        let tiled = open.held.repeat && open.held.samples[0].len() > len as usize;
+        let next = open.next;
+        let len = open.booking.waveform_len as i64;
+        let offset = if open.booking.repeat { (next - start).rem_euclid(len) } else { next - start };
+        let tiled = open.booking.repeat && open.booking.samples[0].len() > len as usize;
         let mut wanted = if tiled { chunk } else { chunk.min(len - offset) };
         if let Some(cut) = held_cut {
-            wanted = wanted.min(cut - open.next);
+            wanted = wanted.min(cut - next);
         }
-        let avail = window_cut - open.next;
+        let avail = window_cut - next;
         if avail < if device_sob { wanted.min(min_open) } else { wanted } {
             return false;
         }
         let count = wanted.min(avail);
         debug_assert!(count > 0, "the send is inside the in-flight window");
-        let ends_waveform = !open.held.repeat && offset + count == len;
-        let ends_at_held = held_cut.is_some_and(|h| open.next + count == h);
+        let ends_waveform = !open.booking.repeat && offset + count == len;
+        let ends_at_held = held_cut.is_some_and(|h| next + count == h);
         // A first send of at most 32 samples is one closed device burst, whether it ends the waveform or reaches the next held burst (UR-22).
         let short_first = device_sob && count <= min_open;
         let eob = ends_waveform || ends_at_held;
-        let mut slices = [&[][..]; TX_CHANNELS_MAX];
-        for (slice, channel) in slices.iter_mut().zip(open.held.samples.iter()) {
-            *slice = &channel[offset as usize..(offset + count) as usize];
-        }
-        let channels = open.held.samples.len();
-        let first = open.first;
         // The Kernel's burst boundaries (`first`, `eob`) and the device's differ where one
         // burst continues the device burst of the one before (§11 F3).
         let continuing = first && !device_sob;
@@ -686,11 +677,23 @@ impl Tx {
         // back, and `step` sends it with end-of-burst at that deadline, or without it ahead
         // of a burst that continues the device burst there (Review N, B3; Review O, O-B1).
         // A short first buffer is not held: its start goes with it.
-        let open_ended = clock.instant(open.next + count) - self.core.now() > self.core.device_lead();
+        let open_ended = clock.instant(next + count) - self.core.now() > self.core.device_lead();
         let hold = eob && !ends_at_held && open_ended && !short_first;
         // A short first send is closed here even where a booking follows at its end: that booking meets the padded front (UR-22).
         let device_eob = eob && (!ends_at_held || short_first) && !hold;
         let sending = (if hold { count - 1 } else { count }) as usize;
+        // A closing packet is padded with zeros (UR-22: a first send to four, a continuation to two).
+        let pad = if device_sob && device_eob { MIN_FIRST_SEND.saturating_sub(sending) } else { usize::from(device_eob && sending == 1) };
+        let device_count = sending + pad;
+        let (samples, burst_open) = (open.booking.samples.clone(), open.booking.open);
+        book.issue(TxSend { count, device_count: device_count as i64, ends: eob });
+        drop(streams);
+        self.core.probe("tx_send_planned", None);
+        let mut slices = [&[][..]; TX_CHANNELS_MAX];
+        for (slice, channel) in slices.iter_mut().zip(samples.iter()) {
+            *slice = &channel[offset as usize..(offset + count) as usize];
+        }
+        let channels = samples.len();
         // The held tail is at `start - 1`; the continuation cursor already follows it.
         if continuing {
             if let Some(tail) = self.chain.tail() {
@@ -698,23 +701,24 @@ impl Tx {
                 // without it this one would play a sample early, so its failure abandons this
                 // burst, the device burst ended (Review Q, NB-Q2).
                 let buffers = tail.buffers();
-                let at = Some(clock.instant(open.next.saturating_sub(1)));
-                match self.core.device.tx_send(self.k, &buffers[..tail.channels], at, false, false, SEND_TIMEOUT) {
-                    Ok(1) => {}
+                let at = Some(clock.instant(next.saturating_sub(1)));
+                let tail_sent = match self.core.device.tx_send(self.k, &buffers[..tail.channels], at, false, false, SEND_TIMEOUT) {
+                    Ok(1) => true,
                     Ok(_) => {
                         self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
-                        return self.abandon(true, 0, true);
+                        false
                     }
                     Err(error) => {
                         self.core.device_failed(None, "tx_burst", &error);
-                        return self.abandon(true, 0, true);
+                        false
                     }
+                };
+                if !tail_sent {
+                    let Settle::Abandon { cursor } = self.complete_send(Outcome::TailShort) else { unreachable!("a failed tail abandons the burst") };
+                    return self.abandon(true, Some(cursor), true);
                 }
             }
         }
-        // A closing packet is padded with zeros (UR-22: a first send to four, a continuation to two).
-        let pad = if device_sob && device_eob { MIN_FIRST_SEND.saturating_sub(sending) } else { usize::from(device_eob && sending == 1) };
-        let device_count = sending + pad;
         let mut padded = [[Iq::default(); MIN_FIRST_SEND]; TX_CHANNELS_MAX];
         let mut sent = [&[][..]; TX_CHANNELS_MAX];
         if pad > 0 {
@@ -730,8 +734,9 @@ impl Tx {
             }
         }
         // T1: every payload-bearing packet names its first sample, even inside a device burst.
-        let at = Some(clock.instant(open.next));
+        let at = Some(clock.instant(next));
         let result = if device_count > 0 { self.core.device.tx_send(self.k, &sent[..channels], at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };
+        let settle = self.complete_send(result.as_ref().map_or(Outcome::Failed, |accepted| Outcome::Accepted(*accepted as i64)));
         // Held only once the samples before it went out: after a send that failed or came
         // up short it would play straight after what the device took (Review P, NB-1).
         let tail = hold.then(|| {
@@ -741,46 +746,45 @@ impl Tx {
             }
             Tail { samples, channels }
         });
-        let open = self.open.as_mut().expect("a burst is open");
-        let next = open.next;
         // The device burst is open when it was before this send, or this one's start went.
         let was_open = !first || continuing;
-        match result {
-            Ok(accepted) if accepted == device_count => {}
-            Ok(accepted) => {
-                self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
-                if device_sob && accepted > 0 {
-                    self.remember_burst(TimePoint::new(clock.domain, start));
-                }
-                let result = self.abandon(was_open || accepted > 0, accepted, !device_eob);
-                if device_eob {
-                    self.core.reject_note(json!({ "call": "tx_close", "stream": self.k,
-                        "error": format!("EOB send accepted {accepted} of {device_count} samples") }));
-                    if self.core.is_lost() {
-                        self.chain.lose();
-                    } else {
-                        self.chain.mark_reopen_needed();
+        if let Settle::Abandon { cursor } = settle {
+            match result {
+                Ok(accepted) => {
+                    self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
+                    if device_sob && accepted > 0 {
+                        self.remember_burst(TimePoint::new(clock.domain, start));
                     }
-                }
-                return result;
-            }
-            Err(error) => {
-                // Whether UHD sent packets before the error is unknown: a start that may have
-                // gone is counted for its report, then closed by the two-sample EOB below.
-                self.core.device_failed(None, "tx_burst", &error);
-                if device_sob {
-                    self.remember_burst(TimePoint::new(clock.domain, start));
-                }
-                let result = self.abandon(true, device_count, !device_eob);
-                if device_eob {
-                    self.core.reject_note(json!({ "call": "tx_close", "stream": self.k, "error": error.message }));
-                    if self.core.is_lost() {
-                        self.chain.lose();
-                    } else {
-                        self.chain.mark_reopen_needed();
+                    let result = self.abandon(was_open || accepted > 0, Some(cursor), !device_eob);
+                    if device_eob {
+                        self.core.reject_note(json!({ "call": "tx_close", "stream": self.k,
+                            "error": format!("EOB send accepted {accepted} of {device_count} samples") }));
+                        if self.core.is_lost() {
+                            self.chain.lose();
+                        } else {
+                            self.chain.mark_reopen_needed();
+                        }
                     }
+                    return result;
                 }
-                return result;
+                Err(error) => {
+                    // Whether UHD sent packets before the error is unknown: a start that may have
+                    // gone is counted for its report, then closed by the two-sample EOB below.
+                    self.core.device_failed(None, "tx_burst", &error);
+                    if device_sob {
+                        self.remember_burst(TimePoint::new(clock.domain, start));
+                    }
+                    let result = self.abandon(true, Some(cursor), !device_eob);
+                    if device_eob {
+                        self.core.reject_note(json!({ "call": "tx_close", "stream": self.k, "error": error.message }));
+                        if self.core.is_lost() {
+                            self.chain.lose();
+                        } else {
+                            self.chain.mark_reopen_needed();
+                        }
+                    }
+                    return result;
+                }
             }
         }
         let mut flags = BlockFlags::NONE;
@@ -800,7 +804,7 @@ impl Tx {
             lost: None,
             contract: self.contract.take().expect("contract is available"),
         };
-        let open_record = first.then_some(open.held.open);
+        let open_record = first.then_some(burst_open);
         if device_sob {
             self.remember_burst(TimePoint::new(clock.domain, start));
         }
@@ -808,33 +812,32 @@ impl Tx {
             self.core.stat("tx_bursts", 1);
         }
         self.core.stat("tx_samples", count);
-        let open = self.open.as_mut().expect("still open");
-        open.first = false;
-        open.next += count;
+        let next = next + count;
         if device_eob {
             self.chain.close_device_burst();
         } else if device_sob {
-            self.chain.open_device_burst(open.next, tail);
+            self.chain.open_device_burst(clock.instant(start), next, tail);
         } else {
-            self.chain.continue_device_burst(open.next, tail);
+            self.chain.continue_device_burst(next, tail);
         }
         if let Some(tracker) = self.tracker.as_mut() {
             let step = tracker.on_block(&header, open_record);
             self.record(step);
         }
         self.contract = Some(header.contract);
-        if eob {
-            let open = self.open.take().expect("open");
-            if !device_eob {
-                // The device burst remains open at the next sample.
-            } else {
-                // UR-22: a closing send that is also the device burst's first send, of at most 32 padded samples, fronts at its padded end plus the
-                // gap of the stream's rate; any other closing send at its end plus three.
-                let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { self.short_gap(clock) } else { CLOSE_GAP };
-                self.chain.advance_front(clock.domain, open.next.saturating_add(pad as i64 + gap));
-            }
+        if device_eob {
+            // UR-22: a closing send that is also the device burst's first send, of at most 32 padded samples, fronts at its padded end plus the
+            // gap of the stream's rate; any other closing send at its end plus three. (A Kernel end the device burst outlives leaves it open
+            // at the next sample.)
+            let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { self.short_gap(clock) } else { CLOSE_GAP };
+            self.chain.advance_front(clock.domain, next.saturating_add(pad as i64 + gap));
         }
         true
+    }
+
+    /// A send's device outcome, in its own section under the streams lock: the book settles it (UR-22).
+    fn complete_send(&self, outcome: Outcome) -> Settle {
+        self.lock_for_send().stream_mut(stream_key(Dir::Tx, self.k)).book.complete(outcome)
     }
 
     fn record(&self, step: Result<BurstStep, ezsdr_kernel::stream::StreamError>) {
@@ -857,12 +860,13 @@ impl Tx {
     fn end_open(&mut self, device_eob: bool) {
         let continuing = self.chain.next();
         let tail = self.chain.tail();
-        let device_open = self.open.as_ref().map_or(continuing.is_some(), |open| !open.first || continuing == Some(open.held.k));
+        let open = self.with_book(|book| book.open.as_ref().map(|open| (open.first, open.booking.k, open.next)));
+        let device_open = open.map_or(continuing.is_some(), |(first, k, _)| !first || continuing == Some(k));
         if device_eob {
             self.chain.close_device_burst();
         }
         if device_eob && device_open && !self.core.is_lost() {
-            let cursor = self.open.as_ref().map_or(continuing, |open| Some(open.next));
+            let cursor = open.map_or(continuing, |(_, _, next)| Some(next));
             if let (Some(clock), Some(cursor)) = (self.clock, cursor) {
                 let close_start = cursor.saturating_sub(if tail.is_some() { 1 } else { 0 });
                 if self.close_device_burst(tail, cursor, clock) {
@@ -872,7 +876,7 @@ impl Tx {
         } else if device_eob && self.core.is_lost() {
             self.chain.lose();
         }
-        let Some(_) = self.open.take() else { return };
+        let Some(_) = self.with_book(TxBook::end_open) else { return };
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
             lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
         }
@@ -946,12 +950,13 @@ impl Tx {
             }
         }
         let mut halted = false;
+        let mut open_cancelled = false;
         {
             let mut streams = lock(&core.streams);
             if result.is_ok() {
                 streams.record_configured(key, if core.is_lost() { None } else { configured });
             } else if !core.is_lost() && streams.stop.is_none() {
-                self.halt_failed_reopen(&mut streams, key);
+                open_cancelled = self.halt_failed_reopen(&mut streams, key);
                 self.chain.reopen_failed();
                 halted = true;
             } else if core.is_lost() {
@@ -964,6 +969,9 @@ impl Tx {
         self.sync_streamer();
         if result.is_ok() {
             self.chain.reopen_succeeded();
+        }
+        if open_cancelled {
+            self.report_cancelled_burst("UR-22: cancelled because the TX streamer could not be reopened", ezsdr_radio::CancelReason::ClockEnded);
         }
         if halted {
             for _ in self.take_all_held().into_values() {
@@ -979,62 +987,36 @@ impl Tx {
     }
 
     /// RM-25: a non-terminal reopen refusal ends the stream's clock: the open burst is cancelled and
-    /// the stream has no clock after it.
-    fn halt_failed_reopen(&mut self, streams: &mut Streams, key: StreamKey) {
-        if self.open.take().is_some() {
-            self.report_cancelled_burst("UR-22: cancelled because the TX streamer could not be reopened", ezsdr_radio::CancelReason::ClockEnded);
-        }
+    /// the stream has no clock after it. True when a burst was open, which the caller reports once the lock is released (UR-25).
+    fn halt_failed_reopen(&mut self, streams: &mut Streams, key: StreamKey) -> bool {
+        let cancelled = streams.stream_mut(key).book.end_open().is_some();
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
             lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
         }
-        streams.stream_mut(key).busy.cancel_switch();
+        streams.stream_mut(key).book.clock_ended();
         streams.finished(key);
         self.clock = None;
         self.cut = None;
         self.tracker = None;
+        cancelled
     }
 
-    /// RM-37 (S4, Opus re-check of round 7, Minor A): the held switches at or after `from` go with the repeat they replace, whether the
-    /// record has applied them or not, so their new waveform is never sent. Each is reported cancelled.
-    fn cancel_held_switches(&mut self, from: i64) {
-        let switches: Vec<i64> = self.with_held(|map| map.iter().filter(|(k, held)| held.switch && **k >= from).map(|(k, _)| *k).collect());
-        for k in switches {
-            let held = self.take_held(k).expect("the first key");
-            if let Some(id) = held.settings.action() {
-                lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).busy.cancel_applied(id);
-            }
-            self.report_cancelled_burst("UR-22: the repeat switch was cancelled with the repeat it replaces", ezsdr_radio::CancelReason::Stop);
-        }
-    }
-
-    /// Always true: abandoning a burst is work, which `send`'s callers return.
-    fn abandon(&mut self, device_open: bool, handed: usize, close_open_burst: bool) -> bool {
+    /// Always true: abandoning a burst at `cursor`, the first sample the device has nothing past, is work, which `send`'s callers return.
+    fn abandon(&mut self, device_open: bool, cursor: Option<i64>, close_open_burst: bool) -> bool {
         // A send that failed or came up short: end the device burst if one is open, so
         // that none is left without end-of-burst (Review N, N7), with an empty buffer —
         // the burst's samples after what the device took are not sent (Review P, NB-1).
-        let handed = i64::try_from(handed).unwrap_or(i64::MAX);
-        let cursor = self.open.as_ref().map(|open| open.next.saturating_add(handed)).or_else(|| self.chain.next().map(|cursor| cursor.saturating_add(handed)));
-        // A switch the owner took at or after the handed cursor never starts, and its held burst goes with it (S4). Only an abandoned
-        // repeat takes its switch: a finite burst's abandon leaves the switch of a repeat it has not started (Opus re-check, Minor B).
-        if let Some(cursor) = cursor {
-            // An abandoned repeat ends in the record at the handed cursor, with no in-flight window (the device has nothing past it), and it
-            // is no longer the playing repeat (S4). A switch joined at the cursor but not yet opened continues the repeat it replaces.
-            let repeat = match &self.open {
-                Some(open) => open.held.repeat,
-                None => self.with_held(|map| map.get(&cursor).is_some_and(|held| held.switch)),
-            };
-            let mut streams = lock(&self.core.streams);
-            let stream = streams.stream_mut(stream_key(Dir::Tx, self.k));
-            if repeat {
-                stream.busy.cancel_switch_from(cursor);
-            }
-            if let (Some(clock), true) = (self.clock, repeat) {
-                stream.stop_at(clock.instant(cursor), 0);
-                stream.playing = None;
-            }
-            drop(streams);
-            if repeat {
-                self.cancel_held_switches(cursor);
+        // A switch at or after the handed cursor never starts, and its payload goes with it, held or unread (S4, A1). Only an abandoned
+        // repeat takes its switch (KL-39).
+        if let (Some(cursor), Some(clock)) = (cursor, self.clock) {
+            // An abandoned repeat ends in the record at the handed cursor, with no in-flight window (the device has nothing past it) (S4,
+            // #80). A switch joined at the cursor but not yet opened continues the repeat it replaces.
+            let (repeat, id) = self
+                .with_book(|book| book.open.as_ref().map(|open| (open.booking.repeat, open.booking.settings.action())))
+                .unwrap_or_else(|| (self.with_held(|map| map.get(&cursor).is_some_and(|held| held.switch)), None));
+            let cancelled = self.with_book(|book| book.abandon(repeat, id, cursor, clock.instant(cursor.saturating_add(STOP_FRONT))));
+            for _ in 0..cancelled {
+                self.report_cancelled_burst("UR-22: the repeat switch was cancelled with the repeat it replaces", ezsdr_radio::CancelReason::Stop);
             }
         }
         self.chain.close_device_burst();
@@ -1051,7 +1033,7 @@ impl Tx {
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
             lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
         }
-        self.open.take();
+        self.with_book(TxBook::end_open);
         true
     }
 
@@ -1103,7 +1085,7 @@ impl Tx {
             Ok(LateOutcome::SendAsap { .. }) if held.untimed => {
                 let moved = {
                     let mut streams = lock(&self.core.streams);
-                    streams.stream_mut(stream_key(Dir::Tx, self.k)).busy.move_untimed(held.k, bound, held.record_len())
+                    streams.stream_mut(stream_key(Dir::Tx, self.k)).book.move_untimed(held.settings.action(), held.k, bound, held.record_len())
                 };
                 match moved {
                     Some(start) => {
@@ -1120,12 +1102,7 @@ impl Tx {
                 let start = bound;
                 let moved = {
                     let mut streams = lock(&self.core.streams);
-                    let busy = &mut streams.stream_mut(stream_key(Dir::Tx, self.k)).busy;
-                    let moved = busy.move_start(held.k, start, held.record_len());
-                    if moved.is_err() {
-                        busy.drop_piece(held.k, held.record_len());
-                    }
-                    moved
+                    streams.stream_mut(stream_key(Dir::Tx, self.k)).book.move_start(held.settings.action(), held.k, start, held.record_len())
                 };
                 if moved.is_err() {
                     self.refuse(&held, late_by, "UR-21: the moved start overlaps an accepted booking");
@@ -1138,16 +1115,9 @@ impl Tx {
                 Some(held)
             }
             Ok(LateOutcome::Drop { late_by }) => {
-                // The region goes as a refused head's does (RM-15); a repeat that never plays takes the switch that replaces it (RM-37).
-                let cancelled = {
-                    let mut streams = lock(&self.core.streams);
-                    let busy = &mut streams.stream_mut(stream_key(Dir::Tx, self.k)).busy;
-                    busy.drop_piece(held.k, held.record_len());
-                    held.repeat && !held.switch && busy.cancel_switch()
-                };
-                if cancelled {
-                    self.cancel_held_switches(held.k);
-                }
+                // The region goes as a refused head's does (RM-15). No switch replaces a repeat dropped here: a switch is accepted only on a
+                // repeat that has started on the device (UR-38), which is never judged at dispatch again.
+                lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, self.k)).book.drop_piece(held.k, held.record_len());
                 self.time_error(TimeErrorOutcome::Drop, late_by, held.target);
                 self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
                 None
@@ -1164,13 +1134,13 @@ impl Tx {
         }
     }
 
-    /// A held burst at the open burst's next sample joins it (M3: the switch's cursor-equal install and the joined
+    /// A held burst at the open burst's next sample joins it (M3: a switch at its boundary and the joined
     /// continuation). Not judged for lateness here: the record refuses a booking inside the open burst's span, and a switch is
     /// never late (RM-37), so a late joined piece is refused at dispatch instead (`dispatch_start`, D24).
     fn join_open(&mut self, next: i64) {
         // UR-23: a burst at the open one's next sample continues the device burst without end-of-burst, as the X300 needs (§11 F3).
         // Otherwise nothing was sent and the new one starts on its own (Review L, P1-4).
-        if self.chain.burst_is_open() || self.open.as_ref().is_some_and(|open| !open.first) {
+        if self.chain.burst_is_open() || self.with_book(|book| book.open.as_ref().is_some_and(|open| !open.first)) {
             self.end_open(false);
             self.chain.continue_device_burst(next, self.chain.tail());
         } else {
@@ -1297,9 +1267,13 @@ impl Tx {
                 underflow(cause);
                 // Its nominal next sample no longer bounds actual playback. Do not
                 // resume untimed payload on the shifted device timeline (UR-22).
-                if self.open.is_some() || self.chain.burst_is_open() {
+                // A5 (F4): with no device burst open nothing was handed that could underflow, so the open booking waits for its own send.
+                // An underflow's tick before the open device burst's first sample is the burst before's (#93, note 39 §6.6): reported, no
+                // abandon. A sequence error's tick is not compared: its meaning is unmeasured, and it may be ahead of its packet's play time.
+                let tick = if cause == TxUnderflowCause::Starved { report.tick } else { None };
+                if self.chain.underflowed(tick) {
                     self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the device burst underflowed; burst not resumed" }));
-                    self.abandon(true, 0, true);
+                    self.abandon(true, self.cursor(), true);
                 }
             }
             TxCode::TimeError => {
@@ -1331,7 +1305,7 @@ impl Tx {
     fn shutdown(&mut self) {
         // A queued halt keeps its own reason; the rest goes with the Run's end.
         self.read_list();
-        let cancelled = self.take_all_held();
+        let cancelled = self.with_book(TxBook::cancel_all);
         self.stop_now(ezsdr_radio::CancelReason::ProviderStop, cancelled);
         self.chain.provider_stop();
         // 100 ms of the device's host clock for the last BURST_ACK (UR-26; plan 30 §4.3: it
@@ -1362,6 +1336,25 @@ mod tests {
     //! uhd-tx driven directly, where the order of its commands and steps matters and the
     //! Provider's threads cannot arrange it (the exit review's UR-21 clause).
 
+    /// The open booking as a test reads and sets it, through the stream's book.
+    impl Tx {
+        pub(super) fn open_next(&self) -> Option<i64> {
+            self.with_book(|book| book.open.as_ref().map(|open| open.next))
+        }
+
+        pub(super) fn open_first(&self) -> Option<bool> {
+            self.with_book(|book| book.open.as_ref().map(|open| open.first))
+        }
+
+        pub(super) fn open_booking<R>(&self, f: impl FnOnce(&Held) -> R) -> Option<R> {
+            self.with_book(|book| book.open.as_ref().map(|open| f(&open.booking)))
+        }
+
+        pub(super) fn poke_open(&self, held: Held, next: i64, first: bool) {
+            self.with_book(|book| book.open = Some(ezsdr_radio::staging::Open::new(held, next, first)));
+        }
+    }
+
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::Duration as Wall;
@@ -1388,6 +1381,7 @@ mod tests {
     use ezsdr_radio::timeline::Channels;
 
     mod e1;
+    mod e2a;
     mod o1;
 
     fn held(clock: &super::Clock, k: i64, len: usize, policy: LatePolicy) -> Held {
@@ -1428,7 +1422,7 @@ mod tests {
         assert_eq!(chain.next(), None);
         assert_eq!(chain.front(), None);
         assert_eq!(chain.recovery(), Recovery::Clean);
-        chain.open_device_burst(20, None);
+        chain.open_device_burst(0, 20, None);
         assert_eq!(chain.next(), Some(20));
         assert!(chain.tail().is_none());
 
@@ -1456,7 +1450,7 @@ mod tests {
 
         chain.reopen_succeeded();
         assert_eq!(chain.recovery(), Recovery::Clean);
-        chain.open_device_burst(90, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
+        chain.open_device_burst(0, 90, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
         chain.mark_reopen_needed();
         chain.reopen_failed();
         assert_eq!(chain.recovery(), Recovery::Clean);
@@ -1464,7 +1458,7 @@ mod tests {
         chain.mark_reopen_needed();
         chain.provider_stop();
         assert_eq!(chain.recovery(), Recovery::Clean, "Provider::stop ends pending reopen work");
-        chain.open_device_burst(100, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
+        chain.open_device_burst(0, 100, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
         chain.mark_reopen_needed();
         chain.lose();
         assert_eq!(chain.recovery(), Recovery::Clean);
@@ -1571,6 +1565,7 @@ mod tests {
                 let at = core.now();
                 streams.stop = Some((at, StopMode::Orderly));
                 streams.end(&core, at, false, false);
+                core.release_streams(streams);
             } else {
                 core.device_lost("test loss during TX recovery");
             }
@@ -1629,7 +1624,7 @@ mod tests {
             let start = clock.at_or_after(device.time_now().unwrap() + core.ticks(5_000_000));
             let samples = [[0.1, 0.0]; 100];
             device.tx_send(0, &[&samples], Some(clock.instant(start)), true, false, Wall::from_secs(1)).unwrap();
-            tx.chain.open_device_burst(start + samples.len() as i64, has_tail.then_some(Tail { samples: [[0.1, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
+            tx.chain.open_device_burst(0, start + samples.len() as i64, has_tail.then_some(Tail { samples: [[0.1, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
             let dry = clock.instant(start + samples.len() as i64) + core.ticks(5_000_000);
             time.advance_to(core.at(dry)).unwrap();
             device.set_time(dry);
@@ -1643,7 +1638,7 @@ mod tests {
             assert!(tx.chain.needs_reopen(), "underflow's {short_close} close did not require recovery: {:?}", device.calls());
             assert_eq!(tx.chain.next(), None, "the failed close leaves no retained device cursor");
             assert!(tx.chain.tail().is_none(), "the abandoned tail is not replayed after failed close");
-            assert!(tx.open.as_ref().is_some_and(|open| open.held.k == target && open.next == target && open.first), "B's new Kernel cursor stays unchanged at the recovery barrier");
+            assert!(tx.open_booking(|held| held.k) == Some(target) && tx.open_next() == Some(target) && tx.open_first() == Some(true), "B's new Kernel cursor stays unchanged at the recovery barrier");
             let target_send = format!("at={} sob=true", clock.instant(target));
             assert!(device.calls().iter().all(|call| !call.contains(&target_send)), "B was sent on the uncertain streamer: {:?}", device.calls());
 
@@ -1671,7 +1666,7 @@ mod tests {
                 assert!(!tx.chain.needs_reopen(), "the failed reopen is no longer pending ({reopen_fault:?})");
                 assert!(tx.clock.is_none(), "a failed reopen ends the stream's clock ({reopen_fault:?})");
                 assert!(tx.chain.next().is_none() && tx.chain.tail().is_none(), "a failed reopen closes the device burst ({reopen_fault:?})");
-                assert!(tx.open.is_none(), "B was cancelled from the send barrier ({reopen_fault:?})");
+                assert!(tx.open_next().is_none(), "B was cancelled from the send barrier ({reopen_fault:?})");
                 assert!(!held_keys(&tx).contains(&target), "B left the held queue ({reopen_fault:?})");
                 let rejected = lock(&core.rec).rejected.clone();
                 assert!(rejected.iter().any(|row| row["reason"] == "UR-22: cancelled because the TX streamer could not be reopened"), "B's cancellation was recorded ({reopen_fault:?}): {rejected:?}");
@@ -1813,7 +1808,7 @@ mod tests {
             let target = clock.at_or_after(core.now() + core.ticks(60_000_000));
             hold(&tx, held(&clock, target, 1, LatePolicy::DropAndFlag));
             if fail_close {
-                tx.chain.open_device_burst(100, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
+                tx.chain.open_device_burst(0, 100, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
             } else {
                 tx.chain.mark_reopen_needed();
             }
@@ -1840,7 +1835,7 @@ mod tests {
             let device = Arc::new(FakeDevice::new(FakeConfig::default()));
             let (core, _time, mut tx, clock, _events) = recovery_rig(device.clone());
             if fail_stop_close {
-                tx.chain.open_device_burst(100, has_tail.then_some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
+                tx.chain.open_device_burst(0, 100, has_tail.then_some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
                 *device.eob_error.lock().unwrap() = Some(crate::DeviceError::failed("controlled Stop EOB failure"));
             } else {
                 tx.chain.mark_reopen_needed();
@@ -1881,7 +1876,7 @@ mod tests {
             assert!(tx.step());
             give(&mut tx, held(&clock, 100_000, 10_000, LatePolicy::DropAndFlag));
             tx.report(crate::device::TxReport { code, tick: Some(clock.instant(22_000)), channel: 0 });
-            assert!(tx.open.is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none());
+            assert!(tx.open_next().is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none());
             assert!(!held_keys(&tx).contains(&20_000));
             assert!(held_keys(&tx).contains(&100_000), "future bursts retain their reservations");
             let sent = device.calls();
@@ -1934,7 +1929,7 @@ mod tests {
         assert!(tx.step());
         time.advance_to(core.at(core.ticks(70_000_000))).unwrap();
         assert!(tx.step());
-        assert!(tx.open.is_none());
+        assert!(tx.open_next().is_none());
         assert_eq!(device.calls().iter().filter(|c| c.starts_with("tx_send ")).count(), 2, "one payload buffer and one empty EOB, no resumed payload");
     }
 
@@ -1953,13 +1948,15 @@ mod tests {
         // Prime an untimed device burst to make starvation independent of a
         // host deadline for the initial timed SOB (covered by UR-21 tests).
         device.tx_send(0, &[&burst.samples[0][..2_000]], None, true, false, std::time::Duration::from_secs(1)).unwrap();
-        tx.open = Some(super::Open { held: burst, next: 2_000, first: false });
+        tx.poke_open(burst, 2_000, false);
+        // The primed send is the owner's device burst: an underflow ends only an open one (A5).
+        tx.chain.open_device_burst(0, 2_000, None);
         tx.remember_burst(TimePoint::new(clock.domain, 0));
         std::thread::sleep(std::time::Duration::from_millis(60));
         time.advance_to(core.at(device.time_now().unwrap().max(core.now()))).unwrap();
         tx.reports(std::time::Duration::ZERO);
         assert!(lock(&core.rec).device_async.iter().any(|r| r["code"] == "Underflow"));
-        assert!(tx.open.is_none());
+        assert!(tx.open_next().is_none());
         for _ in 0..20 {
             assert!(!tx.step());
         }
@@ -1993,12 +1990,12 @@ mod tests {
             assert!(events.iter().any(|e| e.payload["outcome"] == expected));
             assert_eq!(events.iter().filter(|e| e.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).count(), 1, "one TIME_ERROR per late burst: {events:?}");
             if policy == LatePolicy::SendAsapAndFlag {
-                let open = tx.open.as_ref().unwrap();
-                assert_eq!(open.held.k, 42_000);
-                assert_eq!(open.held.open.requested_target, Some(TimePoint::new(clock.domain, 20_000)));
-                assert!(matches!(open.held.open.late, Some(ezsdr_kernel::stream::LateOutcome::SendAsap { .. })));
+                let (k, open) = tx.open_booking(|held| (held.k, held.open)).unwrap();
+                assert_eq!(k, 42_000);
+                assert_eq!(open.requested_target, Some(TimePoint::new(clock.domain, 20_000)));
+                assert!(matches!(open.late, Some(ezsdr_kernel::stream::LateOutcome::SendAsap { .. })));
             } else {
-                assert!(tx.open.is_none());
+                assert!(tx.open_next().is_none());
                 assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
             }
             assert!(!held_keys(&tx).contains(&20_000));
@@ -2025,7 +2022,7 @@ mod tests {
         give(&mut tx, held(&c0, 20_000, 1_000, LatePolicy::DropAndFlag));
         tx.pass();
         assert!(tx.cut.is_none());
-        lock(&core.streams).end(&core, core.ticks(500_000_000), false, false);
+        crate::provider::test_support::end_streams(&core, core.ticks(500_000_000), false, false);
         time.advance_to(core.at(origin)).unwrap();
         assert!(tx.pass(), "the first pass reads the halt");
         assert!(held_keys(&tx).is_empty());
@@ -2051,8 +2048,8 @@ mod tests {
         give(&mut tx, held(&clock, 20_000, 10_000, LatePolicy::DropAndFlag));
         time.advance_to(core.at(core.ticks(18_000_000))).unwrap();
         assert!(tx.step());
-        assert_eq!(tx.open.as_ref().unwrap().held.k, 20_000);
-        assert!(tx.open.as_ref().unwrap().held.open.late.is_none());
+        assert_eq!(tx.open_booking(|held| held.k).unwrap(), 20_000);
+        assert!(tx.open_booking(|held| held.open.late).unwrap().is_none());
         assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).is_empty());
         assert!(device.calls().iter().any(|c| c.contains("at=4000000 sob=true")));
     }
@@ -2069,7 +2066,7 @@ mod tests {
         }
         time.advance_to(core.at(core.ticks(40_000_000))).unwrap();
         assert!(tx.step());
-        assert!(tx.open.is_none());
+        assert!(tx.open_next().is_none());
         assert!(held_keys(&tx).contains(&42_000));
         assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|e| e.payload["outcome"] == "refused"));
         assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
@@ -2147,7 +2144,7 @@ mod tests {
 
     /// The booking uhd-control put on transmit stream 0's list, taken off it without the owner reading it (UR-21).
     fn take_booking(core: &Core) -> Option<Held> {
-        match lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).list.read() {
+        match lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).book.list.read() {
             Some(ezsdr_radio::staging::Read::Booking(held)) => Some(held),
             _ => None,
         }
@@ -2159,13 +2156,13 @@ mod tests {
 
     /// A booking received and read: the list's entry, then the owner's read (UR-21).
     fn give(tx: &mut Tx, held: Held) {
-        lock(&tx.core.streams).stream_mut(stream_key(Dir::Tx, tx.k)).list.book(held);
+        lock(&tx.core.streams).stream_mut(stream_key(Dir::Tx, tx.k)).book.list.book(held);
         tx.read_list();
     }
 
     /// A Stop received and read (UR-26).
     fn halt(tx: &mut Tx) {
-        lock(&tx.core.streams).stream_mut(stream_key(Dir::Tx, tx.k)).list.halt(ezsdr_radio::CancelReason::Stop);
+        lock(&tx.core.streams).stream_mut(stream_key(Dir::Tx, tx.k)).book.list.halt(ezsdr_radio::CancelReason::Stop);
         tx.read_list();
     }
 
@@ -2650,7 +2647,7 @@ mod tests {
             drain_tx(&mut tx);
             while tx.step() {}
             let case = format!("{rate} samples/s");
-            assert_eq!(tx.open.as_ref().unwrap().next, expected_cut, "{case}: exclusive first-unhanded sample");
+            assert_eq!(tx.open_next().unwrap(), expected_cut, "{case}: exclusive first-unhanded sample");
             let handed = (expected_cut - start) as usize;
             assert_eq!(sends(&device).iter().map(|(n, _, _)| n).sum::<usize>(), handed, "{case}: total payload handed");
             assert_eq!(device.transmitted(clock.instant(start), handed), vec![Some([0.25, 0.0]); handed], "{case}: payload values");
@@ -2686,7 +2683,7 @@ mod tests {
         book_burst(&mut control, &core, 1, clock, 3_000, &wave, true, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
         assert!(tx.step());
-        assert_eq!(tx.open.as_ref().unwrap().next, 4_000);
+        assert_eq!(tx.open_next().unwrap(), 4_000);
         assert_eq!(sends(&device).iter().map(|(n, _, _)| n).sum::<usize>(), 1_000);
 
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
@@ -2725,7 +2722,7 @@ mod tests {
         book_burst(&mut control, &core, 1, clock, 3_000, &wave, true, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
         assert!(tx.step());
-        assert_eq!(tx.open.as_ref().unwrap().next, 5_000, "the candidate 8 ms window hands over its 2 ms chunk");
+        assert_eq!(tx.open_next().unwrap(), 5_000, "the candidate 8 ms window hands over its 2 ms chunk");
         assert_eq!(sends(&device).iter().map(|(n, _, _)| n).sum::<usize>(), 2_000);
     }
 
@@ -2741,7 +2738,7 @@ mod tests {
         let target = clock.at_or_after(tx.core.now() + tx.core.ticks(1_500_000));
         hold(&tx, held(&clock, target, 100, LatePolicy::DropAndFlag));
         assert!(tx.step(), "the queued burst is evaluated by the Provider");
-        assert!(tx.open.is_none(), "the burst inside the device lead is dropped");
+        assert!(tx.open_next().is_none(), "the burst inside the device lead is dropped");
         let errors: Vec<_> =
             events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
         assert_eq!(errors.len(), 1, "{errors:?}");
@@ -2791,7 +2788,7 @@ mod tests {
         book_burst(&mut control, &core, 1, clock, 3_000, &a_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
         assert!(tx.step());
-        assert!(tx.open.is_none() && tx.chain.next() == Some(5_000));
+        assert!(tx.open_next().is_none() && tx.chain.next() == Some(5_000));
         device_at(&core, &time, &device, core.ticks(3_000_000));
         assert!(tx.step(), "the final sample and EOB were not handed");
         assert_eq!(tx.chain.front(), Some((clock.domain, 5_004)));
@@ -2821,10 +2818,10 @@ mod tests {
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 2_500, &a_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
-        while tx.open.as_ref().is_none_or(|open| open.next < 10_000) {
+        while tx.open_next().is_none_or(|next| next < 10_000) {
             assert!(tx.step());
         }
-        assert_eq!(tx.open.as_ref().unwrap().next, 10_000, "finite A is clamped by W, not its end");
+        assert_eq!(tx.open_next().unwrap(), 10_000, "finite A is clamped by W, not its end");
         let calls = device.calls().len();
         book_burst(&mut control, &core, 2, clock, 5_000, &b_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -2857,10 +2854,10 @@ mod tests {
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 2_500, &a_wave, true, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
-        while tx.open.as_ref().is_none_or(|open| open.next < 10_000) {
+        while tx.open_next().is_none_or(|next| next < 10_000) {
             assert!(tx.step());
         }
-        assert_eq!(tx.open.as_ref().unwrap().next, 10_000);
+        assert_eq!(tx.open_next().unwrap(), 10_000);
         book_burst(&mut control, &core, 2, clock, 6_000, &b_wave, false, LatePolicy::SendAsapAndFlag);
         drain_tx(&mut tx);
         let refused: Vec<_> =
@@ -2894,7 +2891,7 @@ mod tests {
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 2_500, &a_wave, true, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
-        while tx.open.as_ref().is_none_or(|open| open.next < 10_000) {
+        while tx.open_next().is_none_or(|next| next < 10_000) {
             assert!(tx.step());
         }
         device_at(&core, &time, &device, core.ticks(9_000_000));
@@ -3055,7 +3052,7 @@ mod tests {
             device_at(&core, &time, &device, deadline + offset);
             txp_drain(&mut tx);
             let mut streams = lock(&core.streams);
-            let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).busy;
+            let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).book.record;
             let horizon = ezsdr_radio::staging::handover_horizon(core.now(), core.tx_in_flight(), |t| clock.at_or_after(t));
             let decided = busy.accept(20_040, Some(10), core.now(), |k| core.join_by(clock, k), horizon);
             drop(streams);
@@ -3108,7 +3105,7 @@ mod tests {
                 drain_tx(&mut tx);
                 if receipt.is_none() && !held_keys(&tx).contains(&40_000) && held_keys(&tx).contains(&40_054) {
                     let mut streams = lock(&core.streams);
-                    let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).busy;
+                    let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).book.record;
                     let horizon = ezsdr_radio::staging::handover_horizon(core.now(), core.tx_in_flight(), |t| clock.at_or_after(t));
                     receipt = Some(busy.accept(40_056, Some(10), core.now(), |k| core.join_by(clock, k), horizon));
                 }
@@ -3173,10 +3170,10 @@ mod tests {
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
             book_burst(&mut control, &core, 1, clock, 2_500, &a_wave, true, LatePolicy::DropAndFlag);
             drain_tx(&mut tx);
-            while tx.open.as_ref().is_none_or(|open| open.next < 10_000) {
+            while tx.open_next().is_none_or(|next| next < 10_000) {
                 assert!(tx.step(), "A stopped making progress before the 10 ms hand-over frontier");
             }
-            assert_eq!(tx.open.as_ref().unwrap().next, 10_000, "the future A is handed to H before Stop");
+            assert_eq!(tx.open_next().unwrap(), 10_000, "the future A is handed to H before Stop");
             control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(super::super::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
             drain_tx(&mut tx);
             let record = lock(&core.rec).bursts.last().cloned().expect("the stopped repeat record");
@@ -3340,10 +3337,10 @@ mod tests {
         drain_tx(&mut tx);
         assert!(tx.step());
         device_at(&core, &time, &device, core.ticks(4_000_000));
-        while tx.open.as_ref().is_some_and(|open| open.next < 12_000) {
+        while tx.open_next().is_some_and(|next| next < 12_000) {
             assert!(tx.step());
         }
-        assert_eq!(tx.open.as_ref().unwrap().next, 12_000);
+        assert_eq!(tx.open_next().unwrap(), 12_000);
         control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(super::super::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
         drain_tx(&mut tx);
         let record = lock(&core.rec).bursts.last().cloned().unwrap();
@@ -3374,7 +3371,7 @@ mod tests {
         for _ in 0..3 {
             assert!(tx.step(), "A did not hand over its three chunks");
         }
-        assert!(tx.open.is_none() && tx.chain.next() == Some(8_000) && tx.chain.tail().as_ref().is_some_and(|tail| tail.channels == 1), "A's last sample is held: {:?}", device.calls());
+        assert!(tx.open_next().is_none() && tx.chain.next() == Some(8_000) && tx.chain.tail().as_ref().is_some_and(|tail| tail.channels == 1), "A's last sample is held: {:?}", device.calls());
 
         // The held tail's front is `e + 4` = 8 004 (RM-15): 8 003 is refused at receipt, 8 004 is on time.
         book_burst(&mut control, &core, 2, clock, 8_003, &b_wave, false, LatePolicy::DropAndFlag);
@@ -3449,7 +3446,7 @@ mod tests {
         for _ in 0..3 {
             assert!(tx.step());
         }
-        assert!(tx.open.is_none() && tx.chain.next() == Some(8_000) && tx.chain.tail().is_some());
+        assert!(tx.open_next().is_none() && tx.chain.next() == Some(8_000) && tx.chain.tail().is_some());
         device_at(&core, &time, &device, core.ticks(6_000_000));
         assert!(tx.step(), "the held last sample was not closed with EOB");
         assert_eq!(tx.chain.front(), Some((clock.domain, 8_004)));
@@ -3549,7 +3546,7 @@ mod tests {
             }
             device_at(&core, &time, &device, core.ticks(27_000_000));
             assert!(!tx.step(), "{policy:?}: the 2 000 samples before the 37 ms window edge were handed in a short buffer");
-            assert_eq!(tx.open.as_ref().expect("A is open").next, 35_000, "{policy:?}: A's first unhanded sample");
+            assert_eq!(tx.open_next().expect("A is open"), 35_000, "{policy:?}: A's first unhanded sample");
             // B, 7 ms ahead at 27 ms, starts inside A's span (A runs to 59 002): it is refused at receipt, on time or not,
             // for both policies; no move or drop verdict is made, and A keeps its cursor.
             let calls = device.calls().len();
@@ -3559,8 +3556,8 @@ mod tests {
             assert_eq!(refused[0].payload["action"], 2, "{policy:?}");
             assert!(refused[0].payload["reason"].as_str().unwrap().contains("overlaps an accepted booking"), "{policy:?}");
             assert!(take_booking(&core).is_none(), "{policy:?}: the refused B was booked on the list");
-            assert!(tx.open.as_ref().is_some_and(|open| open.held.k == 29_000), "{policy:?}: A is not still open");
-            assert_eq!(tx.open.as_ref().unwrap().next, 35_000, "{policy:?}: A's first unhanded sample");
+            assert!(tx.open_booking(|held| held.k) == Some(29_000), "{policy:?}: A is not still open");
+            assert_eq!(tx.open_next().unwrap(), 35_000, "{policy:?}: A's first unhanded sample");
             assert_eq!(device.calls().len(), calls, "{policy:?}: the refusal called the device");
         }
     }
@@ -3578,7 +3575,7 @@ mod tests {
         txp_book(&mut tx, &core, clock, b);
         device_at(&core, &time, &device, txp_ticks(18_000));
         txp_drain(&mut tx);
-        assert!(tx.open.is_none() && held_keys(&tx) == [21_000], "A was abandoned by the failed send; B waits: {:?}", device.calls());
+        assert!(tx.open_next().is_none() && held_keys(&tx) == [21_000], "A was abandoned by the failed send; B waits: {:?}", device.calls());
         device_at(&core, &time, &device, txp_ticks(19_001));
         txp_drain(&mut tx);
         let emitted = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
@@ -3644,7 +3641,7 @@ mod tests {
 
         assert!(worked);
         assert!(core.is_lost());
-        assert!(tx.open.is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none(), "the failed burst is closed");
+        assert!(tx.open_next().is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none(), "the failed burst is closed");
         assert!(!tx.chain.needs_reopen(), "published loss must not reintroduce ReopenNeeded");
         assert_eq!(tx.chain.recovery(), Recovery::Clean);
         assert_eq!(tx.chain.front(), front, "the failed EOB leaves the safe front unchanged");
@@ -3661,7 +3658,7 @@ mod tests {
         core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(old), Channels::first(1));
-        tx.chain.open_device_burst(100, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
+        tx.chain.open_device_burst(0, 100, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
         *device.eob_error.lock().unwrap() = Some(crate::device::DeviceError { lost: true, message: "controlled EOB loss at the cut".to_owned() });
         let before = device.calls().len();
         tx.end_clock();
@@ -3678,7 +3675,7 @@ mod tests {
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        tx.chain.open_device_burst(100, None);
+        tx.chain.open_device_burst(0, 100, None);
         hold(&tx, held(&clock, 3000, 10, LatePolicy::DropAndFlag));
         *device.eob_error.lock().unwrap() = Some(crate::device::DeviceError { lost: true, message: "controlled EOB loss after underflow".to_owned() });
         let before = device.calls().len();
@@ -3823,9 +3820,9 @@ mod tests {
         let a = TimePoint::new(clock.domain, 10_000);
         let b = TimePoint::new(clock.domain, 20_000);
         tx.remember_burst(a);
-        tx.open = Some(super::Open { held: held(&clock, 10_000, 1, LatePolicy::DropAndFlag), next: 10_001, first: false });
-        assert!(tx.abandon(false, 0, false), "A was not abandoned");
-        assert!(tx.open.is_none());
+        tx.poke_open(held(&clock, 10_000, 1, LatePolicy::DropAndFlag), 10_001, false);
+        assert!(tx.abandon(false, tx.cursor(), false), "A was not abandoned");
+        assert!(tx.open_next().is_none());
         tx.remember_burst(b);
 
         tx.report(TxReport { code: TxCode::TimeError, tick: Some(clock.instant(25_000)), channel: 0 });
@@ -3917,7 +3914,7 @@ mod tests {
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
         // A burst continuing the device burst of the one before: its held sample goes first,
         // then its own payload; its last sample is held for the end of burst.
-        tx.chain.open_device_burst(20_020, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
+        tx.chain.open_device_burst(0, 20_020, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
         give(&mut tx, held(&c0, 20_020, 10, LatePolicy::DropAndFlag));
         time.advance_to(core.at(3_600_000)).unwrap();
         assert!(tx.step());
@@ -4090,7 +4087,11 @@ mod tests {
         }
         device_at(&core, &time, &device, core.ticks(61_000_000));
         assert!(tx.step(), "the final pre-window sample is not handed");
-        assert!(tx.open.is_none() && tx.chain.next() == Some(70_000) && tx.chain.tail().as_ref().is_some_and(|tail| tail.channels == 1), "A's last sample is not the held tail: {:?}", device.calls());
+        assert!(
+            tx.open_next().is_none() && tx.chain.next() == Some(70_000) && tx.chain.tail().as_ref().is_some_and(|tail| tail.channels == 1),
+            "A's last sample is not the held tail: {:?}",
+            device.calls()
+        );
         (core, device, time, tx, frozen)
     }
 
@@ -4149,7 +4150,7 @@ mod tests {
         assert!(tx.step(), "A's held sample is not taken ahead of B");
         device_at(&core, &time, &device, core.ticks(69_000_000));
         assert!(tx.step(), "B's held sample is not ended");
-        assert!(tx.open.is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none());
+        assert!(tx.open_next().is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none());
         let mut whole: Vec<Option<[f32; 2]>> = (0..30_000).map(|_| Some([0.25, 0.0])).chain(second.iter().copied().map(Some)).collect();
         whole.push(Some([0.0, 0.0]));
         assert_eq!(device.transmitted(clock.instant(40_000), 31_001), whole, "{:?}", device.calls());
@@ -4182,7 +4183,7 @@ mod tests {
         // A's held last payload sample leads the two-sample close; its padding zero is at 70 000.
         assert_eq!(sends.last(), Some(&(2, false, true)), "{sends:?}");
         assert_eq!(sends.iter().filter(|(_, _, eob)| *eob).count(), 1, "{sends:?}");
-        assert!(tx.open.is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none());
+        assert!(tx.open_next().is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none());
         assert_eq!(device.unended_bursts(), 0, "{sends:?}");
         tx.reports(Wall::ZERO);
         assert!(lock(&core.rec).device_async.iter().all(|row| row["code"] != "Underflow"), "{:?}", lock(&core.rec).device_async);
@@ -4209,10 +4210,9 @@ mod tests {
         for _ in 0..8 {
             tx.step();
         }
-        let open = tx.open.as_ref().expect("A is open");
-        assert_eq!(open.next, 22_000, "the hand-over went past the in-flight window: {:?}", device.calls());
+        assert_eq!(tx.open_next().expect("A is open"), 22_000, "the hand-over went past the in-flight window: {:?}", device.calls());
         halt(&mut tx);
-        assert!(tx.open.is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none());
+        assert!(tx.open_next().is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none());
         let window = core.ticks(core.description.timing.tx_in_flight_ns);
         let stop = core.now();
         let record = lock(&core.rec).bursts.last().cloned().expect("A's record");
@@ -4248,7 +4248,7 @@ mod tests {
         assert!(tx.step(), "B is not dispatched at the safe sample");
         device_at(&core, &time, &device, core.ticks(69_000_000) + 40_000);
         assert!(tx.step(), "B's held sample is not ended");
-        assert!(tx.open.is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none());
+        assert!(tx.open_next().is_none() && tx.chain.next().is_none() && tx.chain.tail().is_none());
         let mut whole: Vec<Option<[f32; 2]>> = (0..30_000).map(|_| Some([0.25, 0.0])).collect();
         whole.extend([Some([0.0, 0.0]), None, None, None]);
         whole.extend(second.iter().copied().map(Some));
@@ -4358,7 +4358,7 @@ mod tests {
             give(&mut tx, burst);
             device_at(&core, &time, &device, core.ticks(31_000_000));
             assert!(tx.step(), "{what}: A's first send");
-            assert!(tx.open.is_none(), "{what}: A was not abandoned: {:?}", device.calls());
+            assert!(tx.open_next().is_none(), "{what}: A was not abandoned: {:?}", device.calls());
             assert_eq!(tx.unacked.iter().map(|pending| pending.target).collect::<Vec<_>>(), [TimePoint::new(clock.domain, 40_000)], "{what}: the attempted first burst stays correlated");
             let sent = device.transmitted(clock.instant(40_000), 501);
             assert_eq!(sent[..499], a[..499].iter().copied().map(Some).collect::<Vec<_>>(), "{what}: {:?}", device.calls());
@@ -4430,12 +4430,12 @@ mod tests {
                 device_at(&core, &time, &device, core.ticks(at));
                 tx.step();
                 at += 200_000;
-                if tx.open.is_none() {
+                if tx.open_next().is_none() {
                     break;
                 }
             }
             let sends = sends(&device);
-            assert!(tx.open.is_none(), "{nth}: the device burst was not ended: {:?}", device.calls());
+            assert!(tx.open_next().is_none(), "{nth}: the device burst was not ended: {:?}", device.calls());
             let rejected = lock(&core.rec).rejected.clone();
             assert!(
                 rejected.iter().any(|r| r["reason"].as_str().unwrap_or("").contains("UR-22: a send did not complete") || r["reason"].as_str().unwrap_or("").contains("fake: the send failed")),
@@ -4463,7 +4463,7 @@ mod tests {
             txp_give(&mut tx, burst);
             assert!(tx.step(), "{fault:?}: first tiled send");
             assert!(tx.step(), "{fault:?}: the second tiled send is cut");
-            assert!(tx.open.is_none(), "{fault:?}: a partial/error send is abandoned");
+            assert!(tx.open_next().is_none(), "{fault:?}: a partial/error send is abandoned");
             let handed = if matches!(&fault, FakeFault::ShortSend(_)) { 10_000 } else { 20_000 };
             assert_eq!(tx.chain.front(), Some((clock.domain, start + 20_000 + handed + 2 + GAP_200MSPS)), "{fault:?}: recovery uses the accepted or conservatively attempted cursor");
             let sent = device.transmitted(clock.instant(start), 30_002);
@@ -4497,7 +4497,7 @@ mod tests {
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
             tx.chain.advance_front(clock.domain, 200);
             tx.remember_burst(TimePoint::new(clock.domain, 500_000));
-            tx.chain.open_device_burst(500_001, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
+            tx.chain.open_device_burst(0, 500_001, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
 
             tx.end_open(true);
             assert!(tx.chain.needs_reopen(), "{fault:?}: a partial or failed EOB did not invalidate the streamer");
@@ -4658,7 +4658,7 @@ mod tests {
             for _ in 0..3 {
                 assert!(tx.step(), "{case}: A's chunks");
             }
-            assert!(tx.open.is_none() && tx.chain.next() == Some(8_000) && tx.chain.tail().as_ref().is_some_and(|tail| tail.channels == 1), "{case}: A's held tail");
+            assert!(tx.open_next().is_none() && tx.chain.next() == Some(8_000) && tx.chain.tail().as_ref().is_some_and(|tail| tail.channels == 1), "{case}: A's held tail");
             assert_eq!(sends(&device).len(), 3, "{case}: the tail must still be held");
 
             // B at A's end joins the held tail's chain (S2, received on time), so it continues A's device burst.
@@ -4670,7 +4670,7 @@ mod tests {
                 events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect::<Vec<_>>();
             assert!(moved.is_empty(), "{case}: B joins on time: {moved:?}");
             let safe = cursor + 2 + GAP_1MSPS;
-            assert!(tx.open.is_none(), "{case}: the incomplete continuation was resumed");
+            assert!(tx.open_next().is_none(), "{case}: the incomplete continuation was resumed");
             let mut expected = vec![Some([0.25, 0.0]); 5_999];
             if tail_taken {
                 expected.push(Some([0.25, 0.0]));
@@ -4802,7 +4802,7 @@ mod tests {
     /// a continuation that is still joinable (UR-23, RM-16).
     fn txp_record(core: &Core, clock: Clock, burst: &Held) {
         let mut streams = lock(&core.streams);
-        let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).busy;
+        let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).book.record;
         let horizon = ezsdr_radio::staging::handover_horizon(core.now(), core.tx_in_flight(), |t| clock.at_or_after(t));
         busy.accept(burst.k, (!burst.repeat).then_some(burst.waveform_len as i64), core.now(), |k| core.join_by(clock, k), horizon).expect("the record takes the test's booking");
         busy.book((!burst.repeat).then(|| clock.instant(burst.k + burst.waveform_len as i64)));
@@ -4855,22 +4855,22 @@ mod tests {
         txp_give(&mut tx, burst);
         txp_drain(&mut tx);
 
-        let held = tx.open.as_ref().expect("the repeat remains open").held.samples.clone();
+        let held = tx.open_booking(|held| held.samples.clone()).expect("the repeat remains open");
         let tiled = &held[0];
         assert_eq!(sends(&device), [(996, true, false)], "the first timed SOB takes the available prefix");
         assert_eq!(tiled.len() % wave.len(), 0, "the tile contains whole original periods");
         assert!(tiled.len() >= 20_000 + wave.len() - 1 && tiled.len() < 60_000, "tile bound: {} samples", tiled.len());
         assert!(tiled.iter().enumerate().all(|(i, sample)| *sample == wave[i % wave.len()]));
-        assert_eq!(tx.open.as_ref().unwrap().held.open.waveform_len, Some(997));
+        assert_eq!(tx.open_booking(|held| held.open.waveform_len).unwrap(), Some(997));
 
         device_at(&core, &time, &device, clock.instant(20_000));
         assert!(tx.step(), "the continuation now has a full 20,000-sample window");
         assert_eq!(*sends(&device).last().unwrap(), (20_000, false, false));
-        assert!(Arc::ptr_eq(&held, &tx.open.as_ref().unwrap().held.samples), "the burst is not re-tiled between sends");
+        assert!(Arc::ptr_eq(&held, &tx.open_booking(|held| held.samples.clone()).unwrap()), "the burst is not re-tiled between sends");
         device_at(&core, &time, &device, clock.instant(40_000));
         assert!(tx.step(), "a second continuation crosses another original-waveform wrap");
         assert_eq!(*sends(&device).last().unwrap(), (20_000, false, false));
-        assert!(Arc::ptr_eq(&held, &tx.open.as_ref().unwrap().held.samples), "the burst is not re-tiled between sends");
+        assert!(Arc::ptr_eq(&held, &tx.open_booking(|held| held.samples.clone()).unwrap()), "the burst is not re-tiled between sends");
         let expected: Vec<_> = (0..40_996).map(|i| Some(wave[i % wave.len()])).collect();
         assert_eq!(device.transmitted(clock.instant(start), expected.len()), expected, "continuations keep the original 997-sample phase");
 
@@ -4889,7 +4889,7 @@ mod tests {
         assert_eq!(lock(&core.rec).stats.get("tx_bursts"), Some(&1));
         assert!(tx.step(), "the next chunk starts at an original-waveform wrap");
         assert_eq!(*sends(&device).last().unwrap(), (2_500, false, false));
-        assert_eq!(tx.open.as_ref().unwrap().next, 8_000);
+        assert_eq!(tx.open_next().unwrap(), 8_000);
         assert_eq!(lock(&core.rec).stats.get("tx_bursts"), Some(&1));
     }
 
@@ -5017,7 +5017,7 @@ mod tests {
         txp_drain(&mut tx);
         assert!(!held_keys(&tx).contains(&20_000), "the refused burst is gone");
         let streams = lock(&core.streams);
-        let busy = &streams.stream(stream_key(Dir::Tx, 0)).busy;
+        let busy = &streams.stream(stream_key(Dir::Tx, 0)).book.record;
         assert!(busy.stageable(clock.instant(50_000)).is_err(), "A's booked end (60 000) still counts for a value");
         assert!(busy.stageable(clock.instant(70_100)).is_ok(), "at the last booked end the value is taken");
     }
@@ -5067,7 +5067,7 @@ mod tests {
         let a = repeat.samples[0].clone();
         txp_give(&mut tx, repeat);
         assert!(tx.step(), "first send");
-        assert_eq!(tx.open.as_ref().unwrap().next, 520_000, "first unhanded sample");
+        assert_eq!(tx.open_next().unwrap(), 520_000, "first unhanded sample");
         let next = txp_burst(&clock, 520_000, 4, false, LatePolicy::DropAndFlag);
         let b = next.samples[0].clone();
         txp_give(&mut tx, next);
@@ -5165,7 +5165,7 @@ mod tests {
             txp_give(&mut tx, burst);
             assert!(Arc::ptr_eq(&input, &tx.with_held(|map| map[&start].samples.clone())), "holding length {len} does not copy");
             assert!(tx.step());
-            assert!(Arc::ptr_eq(&input, &tx.open.as_ref().unwrap().held.samples), "sending length {len} does not copy");
+            assert!(Arc::ptr_eq(&input, &tx.open_booking(|held| held.samples.clone()).unwrap()), "sending length {len} does not copy");
             assert_eq!(*sends(&device).last().unwrap(), (20_000, true, false));
             let expected: Vec<_> = input[0][..20_000].iter().copied().map(Some).collect();
             assert_eq!(device.transmitted(clock.instant(start), expected.len()), expected);
@@ -5180,11 +5180,11 @@ mod tests {
             if !tx.step() {
                 break;
             }
-            let next = tx.open.as_ref().unwrap().next;
+            let next = tx.open_next().unwrap();
             assert!(next <= 10_000 && device.transmitted(clock.instant(next), 1) == vec![None], "nothing at or past the window edge after a step: {next}");
         }
         assert_eq!(sends(&device), [(2_500, true, false), (2_500, false, false)]);
-        assert_eq!(tx.open.as_ref().unwrap().next, 8_000, "2 000 samples are left before the 10 000 edge: no short buffer");
+        assert_eq!(tx.open_next().unwrap(), 8_000, "2 000 samples are left before the 10 000 edge: no short buffer");
         let calls = device.calls().len();
         assert!(!tx.step(), "waiting is not work");
         assert_eq!(device.calls().len(), calls, "a wait makes no device call");
@@ -5193,7 +5193,7 @@ mod tests {
         assert!(tx.step());
         assert_eq!(sends(&device).len(), 3);
         assert_eq!(*sends(&device).last().unwrap(), (2_500, false, false));
-        assert_eq!(tx.open.as_ref().unwrap().next, 10_500, "the window edge itself takes a buffer: `<`, not `<=`");
+        assert_eq!(tx.open_next().unwrap(), 10_500, "the window edge itself takes a buffer: `<`, not `<=`");
         // M1c: nothing past the edge was handed over.
         assert_eq!(device.transmitted(clock.instant(10_500), 1), vec![None]);
         assert!(!tx.step());
@@ -5205,7 +5205,7 @@ mod tests {
         txp_give(&mut tx, txp_burst(&clock, 3_500, 6_800, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(sends(&device), [(2_500, true, false), (2_500, false, false)]);
-        assert_eq!(tx.open.as_ref().unwrap().next, 8_500, "1 500 samples fit, the 1 800 left do not: wait");
+        assert_eq!(tx.open_next().unwrap(), 8_500, "1 500 samples fit, the 1 800 left do not: wait");
         device_at(&core, &time, &device, txp_ticks(300));
         assert!(tx.step());
         // All 800 samples go, the last one held back for the end-of-burst.
@@ -5225,7 +5225,7 @@ mod tests {
         device_at(&core, &time, &device, txp_ticks(2_500));
         assert!(tx.step());
         assert_eq!(*sends(&device).last().unwrap(), (2_500, false, false), "the full chunk crosses original waveform wraps");
-        assert_eq!(tx.open.as_ref().unwrap().next, 12_500);
+        assert_eq!(tx.open_next().unwrap(), 12_500);
         let wave: Vec<_> = (0..3_500).map(|i| Some([((i % 1_500) + 1) as f32 / 100_000.0, 0.9])).collect();
         assert_eq!(device.transmitted(clock.instant(9_000), 3_500), wave, "no gap, no phase reset at the wrap");
     }
@@ -5235,7 +5235,7 @@ mod tests {
         let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
-        assert_eq!(tx.open.as_ref().unwrap().next, 8_000);
+        assert_eq!(tx.open_next().unwrap(), 8_000);
         txp_give(&mut tx, txp_burst(&clock, 9_600, 4_000, false, LatePolicy::DropAndFlag));
         assert!(tx.step(), "A's last 1 600 before B, a cut-sized buffer");
         assert_eq!(*sends(&device).last().unwrap(), (1_600, false, false));
@@ -5243,7 +5243,7 @@ mod tests {
         let calls = device.calls().len();
         assert!(!tx.step(), "B's first buffer, a continuation, waits for a whole buffer of room");
         assert_eq!(device.calls().len(), calls, "the wait reached the device (an entry that skips the rule)");
-        assert!(tx.open.as_ref().is_some_and(|open| open.next == 9_600 && open.first));
+        assert!(tx.open_next() == Some(9_600) && tx.open_first() == Some(true));
         assert_eq!(tx.chain.next(), Some(9_600));
         assert!(tx.chain.tail().is_none());
         device_at(&core, &time, &device, txp_ticks(2_100));
@@ -5285,7 +5285,7 @@ mod tests {
                 assert_eq!(tx.chain.front(), Some((clock.domain, front)), "{rate} S/s, len {len}: the owner's front");
                 assert_eq!(past_front(&core), 0, "{rate} S/s, len {len}");
                 let mut streams = lock(&core.streams);
-                let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).busy;
+                let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).book.record;
                 let horizon = ezsdr_radio::staging::handover_horizon(core.now(), core.tx_in_flight(), |t| clock.at_or_after(t));
                 let mut book = |start| busy.accept(start, Some(1), core.now(), |k| core.join_by(clock, k), horizon);
                 assert!(book(front - 1).is_err(), "{rate} S/s, len {len}: the record refuses one sample before the front");
@@ -5303,7 +5303,7 @@ mod tests {
             txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 1, false, LatePolicy::DropAndFlag));
             txp_drain(&mut tx);
             let mut streams = lock(&core.streams);
-            let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).busy;
+            let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).book.record;
             let horizon = ezsdr_radio::staging::handover_horizon(core.now(), core.tx_in_flight(), |t| clock.at_or_after(t));
             let mut book = |start| busy.accept(start, Some(1), core.now(), |k| core.join_by(clock, k), horizon);
             assert!(book(5_000 + 4 + gap - 1).is_err(), "{rate} S/s: the record refuses one sample before the front");
@@ -5335,7 +5335,7 @@ mod tests {
                 assert_eq!(tx.chain.front(), Some((clock.domain, front)), "{rate} S/s, stop {stop}: the owner's front");
                 assert_eq!(past_front(&core), 0, "{rate} S/s, stop {stop}");
                 let mut streams = lock(&core.streams);
-                let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).busy;
+                let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).book.record;
                 let horizon = ezsdr_radio::staging::handover_horizon(core.now(), core.tx_in_flight(), |t| clock.at_or_after(t));
                 let mut book = |at| busy.accept(at, Some(1), core.now(), |k| core.join_by(clock, k), horizon);
                 if !stop {
@@ -5399,7 +5399,7 @@ mod tests {
         let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
-        assert_eq!(tx.open.as_ref().unwrap().next, 8_000);
+        assert_eq!(tx.open_next().unwrap(), 8_000);
         txp_give(&mut tx, txp_burst(&clock, 9_600, 1, false, LatePolicy::DropAndFlag));
         assert!(tx.step());
         assert_eq!(*sends(&device).last().unwrap(), (1_600, false, false));
@@ -5743,7 +5743,7 @@ mod tests {
         let clock = tx.clock.expect("a transmit clock");
         device_at(&core, &time, &device, core.ticks(68_000_000));
         txp_drain(&mut tx);
-        assert!(tx.open.is_none() && tx.chain.tail().is_none(), "A's held sample did not go out at the deadline: {:?}", device.calls());
+        assert!(tx.open_next().is_none() && tx.chain.tail().is_none(), "A's held sample did not go out at the deadline: {:?}", device.calls());
         let before = sends(&device);
         give(&mut tx, continuation(&clock, 70_000, 1_000));
         txp_drain(&mut tx);
@@ -5776,6 +5776,7 @@ mod tests {
         txp_drain(&mut tx);
         assert!(sends(&device).is_empty(), "{:?}", device.calls());
         halt(&mut tx);
+        assert_eq!(e1::notes(&core), ["UR-26: cancelled by Stop"], "#85: the open booking issued nothing");
         txp_drain(&mut tx);
         assert!(sends(&device).is_empty(), "a first send went after Stop: {:?}", device.calls());
     }
@@ -5902,7 +5903,7 @@ mod tests {
     #[test]
     fn ur_23_m4c_a_stop_during_a_continuation_s_wait_ends_the_device_burst_once() {
         // The waiting state (an open burst still `first`, its device burst continued) meets Stop, with and without a held tail.
-        let (_, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         txp_give(&mut tx, txp_burst(&clock, 9_600, 4_000, false, LatePolicy::DropAndFlag));
@@ -5911,7 +5912,8 @@ mod tests {
         let sent = sends(&device).len();
         halt(&mut tx);
         assert_eq!(sends(&device)[sent..], [(2, false, true)], "one two-zero end-of-burst and no more payload");
-        assert!(tx.open.is_none() && tx.chain.next().is_none() && held_keys(&tx).is_empty());
+        assert!(tx.open_next().is_none() && tx.chain.next().is_none() && held_keys(&tx).is_empty());
+        assert_eq!(e1::notes(&core), ["UR-26: cancelled by Stop"], "#85: the continuation issued nothing");
         // With a held tail (M9's state): the tail goes out as the device burst's last sample, with the end-of-burst.
         let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 3_000, 6_000, false, LatePolicy::DropAndFlag));
@@ -5922,7 +5924,8 @@ mod tests {
         halt(&mut tx);
         assert_eq!(sends(&device)[sent..], [(2, false, true)], "the held sample and one zero, with the end-of-burst");
         assert_eq!(device.transmitted(clock.instant(8_999), 2), vec![Some([6_000f32 / 100_000.0, 0.3]), Some([0.0, 0.0])]);
-        assert!(tx.open.is_none() && tx.chain.tail().is_none() && held_keys(&tx).is_empty());
+        assert!(tx.open_next().is_none() && tx.chain.tail().is_none() && held_keys(&tx).is_empty());
+        assert_eq!(e1::notes(&core), ["UR-26: cancelled by Stop"], "#85: the continuation behind the held tail issued nothing");
     }
 
     #[test]
@@ -6037,7 +6040,7 @@ mod tests {
         let (_, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 1);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 5, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
-        assert_eq!(tx.open.as_ref().unwrap().next, 8_000);
+        assert_eq!(tx.open_next().unwrap(), 8_000);
         assert_eq!(sends(&device), [(2_500, true, false), (2_500, false, false)], "RX block_len=1 does not cap TX");
     }
 
@@ -6051,7 +6054,7 @@ mod tests {
         txp_give(&mut tx, burst);
         txp_drain(&mut tx);
         assert_eq!(sends(&device), [(2_500, true, false), (2_500, false, false)]);
-        assert_eq!(tx.open.as_ref().unwrap().next, 8_000);
+        assert_eq!(tx.open_next().unwrap(), 8_000);
     }
 
     // The priority of the transmit owner (UR-23) and the idle wait, on `Tx::run` threads over a `TxSpy`.
@@ -6075,7 +6078,7 @@ mod tests {
             inner.apply(Dir::Tx, k, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let (to_tx, cmds) = std::sync::mpsc::channel();
             let burst = txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag);
-            lock(&core.streams).stream_mut(stream_key(Dir::Tx, k)).list.book(burst);
+            lock(&core.streams).stream_mut(stream_key(Dir::Tx, k)).book.list.book(burst);
             let tx = Tx::new(core.clone(), k, cmds, Some(clock), Channels::first(1));
             senders.push(to_tx);
             threads.push(host.spawn(&super::super::tx_name(k), move || tx.run()).expect("a participant thread"));
@@ -6175,7 +6178,7 @@ mod tests {
         let clock = core.register(Dir::Tx, 2_000, 0).unwrap();
         let (to_tx, cmds) = std::sync::mpsc::channel();
         let burst = txp_burst(&clock, 1_250, 5_000, true, LatePolicy::DropAndFlag);
-        lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).list.book(burst);
+        lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).book.list.book(burst);
         let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         (core, inner, spy, to_tx, tx, frozen)
     }
@@ -6230,7 +6233,7 @@ mod tests {
         assert_eq!(looked.what, "tx_async", "the owner went to sleep after a look: {recs:?}");
         let slept = woke - looked.host;
         assert!(slept >= TXP_IDLE && slept < 3 * TXP_IDLE, "the wait sleeps an idle period, not until a buffer fits: {slept:?}");
-        lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).list.halt(ezsdr_radio::CancelReason::Stop);
+        lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).book.list.halt(ezsdr_radio::CancelReason::Stop);
         release.send(()).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let sends = loop {
@@ -6515,7 +6518,9 @@ mod tests {
         let (core, device, time, mut tx, _frozen, _events, _to_tx) = owner(1);
         let clock = tx.clock.expect("a clock");
         let stopper = core.clone();
-        super::super::test_support::probe(&core, "tx_configure_before_mark", move |_| stopper.streams.lock().unwrap().stream_mut(stream_key(Dir::Tx, 0)).list.halt(ezsdr_radio::CancelReason::Stop));
+        super::super::test_support::probe(&core, "tx_configure_before_mark", move |_| {
+            stopper.streams.lock().unwrap().stream_mut(stream_key(Dir::Tx, 0)).book.list.halt(ezsdr_radio::CancelReason::Stop)
+        });
         give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F2, 1));
         turns(&core, &time, &device, &mut tx, 1, 30, 1);
         assert!(!traffic(&device, 1).iter().any(|call| call.starts_with("tx_send ")), "no payload after the Stop: {:?}", traffic(&device, 1));
@@ -6654,6 +6659,7 @@ mod tests {
                 let mut streams = lock(&stopper.streams);
                 streams.stop = Some((at, StopMode::Orderly));
                 streams.end(&stopper, at, false, false);
+                stopper.release_streams(streams);
                 to_tx.send(TxCmd::Shutdown).unwrap();
             }
         });
@@ -6869,6 +6875,8 @@ mod tests {
         book_repeat(&mut rig, 1, 2_000, 0);
         run(&mut rig, 0, 3);
         book_switch(&mut rig, 2, 3_000, 1);
+        drain_tx(&mut rig.tx);
+        assert_eq!(held_keys(&rig.tx), [15_000], "taken at receipt: the owner holds the new waveform at its boundary once it reads it");
         run(&mut rig, 3, 20);
         assert!(refusals(&rig.events).is_empty(), "{:?}", lock(&rig.core.rec).rejected);
         assert_eq!(rig.device.transmitted(rig.clock.instant(14_999), 2), vec![Some(OLD), Some(NEW)], "{:?}", rig.device.calls());
@@ -6885,67 +6893,6 @@ mod tests {
         run(&mut rig, 3, 20);
         assert!(sends(&rig.device).iter().all(|send| !send.2), "{:?}", sends(&rig.device));
         assert!(rig.events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TX_UNDERFLOW));
-    }
-
-    #[test]
-    fn ur_21_s8_switch_at_the_exact_handed_cursor_installs() {
-        // S8 (Sol 4): the cursor is the first sample not yet handed. Below or at the boundary the switch installs there; past it, it
-        // installs at the next boundary of the grid (UR-38).
-        for (cursor, boundary) in [(14_999, 15_000), (15_000, 15_000), (15_001, 16_000)] {
-            let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
-            book_repeat(&mut rig, 1, 2_000, 0);
-            run(&mut rig, 0, 3);
-            book_switch(&mut rig, 2, 3_000, 1);
-            rig.tx.open = Some(super::Open { held: one_shot(&rig.clock, 2_000, 1, vec![OLD; 1_000]), next: cursor, first: false });
-            drain_tx(&mut rig.tx);
-            let events = rig.events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
-            assert!(held_keys(&rig.tx).contains(&boundary), "cursor {cursor}");
-            assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED), "cursor {cursor}: {events:?}");
-            // Only a cursor past the boundary moves the switch, and only a moved switch reports a `TIME_ERROR` naming it (UR-38).
-            let moved = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).count();
-            assert_eq!(moved, usize::from(cursor > 15_000), "cursor {cursor}: {events:?}");
-        }
-    }
-
-    #[test]
-    fn ur_21_s12_send_asap_switch_handed_past_is_installed_at_the_next_boundary() {
-        // S12 (UR-38): the owner hands on past the boundary before it takes a SendAsapAndFlag switch. The switch moves to the first
-        // boundary of the old repeat's grid at or after the cursor and is installed there: the old repeat plays whole up to it, no
-        // end-of-burst is sent at it, and one `TIME_ERROR { send_asap }` names the switch. The record keeps both boundaries.
-        let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
-        book_repeat(&mut rig, 1, 2_000, 0);
-        run(&mut rig, 0, 3);
-        book_switch(&mut rig, 2, 3_000, 1);
-        for ms in 4..=8 {
-            device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(ms * 1_000_000));
-            for _ in 0..8 {
-                if !rig.tx.step() {
-                    break;
-                }
-            }
-        }
-        let cursor = rig.tx.open.as_ref().map(|open| open.next).or_else(|| rig.tx.chain.next()).expect("the old repeat is handed");
-        assert!(cursor > 15_000, "the cursor {cursor} is past the boundary 15 000");
-        drain_tx(&mut rig.tx);
-        let moved = ezsdr_radio::staging::repeat_boundary(2_000, 1_000, cursor);
-        let errors = time_errors(&rig.events);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].payload["outcome"], "send_asap");
-        assert_eq!(errors[0].payload["action"], 2);
-        run(&mut rig, 8, 20);
-        assert!(refusals(&rig.events).is_empty(), "{:?}", lock(&rig.core.rec).rejected);
-        assert_eq!(rig.device.transmitted(rig.clock.instant(moved - 1), 2), vec![Some(OLD), Some(NEW)], "{:?}", rig.device.calls());
-        assert!(rig.device.transmitted(rig.clock.instant(15_000), (moved - 15_000) as usize).iter().all(|sample| *sample == Some(OLD)));
-        assert!(sends(&rig.device).iter().all(|send| !send.2), "{:?}", sends(&rig.device));
-        assert_eq!(switch_row(&rig.core, 0)["boundary"], 15_000);
-        assert_eq!(switch_row(&rig.core, 0)["moved_to"], moved);
-        assert_eq!(switch_row(&rig.core, 0)["outcome"], "applied");
-        stop(&mut rig);
-        // UR-38: the late amount is the cursor's passage of the boundary the switch was chosen at, 1 MS/s: 1 000 ns a sample.
-        let bursts = lock(&rig.core.rec).bursts.clone();
-        let late: Vec<_> = bursts.iter().filter(|burst| !burst["late_by"].is_null()).collect();
-        assert_eq!(late.len(), 1, "{bursts:?}");
-        assert_eq!(late[0]["late_by"]["ticks"], (cursor - 15_000) * 1_000, "{bursts:?}");
     }
 
     #[test]
@@ -6974,7 +6921,7 @@ mod tests {
         let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 500], vec![NEW; 300]]);
         book_repeat(&mut rig, 1, 2_000, 0);
         run(&mut rig, 0, 3);
-        let cursor = rig.tx.open.as_ref().map(|open| open.next).expect("the repeat is handed");
+        let cursor = rig.tx.open_next().expect("the repeat is handed");
         rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(2_500)), channel: 0 });
         drain_tx(&mut rig.tx);
         book_with(&mut rig.control, &rig.core, 4, 0, rig.clock, cursor + 5_000, &rig.waves[2], false, LatePolicy::DropAndFlag, BTreeMap::new());
@@ -6983,14 +6930,14 @@ mod tests {
 
     #[test]
     fn ur_21_s4_a_switch_taken_past_the_abandoned_cursor_is_cancelled_not_applied() {
-        // S4 (note 47 stage 5, Opus re-check): the owner takes a switch whose boundary is 15 000, then an underflow abandons the repeat at
+        // S4 (note 47 stage 5, Opus re-check): the owner reads a switch whose boundary is 15 000, then an underflow abandons the repeat at
         // its handed cursor c, below 15 000. No sample of the new waveform played, so the record settles the switch cancelled.
         let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
         book_repeat(&mut rig, 1, 2_000, 0);
         run(&mut rig, 0, 3);
         book_switch(&mut rig, 2, 3_000, 1);
         run(&mut rig, 3, 4);
-        let cursor = rig.tx.open.as_ref().map(|open| open.next).expect("the repeat is handed");
+        let cursor = rig.tx.open_next().expect("the repeat is handed");
         assert!(cursor < 15_000, "the cursor {cursor} is before the boundary 15 000");
         rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(cursor)), channel: 0 });
         drain_tx(&mut rig.tx);
@@ -7006,7 +6953,7 @@ mod tests {
         run(&mut rig, 0, 3);
         book_switch(&mut rig, 2, 3_000, 1);
         drain_tx(&mut rig.tx);
-        rig.tx.open.as_mut().expect("the repeat is handed").next = 15_000;
+        rig.tx.with_book(|book| book.open.as_mut().expect("the repeat is handed").next = 15_000);
         rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(15_000)), channel: 0 });
         drain_tx(&mut rig.tx);
         assert!(held_keys(&rig.tx).is_empty(), "the switch's held burst goes with the switch");
@@ -7024,7 +6971,7 @@ mod tests {
         run(&mut rig, 0, 3);
         book_switch(&mut rig, 2, 3_000, 1);
         drain_tx(&mut rig.tx);
-        rig.tx.open.as_mut().expect("the repeat is handed").next = 14_000;
+        rig.tx.with_book(|book| book.open.as_mut().expect("the repeat is handed").next = 14_000);
         rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(14_000)), channel: 0 });
         drain_tx(&mut rig.tx);
         run(&mut rig, 3, 20);
@@ -7035,15 +6982,15 @@ mod tests {
     #[test]
     fn ur_21_s4_a_report_between_the_join_and_the_switch_s_open_cancels_it() {
         // S4 (Opus re-check, the neighbour): the switch joins the open burst at its boundary, so no repeat is open when an underflow
-        // abandons the device burst there. The switch the owner took is cancelled, and nothing of the new waveform is sent later.
+        // abandons the device burst there. The switch the owner read is cancelled, and nothing of the new waveform is sent later.
         let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
         book_repeat(&mut rig, 1, 2_000, 0);
         run(&mut rig, 0, 3);
         book_switch(&mut rig, 2, 3_000, 1);
         drain_tx(&mut rig.tx);
-        rig.tx.open.as_mut().expect("the repeat is handed").next = 15_000;
+        rig.tx.with_book(|book| book.open.as_mut().expect("the repeat is handed").next = 15_000);
         assert!(rig.tx.step(), "the held switch joins the open burst at its boundary");
-        assert!(rig.tx.open.is_none());
+        assert!(rig.tx.open_next().is_none());
         rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(15_000)), channel: 0 });
         drain_tx(&mut rig.tx);
         assert!(held_keys(&rig.tx).is_empty(), "the switch's held burst goes with the switch");
@@ -7057,18 +7004,18 @@ mod tests {
     }
 
     #[test]
-    fn ur_21_s4_a_switch_whose_repeat_the_host_dispatched_late_is_refused_without_a_cursor() {
-        // S4 (note 47 stage 5, Opus re-check): the host is late for the repeat the switch replaces. Both are accepted at receipt; the
-        // repeat is dispatched after the device has passed its start, so it is dropped and leaves the record, and the switch has no
-        // handed cursor to take it at. The switch is refused, and its row is settled refused.
+    fn ur_21_s4_a_switch_whose_repeat_the_host_dispatched_late_is_refused_at_receipt() {
+        // S4, UR-38 (#84): the host is late for the repeat the switch replaces: the device has passed its start and the owner has issued
+        // none of it. The repeat has not started on the device, so the switch is refused at receipt, with no row; nothing else changes.
         let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
         book_repeat(&mut rig, 1, 2_000, 0);
         device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(3_000_000));
         book_switch(&mut rig, 2, 3_000, 1);
+        assert_eq!(refusals(&rig.events), ["UR-38: the repeat the switch replaces has not started on the device"], "{:?}", lock(&rig.core.rec).rejected);
+        assert!(lock(&rig.core.rec).switches.is_empty(), "a refused switch writes no row");
         drain_tx(&mut rig.tx);
-        assert_eq!(switch_row(&rig.core, 0)["outcome"], "refused_past_boundary", "{:?}", lock(&rig.core.rec).rejected);
         // RM-37: the refused switch is not the stream's playing repeat; the repeat it would have replaced still is.
-        let playing = lock(&rig.core.streams).stream(stream_key(Dir::Tx, 0)).playing;
+        let playing = lock(&rig.core.streams).stream(stream_key(Dir::Tx, 0)).book.playing;
         assert_eq!(playing.map(|playing| playing.id), Some(ActionId(1)), "the refused switch (id 2) must not be the playing repeat");
     }
 
@@ -7082,7 +7029,7 @@ mod tests {
         run(&mut rig, 0, 3);
         book_switch(&mut rig, 2, 3_000, 1);
         drain_tx(&mut rig.tx);
-        rig.tx.open.as_mut().expect("the repeat is handed").next = 15_000;
+        rig.tx.with_book(|book| book.open.as_mut().expect("the repeat is handed").next = 15_000);
         assert!(rig.tx.step(), "the held switch joins the open burst at its boundary");
         device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(16_000_000));
         assert!(rig.tx.step());
@@ -7109,27 +7056,6 @@ mod tests {
         assert!(refusals(&rig.events).is_empty(), "the dropped repeat holds no region: {:?}", lock(&rig.core.rec).rejected);
         run(&mut rig, 3, 30);
         assert!(rig.device.transmitted(rig.clock.instant(20_000), 2).iter().all(|sample| *sample == Some(NEW)), "{:?}", rig.device.calls());
-    }
-
-    #[test]
-    fn ur_21_s4_a_finite_abandon_keeps_the_switch_of_the_repeat_it_has_not_started() {
-        // S4 (Opus re-check of round 7, Minor B): a finite burst F is abandoned at its cursor 1 200 while a switch waits on the repeat R at
-        // 2 000, which has not started on the device. The abandoned burst does not end R, so the switch is not cancelled: R is sent late
-        // (SendAsap) and the switch is applied at its boundary, as MockRadio does. If R is dropped at dispatch instead, the switch that
-        // replaces it is cancelled.
-        for (policy, outcome) in [(LatePolicy::SendAsapAndFlag, "applied"), (LatePolicy::DropAndFlag, "cancelled")] {
-            let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000], vec![[0.5, 0.5]; 500]]);
-            book_with(&mut rig.control, &rig.core, 1, 0, rig.clock, 2_000, &rig.waves[0], true, policy, BTreeMap::new());
-            rig.tx.open = Some(super::Open { held: one_shot(&rig.clock, 1_000, 1, vec![[0.5, 0.5]; 500]), next: 1_200, first: false });
-            device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(2_000_000));
-            book_switch(&mut rig, 2, 2_000, 1);
-            drain_tx(&mut rig.tx);
-            assert!(refusals(&rig.events).is_empty(), "{:?}", lock(&rig.core.rec).rejected);
-            rig.tx.step();
-            run(&mut rig, 2, 22);
-            assert_eq!(switch_row(&rig.core, 0)["outcome"], outcome, "{policy:?}: {:?}", lock(&rig.core.rec).rejected);
-            assert_eq!(rig.device.transmitted(rig.clock.instant(15_000), 1).contains(&Some(NEW)), outcome == "applied", "{policy:?}: {:?}", rig.device.calls());
-        }
     }
 
     #[test]
@@ -7173,41 +7099,11 @@ mod tests {
         run(&mut rig, 0, 3);
         book_switch(&mut rig, 2, 3_000, 1);
         run(&mut rig, 3, 8);
-        assert!(rig.tx.open.as_ref().is_some_and(|open| open.next > 15_000), "the cursor is past the boundary before the Stop");
+        assert!(rig.tx.open_next().is_some_and(|next| next > 15_000), "the cursor is past the boundary before the Stop");
         stop(&mut rig);
         assert_eq!(rig.device.transmitted(rig.clock.instant(15_000), 1), vec![Some(NEW)]);
         assert!(!rig.device.transmitted(rig.clock.instant(18_100), 900).contains(&Some(NEW)), "{:?}", rig.device.calls());
         assert_eq!(switch_row(&rig.core, 0)["outcome"], "applied");
-    }
-
-    #[test]
-    fn ur_23_stop_before_the_moved_boundary_cancels_the_switch() {
-        // UR-38: the owner takes a late SendAsap switch at a cursor of 19 500 (9.5 ms; the old repeat is handed in 2 500-sample pieces),
-        // which moves it to 20 000. A Stop at 9.5 ms bounds the stream at 19 503, before the moved boundary: the switch is cancelled, and
-        // no sample of the new waveform is sent.
-        let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
-        book_repeat(&mut rig, 1, 2_000, 0);
-        run(&mut rig, 0, 3);
-        book_switch(&mut rig, 2, 3_000, 1);
-        for ns in (4..=9).map(|ms| ms * 1_000_000).chain([9_500_000]) {
-            device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(ns));
-            for _ in 0..8 {
-                if !rig.tx.step() {
-                    break;
-                }
-            }
-        }
-        let cursor = rig.tx.open.as_ref().map(|open| open.next).or_else(|| rig.tx.chain.next()).expect("the old repeat is handed");
-        assert_eq!(cursor, 19_500, "the old repeat is handed in 2 500-sample pieces");
-        drain_tx(&mut rig.tx);
-        // UR-38: the TIME_ERROR's late amount is how far the cursor passed the chosen boundary (15 000), 1 000 ns a sample.
-        let errors = time_errors(&rig.events);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].payload["late_by_ns"], (cursor - 15_000) * 1_000, "{errors:?}");
-        stop(&mut rig);
-        assert!(!rig.device.transmitted(rig.clock.instant(15_000), 5_000).contains(&Some(NEW)), "{:?}", rig.device.calls());
-        assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled");
-        assert_eq!(switch_row(&rig.core, 0)["moved_to"], 20_000, "the cancelled switch keeps the boundary it was moved to");
     }
 
     #[test]
@@ -7220,7 +7116,7 @@ mod tests {
             book_switch(&mut rig, 2, 3_000, 1);
             run(&mut rig, 3, 3);
             let core = rig.core.clone();
-            lock(&core.streams).end(&core, core.ticks(4_000_000), false, lost);
+            crate::provider::test_support::end_streams(&core, core.ticks(4_000_000), false, lost);
             assert!(!rig.device.transmitted(rig.clock.instant(0), 20_000).contains(&Some(NEW)), "lost {lost}: {:?}", rig.device.calls());
             assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled", "lost {lost}");
         }

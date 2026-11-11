@@ -347,14 +347,18 @@ fn switched(period: usize, new_period: usize, recv: i64, at: i64) -> M {
 fn o1_mock_t4a_a_switch_takes_the_first_grid_point_at_or_after_its_bound() {
     // RM-37, MR-42 (seq 4): R has period 700 (grid X + 2000 + 700 j); the switch is received so that its bound (receipt sample + window +
     // lead) is one before a grid point, on it and one after it, and once with an explicit `at` between grid points. The boundary is the
-    // oracle's; the new waveform has its own period from it. A Mock never moves a switch (`moved_to` null). (Mutation row O1-M3b.)
+    // oracle's; the new waveform has its own period from it. Nothing moves a switch (its row has no `moved_to`); the successor's requested
+    // target is the oracle's (#86): the switch's `at` when the receipt pushed it, none for an `at` past the bound. (Mutation row O1-M3b.)
     let s = X + 2_000;
     let g = s + 14_000;
     let cases: [(&str, i64, Option<i64>); 4] = [("g - 1", g - 1, None), ("g", g, None), ("g + 1", g + 1, None), ("at between grid points", g, Some(g + 100))];
     for (case, bound, at) in cases {
         let recv = if at.is_some() { s + 1_000 } else { bound - 12_000 };
-        let mut m = switched(700, 400, recv, at.unwrap_or(recv));
+        let asked = at.unwrap_or(recv);
+        let mut m = switched(700, 400, recv, asked);
         let b = o::switch_boundary(&m.p, s, 700, m.tick(recv), at);
+        let requested = o::switch_requested_target(&m.p, s, 700, m.tick(recv), asked, false);
+        assert_eq!(requested.is_some(), at.is_none(), "{case}: an `at` before the bound is pushed");
         assert_eq!(b, if at.is_none() && bound <= g { g } else { g + 700 }, "{case}");
         // A Stop at X + 31 000 closes the new repeat: its record is the successor's (the Mock's cut is MR-25's point).
         m.go(X + 31_000);
@@ -364,13 +368,13 @@ fn o1_mock_t4a_a_switch_takes_the_first_grid_point_at_or_after_its_bound() {
         let cut = o::mock_cut(&m.p, t, &[o::MBurst { start: b, len: None, started: true, before_stop: true }], None);
         let rows = m.switch_rows();
         assert_eq!(rows.len(), 1, "{case}");
-        assert_eq!((rows[0]["outcome"].as_str(), rows[0]["boundary"].as_i64(), rows[0]["moved_to"].is_null()), (Some("applied"), Some(b), true), "{case}: {rows:?}");
+        assert_eq!((rows[0]["outcome"].as_str(), rows[0]["boundary"].as_i64(), rows[0].get("moved_to")), (Some("applied"), Some(b), None), "{case}: {rows:?}");
         assert!(m.all_refusals() == 0 && m.time_errors().is_empty(), "{case}: {:?}", m.events);
         let slots = o::Slots { segs: vec![o::Seg::repeating(8, s, 700, b), o::Seg::repeating(9, b, 400, cut)], cut: None };
         m.check(&slots, s - 10, cut + 100);
         assert_eq!(m.pairs(), [(s, (b - s) as u64), (b, (cut - b) as u64)], "{case}: the old repeat's record ends at the boundary");
         m.assert_switch_ids(0);
-        assert_eq!(m.full_rec(1), (b, (cut - b) as u64, ((cut - b) / 400) as u32, None, false, "stop"), "{case}: the successor's record");
+        assert_eq!(m.full_rec(1), (b, (cut - b) as u64, ((cut - b) / 400) as u32, requested, false, "stop"), "{case}: the successor's record");
     }
 }
 
@@ -397,6 +401,13 @@ fn o1_mock_t4c_a_stop_before_the_boundary_cancels_the_switch() {
 }
 
 /// A switch received at s + 2 000 (boundary s + 14 000), then a Stop whose window edge is `b + after`: `(m, s, b, cut)`.
+/// The successor's requested target (#86): the switch asked for `s + 2 000` and the receipt pushed it to `s + 14 000`.
+fn pushed(m: &M, s: i64) -> Option<i64> {
+    let requested = o::switch_requested_target(&m.p, s, 1_000, m.tick(s + 2_000), s + 2_000, false);
+    assert_eq!(requested, Some(s + 2_000));
+    requested
+}
+
 fn stopped_after_switch(after: i64) -> (M, i64, i64, i64, i64) {
     let s = X + 2_000;
     let mut m = switched(1_000, 1_000, s + 2_000, s + 2_000);
@@ -425,7 +436,7 @@ fn o1_mock_t4d_a_stop_with_b_before_its_bound_leaves_the_row_applied() {
     assert_eq!(m.switch_rows()[0]["outcome"], "applied");
     m.assert_switch_ids(0);
     assert_eq!(m.pairs(), [(s, (b - s) as u64), (b, (cut - b) as u64)]);
-    assert_eq!(m.full_rec(1), (b, (cut - b) as u64, ((cut - b) / 1_000) as u32, None, false, "stop"), "the successor's record");
+    assert_eq!(m.full_rec(1), (b, (cut - b) as u64, ((cut - b) / 1_000) as u32, pushed(&m, s), false, "stop"), "the successor's record");
 }
 
 #[test]
@@ -437,7 +448,36 @@ fn o1_mock_t4e_a_stop_after_the_new_waveform_sounded_leaves_it_applied() {
     assert_eq!(m.switch_rows()[0]["outcome"], o::outcome_after_stop(b, bound).as_str());
     m.assert_switch_ids(0);
     assert_eq!(m.full_rec(0), (s, (b - s) as u64, ((b - s) / 1_000) as u32, None, false, "eob"), "the predecessor's record");
-    assert_eq!(m.full_rec(1), (b, (cut - b) as u64, ((cut - b) / 1_000) as u32, None, false, "stop"), "the successor's record");
+    assert_eq!(m.full_rec(1), (b, (cut - b) as u64, ((cut - b) / 1_000) as u32, pushed(&m, s), false, "stop"), "the successor's record");
+}
+
+#[test]
+fn mr_42_a_timed_switch_pushed_past_its_boundary_records_its_at() {
+    // #86, MR-42 (M3; `e2a_86_a_timed_switch_pushed_past_its_boundary_records_its_at` is the UHD twin): R (period 1 000 from s) and a
+    // switch received at s + 2 000, whose bound is s + 14 000. A timed switch for s + 2 000 is pushed to s + 14 000 and its new repeat's
+    // record carries s + 2 000 as its requested target; one for s + 16 000 is on its own grid point and carries none; an untimed one none.
+    let s = X + 2_000;
+    let recv = s + 2_000;
+    for (case, at, untimed) in [("pushed", s + 2_000, false), ("on the rule", s + 16_000, false), ("untimed", s + 2_000, true)] {
+        let mut m = x3xx(&[(8, 1_000), (9, 1_000)]);
+        m.book(0, s, true, LatePolicy::DropAndFlag);
+        m.go(recv);
+        let action = m.action(1, at, true, LatePolicy::SendAsapAndFlag, true);
+        if untimed {
+            m.radio.actions.1.store(true, Ordering::SeqCst);
+        }
+        m.push(action);
+        let b = o::switch_boundary(&m.p, s, 1_000, m.tick(recv), Some(at));
+        m.go(X + 31_000);
+        m.stop();
+        m.go(X + 60_000);
+        let rows = m.switch_rows();
+        assert_eq!((rows.len(), rows[0]["outcome"].as_str(), rows[0]["boundary"].as_i64(), rows[0].get("moved_to")), (1, Some("applied"), Some(b), None), "{case}: {rows:?}");
+        let want = o::switch_requested_target(&m.p, s, 1_000, m.tick(recv), at, untimed);
+        assert_eq!(want.is_some(), case == "pushed", "{case}");
+        let successor = m.full_rec(1);
+        assert_eq!((successor.0, successor.3, successor.4), (b, want, false), "{case}: the successor's record");
+    }
 }
 
 // ------------------------------------------------------------------------------------------------------------ T5

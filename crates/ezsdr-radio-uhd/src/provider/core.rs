@@ -14,7 +14,7 @@ use ezsdr_kernel::stream::{DataLink, Direction};
 use ezsdr_kernel::time::{ClockRegistry, Duration, Rescaled, TimeAuthority, TimeError, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::CommandRejectedPayload;
-use ezsdr_radio::staging::{Bookings, TxList, closed_short_gap, stop_bound, stop_sample};
+use ezsdr_radio::staging::{Started, StopReach, TxBook, closed_short_gap, stop_bound, stop_sample};
 use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, StreamKey};
 use serde_json::{Value as Json, json};
 
@@ -32,6 +32,8 @@ use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
 /// thread's line is not this caller's.
 pub(crate) struct Locked<'a, T> {
     guard: MutexGuard<'a, T>,
+    #[cfg(test)]
+    address: usize,
 }
 
 impl<T> std::ops::Deref for Locked<'_, T> {
@@ -50,17 +52,23 @@ impl<T> std::ops::DerefMut for Locked<'_, T> {
 impl<T> Drop for Locked<'_, T> {
     fn drop(&mut self) {
         #[cfg(test)]
-        super::test_support::left_lock();
+        super::test_support::left_lock(self.address);
     }
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> Locked<'_, T> {
     #[cfg(test)]
+    let address = std::ptr::from_ref(m) as usize;
+    #[cfg(test)]
     {
-        super::test_support::note_lock(std::ptr::from_ref(m) as usize);
-        super::test_support::entered_lock();
+        super::test_support::note_lock(address);
+        super::test_support::entered_lock(address);
     }
-    Locked { guard: m.lock().unwrap_or_else(|e| e.into_inner()) }
+    Locked {
+        guard: m.lock().unwrap_or_else(|e| e.into_inner()),
+        #[cfg(test)]
+        address,
+    }
 }
 
 /// UR-25: the caller holds no guard of the instance's state — `streams`, `rec` or
@@ -273,6 +281,9 @@ pub(crate) struct Streams {
     /// The instant of the device's loss, once a thread found it (UR-29): the end's `S` when
     /// the loss comes first (design 38 D2 (4)).
     pub lost_at: Option<i64>,
+    /// Refusals decided under this lock, published by [`Core::release_streams`] once it is dropped (UR-25: no event under the line
+    /// lock): the Action, its kind and the reason.
+    refused: Vec<(Option<ActionId>, &'static str, String)>,
 }
 
 impl Default for Streams {
@@ -293,6 +304,7 @@ impl Streams {
             ended: false,
             stop: None,
             lost_at: None,
+            refused: Vec::new(),
         }
     }
 }
@@ -378,21 +390,9 @@ pub(crate) struct StreamState {
     delivered: Option<(i64, Config, i64)>,
     /// The transmit clock registered at `arm` (RM-25): none or one.
     pub clock: Option<Clock>,
-    /// The transmit value rule's record of the stream's bookings and Stops (RM-21): the one place
-    /// a receipt is judged by (never the hand-over state).
-    pub busy: Bookings,
-    /// The stream's accepted bookings and halts in receipt order, written under the same lock as `busy`; uhd-tx reads it (UR-21, UR-26).
-    pub list: TxList<Held>,
-    /// The repeat a switch replaces (RM-37): the repeat booked last, or the switch the owner took (a refused switch changes nothing).
-    pub playing: Option<Playing>,
-}
-
-/// The repeat a switch replaces: the Action that booked it, the sample its waveform repeats from, and its period (RM-37).
-#[derive(Clone, Copy)]
-pub(crate) struct Playing {
-    pub id: ActionId,
-    pub origin: i64,
-    pub period: i64,
+    /// The transmit stream's book (RM-21): the record a receipt is judged by (never the hand-over state), the accepted bookings and halts
+    /// in receipt order (UR-21, UR-26) and the repeat a switch replaces (RM-37), under one lock.
+    pub book: TxBook<Held>,
 }
 
 impl Default for StreamState {
@@ -406,9 +406,7 @@ impl Default for StreamState {
             claims: Claims::default(),
             delivered: None,
             clock: None,
-            busy: Bookings::unarmed(),
-            list: TxList::default(),
-            playing: None,
+            book: TxBook::new(Started::AtFirstIssue),
         }
     }
 }
@@ -423,18 +421,23 @@ impl StreamState {
     /// RM-15: a transmit stream's record learns its closed short burst gap from its clock (one root tick is one master-clock tick, so the
     /// stream's rate is `mcr / n`). Called wherever the stream's clock is registered; the rate is fixed for the Run (RM-27).
     pub fn arm_record(&mut self, mcr: u64, clock: Clock) {
-        self.busy.arm(stream_gap(mcr, clock));
+        self.book.record.arm(stream_gap(mcr, clock));
     }
 
     /// RM-16: a `Stop` taking effect at root tick `at` ends the stream's transmit bookings: the
     /// value rule and the overlap rule are both bounded by the stream's clock. A stream with no clock has none.
     /// Returns the root tick the bookings end at (the `tx_stop_applied` timing row).
     pub fn stop_at(&mut self, at: i64, in_flight: i64) -> Option<i64> {
+        let reach = self.stop_reach(at, in_flight)?;
+        self.book.stop(reach);
+        Some(reach.0)
+    }
+
+    /// RM-16: what a `Stop` at root tick `at` reaches on the record; none for a stream with no clock.
+    pub fn stop_reach(&self, at: i64, in_flight: i64) -> Option<StopReach> {
         let clock = self.clock?;
         let bound = stop_bound(at, in_flight, |t| clock.at_or_after(t), |k| clock.instant(k));
-        self.busy.stop(bound);
-        self.busy.halt(clock.at_or_after(at), stop_sample(at, in_flight, |t| clock.at_or_after(t)));
-        Some(bound)
+        Some((bound, Some((clock.at_or_after(at), stop_sample(at, in_flight, |t| clock.at_or_after(t))))))
     }
 }
 
@@ -591,7 +594,7 @@ impl Streams {
         }
         if let Err(error) = self.lines.book(stream, item) {
             // The Action being booked names the refusal: a `start_rx` is a command, a Stop or an end a stop.
-            core.command_rejected(id, if item.kind == Kind::Start { "command" } else { "stop" }, &format!("RM-25: {error}"));
+            self.refused.push((id, if item.kind == Kind::Start { "command" } else { "stop" }, format!("RM-25: {error}")));
             return false;
         }
         self.changed(core, stream, id);
@@ -612,7 +615,7 @@ impl Streams {
             }
             Err(error) => {
                 // Only a `start_rx` is refused at its instant (RM-25).
-                core.command_rejected(None, "command", &format!("RM-25: {error}"));
+                self.refused.push((None, "command", format!("RM-25: {error}")));
                 false
             }
         }
@@ -636,7 +639,7 @@ impl Streams {
             stream.stop_at(at, core.tx_in_flight());
             // A loss pushes nothing: the owner idles and its shutdown cancels with ProviderStop (UR-26).
             if !lost {
-                stream.list.halt(ezsdr_radio::CancelReason::ProviderStop);
+                stream.book.list.halt(ezsdr_radio::CancelReason::ProviderStop);
             }
         }
         for dir in [Dir::Rx, Dir::Tx] {
@@ -741,7 +744,7 @@ impl Streams {
         let cut = self.stream(stream).clock.zip(self.lines.line(stream).and_then(|line| line.plan.first()).and_then(|segment| segment.cut));
         if let Some((clock, cut)) = cut.filter(|(clock, _)| !core.clocks.get(clock.domain).is_ok_and(|domain| domain.ended_at.is_some())) {
             if let Err(error) = core.clocks.end(clock.domain, core.at(clock.instant(cut))) {
-                core.command_rejected(id, "stop", &format!("UR-25: {error}"));
+                self.refused.push((id, "stop", format!("UR-25: {error}")));
             }
         }
     }
@@ -990,6 +993,13 @@ impl Core {
         *lock(&self.rec).stats.entry(name).or_default() += n;
     }
 
+    /// A stat that keeps the largest value it was given.
+    pub fn stat_max(&self, name: &'static str, n: i64) {
+        let mut rec = lock(&self.rec);
+        let stat = rec.stats.entry(name).or_insert(n);
+        *stat = (*stat).max(n);
+    }
+
     pub fn timing(&self, row: Json) {
         lock(&self.rec).timing.push(row);
     }
@@ -998,8 +1008,9 @@ impl Core {
         lock(&self.rec).rejected.push(row);
     }
 
-    /// A control-path event from `source` at `time` (RM-11, UR-20).
+    /// A control-path event from `source` at `time` (RM-11, UR-20), never under the line lock (UR-25): [`Core::emit`] comes here too.
     pub fn emit_at(&self, source: &ResourceId, kind: &str, severity: Severity, payload: Json, time: TimePoint) {
+        assert_line_free("emit");
         let event = Event { source: EventSource::Node { node: source.clone() }, time, severity, kind: EventKind::parse(kind).expect("a radio kind"), payload };
         if let Err(error) = self.events.emit_control(event) {
             self.reject_note(json!({ "event_not_emitted": kind, "error": error.to_string() }));
@@ -1008,6 +1019,15 @@ impl Core {
 
     pub fn emit(&self, source: &ResourceId, kind: &str, severity: Severity, payload: Json) {
         self.emit_at(source, kind, severity, payload, self.at(self.now()));
+    }
+
+    /// Drops the streams guard, then publishes the refusals booked under it (UR-25: no event under the line lock).
+    pub(crate) fn release_streams(&self, mut streams: Locked<'_, Streams>) {
+        let refused = std::mem::take(&mut streams.refused);
+        drop(streams);
+        for (id, kind, reason) in refused {
+            self.command_rejected(id, kind, &reason);
+        }
     }
 
     /// `radio.COMMAND_REJECTED` from the device, naming the Action by `id` when uhd-control
@@ -1038,7 +1058,7 @@ impl Core {
         streams.lost_at = streams.lost_at.or(Some(at));
         streams.end(self, at, false, true);
         self.lost.store(true, Ordering::Release);
-        drop(streams);
+        self.release_streams(streams);
         // Before anything can free it: a lost device is never freed (F4).
         self.device.mark_lost();
         self.timing(json!({ "what": "device_lost", "message": message, "at": at }));
@@ -1103,7 +1123,7 @@ impl Core {
     pub fn settle_switches(&self) {
         let settled: Vec<ezsdr_radio::staging::Settled> = {
             let mut streams = lock(&self.streams);
-            (0..self.description.stream_count(Dir::Tx)).flat_map(|k| streams.stream_mut(stream_key(Dir::Tx, k)).busy.take_settled()).collect()
+            (0..self.description.stream_count(Dir::Tx)).flat_map(|k| streams.stream_mut(stream_key(Dir::Tx, k)).book.record.take_settled()).collect()
         };
         ezsdr_radio::staging::write_settled(&mut lock(&self.rec).switches, settled);
     }
@@ -2115,6 +2135,7 @@ mod tests {
                 streams.delivered(stream, 0, cfg(1), k);
             }
             streams.end(&core, 5_000, true, false);
+            core.release_streams(streams);
         }
         let streams = lock(&core.streams);
         assert_eq!(streams.planned(stream_key(Dir::Rx, 0))[0].segment.cut, Some(1_000));
@@ -2128,6 +2149,7 @@ mod tests {
                 streams.delivered(stream, 0, cfg(1), k);
             }
             streams.end(&core, 400_000, false, false);
+            core.release_streams(streams);
         }
         let streams = lock(&core.streams);
         assert_eq!(streams.planned(stream_key(Dir::Rx, 0))[0].segment.cut, Some(3_000), "its own floor");
@@ -2139,6 +2161,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             streams.end(&core, 5_000, false, false);
             streams.end(&core, 6_000, false, false);
+            core.release_streams(streams);
         }
         let streams = lock(&core.streams);
         for dir in [Direction::Rx, Direction::Tx] {
@@ -2177,11 +2200,13 @@ mod tests {
         const O: i64 = 10_000;
         for (stop, ended) in [(O - 4_000, Some(O)), (O, Some(O)), (O + 400, None)] {
             let (core, clock) = tx_clock_at(O);
-            lock(&core.streams).end(&core, stop, false, false);
+            crate::provider::test_support::end_streams(&core, stop, false, false);
             assert_eq!(lock(&core.streams).planned(stream_key(Dir::Tx, 0))[0].segment.cut, ended.map(|_| 0), "S {stop}");
             assert_eq!(tx_clock_end(&core, clock), ended, "S {stop}");
             let mut streams = lock(&core.streams);
             streams.changed(&core, stream_key(Dir::Tx, 0), None);
+            // A refusal under the lock is published when the lock is released (UR-25).
+            core.release_streams(streams);
             assert!(lock(&core.rec).rejected.is_empty(), "S {stop}: {:?}", lock(&core.rec).rejected);
         }
         // A loss: the same end through the thread that finds it, which bypasses the owner's work.
@@ -2229,6 +2254,7 @@ mod tests {
             assert_eq!(streams.first_undelivered(rx0), Some((0, cfg(1), 3_000)), "stream 0's floor stands");
             assert_eq!(streams.first_undelivered(rx1), None, "stream 1's floor is cleared");
             streams.end(&core, 800_000, true, false);
+            core.release_streams(streams);
         }
         let streams = lock(&core.streams);
         assert_eq!(streams.planned(rx0)[0].segment.cut, Some(3_000), "stream 0's own delivered floor");

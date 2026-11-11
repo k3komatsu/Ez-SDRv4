@@ -144,45 +144,34 @@ impl Chain {
     }
 }
 
-/// A repeat switch accepted and not yet applied (RM-37, note 47 §1.2): the Action that asked for it and
-/// the sample at which the new waveform starts. The boundary is chosen at receipt; the owner moves it
-/// when its cursor has passed it (UR-38).
+/// A repeat switch accepted and not yet applied (RM-37, note 47 §1.2): the Action that asked for it and the sample at which the new
+/// waveform starts, chosen and taken at receipt; nothing moves it later.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Switch {
     /// The Action that asked for the switch.
     pub id: ActionId,
-    /// The origin and period of the repeat it replaces: the grid a moved boundary stays on.
-    pub grid: (i64, i64),
     /// The first sample of the new waveform, on the stream's clock.
     pub boundary: i64,
-    /// Whether the owner has taken the new waveform for the device (UR-36): a switch the owner has not taken is not applied.
-    pub installed: bool,
-    /// The boundary the owner moved the switch to under its late policy (UR-38), or `None`.
-    pub moved_to: Option<i64>,
 }
 
-/// A switch the record settled (RM-37): its outcome, and the boundary it was moved to, if it was (UR-38). The Provider writes
-/// both into the switch's row in one place ([`write_settled`]).
+/// A switch the record settled (RM-37): its outcome. The Provider writes it into the switch's row in one place ([`write_settled`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Settled {
     /// The Action that asked for the switch.
     pub id: ActionId,
     /// How it was settled.
     pub outcome: SwitchOutcome,
-    /// The boundary the owner moved it to under its late policy, or `None`.
-    pub moved_to: Option<i64>,
+    /// The boundary it was settled at: its new waveform's first sample.
+    pub boundary: i64,
 }
 
-/// How a switch was settled: applied at its boundary, or cancelled by a Stop before it, or refused because the owner had no handed
-/// cursor to take it at.
+/// How a switch was settled: applied at its boundary, or cancelled before it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SwitchOutcome {
     /// The old repeat ended at the boundary and the new one began there.
     Applied,
-    /// A Stop reached the boundary first, so the new waveform never started.
+    /// A Stop, a loss or the abandon of the repeat it replaces reached the boundary first, so the new waveform never started.
     Cancelled,
-    /// The owner had no handed cursor to take the switch at (the repeat it replaces left the record first): the old repeat keeps playing.
-    Refused,
 }
 
 impl SwitchOutcome {
@@ -191,9 +180,48 @@ impl SwitchOutcome {
         match self {
             SwitchOutcome::Applied => "applied",
             SwitchOutcome::Cancelled => "cancelled",
-            SwitchOutcome::Refused => "refused_past_boundary",
         }
     }
+}
+
+/// Why a switch is refused at receipt (RM-37, UR-38).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SwitchRefusal {
+    /// No repeat plays on the stream: none was booked, it is finite, stopped or not yet started in device time.
+    NoPlayingRepeat,
+    /// Another switch is pending.
+    PendingSwitch,
+    /// UR-38: the repeat it replaces has not started on the device (its owner has issued none of it). Never on a Provider whose repeats
+    /// start at acceptance ([`Started::AtAcceptance`]).
+    NotStarted,
+}
+
+/// A switch accepted at receipt (RM-37): its boundary, and the sample it asked for when the receipt pushed it past the boundary that
+/// sample alone gives (a timed switch only, #86): the burst record's requested target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SwitchAccepted {
+    /// The new waveform's first sample.
+    pub boundary: i64,
+    /// The switch's `at`, when the receipt pushed the boundary past `repeat_boundary` of it.
+    pub requested_target: Option<i64>,
+}
+
+/// RM-37, UR-38: when the repeat a switch replaces counts as started, a property of the Provider. MockRadio's repeats sound from their
+/// start in device time, so the record alone decides (`AtAcceptance`); UHD's sound from the first send its owner issues (`AtFirstIssue`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Started {
+    /// The repeat is started once accepted (the record's `start <= now` still applies).
+    AtAcceptance,
+    /// The repeat is started once the executor issues its first send.
+    AtFirstIssue,
+}
+
+/// What the book reads of a booking: the Action that booked it, and whether it is a repeat switch's new waveform.
+pub trait Booked {
+    /// The Action that booked it.
+    fn id(&self) -> Option<ActionId>;
+    /// It is a repeat switch's new waveform (RM-37).
+    fn is_switch(&self) -> bool;
 }
 
 /// One row of a Provider's `switches` section (RM-37): a repeat switch and how it was settled.
@@ -211,8 +239,6 @@ pub struct SwitchRecord {
     pub new_period: i64,
     /// The boundary chosen at receipt, on the stream's clock (RM-37).
     pub boundary: i64,
-    /// The boundary the owner moved the switch to under its late policy (UR-38), or `None`.
-    pub moved_to: Option<i64>,
     /// `pending` until the record settles it: [`SwitchOutcome::label`].
     pub outcome: &'static str,
 }
@@ -276,10 +302,291 @@ impl<P> TxList<P> {
     pub fn unread(&self) -> bool {
         !self.unread.is_empty()
     }
+}
 
-    /// Whether a halt waits to be read: the executor must read it before it hands anything further.
-    pub fn halt_unread(&self) -> bool {
-        self.unread.iter().any(|arrival| matches!(arrival, Arrival::Halt(_)))
+/// The repeat a switch replaces: the Action that booked it, the sample its waveform repeats from, its period, and whether it has
+/// started ([`Started`]) (RM-37, UR-38).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Playing {
+    /// The Action that booked the repeat.
+    pub id: ActionId,
+    /// The sample its waveform repeats from.
+    pub origin: i64,
+    /// Its period in samples.
+    pub period: i64,
+    /// It has started on the device: a switch on it is accepted.
+    pub started: bool,
+}
+
+/// The booking the executor is transmitting (UR-21, UR-22, MR-15): the booking, the first sample it has not yet issued, whether its first
+/// send is still to come, and the one send issued and not yet completed.
+pub struct Open<P> {
+    /// The booking.
+    pub booking: P,
+    /// The first sample not yet issued.
+    pub next: i64,
+    /// No send of the booking has completed.
+    pub first: bool,
+    inflight: Option<TxSend>,
+}
+
+impl<P> Open<P> {
+    /// A booking open at `next`, with no send in flight.
+    pub fn new(booking: P, next: i64, first: bool) -> Open<P> {
+        Open { booking, next, first, inflight: None }
+    }
+}
+
+/// One planned send of the open booking (UR-22, UR-23), from its next sample: `count` samples of the booking, `device_count` the samples the
+/// device is given for them (less a held tail, plus padding), and whether it ends the booking.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TxSend {
+    /// The booking's samples the send issues.
+    pub count: i64,
+    /// The samples handed to the device.
+    pub device_count: i64,
+    /// The send is the booking's last.
+    pub ends: bool,
+}
+
+/// What the device did with an issued send.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Outcome {
+    /// It took this many of the send's device samples (all of them, or fewer when it came up short).
+    Accepted(i64),
+    /// The send failed: whether the device took any of it is unknown.
+    Failed,
+    /// The held tail the send continues from failed or came up short, so the send itself was not made.
+    TailShort,
+}
+
+/// What the executor does after a send completed (UR-22).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Settle {
+    /// The send went out whole.
+    Sent,
+    /// The booking is abandoned at `cursor`, the first sample the device has nothing past.
+    Abandon {
+        /// The abandon's cursor.
+        cursor: i64,
+    },
+}
+
+/// A Stop's reach on the record (RM-16): the root tick bound of the value rule, and the Stop region's first and end samples (none when
+/// the stream's clock cannot place the first sample).
+pub type StopReach = (i64, Option<(i64, i64)>);
+
+/// One transmit stream's book: the record that judges receipts, the receipt list the executor reads, and the repeat a switch replaces
+/// (`playing`), under one lock. A Provider's write to any of the three goes through a transition here; receipt-side reads and the
+/// judging calls reach `record` directly until the later steps of note 49 stage E2a move them in.
+pub struct TxBook<P> {
+    /// The bookings and Stops (RM-15, RM-16, RM-21).
+    pub record: Bookings,
+    /// The receipts, in receipt order.
+    pub list: TxList<P>,
+    /// RM-37: the repeat booked last, or the switch accepted last.
+    pub playing: Option<Playing>,
+    /// The booking the executor is transmitting. The executor writes it only through `take`, `untake`, `issue`, `complete` and `end_open`.
+    pub open: Option<Open<P>>,
+    /// When the Provider's repeats count as started (UR-38).
+    pub started_rule: Started,
+}
+
+impl<P: Booked> TxBook<P> {
+    /// An empty book of a Provider whose repeats start by `started_rule`.
+    pub fn new(started_rule: Started) -> TxBook<P> {
+        TxBook { record: Bookings::unarmed(), list: TxList::default(), playing: None, open: None, started_rule }
+    }
+
+    /// The executor opens `booking` at its first sample `next`.
+    pub fn take(&mut self, booking: P, next: i64) {
+        debug_assert!(self.open.is_none(), "a booking is already open");
+        self.open = Some(Open::new(booking, next, true));
+    }
+
+    /// The executor gives an open booking with nothing sent back to the held bookings, at its first sample.
+    pub fn untake(&mut self) {
+        let open = self.open.take().expect("a booking is open");
+        debug_assert!(open.first && open.inflight.is_none(), "only a booking with nothing sent goes back");
+        self.list.held.insert(open.next, open.booking);
+    }
+
+    /// The executor ends the open booking with no send outcome: the record is unchanged (RM-16: nothing handed is recalled).
+    pub fn end_open(&mut self) -> Option<P> {
+        self.open.take().map(|open| open.booking)
+    }
+
+    /// The executor issues `send` of the open booking; one send is in flight at a time. The playing repeat's first issue starts it (UR-38).
+    pub fn issue(&mut self, send: TxSend) {
+        let open = self.open.as_mut().expect("a booking is open");
+        assert!(open.inflight.is_none(), "a send in flight is issued again");
+        open.inflight = Some(send);
+        let id = open.booking.id();
+        if let Some(playing) = self.playing.as_mut().filter(|playing| id == Some(playing.id)) {
+            playing.started = true;
+        }
+    }
+
+    /// The device's `outcome` of the send in flight: a whole send advances the open booking (and its last ends it); any other outcome
+    /// abandons it at the cursor UR-22 gives: what the device took of a short send, all of a failed one, nothing past a failed tail.
+    pub fn complete(&mut self, outcome: Outcome) -> Settle {
+        let send = self.open.as_mut().and_then(|open| open.inflight.take()).expect("no send in flight to complete");
+        let open = self.open.as_mut().expect("a booking is open");
+        let handed = match outcome {
+            Outcome::Accepted(accepted) if accepted == send.device_count => {
+                open.next += send.count;
+                open.first = false;
+                if send.ends {
+                    self.open = None;
+                }
+                return Settle::Sent;
+            }
+            Outcome::Accepted(accepted) => accepted,
+            Outcome::Failed => send.device_count,
+            Outcome::TailShort => 0,
+        };
+        Settle::Abandon { cursor: open.next.saturating_add(handed) }
+    }
+
+    /// The executor reads the list's oldest receipt: a halt cancels what [`TxBook::cancel_all`] takes.
+    pub fn read(&mut self) -> Option<Read<P>> {
+        Some(match self.list.read()? {
+            Read::Halt { reason, mut cancelled } => {
+                cancelled.append(&mut self.cancel_all());
+                Read::Halt { reason, cancelled }
+            }
+            booking => booking,
+        })
+    }
+
+    /// RM-16 (#85): what a halt cancels: the held bookings, and the open one when it has issued nothing (`first`); one that has keeps
+    /// what it handed, which nothing recalls.
+    pub fn cancel_all(&mut self) -> BTreeMap<i64, P> {
+        debug_assert!(self.open.as_ref().is_none_or(|open| open.inflight.is_none()), "a halt is read with no send in flight");
+        let mut cancelled = std::mem::take(&mut self.list.held);
+        if let Some(open) = self.open.take_if(|open| open.first) {
+            cancelled.insert(open.next, open.booking);
+        }
+        cancelled
+    }
+
+    /// Receipt: an accepted booking enters the record (`end` is its exclusive end in root ticks, `None` for a repeat) and the list.
+    pub fn book(&mut self, booking: P, end: Option<i64>) {
+        self.record.book(end);
+        self.list.book(booking);
+    }
+
+    /// Receipt: a `repeat` booking `id` at `origin` with `period` becomes the playing repeat, started by the Provider's rule.
+    pub fn play(&mut self, repeat: bool, id: ActionId, origin: i64, period: i64) {
+        if repeat {
+            self.playing = Some(Playing { id, origin, period, started: self.started_rule == Started::AtAcceptance });
+        }
+    }
+
+    /// RM-37: the boundary a switch received now takes: the first sample of the playing repeat's grid at or after both its `at_k` and
+    /// `bound_k`, the receipt plus the in-flight window and the device lead. `None` when no repeat plays.
+    pub fn switch_boundary(&self, at_k: i64, bound_k: i64) -> Option<i64> {
+        self.playing.map(|playing| repeat_boundary(playing.origin, playing.period, bound_k.max(at_k)))
+    }
+
+    /// RM-37, UR-38: receipt of the switch `id` to a waveform of `period` samples, at `at_k` (`untimed`: the Kernel's instant), received at
+    /// the sample `now_k` with the bound `bound_k` ([`TxBook::switch_boundary`]). Accepted, it is taken at its boundary: pending in the
+    /// record until device time reaches it, and the playing repeat from now on. Refused (nothing changes) when no repeat plays, a switch
+    /// is pending, or the repeat it replaces has not started. A timed switch the bound pushed past the boundary of `at_k` alone records
+    /// `at_k` as its requested target (#86).
+    pub fn receive_switch(&mut self, id: ActionId, period: i64, at_k: i64, bound_k: i64, untimed: bool, now_k: i64) -> Result<SwitchAccepted, SwitchRefusal> {
+        let (Some(playing), Some(boundary)) = (self.playing, self.switch_boundary(at_k, bound_k)) else { return Err(SwitchRefusal::NoPlayingRepeat) };
+        self.record.switch(id, boundary, now_k, playing.started)?;
+        self.play(true, id, boundary, period);
+        let requested_target = (!untimed && boundary != repeat_boundary(playing.origin, playing.period, at_k)).then_some(at_k);
+        Ok(SwitchAccepted { boundary, requested_target })
+    }
+
+    /// RM-16: a Stop's reach on the record.
+    pub fn stop(&mut self, (bound, region): StopReach) {
+        self.record.stop(bound);
+        if let Some((at, stop)) = region {
+            self.record.halt(at, stop);
+        }
+    }
+
+    /// UR-22, RM-37: the owner abandons the open booking `id` at the handed cursor `cursor_k` ([`Bookings::abandon`], `bound` the root
+    /// tick of `cursor_k + STOP_FRONT`). Only a `repeat` reaches the record: a finite booking keeps its whole region (RM-15). The playing repeat
+    /// stops being one only when it is the abandoned booking or a switch the abandon settled; each switch it cancelled goes through
+    /// [`TxBook::cancel_switch`]. Returns the number of switch payloads removed, each of which the Provider reports with one note.
+    pub fn abandon(&mut self, repeat: bool, id: Option<ActionId>, cursor_k: i64, bound: i64) -> usize {
+        if !repeat {
+            return 0;
+        }
+        let settled = self.record.abandon(cursor_k, bound);
+        if self.playing.is_some_and(|playing| Some(playing.id) == id || settled.iter().any(|s| s.id == playing.id)) {
+            self.playing = None;
+        }
+        settled.iter().filter(|s| s.outcome == SwitchOutcome::Cancelled).filter(|s| self.cancel_switch(s.id)).count()
+    }
+
+    /// RM-37, UR-22 (A1): the book's side of the cancellation of the switch `id`, which the record has settled cancelled
+    /// ([`Bookings::abandon`]): it stops being the playing repeat, and its payload leaves the held bookings and the unread receipts, so its
+    /// new waveform is never sent. [`TxBook::abandon`] finds a cancelled applied switch in the record's settled switches, which are drained
+    /// only when the Provider writes its sections (`take_settled`). Returns whether a payload was removed, which the Provider reports with
+    /// one note.
+    pub fn cancel_switch(&mut self, id: ActionId) -> bool {
+        if self.playing.is_some_and(|playing| playing.id == id) {
+            self.playing = None;
+        }
+        let ours = |booking: &P| booking.is_switch() && booking.id() == Some(id);
+        let before = self.list.held.len() + self.list.unread.len();
+        self.list.held.retain(|_, booking| !ours(booking));
+        self.list.unread.retain(|arrival| !matches!(arrival, Arrival::Booking(booking) if ours(booking)));
+        self.list.held.len() + self.list.unread.len() < before
+    }
+
+    /// RM-37: the record applies a pending switch once device time `now_k` reaches its boundary.
+    pub fn advance(&mut self, now_k: i64) {
+        self.record.advance(now_k);
+    }
+
+    /// RM-15 (C6): a booking refused at its dispatch or configure leaves the overlap rule.
+    pub fn drop_piece(&mut self, start: i64, len: Option<i64>) {
+        self.record.drop_piece(start, len);
+    }
+
+    /// RM-25: a failed reopen ends the stream's clock, and with it the pending switch.
+    pub fn clock_ended(&mut self) {
+        self.record.cancel_switch();
+    }
+
+    /// UR-23: the owner's close at sample `e`. `None` while a booking can still join; otherwise the closed chain's front.
+    pub fn close_unjoined(&mut self, e: i64, now: i64, join_by: impl Fn(i64) -> i64) -> Option<Option<i64>> {
+        (!self.record.continuation_open(e, now, join_by)).then(|| self.record.close(e))
+    }
+
+    /// RM-14: an untimed head, booked by `id`, moves at dispatch to the first free sample at or after `from`; the playing repeat's grid
+    /// moves with it (#88).
+    pub fn move_untimed(&mut self, id: Option<ActionId>, old: i64, from: i64, len: Option<i64>) -> Option<i64> {
+        let moved = self.record.move_untimed(old, from, len);
+        if let Some(start) = moved {
+            self.moved(id, start);
+        }
+        moved
+    }
+
+    /// RM-14: a SendAsap head, booked by `id`, moves at dispatch to `new`, and the playing repeat's grid with it (#88); a refused move
+    /// drops the piece.
+    pub fn move_start(&mut self, id: Option<ActionId>, old: i64, new: i64, len: Option<i64>) -> Result<(), Overlap> {
+        let moved = self.record.move_start(old, new, len);
+        match moved {
+            Ok(()) => self.moved(id, new),
+            Err(_) => self.record.drop_piece(old, len),
+        }
+        moved
+    }
+
+    /// #88: a repeat moved at dispatch repeats from its new start, so a later switch takes its boundary on that grid.
+    fn moved(&mut self, id: Option<ActionId>, start: i64) {
+        if let Some(playing) = self.playing.as_mut().filter(|playing| id == Some(playing.id)) {
+            playing.origin = start;
+        }
     }
 }
 
@@ -487,10 +794,9 @@ impl Bookings {
         }
         match pending {
             // A switch before the bound is applied, and its new repeat is cut at the bound like any other; the samples
-            // handed within the in-flight window are not recalled (RM-16). One at or after the bound was never handed,
-            // and one the owner has not taken is never handed.
-            Some(switch) if switch.installed && switch.boundary < stop => self.apply(switch, stop),
-            Some(switch) => self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Cancelled, moved_to: switch.moved_to }),
+            // handed within the in-flight window are not recalled (RM-16). One at or after the bound was never handed.
+            Some(switch) if switch.boundary < stop => self.apply(switch, stop),
+            Some(switch) => self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Cancelled, boundary: switch.boundary }),
             None => {}
         }
         if let Some(front) = cut {
@@ -501,79 +807,83 @@ impl Bookings {
         }
     }
 
-    /// RM-37 (the repeat switch): accepts, for the action `id`, a switch whose new waveform starts at `boundary`, asked for at the
-    /// receipt's sample `now_k`, on the replaced repeat's `grid` (origin, period). Refused, and nothing is pending, unless a repeat
-    /// is playing (its chain has no end and no front yet, and it started at or before `now_k`) and no other switch is pending. The
-    /// caller chooses `boundary` with [`repeat_boundary`]. Returns whether the switch was accepted; the owner then takes it with
-    /// [`Bookings::install`].
-    pub fn switch(&mut self, id: ActionId, grid: (i64, i64), boundary: i64, now_k: i64) -> bool {
+    /// RM-37 (the repeat switch): accepts, for the action `id`, a switch whose new waveform starts at `boundary`, received at the
+    /// sample `now_k`: pending until device time reaches the boundary. Refused, and nothing is pending, unless a repeat is playing (its
+    /// chain has no end and no front yet, and it started at or before `now_k`), no other switch is pending, and that repeat has
+    /// `started` (UR-38). The caller chooses `boundary` ([`TxBook::switch_boundary`]).
+    pub fn switch(&mut self, id: ActionId, boundary: i64, now_k: i64, started: bool) -> Result<(), SwitchRefusal> {
         self.advance(now_k);
-        let playing = self.chains.iter().any(|c| c.end == i64::MAX && c.front == i64::MAX && c.start <= now_k);
-        if self.pending.is_some() || !playing {
-            return false;
+        if !self.chains.iter().any(|c| c.end == i64::MAX && c.front == i64::MAX && c.start <= now_k) {
+            return Err(SwitchRefusal::NoPlayingRepeat);
         }
-        self.pending = Some(Switch { id, grid, boundary, installed: false, moved_to: None });
-        true
-    }
-
-    /// UR-36, UR-38 (RM-37): the owner takes the pending switch `id` at its handed cursor `cursor_k`. A cursor at or before the
-    /// boundary installs it there. A later cursor moves it to the first boundary of its grid at or after the cursor (a switch is
-    /// always SendAsapAndFlag, RM-13). Returns the boundary it is installed at, or `None` when `id` is not pending.
-    pub fn install(&mut self, id: ActionId, cursor_k: i64) -> Option<i64> {
-        let switch = self.pending.filter(|s| s.id == id && !s.installed)?;
-        let (boundary, moved_to) = if cursor_k <= switch.boundary {
-            (switch.boundary, None)
-        } else {
-            let moved = repeat_boundary(switch.grid.0, switch.grid.1, cursor_k);
-            (moved, Some(moved))
-        };
-        self.pending = Some(Switch { boundary, installed: true, moved_to, ..switch });
-        Some(boundary)
-    }
-
-    /// UR-36: the owner refuses the pending switch `id` that it cannot take, so the old repeat keeps playing and the row is settled
-    /// as refused. Every owner-side refusal of a switch goes through here (S4).
-    pub fn refuse(&mut self, id: ActionId) {
-        if self.pending.is_some_and(|s| s.id == id && !s.installed) {
-            self.pending = None;
-            self.settled.push(Settled { id, outcome: SwitchOutcome::Refused, moved_to: None });
+        if self.pending.is_some() {
+            return Err(SwitchRefusal::PendingSwitch);
         }
+        if !started {
+            return Err(SwitchRefusal::NotStarted);
+        }
+        self.pending = Some(Switch { id, boundary });
+        Ok(())
     }
 
     /// RM-37: a Provider's loss or F8 recovery that ends the repeat cancels the pending switch. Returns whether one was pending.
     pub fn cancel_switch(&mut self) -> bool {
         match self.pending.take() {
             Some(switch) => {
-                self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Cancelled, moved_to: switch.moved_to });
+                self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Cancelled, boundary: switch.boundary });
                 true
             }
             None => false,
         }
     }
 
-    /// RM-37 (S4): the owner abandons its repeat at the handed cursor `cursor_k`. A pending switch whose boundary is at or after the cursor
-    /// never starts, so it is cancelled rather than applied by the Stop that ends the repeat. Returns whether it cancelled one.
-    pub fn cancel_switch_from(&mut self, cursor_k: i64) -> bool {
-        let cancel = self.pending.is_some_and(|switch| switch.boundary >= cursor_k);
-        if cancel {
-            self.cancel_switch();
+    /// RM-15, RM-16, RM-37 (UR-22): the owner abandons a repeat at the handed cursor `cursor_k`, the first sample the device has nothing
+    /// past; `bound` is `cursor_k + STOP_FRONT` in root ticks. The abandoned repeat and the switch replacing it are reached, and a booking
+    /// received after a Stop is not (#80):
+    /// - a switch whose boundary is at or after the cursor never starts: a pending one is cancelled, an applied one (its payload unread,
+    ///   held or open) is settled cancelled and its chain goes. A pending one before the cursor is applied, cut at `cursor_k + STOP_FRONT`
+    ///   (`s`), as a Stop there would apply it ([`Bookings::halt`]);
+    /// - a chain starting in `[cursor_k, s)` goes, with the region a Stop at the cursor leaves ([`Bookings::halt`]); the last repeat chain
+    ///   starting before the cursor keeps the footprint `[start, s)` (RM-15), whatever front an applied switch gave it;
+    /// - a chain starting at or after `s` (a booking received after a Stop) is kept as it is, and the value rule is capped at `bound` only
+    ///   when none is.
+    ///
+    /// The one switch the record can hold replaces the abandoned repeat: a switch is accepted only on the repeat that plays and has
+    /// started on the device (UR-38), so no switch waits on a later repeat behind the abandoned one, and none is reached by mistake.
+    ///
+    /// Returns the switches it settled, as settled.
+    pub fn abandon(&mut self, cursor_k: i64, bound: i64) -> Vec<Settled> {
+        let stop = cursor_k.saturating_add(STOP_FRONT);
+        let mut settled = Vec::new();
+        let mut never_started = Vec::new();
+        for s in self.settled.iter_mut().filter(|s| s.outcome == SwitchOutcome::Applied && s.boundary >= cursor_k) {
+            s.outcome = SwitchOutcome::Cancelled;
+            settled.push(s.id);
+            never_started.push(s.boundary);
         }
-        cancel
+        if let Some(switch) = self.pending {
+            settled.push(switch.id);
+            if switch.boundary >= cursor_k {
+                self.cancel_switch();
+            }
+        }
+        let (later, kept): (Vec<Chain>, Vec<Chain>) = std::mem::take(&mut self.chains).into_iter().partition(|c| c.start >= stop && !never_started.contains(&c.start));
+        self.chains = kept;
+        self.halt(cursor_k, stop);
+        if let Some(repeat) = self.chains.iter_mut().filter(|c| c.end == i64::MAX && c.start < cursor_k).max_by_key(|c| c.start) {
+            repeat.front = stop;
+        }
+        if later.is_empty() {
+            self.stop(bound);
+        }
+        self.chains.extend(later);
+        self.settled.iter().filter(|s| settled.contains(&s.id)).copied().collect()
     }
 
-    /// RM-37 (S4): the switch `id` the record applied, whose new waveform the owner never sent, is settled cancelled. The entry is
-    /// changed only while it is still unwritten to the switch rows.
-    pub fn cancel_applied(&mut self, id: ActionId) {
-        if let Some(settled) = self.settled.iter_mut().find(|s| s.id == id && s.outcome == SwitchOutcome::Applied) {
-            settled.outcome = SwitchOutcome::Cancelled;
-        }
-    }
-
-    /// RM-37: at the sample `now_k`, applies a pending switch that the owner has taken and whose boundary has been reached (the old
-    /// repeat ends there and the new one begins). [`Bookings::prune`] and [`Bookings::switch`] run it first; [`Bookings::halt`]
-    /// settles a pending switch itself.
+    /// RM-37: at the sample `now_k`, applies a pending switch whose boundary has been reached (the old repeat ends there and the new one
+    /// begins). [`Bookings::prune`] and [`Bookings::switch`] run it first; [`Bookings::halt`] settles a pending switch itself.
     pub fn advance(&mut self, now_k: i64) {
-        if let Some(switch) = self.pending.filter(|s| s.installed && s.boundary <= now_k) {
+        if let Some(switch) = self.pending.filter(|s| s.boundary <= now_k) {
             self.pending = None;
             self.apply(switch, i64::MAX);
         }
@@ -590,7 +900,7 @@ impl Bookings {
             c.front = c.front.min(switch.boundary);
         }
         self.chains.push(Chain { start: switch.boundary, end: i64::MAX, joined: Vec::new(), front, join: false });
-        self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Applied, moved_to: switch.moved_to });
+        self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Applied, boundary: switch.boundary });
     }
 
     /// RM-14, UR-23: a chain head that host lateness moves at dispatch, from `old` to `new` with its length `len` (`None` for a
@@ -746,14 +1056,12 @@ pub fn handover_horizon(now: i64, in_flight: i64, at_or_after: impl Fn(i64) -> i
     at_or_after(now.saturating_add(in_flight))
 }
 
-/// RM-37, UR-38: writes each settled switch into its row of the `switches` section: its outcome and the boundary it was moved to.
-/// Both Providers call it, so the row has one writer.
+/// RM-37: writes each settled switch's outcome into its row of the `switches` section. Both Providers call it, so the row has one writer.
 pub fn write_settled(rows: &mut [serde_json::Value], settled: impl IntoIterator<Item = Settled>) {
     for settled in settled {
         let id = serde_json::to_value(settled.id).expect("an action id");
         if let Some(row) = rows.iter_mut().rev().find(|row| row["action_id"] == id) {
             row["outcome"] = serde_json::json!(settled.outcome.label());
-            row["moved_to"] = serde_json::json!(settled.moved_to);
         }
     }
 }

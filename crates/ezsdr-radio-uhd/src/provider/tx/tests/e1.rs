@@ -9,43 +9,43 @@ use crate::provider::tx::oracle as o;
 use ezsdr_radio::staging::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const MS: i64 = 200_000;
+pub(super) const MS: i64 = 200_000;
 
-fn params() -> o::Params {
+pub(super) fn params() -> o::Params {
     o::Params { clock: o::Clock { origin: 0, n: 200 }, root_hz: 200_000_000, window: 10 * MS, lead: 2 * MS, allowance: 3 * MS }
 }
 
-fn at(rig: &SwitchRig, ticks: i64) {
+pub(super) fn at(rig: &SwitchRig, ticks: i64) {
     device_at(&rig.core, &rig.time, &rig.device, ticks);
 }
 
 /// A finite booking of `rig.waves[wave]` at sample `k`.
-fn book(rig: &mut SwitchRig, id: u64, wave: usize, k: i64) {
+pub(super) fn book(rig: &mut SwitchRig, id: u64, wave: usize, k: i64) {
     book_with(&mut rig.control, &rig.core, id, 0, rig.clock, k, &rig.waves[wave], false, LatePolicy::DropAndFlag, BTreeMap::new());
 }
 
 /// uhd-control's Stop of transmit stream 0, received and not read.
-fn stop_receipt(rig: &mut SwitchRig) {
+pub(super) fn stop_receipt(rig: &mut SwitchRig) {
     rig.control.book(Dispatched::new(ActionId(9), Action::Stop { target: Some(crate::provider::test_support::target_of(&rig.core.tx_id)) }, Some(rig.core.tx_id.clone())));
 }
 
 /// The `rejected` notes of cancelled bookings, in order.
-fn notes(core: &Core) -> Vec<String> {
+pub(super) fn notes(core: &Core) -> Vec<String> {
     lock(&core.rec).rejected.iter().filter(|row| row["kind"] == "tx_burst").filter_map(|row| row["reason"].as_str().filter(|reason| reason.starts_with("UR-26")).map(str::to_owned)).collect()
 }
 
-fn rejection_events(events: &EventCollector) -> Vec<ezsdr_kernel::event::Event> {
+pub(super) fn rejection_events(events: &EventCollector) -> Vec<ezsdr_kernel::event::Event> {
     rejected(events)
 }
 
 /// The bookings left unread on stream 0's list (halts skipped).
 fn booked_entries(core: &Core) -> usize {
     let mut streams = lock(&core.streams);
-    std::iter::from_fn(|| streams.stream_mut(stream_key(Dir::Tx, 0)).list.read()).filter(|read| matches!(read, Read::Booking(_))).count()
+    std::iter::from_fn(|| streams.stream_mut(stream_key(Dir::Tx, 0)).book.list.read()).filter(|read| matches!(read, Read::Booking(_))).count()
 }
 
 /// The end of what was handed to the device: the first timed send's start plus every sample sent.
-fn handed_end(rig: &SwitchRig) -> i64 {
+pub(super) fn handed_end(rig: &SwitchRig) -> i64 {
     let calls = rig.device.calls();
     let sends: Vec<&String> = calls.iter().filter(|call| call.starts_with("tx_send ")).collect();
     let field = |call: &str, name: &str| call.split_whitespace().find_map(|word| word.strip_prefix(name)).map(str::to_owned);
@@ -53,11 +53,11 @@ fn handed_end(rig: &SwitchRig) -> i64 {
     rig.clock.at_or_after(first.parse().unwrap()) + sends.iter().map(|call| field(call, "n=").unwrap().parse::<i64>().unwrap()).sum::<i64>()
 }
 
-fn last_send_eob(rig: &SwitchRig) -> bool {
+pub(super) fn last_send_eob(rig: &SwitchRig) -> bool {
     sends(&rig.device).last().is_some_and(|send| send.2)
 }
 
-fn rows(rig: &SwitchRig) -> Vec<serde_json::Value> {
+pub(super) fn rows(rig: &SwitchRig) -> Vec<serde_json::Value> {
     lock(&rig.core.rec).bursts.clone()
 }
 
@@ -83,7 +83,7 @@ fn rig_at(origin: i64, waves: Vec<Vec<Iq>>) -> SwitchRig {
 }
 
 /// `Tx::shutdown`, with the manual clock released so that its 100 ms acknowledgement window can pass; returns the Core and the events.
-fn shutdown(rig: SwitchRig) -> (Arc<Core>, Arc<EventCollector>) {
+pub(super) fn shutdown(rig: SwitchRig) -> (Arc<Core>, Arc<EventCollector>) {
     let SwitchRig { core, events, mut tx, _frozen, .. } = rig;
     drop(_frozen);
     let host = core.device.host();
@@ -130,7 +130,7 @@ fn e1_q1_a_stop_is_read_between_the_booking_before_it_and_the_one_after_it() {
 }
 
 /// A repeat playing on a rig, device time 3 ms, the owner's list read.
-fn playing() -> SwitchRig {
+pub(super) fn playing() -> SwitchRig {
     let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000], vec![NEW; 200]]);
     book_repeat(&mut rig, 1, 2_000, 0);
     run(&mut rig, 0, 3);
@@ -141,7 +141,7 @@ fn playing() -> SwitchRig {
 fn e1_q2_the_step_reads_a_stop_it_has_not_read_before_it_hands() {
     let mut rig = playing();
     let t = rig.core.now();
-    lock(&rig.core.streams).end(&rig.core, t, false, false);
+    crate::provider::test_support::end_streams(&rig.core, t, false, false);
     at(&rig, t + 2 * MS);
     assert!(rig.tx.step(), "the step reads the halt first");
     let (_, bound) = params().stop_bound(t);
@@ -155,10 +155,12 @@ fn e1_q2b_now_is_read_under_the_lock_that_checked_the_list() {
     let mut rig = playing();
     let t = rig.core.now();
     let fired = Arc::new(AtomicBool::new(false));
-    let (core, time, device) = (rig.core.clone(), rig.time.clone(), rig.device.clone());
+    // The probe holds the Core weakly: `core.probes` holding it would keep the rig from ever dropping (UR-33's drop check).
+    let (core, time, device) = (Arc::downgrade(&rig.core), rig.time.clone(), rig.device.clone());
     crate::provider::test_support::probe(&rig.core, "tx_step_guarded", move |_| {
+        let Some(core) = core.upgrade() else { return };
         if !fired.swap(true, Ordering::SeqCst) {
-            lock(&core.streams).end(&core, t, false, false);
+            crate::provider::test_support::end_streams(&core, t, false, false);
             device_at(&core, &time, &device, t + 2 * MS);
         }
     });
@@ -181,7 +183,7 @@ fn e1_q3_a_pre_origin_provider_stop_cancels_a_booking_with_its_own_note() {
             rig.tx.read_list();
         }
         let t2 = rig.core.now() + 5 * MS;
-        lock(&rig.core.streams).end(&rig.core, t2, false, false);
+        crate::provider::test_support::end_streams(&rig.core, t2, false, false);
         at(&rig, origin);
         let (core, events) = if order.starts_with("shutdown") {
             shutdown(rig)
@@ -198,14 +200,15 @@ fn e1_q3_a_pre_origin_provider_stop_cancels_a_booking_with_its_own_note() {
 }
 
 #[test]
-fn e1_q4b_a_switch_read_after_the_stop_that_took_it_is_not_taken() {
+fn e1_q4b_a_switch_read_after_the_stop_that_took_it_is_cancelled_with_it() {
+    // The switch (boundary 15 000) is taken at receipt; the Stop received after it bounds the stream at 13 005, before the boundary, so
+    // the record cancels it. The owner reads the switch's payload, then the Stop, which cancels the payload with one note: no refusal.
     let mut rig = playing();
     book_switch(&mut rig, 2, 3_000, 1);
     stop_receipt(&mut rig);
     rig.tx.read_list();
-    let events = rejection_events(&rig.events);
-    assert_eq!(events.iter().map(|e| e.payload["action"].clone()).collect::<Vec<_>>(), [serde_json::json!(2)], "{events:?}");
-    assert!(events[0].payload["reason"].as_str().unwrap().starts_with("UR-21: the repeat switch was not taken"), "{events:?}");
+    assert!(rejection_events(&rig.events).is_empty(), "nothing is refused");
+    assert_eq!(notes(&rig.core), ["UR-26: cancelled by Stop"], "{:?}", lock(&rig.core.rec).rejected);
     assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled");
     assert!(last_send_eob(&rig));
     assert_eq!(rows(&rig)[0]["end"], "stop");
@@ -219,6 +222,11 @@ fn e1_q5_a_booking_waiting_when_the_repeat_is_abandoned_still_plays() {
     stop_receipt(&mut rig);
     book(&mut rig, 3, 2, 30_000);
     rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(2_500)), channel: 0 });
+    // #80: the abandon keeps B's chain, so a booking overlapping B is refused at receipt; R, the abandoned repeat, is no longer playing.
+    rejected(&rig.events);
+    book(&mut rig, 4, 2, 30_100);
+    assert_eq!(rejected(&rig.events).iter().filter_map(|event| event.payload["action"].as_u64()).collect::<Vec<_>>(), [4], "{:?}", lock(&rig.core.rec).rejected);
+    assert_eq!(rig.tx.with_book(|book| book.playing), None);
     rig.tx.read_list();
     run(&mut rig, 4, 40);
     assert!(notes(&rig.core).is_empty(), "B is not cancelled: {:?}", lock(&rig.core.rec).rejected);
@@ -232,7 +240,7 @@ fn e1_q6_a_stop_a_booking_and_the_run_end_all_unread() {
     stop_receipt(&mut rig);
     book(&mut rig, 2, 0, 30_000);
     let t = rig.core.now();
-    lock(&rig.core.streams).end(&rig.core, t, false, false);
+    crate::provider::test_support::end_streams(&rig.core, t, false, false);
     rig.tx.read_list();
     assert_eq!(notes(&rig.core), ["UR-26: cancelled by Stop", "UR-26: cancelled by Provider::stop"]);
     assert!(held_keys(&rig.tx).is_empty());
@@ -254,8 +262,12 @@ fn e1_q6b_shutdown_reads_the_list_before_it_cancels() {
 fn e1_q7_a_stop_received_while_a_configure_refuses_its_burst() {
     let (core, device, time, mut tx, _frozen, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
     let clock = tx.clock.expect("a clock");
-    let stopper = core.clone();
-    crate::provider::test_support::probe(&core, "tx_configure_before_mark", move |_| lock(&stopper.streams).stream_mut(stream_key(Dir::Tx, 0)).list.halt(ezsdr_radio::CancelReason::Stop));
+    let stopper = Arc::downgrade(&core);
+    crate::provider::test_support::probe(&core, "tx_configure_before_mark", move |_| {
+        if let Some(stopper) = stopper.upgrade() {
+            lock(&stopper.streams).stream_mut(stream_key(Dir::Tx, 0)).book.list.halt(ezsdr_radio::CancelReason::Stop);
+        }
+    });
     give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F2, 1));
     turns(&core, &time, &device, &mut tx, 1, 30, 1);
     let refused = rejected(&events);
@@ -281,7 +293,7 @@ fn e1_q8_provider_stop_closes_the_open_burst_at_the_next_turn() {
         }
     }
     let t = rig.core.now();
-    lock(&rig.core.streams).end(&rig.core, t, false, false);
+    crate::provider::test_support::end_streams(&rig.core, t, false, false);
     at(&rig, t + MS);
     rig.tx.pass();
     let (_, bound) = params().stop_bound(t);
@@ -295,11 +307,12 @@ fn e1_q8_provider_stop_closes_the_open_burst_at_the_next_turn() {
 fn e1_q12_a_booking_racing_a_provider_stop_cut_is_refused_at_receipt() {
     let mut rig = switch_rig(vec![vec![OLD; 100]]);
     let fired = Arc::new(AtomicBool::new(false));
-    let core = rig.core.clone();
+    let core = Arc::downgrade(&rig.core);
     crate::provider::test_support::probe(&rig.core, "tx_book_cut_checked", move |_| {
+        let Some(core) = core.upgrade() else { return };
         if !fired.swap(true, Ordering::SeqCst) {
             let now = core.now();
-            lock(&core.streams).end(&core, now, false, false);
+            crate::provider::test_support::end_streams(&core, now, false, false);
         }
     });
     book(&mut rig, 1, 0, 20_000);
@@ -330,13 +343,14 @@ fn e1_q14_a_continuation_accepted_after_the_unread_check_keeps_the_burst_open() 
     let deadline = core.join_by(clock, 20_040);
     device_at(&core, &time, &device, deadline - 1_000);
     let fired = Arc::new(AtomicBool::new(false));
-    let (hook_core, hook_time, hook_device) = (core.clone(), time.clone(), device.clone());
+    let (hook_core, hook_time, hook_device) = (Arc::downgrade(&core), time.clone(), device.clone());
     crate::provider::test_support::probe(&core, "tx_step_guarded", move |_| {
+        let Some(hook_core) = hook_core.upgrade() else { return };
         if !fired.swap(true, Ordering::SeqCst) {
             device_at(&hook_core, &hook_time, &hook_device, deadline);
             let b = txp_burst(&clock, 20_040, 10, false, LatePolicy::DropAndFlag);
             txp_record(&hook_core, clock, &b);
-            lock(&hook_core.streams).stream_mut(stream_key(Dir::Tx, 0)).list.book(b);
+            lock(&hook_core.streams).stream_mut(stream_key(Dir::Tx, 0)).book.list.book(b);
             device_at(&hook_core, &hook_time, &hook_device, deadline + 1);
         }
     });

@@ -350,17 +350,21 @@ fn switched(period: usize, new_period: usize, recv: i64, at: i64) -> Rig {
 fn o1_uhd_t4a_a_switch_takes_the_first_grid_point_at_or_after_its_bound() {
     // RM-37 (seq 4): R has period 700 (a period that divides neither the window nor the lead, grid 2000 + 700 j). The switch is received
     // so that its bound (receipt's sample + window + lead) is one before a grid point, on it and one after it, and once with an explicit
-    // `at` between grid points. The boundary is the oracle's, not the observed one; the new waveform has its own period from there.
+    // `at` between grid points. The boundary is the oracle's, not the observed one; the new waveform has its own period from there. The
+    // successor's requested target is the oracle's (#86): the switch's `at` when the receipt pushed it, none for an `at` past the bound.
     // (Mutation row O1-M3a.)
     let cases: [(&str, i64, Option<i64>); 4] = [("g - 1", 15_999, None), ("g", 16_000, None), ("g + 1", 16_001, None), ("at between grid points", 16_000, Some(16_100))];
     for (case, bound, at) in cases {
         let recv = if at.is_some() { 4 * MS } else { r_tick(bound - 12_000) };
-        let mut r = switched(700, 400, recv, at.unwrap_or(bound - 12_000));
+        let asked = at.unwrap_or(bound - 12_000);
+        let mut r = switched(700, 400, recv, asked);
         let b = o::switch_boundary(&r.p, 2_000, 700, recv, at);
+        let requested = o::switch_requested_target(&r.p, 2_000, 700, recv, asked, false);
+        assert_eq!(requested.is_some(), at.is_none(), "{case}: an `at` before the bound is pushed");
         assert_eq!(b, if bound == 15_999 || bound == 16_000 && at.is_none() { 16_000 } else { 16_700 }, "{case}: the grid is 2000 + 700 j");
         r.turns(5, 30);
         let row = r.switch_row(0);
-        assert_eq!((row["outcome"].as_str(), row["boundary"].as_i64(), row["moved_to"].is_null()), (Some("applied"), Some(b), true), "{case}: {row}");
+        assert_eq!((row["outcome"].as_str(), row["boundary"].as_i64(), row.get("moved_to")), (Some("applied"), Some(b), None), "{case}: {row}");
         assert!(r.refusals().is_empty() && r.time_errors().is_empty(), "{case}: {:?}", r.events);
         let slots = o::Slots { segs: vec![o::Seg::repeating(8, 2_000, 700, b), o::Seg::repeating(9, b, 400, i64::MAX)], cut: None };
         r.check(&slots, 1_990, b + 1_200);
@@ -370,7 +374,7 @@ fn o1_uhd_t4a_a_switch_takes_the_first_grid_point_at_or_after_its_bound() {
             "{case}: the old repeat's record ends at the boundary"
         );
         r.assert_switch_ids(0);
-        // A Stop at 31 ms closes the new repeat: its record is the successor's, with its own target, count, wraps and end, not late, not moved.
+        // A Stop at 31 ms closes the new repeat: its record is the successor's, with its own target, count, wraps and end, not late.
         r.at(31 * MS);
         r.turn();
         let (t_k, bound) = r.p.stop_bound(31 * MS);
@@ -380,7 +384,7 @@ fn o1_uhd_t4a_a_switch_takes_the_first_grid_point_at_or_after_its_bound() {
         let cut = r.check(&slots, 1_990, bound + 100).expect("the Stop cuts the new repeat");
         let recs = r.full_recs();
         assert_eq!(recs.len(), 2, "{case}: {recs:?}");
-        assert_eq!(recs[1], (b, cut - b, (cut - b) / 400, None, None, "stop".to_owned()), "{case}: the successor's record");
+        assert_eq!(recs[1], (b, cut - b, (cut - b) / 400, requested, None, "stop".to_owned()), "{case}: the successor's record");
     }
 }
 
@@ -390,14 +394,16 @@ fn r_tick(k: i64) -> i64 {
 }
 
 #[test]
-fn o1_uhd_t4b_a_switch_taken_after_the_cursor_passed_its_boundary_moves_to_the_next_grid_point() {
-    // RM-37, UR-38 (seq 4, UHD only; E2a deletes this path, note 49 §5.4.5): the switch is booked at 3 ms (boundary 15 000) and sits in the
-    // owner's channel while the owner hands the repeat past 15 000 (no state is poked: `Tx::step` hands without draining). When the owner
-    // takes it, its cursor is where the send trace says; the boundary is the first grid point at or after that cursor.
+fn o1_uhd_t4b_an_owner_that_has_not_read_a_switch_never_hands_past_its_boundary() {
+    // RM-37, UR-38 (seq 4, UHD only): the switch is booked at 3 ms (boundary 15 000) and the owner steps on to 7 ms without draining its
+    // channel. The step reads any unread receipt before it hands, so the switch is read before the cursor reaches 15 000, and nothing moves
+    // it: the boundary is the one chosen at receipt, no `TIME_ERROR`, one device burst, the old record ends at 15 000.
     let mut r = rig(&[(8, 1_000), (9, 1_000)], Vec::new());
     r.book(1, 0, 2_000, true, LatePolicy::DropAndFlag);
     r.turns(0, 3);
     book_switch(&mut r.rig, 2, 3_000, 1);
+    let b = o::switch_boundary(&r.p, 2_000, 1_000, 3 * MS, Some(3_000));
+    assert_eq!(b, 15_000);
     for ms in 4..=7 {
         r.at(ms * MS);
         for _ in 0..8 {
@@ -406,37 +412,20 @@ fn o1_uhd_t4b_a_switch_taken_after_the_cursor_passed_its_boundary_moves_to_the_n
             }
         }
     }
-    let cursor = r.sends().iter().map(|(k, n, _)| k + n).max().unwrap();
-    assert!(cursor > 15_000, "the owner's cursor {cursor} has passed the boundary 15 000 without draining the switch");
-    let to = o::moved_boundary(2_000, 1_000, cursor);
-    drain_tx(&mut r.rig.tx);
     r.turns(8, 30);
     let row = r.switch_row(0);
-    assert_eq!((row["outcome"].as_str(), row["moved_to"].as_i64()), (Some("applied"), Some(to)), "{row}");
-    assert_eq!(r.time_errors(), ["send_asap"], "the move is reported once");
-    let slots = o::Slots { segs: vec![o::Seg::repeating(8, 2_000, 1_000, to), o::Seg::repeating(9, to, 1_000, i64::MAX)], cut: None };
-    r.check(&slots, 1_990, to + 1_500);
+    assert_eq!((row["outcome"].as_str(), row["boundary"].as_i64(), row.get("moved_to")), (Some("applied"), Some(b), None), "{row}");
+    assert!(r.time_errors().is_empty() && r.refusals().is_empty(), "{:?}", r.events);
+    assert!(r.sends().iter().all(|(_, _, eob)| !eob), "no end-of-burst at the boundary: {:?}", r.sends());
+    let slots = o::Slots { segs: vec![o::Seg::repeating(8, 2_000, 1_000, b), o::Seg::repeating(9, b, 1_000, i64::MAX)], cut: None };
+    r.check(&slots, 1_990, b + 1_500);
     r.assert_switch_ids(0);
-    // A Stop at 30 ms closes the moved successor. Its record reads the move like any late burst's (UR-38): the target is where it started,
-    // and `late_by` the amount the cursor passed the boundary chosen at receipt (15 000).
     r.at(30 * MS);
     r.turn();
-    let (t_k, bound) = r.p.stop_bound(30 * MS);
     r.stop();
     r.turns(31, 45);
-    let slots = o::Slots { segs: vec![o::Seg::repeating(8, 2_000, 1_000, to).cuttable(), o::Seg::repeating(9, to, 1_000, i64::MAX).cuttable()], cut: Some((t_k, bound)) };
-    let cut = r.check(&slots, 1_990, bound + 100).expect("the Stop cuts the new repeat");
     let recs = r.full_recs();
-    assert_eq!(recs.len(), 2, "{recs:?}");
-    assert_eq!(recs[0].1, to - 2_000, "the old repeat's record ends at the moved boundary");
-    let b0 = o::switch_boundary(&r.p, 2_000, 1_000, 3 * MS, Some(3_000));
-    assert_eq!(b0, 15_000);
-    assert_eq!((recs[1].0, recs[1].1, recs[1].2, recs[1].4, recs[1].5.as_str()), (to, cut - to, (cut - to) / 1_000, Some((cursor - b0) * 1_000), "stop"), "the moved successor's record");
-    // KNOWN DIVERGENCE #86: the spec records the switch's asked instant (`at` = 3 000) as the moved successor's requested target (RM-14, UR-38,
-    // SC-23a); today's record leaves it None. The fix deletes only this block and asserts `recs[1].3 == spec`.
-    let spec = o::requested_target_of_a_moved_switch(3_000);
-    assert_eq!(recs[1].3, None, "#86 fixed? delete this block and assert the requested target equals the spec's");
-    assert_ne!(recs[1].3, spec, "today's value differs from the oracle's");
+    assert_eq!(recs[0].1, b - 2_000, "the old repeat's record ends at the boundary chosen at receipt: {recs:?}");
 }
 
 #[test]
@@ -489,6 +478,8 @@ fn o1_uhd_t4d_a_stop_with_b_before_its_bound_leaves_the_row_applied_with_no_new_
     r.assert_switch_ids(0);
     // Applied with no new payload handed leaves no successor record today (C2 changes the row, not this): only the predecessor's.
     assert_eq!(r.full_recs().len(), 1, "{:?}", r.full_recs());
+    // #85: the new repeat is the open booking with nothing issued when the owner reads the Stop, so the Stop cancels it with a note.
+    assert_eq!(r.cancellations(), 1, "{:?}", lock(&r.rig.core.rec).rejected);
 }
 
 #[test]
@@ -502,11 +493,14 @@ fn o1_uhd_t4e_a_stop_after_the_new_waveform_sounded_leaves_it_applied() {
     assert!(r.heard(9, b, b + 100));
     assert_eq!(r.switch_row(0)["outcome"], o::outcome_after_stop(b, bound).as_str(), "C2 (note 49 §11.10) may change the unhanded case, not this one");
     r.assert_switch_ids(0);
-    // The successor's record: its own target, the samples the device played of it, wraps, end stop; not late, not moved.
+    // The successor's record: its own target, the samples the device played of it, wraps, end stop; not late. The receipt pushed the
+    // switch's `at` (3 000) to 15 000, so its requested target is that `at` (#86).
     let recs = r.full_recs();
     assert_eq!(recs.len(), 2, "{recs:?}");
     assert_eq!(recs[0], (2_000, b - 2_000, (b - 2_000) / 1_000, None, None, "eob".to_owned()), "the predecessor's record");
-    assert_eq!(recs[1], (b, cut - b, (cut - b) / 1_000, None, None, "stop".to_owned()), "the successor's record");
+    let requested = o::switch_requested_target(&r.p, 2_000, 1_000, 3 * MS, 3_000, false);
+    assert_eq!(requested, Some(3_000));
+    assert_eq!(recs[1], (b, cut - b, (cut - b) / 1_000, requested, None, "stop".to_owned()), "the successor's record");
 }
 
 // ------------------------------------------------------------------------------------------------------------ T5
@@ -660,22 +654,18 @@ fn o1_uhd_t6b_a_cancellation_that_starts_before_the_bound_leaves_the_region() {
 }
 
 #[test]
-fn o1_uhd_t6b2_an_unhanded_open_booking_at_a_stop_is_cancelled_known_divergence_85() {
+fn o1_uhd_t6b2_an_unhanded_open_booking_at_a_stop_is_cancelled() {
     // RM-16, MR-25 (seq 6): H2 starts at window_end - 16 = 29 984, inside (window_end - 32, B): the owner dispatches it into its open slot
     // but cannot hand its first 32 samples, so at the Stop it is unhanded. The spec: cancelled, one `rejected` cancellation note, no
-    // sample, no burst record. Today's UHD drops it in `end_open` with no note (#85).
+    // sample, no burst record (#85).
     let (mut r, t) = before_stop(&[(1, 100), (3, 300), (4, 200)], &[(1, 29_984)]);
     assert_eq!(o::stop_region(&r.p, t, &[29_984]).map(|region| region.front), Some(30_005));
     r.turns(21, 60);
     let spec = o::unhanded_booking_at_a_stop();
     assert_eq!(spec, o::Cancelled { notes: 1, records: 0, samples: false }, "the oracle's own answer, independent of the code");
-    // The normal assertions hold today: no sample of H2 and no burst record of 300 samples.
     assert_eq!(r.heard(3, 0, 60_000), spec.samples);
     assert_eq!(r.rows().iter().filter(|row| row["samples"] == 300).count(), spec.records);
-    // KNOWN DIVERGENCE #85: today's UHD leaves no cancellation note. E2a deletes only this block and asserts `notes == spec.notes`.
-    let notes = r.cancellations();
-    assert_eq!(notes, 0, "#85 fixed? delete this block and assert notes == spec.notes");
-    assert_ne!(notes, spec.notes);
+    assert_eq!(r.cancellations(), spec.notes, "{:?}", lock(&r.rig.core.rec).rejected);
 }
 
 #[test]
@@ -905,23 +895,23 @@ fn o1_uhd_t7b_an_abandoned_finite_booking_keeps_its_whole_region() {
 // ------------------------------------------------------------------------------------------------------------ T8
 
 #[test]
-fn o1_uhd_t8_a_switch_whose_repeat_was_dropped_at_dispatch_is_cancelled_known_divergence_84() {
-    // RM-37, UR-38 (seq 8): the host dispatches the repeat after the device passed its start (3 ms, start 2 000), so DropAndFlag drops it and
-    // the switch that replaces it has nothing to replace: the spec says cancelled. Today's code settles `refused_past_boundary` (#84).
+fn o1_uhd_t8_a_switch_whose_repeat_the_host_has_not_issued_is_refused_at_receipt() {
+    // RM-37, UR-38 (seq 8, #84): the switch arrives at 3 ms, after the repeat's start (2 000) and before the owner issued any of it. The
+    // repeat has not started on the device, so the switch is refused at receipt (the oracle's answer): one `COMMAND_REJECTED` naming it,
+    // no `switches` row, the repeat still the playing one. The host then dispatches the repeat late and DropAndFlag drops it.
     let mut r = rig(&[(8, 1_000), (9, 1_000)], Vec::new());
     r.book(1, 0, 2_000, true, LatePolicy::DropAndFlag);
     r.at(3 * MS);
     book_switch(&mut r.rig, 2, 3_000, 1);
-    drain_tx(&mut r.rig.tx);
-    let spec = o::outcome_after_repeat_dropped();
-    assert_eq!(spec, o::Outcome::Cancelled, "the oracle's own answer, independent of the code");
-    let today = r.switch_row(0)["outcome"].as_str().unwrap().to_owned();
-    // KNOWN DIVERGENCE #84: today's code settles refused_past_boundary. E2a deletes only this block and asserts `today == spec`.
-    assert_eq!(today, "refused_past_boundary", "#84 fixed? delete this block and assert today == spec");
-    assert_ne!(today, spec.as_str());
-    // The normal assertions hold today: the repeat never played and no new sample ever sounds, one `switches` row.
-    r.turns(4, 30);
+    assert!(o::switch_refused_unstarted(), "the oracle's own answer, independent of the code");
+    let refused = r.take().into_iter().filter(|e| e.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect::<Vec<_>>();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!((refused[0].payload["action"].as_u64(), refused[0].payload["reason"].as_str()), (Some(2), Some("UR-38: the repeat the switch replaces has not started on the device")));
+    assert!(lock(&r.rig.core.rec).switches.is_empty(), "a refused switch writes no row");
+    assert_eq!(r.rig.tx.with_book(|book| book.playing.map(|playing| playing.id)), Some(ActionId(1)));
+    r.turns(3, 30);
+    assert_eq!(r.time_errors(), ["drop"], "the repeat is dropped at dispatch");
     assert!(!r.heard(8, 0, 30_000) && !r.heard(9, 0, 30_000));
     r.check(&o::Slots::default(), 1_990, 20_000);
-    assert_eq!(lock(&r.rig.core.rec).switches.len(), 1);
+    assert!(lock(&r.rig.core.rec).switches.is_empty());
 }

@@ -2707,8 +2707,8 @@ fn o1_parity_a_stop_cuts_a_playing_burst_inside_the_applied_range() {
 #[test]
 fn o1_parity_a_switched_repeat_changes_waveform_at_its_recorded_boundary_on_its_grid() {
     // RM-37 (seq 4): R (700 samples, from 40 ms) switched to a 400-sample waveform, then a Stop closes the new repeat. The UHD receives the
-    // switch once R is observed started; its new waveform starts at the boundary its `switches` row records (the moved one if the host was
-    // late), which lies on R's grid from R's observed start; the old repeat is `R[(k - target) mod 700]` to it and the new one `N[(k - b) mod
+    // switch once R is observed started; its new waveform starts at the boundary its `switches` row records, which lies on R's grid from
+    // R's observed start; the old repeat is `R[(k - target) mod 700]` to it and the new one `N[(k - b) mod
     // 400]` from it to the Stop's cut (in the applied range), the old record ends there and the successor's record is its own: target `b`, the
     // samples played, wraps, end stop. The switch row names the switch (its action id) and R (the predecessor). The Mock's boundary is the
     // oracle's for its own receipt at 43 ms. No row outcome is compared between the Providers.
@@ -2734,7 +2734,7 @@ fn o1_parity_a_switched_repeat_changes_waveform_at_its_recorded_boundary_on_its_
     assert_eq!(rows.len(), 1, "{rows:?}");
     // The queue gives the UHD's ids in order, its barriers included: R is 1, its barrier 2, the switch 3.
     assert_eq!((rows[0]["action_id"].as_u64(), rows[0]["predecessor"].as_u64()), (Some(3), Some(1)), "{rows:?}");
-    let b = rows[0]["moved_to"].as_i64().or(rows[0]["boundary"].as_i64()).unwrap();
+    let b = rows[0]["boundary"].as_i64().unwrap();
     let uhd_recs = o1_records(&uhd, "ezsdr.radio.uhd.bursts");
     let target = uhd_recs[0].0;
     assert_eq!((b - target) % 700, 0, "the boundary {b} is on the repeat's grid from {target}");
@@ -2754,7 +2754,7 @@ fn o1_parity_a_switched_repeat_changes_waveform_at_its_recorded_boundary_on_its_
     let at = at.ticks_in(at.domain()).unwrap();
     let mb = oracle::switch_boundary(&mp, mock_rows[0].0, 700, pair.t0 + ms(43), Some(at));
     let rows = manifest_rows(&mock, "ezsdr.radio.mock.switches");
-    assert_eq!((rows.len(), rows[0]["boundary"].as_i64(), rows[0]["moved_to"].is_null()), (1, Some(mb), true), "{rows:?}");
+    assert_eq!((rows.len(), rows[0]["boundary"].as_i64(), rows[0].get("moved_to")), (1, Some(mb), None), "{rows:?}");
     assert_eq!((rows[0]["action_id"].as_u64(), rows[0]["predecessor"].as_u64()), (Some(2), Some(1)), "the Mock's queue gives the repeat 1 and the switch 2: {rows:?}");
     let mock_cut = oracle::mock_cut(&mp, pair.t0 + ms(70), &[oracle::MBurst { start: mb, len: None, started: true, before_stop: true }], None);
     assert_eq!(mock_rows.len(), 2, "{mock_rows:?}");

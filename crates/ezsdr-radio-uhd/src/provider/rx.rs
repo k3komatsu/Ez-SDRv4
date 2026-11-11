@@ -424,7 +424,7 @@ impl Rx {
         if let Some(claim) = claim {
             streams.give_back(claim);
         }
-        drop(streams);
+        self.core.release_streams(streams);
         if !refused {
             self.from = next.segment.origin.saturating_add(1);
         }
@@ -1480,6 +1480,7 @@ mod tests {
             let at = core.now();
             streams.stop = Some((at, StopMode::Orderly));
             streams.end(&core, at, false, false);
+            core.release_streams(streams);
         }
         time.advance_to(core.at(origin)).unwrap();
         release.send(()).unwrap();
@@ -1598,10 +1599,10 @@ mod tests {
     fn ur_26_a_late_start_after_abort_does_not_stop_again() {
         let (core, device, _, _) = super::super::test_support::rig();
         let (mut rx, _) = rx(&core, 1);
-        lock(&core.streams).end(&core, 0, true, false);
+        crate::provider::test_support::end_streams(&core, 0, true, false);
         rx.poll();
         rx.receive(RxRecv::LateCommand);
-        lock(&core.streams).end(&core, 0, true, false);
+        crate::provider::test_support::end_streams(&core, 0, true, false);
         rx.command(RxCmd::Shutdown(StopMode::Abort));
         assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1);
         assert_eq!(lock(&core.rec).applied.iter().filter(|r| r["key"] == "rx_stop").count(), 1);
@@ -1613,7 +1614,7 @@ mod tests {
         let (core, device, _, _) = super::super::test_support::rig();
         let (mut rx, _) = rx(&core, 1);
         // `Provider::stop(orderly)` at 0: the stream is cut at sample 0 (RM-16).
-        lock(&core.streams).end(&core, 0, false, false);
+        crate::provider::test_support::end_streams(&core, 0, false, false);
         rx.poll();
         rx.receive(RxRecv::LateCommand);
         rx.receive(RxRecv::LateCommand);
@@ -1650,6 +1651,7 @@ mod tests {
                 let mut streams = lock(&core.streams);
                 streams.stop = Some((core.ticks(5_000_000), mode));
                 streams.end(&core, core.ticks(5_000_000), mode == StopMode::Abort, false);
+                core.release_streams(streams);
             }
             rx.poll();
             let case = format!("{mode:?}, {delivered} delivered, a Stop before: {stop}");
@@ -1759,8 +1761,8 @@ mod tests {
         let (mut rx, clock) = rx(&core, 1);
         rx.receive(samples(clock.instant(0), 300));
         time.advance_to(core.at(core.ticks(8_000_000))).unwrap();
-        lock(&core.streams).end(&core, core.ticks(5_000_000), false, false);
-        lock(&core.streams).end(&core, core.ticks(7_000_000), false, false);
+        crate::provider::test_support::end_streams(&core, core.ticks(5_000_000), false, false);
+        crate::provider::test_support::end_streams(&core, core.ticks(7_000_000), false, false);
         rx.poll();
         rx.receive(samples(clock.instant(300), 10_000));
         let end: i64 = received(&link).iter().map(|(_, _, len)| i64::from(*len)).sum();
@@ -1833,6 +1835,7 @@ mod tests {
                 let mut streams = lock(&core.streams);
                 streams.stop = Some((ms(5), StopMode::Orderly));
                 streams.end(&core, ms(5), false, false);
+                core.release_streams(streams);
             }
             time.advance_to(core.at(ms(50))).unwrap();
             rx.last_samples = rx.host.now();
@@ -1876,7 +1879,7 @@ mod tests {
         rx.poll();
         rx.receive(samples(clock.instant(0), 9_000));
         time.advance_to(core.at(ms(12))).unwrap();
-        lock(&core.streams).end(&core, ms(12), true, false);
+        crate::provider::test_support::end_streams(&core, ms(12), true, false);
         let planned: Vec<_> = lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.cut)).collect();
         assert_eq!(planned, [(0, Some(10_000))]);
     }
@@ -1898,6 +1901,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             streams.stop = Some((ms(20), StopMode::Abort));
             streams.end(&core, ms(20), true, false);
+            core.release_streams(streams);
         }
         rx.poll();
         let stops = || device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count();
@@ -2198,7 +2202,7 @@ mod tests {
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book(&core, ms(10), 1, Kind::Stop);
         book(&core, ms(11), 2, Kind::Start);
-        lock(&core.streams).end(&core, ms(5), false, false);
+        crate::provider::test_support::end_streams(&core, ms(5), false, false);
         rx.poll();
         rx.receive(samples(0, 10_000));
         assert!(rx.stream.is_none());
@@ -2293,6 +2297,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             streams.stop = Some((core.ticks(5_000_000), StopMode::Abort));
             streams.end(&core, core.ticks(5_000_000), true, false);
+            core.release_streams(streams);
         }
         assert_eq!(ends(rx_key), [(loss, 0, false)], "the receive line after the stop");
         assert_eq!(ends(tx_key), [(loss, 0, false)], "the transmit line after the stop");
@@ -2575,7 +2580,7 @@ mod tests {
         let mut streams = lock(&core.streams);
         assert!(streams.book(&core, key, Item { e: 0, seq: 1, ready: 0, delivered: None, refused: false, kind: Kind::Stop }, None));
         assert!(!streams.book(&core, key, Item { e: i64::MAX, seq: 2, ready: 0, delivered: None, refused: false, kind: Kind::Start }, Some(ezsdr_kernel::event::ActionId(2))));
-        drop(streams);
+        core.release_streams(streams);
         let refused: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).collect();
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert_eq!((refused[0].payload["kind"].as_str(), &refused[0].payload["action"]), (Some("command"), &serde_json::json!(2)), "the booked Action's kind and id");

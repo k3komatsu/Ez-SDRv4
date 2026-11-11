@@ -1621,9 +1621,11 @@ fn mr_16_s9_switch_different_length_starts_on_the_boundary() {
 }
 
 /// RM-37 (note 47 stage 5, sequence 7, Mock): an untimed switch takes the same boundary as its timed twin, 2_018 000 (the switch is not placed).
+/// The timed twin's `at` (2 005 000) was pushed to that boundary, so its new repeat's record carries the `at` as its requested target; the
+/// untimed switch has no requested instant and carries none (#86).
 #[test]
 fn mr_16_an_untimed_switch_takes_its_timed_twin_boundary() {
-    fn boundary(untimed: bool) -> serde_json::Value {
+    fn boundary(untimed: bool) -> (serde_json::Value, Option<TimePoint>) {
         let (mut harness, domain) = playing_x3xx();
         if untimed {
             harness.actions.push_untimed(switch_action(domain, 2_005_000, 2_000));
@@ -1633,10 +1635,13 @@ fn mr_16_an_untimed_switch_takes_its_timed_twin_boundary() {
         harness.step(2_005_000_000).unwrap();
         harness.step(2_030_000_000).unwrap();
         harness.mock.stop(StopMode::Orderly).unwrap();
-        switch_rows(&harness)[0]["boundary"].clone()
+        (switch_rows(&harness)[0]["boundary"].clone(), bursts(&harness)[1].requested_target)
     }
-    assert_eq!(boundary(true), serde_json::json!(2_018_000));
-    assert_eq!(boundary(true), boundary(false));
+    let (untimed, timed) = (boundary(true), boundary(false));
+    assert_eq!(untimed.0, serde_json::json!(2_018_000));
+    assert_eq!(untimed.0, timed.0);
+    assert_eq!(untimed.1, None, "an untimed switch records no requested target");
+    assert!(timed.1.is_some(), "its timed twin was pushed");
 }
 
 #[test]
@@ -1678,7 +1683,6 @@ fn mr_16_s8_record_fields() {
         "old_period": 2_000,
         "new_period": 2_000,
         "boundary": 2_018_000,
-        "moved_to": null,
         "outcome": "applied",
     });
     assert_eq!(row, &expected);
@@ -1701,6 +1705,26 @@ fn mr_16_s10_second_pending_switch_refused() {
     let rows = switch_rows(&harness);
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0]["action_id"].clone(), rows[0]["outcome"].clone()), (serde_json::to_value(ActionId(2)).unwrap(), serde_json::json!("applied")));
+}
+
+#[test]
+fn mr_42_a_switch_in_a_step_that_jumped_over_the_repeat_s_start_is_accepted() {
+    // MR-42, RM-37 (M2; UHD's twin `e2a_b1_a_switch_behind_an_unstarted_finite_burst_is_refused`): F (500 samples at 2 004 000) and R (a
+    // repeat at 2 006 000) are booked; the next step comes after R's start. MockRadio's repeats start at acceptance, so R plays by the
+    // record and the switch is accepted, and applied at its boundary (KL-41: only the UHD Module refuses it).
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(2_000_000_000).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_004_000, 500, false, LatePolicy::DropAndFlag));
+    harness.actions.push(tx_action(domain, 2_006_000, 2_000, true, LatePolicy::SendAsapAndFlag));
+    harness.step(2_000_000_000).unwrap();
+    harness.actions.push(switch_action(domain, 2_007_000, 2_000));
+    harness.step(2_007_000_000).unwrap();
+    harness.step(2_040_000_000).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    assert!(rejected_rows(&harness).is_empty(), "{:?}", rejected_rows(&harness));
+    let rows = switch_rows(&harness);
+    assert_eq!((rows.len(), rows[0]["outcome"].as_str()), (1, Some("applied")), "{rows:?}");
 }
 
 #[test]

@@ -1184,7 +1184,7 @@ mod stage5_tests {
     #[test]
     fn a_switch_not_applied_fails_and_no_tone_is_inconclusive() {
         let (tone, power) = (tone(), power(0.16));
-        assert!(matches!(switch_verdict(&trial(&tone, &power, "refused_past_boundary", Some(0))), Verdict::Fail(_)));
+        assert!(matches!(switch_verdict(&trial(&tone, &power, "cancelled", Some(0))), Verdict::Fail(_)));
         assert!(matches!(switch_verdict(&trial(&[], &power, "applied", Some(0))), Verdict::Inconclusive(_)));
     }
 

@@ -166,6 +166,20 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 - **Evidence:** the 2026-11-10 bench on both X300s (`plan/phase8/bench-results.md`): at 0.4 MS/s and below a closed burst of 4 samples or fewer underflowed itself, and a two-zero untimed flush was not acknowledged within 1 s at 0.25 MS/s and below. `rm_8_a_transmit_rate_below_one_msps_is_rejected_on_x3xx`, `mr_06_a_transmit_rate_below_one_msps_is_rejected_on_x3xx`, `ur_11_a_transmit_rate_below_one_msps_is_rejected`, `d3_the_two_providers_refuse_a_transmit_rate_below_one_msps_alike`.
 - **Status:** Ceiling (owner, 2026-11-10: 0.5 MS/s was not swept finely, so the floor is the 1 MS/s that was).
 
+### KL-41 A switch right after a delayed repeat is refused
+- **Symptom:** a repeat switch (`radio.start_repeat` with the switch mark; Python's `tx.switch(x)`) is refused at receipt with `radio.COMMAND_REJECTED` (`UR-38: the repeat the switch replaces has not started on the device`); `switch()` raises `Rejected`, and no `switches` row is written. The refusal leaves the repeat it would replace as it was: it plays when its first send goes out, or is dropped at dispatch if it is late and its late policy says `drop`.
+- **When:** on the UHD Module, when the switch arrives before uhd-tx has sent any of the repeat it replaces: the repeat's start has passed, but a host stall or the stream's configure held its first send back. A switch on a switch counts from the first send of that switch's own waveform. MockRadio never refuses it: its repeats play from their start in device time (MR-42).
+- **Workaround:** retry the switch once the repeat sounds (a few milliseconds later); a repeat dropped at dispatch has to be started again. A switch booked well after the repeat's start is not affected.
+- **Evidence:** UR-38 (`design/18-uhd-radio.md`), RM-37 (`design/07-radio-model.md`); design note 49 §12.1 (N2 = (b1), owner); `e2a_b1_a_switch_behind_an_unstarted_finite_burst_is_refused`, `o1_uhd_t8_a_switch_whose_repeat_the_host_has_not_issued_is_refused_at_receipt` and `e2a_84_a_second_switch_on_a_switch_the_host_has_not_issued_is_refused`; MockRadio's acceptance by `mr_42_a_switch_in_a_step_that_jumped_over_the_repeat_s_start_is_accepted`.
+- **Status:** Ceiling (owner, 2026-11-10: a refusal the caller learns at once, rather than a switch accepted and dropped later).
+
+### KL-42 A switch reads `applied` after a Stop although none of its waveform was sent
+- **Symptom:** on the UHD Module, a `Stop` read after an accepted repeat switch whose boundary `b` is before the Stop's bound `B` leaves the switch's `switches` row `applied`, yet no sample of the new waveform is sent: its payload is cancelled with a `UR-26: cancelled by Stop` note. MockRadio sends the new waveform from `b` up to its payload cut for the Stop (MR-25), which ends before `B`.
+- **When:** uhd-tx has not handed past `b` when it reads the Stop: a host stall, or a `Stop` sent right after the switch.
+- **Workaround:** read the burst records: no record carries the switch's waveform.
+- **Evidence:** UR-38 (`design/18-uhd-radio.md`), RM-37 (`design/07-radio-model.md`); `e2a_s11_a_stop_after_a_switch_whose_boundary_is_before_the_bound_applies_it_and_cancels_the_payload`; design note 49 §5.4.5, the table row "Stop が b の操作の発行の前に来る".
+- **Status:** Known defect; fixed in design note 49 stage C2 (a switch's outcome follows whether the sample at its boundary was sent).
+
 ## The `x3xx` profile (MockRadio and USRP)
 
 ### KL-14 With the HG image, rates above 25 MS/s are refused unless the link is declared

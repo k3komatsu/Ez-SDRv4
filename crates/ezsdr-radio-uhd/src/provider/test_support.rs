@@ -9,7 +9,7 @@ use ezsdr_kernel::module_api::{Fidelity, ModuleRegistry, Pacing};
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
 use ezsdr_kernel::spec::{Ident, Scalar, Value};
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimeAuthority};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -198,9 +198,9 @@ pub(super) fn device_at(core: &Core, time: &ManualTimeAuthority, device: &FakeDe
 
 thread_local! {
     static LOCKS: RefCell<Option<Vec<usize>>> = const { RefCell::new(None) };
-    /// The line guards this thread holds (UR-25): what `LockSpy` and `assert_line_free` see,
+    /// The line guards this thread holds, by the mutex's address (UR-25): what `LockSpy` and `assert_line_free` see,
     /// where a `try_lock` can only see some other thread holding the line.
-    static LINE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static LINE_HELD: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Starts recording the addresses of the line locks this thread takes (UR-25).
@@ -222,19 +222,35 @@ pub(super) fn note_lock(address: usize) {
     });
 }
 
-/// One line guard taken by this thread.
-pub(super) fn entered_lock() {
-    LINE_DEPTH.with(|depth| depth.set(depth.get() + 1));
+/// One line guard taken by this thread: a mutex it already holds would hang it, so that panics instead.
+pub(super) fn entered_lock(address: usize) {
+    LINE_HELD.with(|held| {
+        let mut held = held.borrow_mut();
+        assert!(!held.contains(&address), "this thread re-entered a Core mutex it holds (UR-25)");
+        held.push(address);
+    });
 }
 
 /// One line guard dropped by this thread.
-pub(super) fn left_lock() {
-    LINE_DEPTH.with(|depth| depth.set(depth.get() - 1));
+pub(super) fn left_lock(address: usize) {
+    LINE_HELD.with(|held| {
+        let mut held = held.borrow_mut();
+        let at = held.iter().rposition(|taken| *taken == address).expect("a guard this thread took");
+        held.remove(at);
+    });
 }
 
 /// UR-25's order: the caller holds no line guard, so no `updates` may be taken.
 pub(super) fn assert_line_free(what: &str) {
-    assert_eq!(LINE_DEPTH.with(Cell::get), 0, "{what} was made under the line lock (UR-25)");
+    assert!(LINE_HELD.with(|held| held.borrow().is_empty()), "{what} was made under the line lock (UR-25)");
+}
+
+/// The streams' end at `at` (a loss or `Provider::stop`, as `Streams::end` books it), with the lock released as production releases it,
+/// so that the refusals booked under it are published (UR-25).
+pub(super) fn end_streams(core: &Core, at: i64, abort: bool, lost: bool) {
+    let mut streams = super::core::lock(&core.streams);
+    streams.end(core, at, abort, lost);
+    core.release_streams(streams);
 }
 
 /// Registers the probe `name` on `core`'s test hooks (UR-25, UR-29): a section a test holds
@@ -518,7 +534,7 @@ impl Device for LockSpy {
     fn host(&self) -> HostClock {
         // Only once the rig has watched: `Control::new` reads the clock before the test does.
         if self.core.lock().unwrap().upgrade().is_some() {
-            self.hosts.lock().unwrap().push(LINE_DEPTH.with(Cell::get) > 0);
+            self.hosts.lock().unwrap().push(LINE_HELD.with(|held| !held.borrow().is_empty()));
         }
         self.inner.host()
     }

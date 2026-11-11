@@ -25,7 +25,7 @@ use ezsdr_kernel::stream::{
     BackPressure, BlockFlags, BlockHeader, BurstOpen, BurstRecord, BurstStep, BurstTracker, ChannelMask, DataLink, Direction, LateOutcome, LatePolicy, PublishOutcome, SampleBlock,
 };
 use ezsdr_kernel::time::{ClockRegistry, Duration, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimePoint};
-use ezsdr_radio::staging::{Bookings, Overlap, Read, Staging, SwitchRecord, TxList, handover_horizon, is_switch, ordinary_k, repeat_boundary, stop_bound, stop_sample, write_settled};
+use ezsdr_radio::staging::{Bookings, Outcome, Overlap, Playing, Read, Staging, SwitchRecord, TxBook, TxSend, handover_horizon, is_switch, ordinary_k, stop_bound, stop_sample, write_settled};
 use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment, StreamKey};
 use ezsdr_radio::{Addressed, channels, x3xx};
 use ezsdr_sim::channel::{Medium, RootInstant};
@@ -204,45 +204,20 @@ struct TxStream {
     tracker: Option<BurstTracker>,
     /// The current clock's device framing model (MR-15, MR-24).
     device: DeviceModel,
-    /// The bookings and Stops of this stream in receipt order; `list.held` is the bursts booked on the current clock, by their first sample (RM-15).
-    list: TxList<HeldBurst>,
-    /// The burst being transmitted (MR-15).
-    open: Option<OpenBurst>,
+    /// The stream's book (RM-13, RM-15, RM-21): the record of the bookings and Stops, their receipts in order (`book.list.held` is the bursts
+    /// booked on the current clock, by their first sample), the repeat booked last, which a switch replaces, and the burst being
+    /// transmitted (MR-15).
+    book: TxBook<HeldBurst>,
     /// The payload cut made by the last Stop on this SampleClock (MR-25).
     stop_cut: Option<TxFront>,
     /// The instance-wide transmitter, read by logical channel and clock segment (MR-32).
     plan: Option<std::sync::Arc<channel::TxShared>>,
-    /// The transmit value rule's record of the bookings and Stops of this stream (RM-21).
-    busy: Bookings,
-    /// The repeat booked last on this stream, which a switch replaces (RM-13).
-    playing: Option<Playing>,
 }
 
 impl TxStream {
     fn new(node: ResourceId, path: String) -> TxStream {
-        TxStream {
-            node,
-            path,
-            clock: None,
-            registered: None,
-            tracker: None,
-            device: DeviceModel::new(),
-            list: TxList::default(),
-            open: None,
-            stop_cut: None,
-            plan: None,
-            busy: Bookings::unarmed(),
-            playing: None,
-        }
+        TxStream { node, path, clock: None, registered: None, tracker: None, device: DeviceModel::new(), book: TxBook::new(ezsdr_radio::staging::Started::AtAcceptance), stop_cut: None, plan: None }
     }
-}
-
-/// The repeat a switch replaces: the Action that booked it, the sample its waveform repeats from, and its period.
-#[derive(Clone, Copy)]
-struct Playing {
-    id: ActionId,
-    origin: i64,
-    period: i64,
 }
 
 /// A registered transmit clock.
@@ -275,10 +250,23 @@ struct HeldBurst {
     start: i64,
     len: i64,
     repeat: bool,
+    /// A repeat switch's new waveform (RM-37), and the Action that booked the burst: what the stream's book reads of it.
+    switch: bool,
+    id: ActionId,
     open: BurstOpen,
     order: u64,
     /// The stream's channel values the burst takes at its start (RM-21, MR-33).
     values: Vec<ChannelValues>,
+}
+
+impl ezsdr_radio::staging::Booked for HeldBurst {
+    fn id(&self) -> Option<ActionId> {
+        Some(self.id)
+    }
+
+    fn is_switch(&self) -> bool {
+        self.switch
+    }
 }
 
 /// One logical transmit channel's frequency and gain, as a burst's snapshot holds them.
@@ -293,16 +281,6 @@ struct ChannelValues {
 struct TxFront {
     domain: ClockDomainId,
     sample: i64,
-}
-
-struct OpenBurst {
-    start: i64,
-    len: i64,
-    repeat: bool,
-    next: i64,
-    first: bool,
-    open: BurstOpen,
-    order: u64,
 }
 
 /// RM-15: an earlier-received burst contributes only when it starts before the hand-over
@@ -845,11 +823,12 @@ impl MockRadio {
             }
         }
         for k in 0..self.tx.len() {
-            if let (Some(open), Some(clock)) = (self.tx[k].open.as_ref(), self.tx_now(k)) {
+            if let (Some(open), Some(clock)) = (self.tx[k].book.open.as_ref(), self.tx_now(k)) {
                 let (handle, origin) = (&clock.handle, clock.origin);
+                let (start, len) = (open.booking.start, open.booking.len);
                 let block_end = open.next.saturating_add(i64::from(self.profile.block_len()));
-                let waveform_end = if open.repeat { open.start.saturating_add(((open.next - open.start) / open.len + 1).saturating_mul(open.len)) } else { open.start.saturating_add(open.len) };
-                let held_cut = self.tx[k].list.held.keys().next().copied().unwrap_or(i64::MAX);
+                let waveform_end = if open.booking.repeat { start.saturating_add(((open.next - start) / len + 1).saturating_mul(len)) } else { start.saturating_add(len) };
+                let held_cut = self.tx[k].book.list.held.keys().next().copied().unwrap_or(i64::MAX);
                 let cut = held_cut.min(self.tx_cut(k).unwrap_or(i64::MAX));
                 let stop = block_end.min(waveform_end).min(cut);
                 if stop > open.next {
@@ -860,7 +839,7 @@ impl MockRadio {
             }
             if let Some(clock) = self.tx_now(k) {
                 let (handle, origin) = (&clock.handle, clock.origin);
-                if let Some(start) = self.tx[k].list.held.keys().next().copied() {
+                if let Some(start) = self.tx[k].book.list.held.keys().next().copied() {
                     if let Some(tick) = time::v_floor(origin, handle.root_ticks_per_tick(), start) {
                         wake(tick);
                     }
@@ -943,9 +922,9 @@ impl MockRadio {
     /// Ends the open burst's radiation at transmit stream `k`'s sample `stop` (MR-32).
     fn end_open_segment(&mut self, k: usize, stop: i64) {
         let Some(shared) = self.tx[k].plan.clone() else { return };
-        let Some(open) = self.tx[k].open.as_ref() else { return };
+        let Some(open) = self.tx[k].book.open.as_ref() else { return };
         if let Some(clock) = self.tx_now(k) {
-            let key = (clock.origin, clock.by, k, open.start);
+            let key = (clock.origin, clock.by, k, open.booking.start);
             if let Some(segment) = shared.plan().segments.get_mut(&key) {
                 segment.end = Some(segment.end.map_or(stop, |end| end.min(stop)));
             }
@@ -956,14 +935,14 @@ impl MockRadio {
     /// held burst that starts before it, opened in turn (MR-25, MR-32).
     fn transmit_until_cut(&mut self, k: usize, now: i64, cut: i64) -> Result<(), ModuleError> {
         loop {
-            if self.tx[k].open.is_some() {
+            if self.tx[k].book.open.is_some() {
                 self.emit_tx_until(k, now, Some(cut))?;
             }
-            if self.tx[k].open.is_some() {
+            if self.tx[k].book.open.is_some() {
                 break;
             }
-            let Some(start) = self.tx[k].list.held.keys().next().copied().filter(|start| *start < cut) else { break };
-            let held = self.tx[k].list.held.remove(&start).expect("the first held burst");
+            let Some(start) = self.tx[k].book.list.held.keys().next().copied().filter(|start| *start < cut) else { break };
+            let held = self.tx[k].book.list.held.remove(&start).expect("the first held burst");
             self.open_held(k, held);
         }
         Ok(())
@@ -981,7 +960,8 @@ impl MockRadio {
                 model.gain_db.set_at(at, value.gain_db);
             }
         }
-        self.tx[k].open = Some(OpenBurst { start: held.start, len: held.len, repeat: held.repeat, next: held.start, first: true, open: held.open, order: held.order });
+        let next = held.start;
+        self.tx[k].book.take(held, next);
     }
 
     fn action_name(action: &Action) -> &'static str {
@@ -1158,10 +1138,10 @@ impl MockRadio {
 
     /// Reads the stream's list in receipt order: a booking is held by its start, a halt cancels what was read before it, with `reason`.
     fn read_tx(&mut self, k: usize, now: i64, reason: &str) -> Result<(), ModuleError> {
-        while let Some(read) = self.tx[k].list.read() {
+        while let Some(read) = self.tx[k].book.read() {
             match read {
                 Read::Booking(held) => {
-                    self.tx[k].list.held.insert(held.start, held);
+                    self.tx[k].book.list.held.insert(held.start, held);
                 }
                 Read::Halt { reason: cancel_reason, cancelled } => {
                     for _ in cancelled {
@@ -1174,16 +1154,15 @@ impl MockRadio {
     }
 
     fn stop_tx(&mut self, k: usize, now: i64, reason: &str, cancel_reason: ezsdr_radio::CancelReason) -> Result<(), ModuleError> {
-        self.tx[k].list.halt(cancel_reason);
+        self.tx[k].book.list.halt(cancel_reason);
         if let Some(clock) = self.tx_now(k) {
             let (ratio, origin, domain) = (clock.handle.root_ticks_per_tick(), clock.origin, clock.domain);
             let window = time::ns_to_v(self.clocks.as_ref().expect("prepared clocks"), self.root.expect("prepared root"), self.profile.timing().tx_in_flight_ns)
                 .map_err(|error| ModuleError::rejected(format!("MR-25: {error}")))?;
             let bound = stop_bound(now, window, |t| time::k_at_or_after(origin, ratio, t).unwrap_or(i64::MAX), |k| time::v_of(origin, ratio, k).unwrap_or(i64::MAX));
-            self.tx[k].busy.stop(bound);
-            if let Some(at_stop) = time::k_at_or_after(origin, ratio, now) {
-                let stop = stop_sample(now, window, |t| time::k_at_or_after(origin, ratio, t).unwrap_or(i64::MAX));
-                self.tx[k].busy.halt(at_stop, stop);
+            let region = time::k_at_or_after(origin, ratio, now).map(|at_stop| (at_stop, stop_sample(now, window, |t| time::k_at_or_after(origin, ratio, t).unwrap_or(i64::MAX))));
+            self.tx[k].book.stop((bound, region));
+            if let Some((at_stop, _)) = region {
                 self.settle_switches(k);
                 // MR-25's payload cut and MR-17's later-booking margin stay separate.
                 let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop);
@@ -1205,17 +1184,14 @@ impl MockRadio {
                 }
             }
         }
-        let tracked = self.tx[k].tracker.as_mut().and_then(BurstTracker::stop);
-        let open_burst_without_record = self.tx[k].open.is_some() && tracked.is_none();
-        if let Some(record) = tracked {
+        if let Some(record) = self.tx[k].tracker.as_mut().and_then(BurstTracker::stop) {
             self.record_burst(record);
         }
         self.tx[k].device.close();
-        if open_burst_without_record {
-            self.record_cancelled_burst(reason, now, cancel_reason)?;
-        }
-        self.tx[k].open = None;
-        self.read_tx(k, now, reason)
+        // The halt pushed above cancels the held bookings and an open one that has emitted no block (#85, the book's one rule).
+        self.read_tx(k, now, reason)?;
+        self.tx[k].book.end_open();
+        Ok(())
     }
 
     /// MR-25's `stop` at `now`, its cancellations recorded with `reason`; a loss runs its
@@ -1417,10 +1393,10 @@ impl MockRadio {
             let candidate = handed_end_before(order, before, start, end, window_end).filter(|_| start.saturating_add(first) <= window_end);
             payload = merge_front(payload, candidate);
         };
-        if let Some(open) = self.tx[k].open.as_ref() {
-            include(open.order, open.start, open.len, open.repeat, 1);
+        if let Some(open) = self.tx[k].book.open.as_ref() {
+            include(open.booking.order, open.booking.start, open.booking.len, open.booking.repeat, 1);
         }
-        for held in self.tx[k].list.held.values() {
+        for held in self.tx[k].book.list.held.values() {
             include(held.order, held.start, held.len, held.repeat, if held.repeat { DEVICE_MIN_OPEN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) });
         }
         Ok(payload)
@@ -1654,7 +1630,7 @@ impl MockRadio {
                 .decide(clocks, at.time_point, decided_tx, Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.timing().min_timed_command_lead_ns))
                 .map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?
         };
-        self.tx[k].busy.prune(now_k);
+        self.tx[k].book.record.prune(now_k);
         self.settle_switches(k);
         let mut start = target;
         let mut requested = requested_at.map(|deadline| deadline.time_point);
@@ -1667,14 +1643,14 @@ impl MockRadio {
             Overlap::Handed => "MR-16: burst starts before a booking that may already be handed",
         };
         if untimed && !switch {
-            match self.tx[k].busy.place_untimed(target, ordinary.max(sync_k), (!repeat).then_some(length), now, join_by, horizon) {
+            match self.tx[k].book.record.place_untimed(target, ordinary.max(sync_k), (!repeat).then_some(length), now, join_by, horizon) {
                 Some(free) => start = free,
                 None => unplaced = true,
             }
         }
         match policy {
             LateOutcome::OnTime {} if late_policy == LatePolicy::SendAsapAndFlag && !switch && !untimed => {
-                match self.tx[k].busy.region_move(target, (!repeat).then_some(length), now, join_by, horizon) {
+                match self.tx[k].book.record.region_move(target, (!repeat).then_some(length), now, join_by, horizon) {
                     Ok(moved) if moved != target => {
                         let late_ns =
                             time::to_ns(self.clocks.as_ref().expect("prepared clocks"), Duration::new(tx_domain, moved - target)).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
@@ -1690,7 +1666,7 @@ impl MockRadio {
             }
             LateOutcome::OnTime {} => {}
             LateOutcome::SendAsap { late_by } => {
-                match self.tx[k].busy.place(ordinary, (!repeat).then_some(length), now, join_by, horizon) {
+                match self.tx[k].book.record.place(ordinary, (!repeat).then_some(length), now, join_by, horizon) {
                     Some(free) => start = free,
                     None => unplaced = true,
                 }
@@ -1708,24 +1684,31 @@ impl MockRadio {
                 return Ok(());
             }
         }
+        let switch_bound = time::k_at_or_after(origin, ratio, now.saturating_add(window).saturating_add(lead)).unwrap_or(i64::MAX);
+        // A switch's boundary previewed for the overflow and synchronization checks, which refuse before the book changes; the booking
+        // takes the one `receive_switch` returns.
         if switch {
-            switched_from = self.tx[k].playing;
-            if let Some(playing) = switched_from {
-                let bound = time::k_at_or_after(origin, ratio, now.saturating_add(window).saturating_add(lead)).unwrap_or(i64::MAX);
-                start = repeat_boundary(playing.origin, playing.period, bound.max(target));
-            }
+            switched_from = self.tx[k].book.playing;
+            start = self.tx[k].book.switch_boundary(target, switch_bound).unwrap_or(start);
         }
         let start_v = time::v_of(origin, ratio, start).ok_or_else(|| ModuleError::rejected("MR-16: burst time overflow"))?;
         let end = if repeat { None } else { Some(time::v_of(origin, ratio, start.saturating_add(length)).ok_or_else(|| ModuleError::rejected("MR-16: burst end overflow"))?) };
         let refusal = if start_v < self.sync_end.unwrap_or(i64::MIN) {
             Some("MR-16: burst begins before synchronization")
         } else if switch {
-            (!(switched_from.is_some_and(|from| self.tx[k].busy.switch(id, (from.origin, from.period), start, now_k)) && self.tx[k].busy.install(id, now_k).is_some()))
-                .then_some("MR-16: a repeat switch needs a playing repeat and no pending switch")
+            match self.tx[k].book.receive_switch(id, length, target, switch_bound, untimed, now_k) {
+                Ok(accepted) => {
+                    debug_assert_eq!(start, accepted.boundary, "the previewed switch boundary is the book's");
+                    start = accepted.boundary;
+                    requested = requested.or(accepted.requested_target.map(|_| at.time_point));
+                    None
+                }
+                Err(_) => Some("MR-16: a repeat switch needs a playing repeat and no pending switch"),
+            }
         } else if unplaced {
             Some("MR-16: burst overlaps an accepted booking")
         } else {
-            self.tx[k].busy.accept(start, (!repeat).then_some(length), now, join_by, horizon).err().map(overlap_text)
+            self.tx[k].book.record.accept(start, (!repeat).then_some(length), now, join_by, horizon).err().map(overlap_text)
         };
         self.settle_switches(k);
         if let Some(reason) = refusal {
@@ -1766,20 +1749,19 @@ impl MockRadio {
             start,
             len: length,
             repeat,
+            switch,
+            id,
             open: BurstOpen { waveform_len: Some(waveform_len), late: (!matches!(policy, LateOutcome::OnTime {})).then_some(policy), requested_target: requested },
             order: self.next_order,
             values,
         };
-        self.tx[k].busy.book(end);
-        self.tx[k].list.book(held);
+        self.tx[k].book.book(held, end);
         self.read_tx(k, now, "")?;
         self.next_order = self.next_order.saturating_add(1);
         if let Some(from) = switched_from {
             self.record_switch(from, id, length, start, now);
         }
-        if repeat {
-            self.tx[k].playing = Some(Playing { id, origin: start, period: length });
-        }
+        self.tx[k].book.play(repeat, id, start, length);
         Ok(())
     }
 
@@ -1792,7 +1774,6 @@ impl MockRadio {
             old_period: from.period,
             new_period,
             boundary,
-            moved_to: None,
             outcome: "pending",
         };
         if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("switches")) {
@@ -1802,7 +1783,7 @@ impl MockRadio {
 
     /// RM-13: writes the outcome of every switch the stream's record settled since the last call into its row.
     fn settle_switches(&mut self, k: usize) {
-        let settled = self.tx[k].busy.take_settled();
+        let settled = self.tx[k].book.record.take_settled();
         if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("switches")) {
             write_settled(rows, settled);
         }
@@ -1814,7 +1795,7 @@ impl MockRadio {
         for k in 0..self.tx.len() {
             if let Some((ratio, origin)) = self.tx_now(k).map(|clock| (clock.handle.root_ticks_per_tick(), clock.origin)) {
                 if let Some(now_k) = time::k_at_or_after(origin, ratio, u) {
-                    self.tx[k].busy.advance(now_k);
+                    self.tx[k].book.advance(now_k);
                 }
             }
             self.settle_switches(k);
@@ -1823,13 +1804,14 @@ impl MockRadio {
 
     fn emit_tx_until(&mut self, k: usize, until: i64, extra_cut: Option<i64>) -> Result<bool, ModuleError> {
         let mut progressed = false;
-        while let Some(open) = self.tx[k].open.as_ref() {
+        while let Some(open) = self.tx[k].book.open.as_ref() {
             let Some((ratio, origin, domain)) = self.tx_now(k).map(|clock| (clock.handle.root_ticks_per_tick(), clock.origin, clock.domain)) else {
                 break;
             };
+            let (start, length, repeat) = (open.booking.start, open.booking.len, open.booking.repeat);
             let mut stop = open.next.saturating_add(i64::from(self.profile.block_len()));
-            let repeat_end = if open.repeat { open.start.saturating_add(((open.next - open.start) / open.len + 1).saturating_mul(open.len)) } else { open.start.saturating_add(open.len) };
-            let held_cut = self.tx[k].list.held.keys().next().copied().unwrap_or(i64::MAX);
+            let repeat_end = if repeat { start.saturating_add(((open.next - start) / length + 1).saturating_mul(length)) } else { start.saturating_add(length) };
+            let held_cut = self.tx[k].book.list.held.keys().next().copied().unwrap_or(i64::MAX);
             let cut = held_cut.min(self.tx_cut(k).unwrap_or(i64::MAX)).min(extra_cut.unwrap_or(i64::MAX));
             stop = stop.min(repeat_end).min(cut);
             if stop <= open.next {
@@ -1839,13 +1821,12 @@ impl MockRadio {
             if last > until {
                 break;
             }
-            let start = open.start;
             let next = open.next;
             let first = open.first;
-            let burst_open = open.open;
+            let burst_open = open.booking.open;
             let len = u32::try_from(stop - next).map_err(|_| ModuleError::rejected("MR-15: transmit block length overflow"))?;
             let channels = self.effective_stream_channels(Direction::Tx, k) as u16;
-            let ends = (!open.repeat && stop >= start.saturating_add(open.len)) || held_cut == stop;
+            let ends = (!repeat && stop >= start.saturating_add(length)) || held_cut == stop;
             let flags = (if first { BlockFlags::START_OF_BURST } else { BlockFlags::NONE }) | if ends { BlockFlags::END_OF_BURST } else { BlockFlags::NONE };
             let header = BlockHeader {
                 first_sample_time: TimePoint::new(domain, next),
@@ -1875,7 +1856,7 @@ impl MockRadio {
                         self.record_burst(record);
                     }
                     self.tx[k].device.close();
-                    self.tx[k].open = None;
+                    self.tx[k].book.end_open();
                     break;
                 }
             }
@@ -1895,18 +1876,18 @@ impl MockRadio {
                     self.record_burst(record);
                 }
                 self.tx[k].device.close();
-                self.tx[k].open = None;
+                self.tx[k].book.end_open();
                 progressed = true;
                 break;
             }
             self.add_stat("tx_blocks", 1);
             progressed = true;
+            // MR-15: the block is the device's whole result; the book advances the burst, and its last block ends it.
+            let block = i64::from(len);
+            self.tx[k].book.issue(TxSend { count: block, device_count: block, ends });
+            self.tx[k].book.complete(Outcome::Accepted(block));
             if ends {
-                self.tx[k].open = None;
                 self.tx[k].device.close();
-            } else if let Some(open) = self.tx[k].open.as_mut() {
-                open.next = stop;
-                open.first = false;
             }
         }
         Ok(progressed)
@@ -1928,7 +1909,7 @@ impl MockRadio {
             has_at,
             now,
             |k| lines.line(Self::rx_key(k as usize)).is_some_and(Line::streaming),
-            |k| tx.get(k as usize).map_or(Bookings::unarmed(), |stream| stream.busy.clone()),
+            |k| tx.get(k as usize).map_or(Bookings::unarmed(), |stream| stream.book.record.clone()),
         ) {
             Ok(()) => Ok(()),
             Err(refusal) => self.reject_action_at(Some(id), "update_parameter", &format!("MR-18: {}", refusal.reason()), now),
@@ -1939,7 +1920,7 @@ impl MockRadio {
     /// beginnings, then faults and held bursts by instant and arrival, then the untimed tunes of
     /// the instant (MR-34), the streams emitted up to each.
     fn advance(&mut self, u: i64) -> Result<bool, ModuleError> {
-        debug_assert!(self.tx.iter().all(|stream| !stream.list.unread()), "advance runs with every receipt read");
+        debug_assert!(self.tx.iter().all(|stream| !stream.book.list.unread()), "advance runs with every receipt read");
         let mut progressed = false;
         loop {
             let mut candidates: Vec<(i64, u8, u64, WorkKind)> = Vec::new();
@@ -1964,7 +1945,7 @@ impl MockRadio {
                 }
             }
             for k in 0..self.tx.len() {
-                candidates.extend(self.tx[k].list.held.iter().filter_map(|(start, burst)| {
+                candidates.extend(self.tx[k].book.list.held.iter().filter_map(|(start, burst)| {
                     let clock = self.tx_now(k)?;
                     // shortcut: a held burst opens at the last root tick at or before its first sample, which comes after the previous sample only while a sample spans a whole root tick (true on the 1 GHz root for every rate the Mock accepts), upgrade by opening on the sample's rational instant when a slower root is declared.
                     let tick = time::v_floor(clock.origin, clock.handle.root_ticks_per_tick(), *start)?;
@@ -2010,7 +1991,7 @@ impl MockRadio {
                     }
                 },
                 WorkKind::HeldBurst { stream, start } => {
-                    if let Some(held) = self.tx[stream].list.held.remove(&start) {
+                    if let Some(held) = self.tx[stream].book.list.held.remove(&start) {
                         self.open_held(stream, held);
                     }
                 }
@@ -2133,7 +2114,7 @@ impl Provider for MockRadio {
             let ratio = self.rate_ratio(root_rate, rate, "MR-7")?;
             let node = self.tx[k].node.clone();
             // RM-15: the stream's record learns its closed short burst gap with its clock (the rate is fixed for the Run, RM-27).
-            self.tx[k].busy.arm(ezsdr_radio::staging::closed_short_gap(root_rate.num(), ratio.num(), ratio.den()));
+            self.tx[k].book.record.arm(ezsdr_radio::staging::closed_short_gap(root_rate.num(), ratio.num(), ratio.den()));
             self.tx[k].clock = Some(ctx.clocks.declare_sample_clock(node, root, ratio).map_err(|error| self.reject(format!("MR-7: {error}")))?);
         }
         // MR-7, RM-29: every attached link is this fragment's, on one of its receive
@@ -2466,7 +2447,7 @@ mod cancellation_tests {
     use super::*;
 
     fn held(start: i64) -> HeldBurst {
-        HeldBurst { start, len: 1, repeat: false, open: BurstOpen::default(), order: start as u64, values: Vec::new() }
+        HeldBurst { start, len: 1, repeat: false, switch: false, id: ActionId(start as u64), open: BurstOpen::default(), order: start as u64, values: Vec::new() }
     }
 
     fn radio_with_reservations() -> (MockRadio, std::sync::Arc<channel::TxShared>, std::sync::Arc<ezsdr_kernel::event::EventCollector>) {
@@ -2512,10 +2493,10 @@ mod cancellation_tests {
         radio.tx[0].clock = Some(registered.handle.clone());
         radio.tx[0].tracker = Some(BurstTracker::new(registered.domain));
         // As production arms a stream's record where its clock is registered: 1 MS/s on this 200 MHz root (RM-15).
-        radio.tx[0].busy.arm(ezsdr_radio::staging::closed_short_gap(200_000_000, 200, 1));
+        radio.tx[0].book.record.arm(ezsdr_radio::staging::closed_short_gap(200_000_000, 200, 1));
         radio.tx[0].registered = Some(registered);
         radio.tx[0].plan = Some(shared.clone());
-        radio.tx[0].list.held.insert(20, held(20));
+        radio.tx[0].book.list.held.insert(20, held(20));
         (radio, shared, events)
     }
 
@@ -2523,7 +2504,7 @@ mod cancellation_tests {
     fn a_cancelled_held_burst_releases_the_shared_reservation() {
         let (mut radio, shared, events) = radio_with_reservations();
         radio.stop_tx(0, 0, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop).unwrap();
-        assert!(radio.tx[0].list.held.is_empty());
+        assert!(radio.tx[0].book.list.held.is_empty());
         assert!(shared.plan().segments.is_empty());
         let rows = radio.instance.sections[&section("rejected")].as_array().unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
@@ -2534,9 +2515,10 @@ mod cancellation_tests {
     #[test]
     fn a_loss_cuts_the_open_burst_at_its_instant() {
         let (mut radio, _, _) = radio_with_reservations();
-        radio.tx[0].open = Some(OpenBurst { start: 20, len: 1, repeat: true, next: 25, first: false, open: BurstOpen::default(), order: 1 });
+        radio.tx[0].book.open =
+            Some(ezsdr_radio::staging::Open::new(HeldBurst { start: 20, len: 1, repeat: true, switch: false, id: ActionId(1), open: BurstOpen::default(), order: 1, values: Vec::new() }, 25, false));
         radio.stop_tx(0, 0, "test termination", ezsdr_radio::CancelReason::Loss).unwrap();
-        assert!(radio.tx[0].open.is_none(), "a loss must cut at its instant");
+        assert!(radio.tx[0].book.open.is_none(), "a loss must cut at its instant");
     }
 }
 
