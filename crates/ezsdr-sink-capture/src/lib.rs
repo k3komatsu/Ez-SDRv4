@@ -7,7 +7,7 @@ pub use sigmf::sigmf_meta;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use ezsdr_hostmem::interleave;
 use ezsdr_kernel::binding::Binding;
 use ezsdr_kernel::contract::DataContractId;
 use ezsdr_kernel::event::{Action, ActionId, Event, EventKind, EventSink, EventSource, Severity, Target};
-use ezsdr_kernel::hash::ContentHash;
+use ezsdr_kernel::hash::{ContentHash, ContentHasher};
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, RunId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
@@ -65,7 +65,7 @@ struct Capture {
     n: u64,
     at: Option<AbsoluteDeadline>,
     written: u64,
-    file: Option<(PathBuf, File)>,
+    file: Option<(PathBuf, HashedFile<File>)>,
     bps: Option<usize>,
     contract: Option<DataContractId>,
     builders: Vec<ContinuityMap>,
@@ -73,6 +73,27 @@ struct Capture {
     started: bool,
     /// The request's ActionId (HD-16); none for the output's own capture.
     request: Option<ActionId>,
+}
+
+/// A capture's file, hashing exactly the bytes the file accepts, in order (HD-10): a
+/// partial or failed write leaves the hash and size describing what reached the file.
+struct HashedFile<W> {
+    file: W,
+    hasher: ContentHasher,
+    size: u64,
+}
+
+impl<W: Write> Write for HashedFile<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let accepted = self.file.write(buf)?;
+        self.hasher.update(&buf[..accepted]);
+        self.size += accepted as u64;
+        Ok(accepted)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
 }
 
 impl Capture {
@@ -297,7 +318,7 @@ impl CaptureSink {
         let file = File::create_new(&absolute).map_err(|error| ModuleError::rejected(format!("HD-10: cannot create {}: {error}", absolute.display())))?;
         let capture = self.queue.front_mut().expect("a capture is queued");
         capture.id = Some(id);
-        capture.file = Some((absolute, file));
+        capture.file = Some((absolute, HashedFile { file, hasher: ContentHasher::new(), size: 0 }));
         capture.bps = Some(bps);
         capture.contract = Some(contract);
         capture.started = true;
@@ -314,19 +335,19 @@ impl CaptureSink {
         if !capture.started {
             return Ok(());
         }
-        let Some((path, mut file)) = capture.file.take() else {
+        let Some((path, mut hashed)) = capture.file.take() else {
             return Err(ModuleError::rejected("HD-10: started capture has no file"));
         };
-        file.flush().map_err(|error| ModuleError::rejected(format!("HD-10: cannot flush {}: {error}", path.display())))?;
+        hashed.flush().map_err(|error| ModuleError::rejected(format!("HD-10: cannot flush {}: {error}", path.display())))?;
+        let HashedFile { file, hasher, size } = hashed;
         drop(file);
-        let bytes = fs::read(&path).map_err(|error| ModuleError::rejected(format!("HD-10: cannot read {}: {error}", path.display())))?;
         let id = capture.id.take().ok_or_else(|| ModuleError::rejected("HD-10: started capture has no id"))?;
         self.done.push(ArtifactRef {
             id,
             kind: Namespace::parse(CAPTURE_ARTIFACT_KIND).expect("a valid artifact kind"),
             uri: format!("file://{}", path.display()),
-            hash: ContentHash::of_bytes(&bytes),
-            size_bytes: bytes.len() as u64,
+            hash: hasher.finish(),
+            size_bytes: size,
             partial,
             marks: Vec::new(),
             continuity: capture.builders,
@@ -566,5 +587,44 @@ fn push_continuity(capture: &mut Capture, header: &BlockHeader, carry: DropCarry
             Ok(())
         }
         Err(error) => Err(ModuleError::rejected(format!("HD-10: continuity: {error}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Accepts at most `chunk` bytes a call and fails once `budget` bytes are in.
+    struct Short {
+        chunk: usize,
+        budget: usize,
+        got: Vec<u8>,
+    }
+
+    impl Write for Short {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.got.len() >= self.budget {
+                return Err(io::Error::other("disk full"));
+            }
+            let n = buf.len().min(self.chunk).min(self.budget - self.got.len());
+            self.got.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hd_10_the_hash_and_size_describe_the_bytes_the_file_accepted() {
+        let data: Vec<u8> = (0..=255).collect();
+        let mut file = HashedFile { file: Short { chunk: 7, budget: 100, got: Vec::new() }, hasher: ContentHasher::new(), size: 0 };
+        assert!(file.write_all(&data[..40]).is_ok());
+        assert!(file.write_all(&data[40..]).is_err(), "the disk fills during the second write");
+        let HashedFile { file, hasher, size } = file;
+        assert_eq!(file.got, data[..100]);
+        assert_eq!(size, 100);
+        assert_eq!(hasher.finish(), ContentHash::of_bytes(&file.got));
     }
 }

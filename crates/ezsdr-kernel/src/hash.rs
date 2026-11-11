@@ -77,14 +77,9 @@ impl ContentHash {
 
     /// The hash of raw bytes, which is what an artifact's hash is (OV-17).
     pub fn of_bytes(bytes: &[u8]) -> ContentHash {
-        let digest = Sha256::digest(bytes);
-        let mut s = String::with_capacity(7 + 64);
-        s.push_str("sha256:");
-        for b in digest {
-            s.push(char::from_digit((b >> 4) as u32, 16).expect("nibble"));
-            s.push(char::from_digit((b & 0xf) as u32, 16).expect("nibble"));
-        }
-        ContentHash(s)
+        let mut hasher = ContentHasher::new();
+        hasher.update(bytes);
+        hasher.finish()
     }
 
     /// Parses a hash read back from a document (OV-14).
@@ -99,6 +94,35 @@ impl ContentHash {
     /// The hash as written (OV-14).
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// A `ContentHash` of raw bytes fed in pieces: `finish` equals `ContentHash::of_bytes` of
+/// their concatenation (OV-17).
+#[derive(Clone, Default)]
+pub struct ContentHasher(Sha256);
+
+impl ContentHasher {
+    /// A hasher that has seen no bytes.
+    pub fn new() -> ContentHasher {
+        ContentHasher::default()
+    }
+
+    /// Feeds the next bytes.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// The hash of every byte fed so far.
+    pub fn finish(self) -> ContentHash {
+        let digest = self.0.finalize();
+        let mut s = String::with_capacity(7 + 64);
+        s.push_str("sha256:");
+        for b in digest {
+            s.push(char::from_digit((b >> 4) as u32, 16).expect("nibble"));
+            s.push(char::from_digit((b & 0xf) as u32, 16).expect("nibble"));
+        }
+        ContentHash(s)
     }
 }
 

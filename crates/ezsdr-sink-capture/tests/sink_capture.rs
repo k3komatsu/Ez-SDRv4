@@ -405,6 +405,41 @@ fn hd_09_prepare_cases() {
     assert!(blocked_dir.prepare(&fragment(BTreeMap::new()), env.context(vec![one])).is_err());
 }
 
+/// The bytes of ramp samples `from..to`, as `ramp_block` writes them: `(v, -v)` as f32 LE.
+fn ramp_bytes(from: usize, to: usize) -> Vec<u8> {
+    (from..to).flat_map(|i| [(i as f32).to_le_bytes(), (-(i as f32)).to_le_bytes()].concat()).collect()
+}
+
+#[test]
+fn hd_10_the_hash_is_over_every_written_byte_once_in_order() {
+    let mut rig = Rig::new("hash-once", BTreeMap::new());
+    rig.env.actions.push(request(Value::from(3_000), None));
+    let mut first = 0_i64;
+    for len in [1_u32, 7, 1_999, 3, 1_024, 67] {
+        assert_eq!(rig.push_ramp(first, len), PublishOutcome::Accepted);
+        rig.step().expect("step succeeds");
+        first += i64::from(len);
+    }
+    let artifacts = rig.stop(StopMode::Orderly);
+    assert_eq!(artifacts.len(), 1);
+    assert!(!artifacts[0].partial);
+    let expected = ramp_bytes(0, 3_000);
+    assert_eq!(artifacts[0].size_bytes, expected.len() as u64);
+    assert_eq!(artifacts[0].hash, ContentHash::of_bytes(&expected), "no block hashed twice or skipped, and the cut block hashed only as far as it was written");
+    let path = artifacts[0].uri.strip_prefix("file://").expect("file URI");
+    assert_eq!(artifacts[0].hash, ContentHash::of_bytes(&fs::read(path).unwrap()));
+
+    let mut partial = Rig::new("hash-partial", sample_count(5_000));
+    for (first, len) in [(0, 1_500_u32), (1_500, 2_500)] {
+        partial.push_ramp(first, len);
+        partial.step().expect("step succeeds");
+    }
+    let artifacts = partial.stop(StopMode::Abort);
+    assert!(artifacts[0].partial);
+    assert_eq!(artifacts[0].hash, ContentHash::of_bytes(&ramp_bytes(0, 4_000)));
+    assert_eq!(artifacts[0].size_bytes, 4_000 * 8);
+}
+
 #[test]
 fn hd_10_capture_of_n_samples_across_jittered_blocks() {
     let mut rig = Rig::new("jittered", BTreeMap::new());

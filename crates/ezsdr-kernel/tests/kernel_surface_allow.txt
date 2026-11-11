@@ -255,6 +255,7 @@ manifest::Manifest = Manifest envelope
 manifest::ArtifactRef = Artifact reference
 manifest::ArtifactMark = NEW: RS-30's record of a `mark_artifact` reaction against an open artifact.
 hash::ContentHash = content hashes
+hash::ContentHasher = NEW: OV-17's hash of raw bytes fed in pieces, so a Module that writes a large artifact hashes it as it writes (Module crates may not depend on `sha2`, PO-4).
 hash::HashError = NEW: the refusal set of OV-15's canonicaliser.
 hash::canonical_json = content hashes
 manifest::RunSection = Manifest envelope

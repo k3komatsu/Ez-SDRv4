@@ -406,7 +406,9 @@ fn ov_23b_kernel_growth_is_the_new_count() {
     // `session::ControlOp` crate-internal (KC-28 step 3, RS-14): two NEW: items and
     // one audit §13 item (Run state machine) leave the public surface.
     // 113 of 292: stage 1 of note 47 added `session::InitialRequests` (RS-12), NEW:.
-    assert_eq!((new.len(), total), (113, 292), "OV-23b, GZ-2: the Kernel's public surface changed");
+    // 114 of 293: issue #90 added `hash::ContentHasher` (OV-17), NEW:, so the capture
+    // Sink hashes as it writes without a `sha2` dependency outside the Kernel (PO-4).
+    assert_eq!((new.len(), total), (114, 293), "OV-23b, GZ-2: the Kernel's public surface changed");
 }
 
 #[test]

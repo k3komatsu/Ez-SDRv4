@@ -1,6 +1,6 @@
 //! Phase 1 tests for `00-overview.md` §7: canonical JSON and content hashes.
 
-use ezsdr_kernel::hash::{ContentHash, HashError, canonical_json};
+use ezsdr_kernel::hash::{ContentHash, ContentHasher, HashError, canonical_json};
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::spec::Value;
 use ezsdr_kernel::time::{ClockRelation, Duration, TimeError, TimePoint, Validity};
@@ -110,6 +110,22 @@ fn ov_15_strings_use_rfc_8785_escaping() {
 fn ov_14_sha256_known_answers() {
     assert_eq!(ContentHash::of_bytes(b"").as_str(), "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     assert_eq!(ContentHash::of_bytes(b"abc").as_str(), "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+#[test]
+fn ov_17_a_hasher_fed_in_pieces_equals_the_hash_of_the_whole() {
+    let data: Vec<u8> = (0..=255).cycle().take(1_000).collect();
+    for split in [0, 1, 63, 64, 500, 1_000] {
+        let mut hasher = ContentHasher::new();
+        hasher.update(&data[..split]);
+        hasher.update(&data[split..]);
+        assert_eq!(hasher.finish(), ContentHash::of_bytes(&data), "split at {split}");
+    }
+    assert_eq!(ContentHasher::new().finish(), ContentHash::of_bytes(b""));
+    let mut abc = ContentHasher::new();
+    abc.update(b"a");
+    abc.update(b"bc");
+    assert_eq!(abc.finish().as_str(), "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "the digest is SHA-256's, not only of_bytes's own");
 }
 
 #[test]

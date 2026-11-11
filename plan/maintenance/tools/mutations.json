@@ -17613,5 +17613,75 @@
   "old": "raise failed from None",
   "new": "pass",
   "python": "test_easy_api.DepartureClose.test_ea_16_a_close_whose_own_finish_fails_raises_unless_a_manifest_was_written"
+ },
+ {
+  "id": "C90-1-01",
+  "name": "#90 (HD-10): the hash covers the whole buffer offered, not the bytes the file accepted",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "self.hasher.update(&buf[..accepted]);",
+  "new": "self.hasher.update(buf);",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "lib",
+  "filter": "hd_10_the_hash_and_size_describe_the_bytes_the_file_accepted"
+ },
+ {
+  "id": "C90-1-02",
+  "name": "#90 (HD-10): the size counts the buffer offered, not the bytes the file accepted",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "self.size += accepted as u64;",
+  "new": "self.size += buf.len() as u64;",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "lib",
+  "filter": "hd_10_the_hash_and_size_describe_the_bytes_the_file_accepted"
+ },
+ {
+  "id": "C90-1-03",
+  "name": "#90 (HD-10): a written block is hashed twice",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "self.hasher.update(&buf[..accepted]);",
+  "new": "self.hasher.update(&buf[..accepted]);\n        self.hasher.update(&buf[..accepted]);",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_10_the_hash_is_over_every_written_byte_once_in_order"
+ },
+ {
+  "id": "C90-1-04",
+  "name": "#90 (HD-10): the first write is not hashed",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "self.hasher.update(&buf[..accepted]);",
+  "new": "if self.size > 0 {\n            self.hasher.update(&buf[..accepted]);\n        }",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_10_the_hash_is_over_every_written_byte_once_in_order"
+ },
+ {
+  "id": "C90-1-05",
+  "name": "#90 (HD-10): the artifact's hash is not the accumulated one",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "hash: hasher.finish(),",
+  "new": "hash: ContentHash::of_bytes(&[]),",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_10_the_hash_is_over_every_written_byte_once_in_order"
+ },
+ {
+  "id": "C90-1-06",
+  "name": "#90 (HD-10): the artifact's size is not the accumulated one",
+  "file": "crates/ezsdr-sink-capture/src/lib.rs",
+  "old": "size_bytes: size,",
+  "new": "size_bytes: 0,",
+  "crate": "ezsdr-sink-capture",
+  "test_bin": "sink_capture",
+  "filter": "hd_10_the_hash_is_over_every_written_byte_once_in_order"
+ },
+ {
+  "id": "C90-1-07",
+  "name": "#90 (HD-10): a ContentHasher ignores the bytes fed to it",
+  "file": "crates/ezsdr-kernel/src/hash.rs",
+  "old": "self.0.update(bytes);",
+  "new": "let _ = bytes;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "hashing",
+  "filter": "ov_17_a_hasher_fed_in_pieces_equals_the_hash_of_the_whole"
  }
 ]
