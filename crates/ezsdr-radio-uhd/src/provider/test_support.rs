@@ -259,6 +259,21 @@ pub(super) fn probe(core: &Core, name: &'static str, f: impl Fn(Option<&super::c
     core.probes.lock().unwrap().insert(name, Arc::new(f));
 }
 
+/// Runs `f` on its own thread and fails the test if it does not finish within `bound`: a mutant that
+/// deadlocks or wedges the Provider must fail the test, not hang the suite. A failure inside `f` fails
+/// the test at once.
+pub(super) fn bounded<T: Send + 'static>(what: &str, bound: Wall, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, finished) = channel();
+    let _ = std::thread::spawn(move || {
+        let _ = done.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| ()));
+    });
+    match finished.recv_timeout(bound) {
+        Ok(Ok(value)) => value,
+        Ok(Err(())) => panic!("{what} failed"),
+        Err(_) => panic!("{what} did not finish within {bound:?}"),
+    }
+}
+
 /// A gated device call's handshake: the call is held until the test releases it.
 pub(super) struct Gate {
     reached: Receiver<()>,

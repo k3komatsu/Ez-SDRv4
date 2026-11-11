@@ -5238,16 +5238,6 @@
    "filter": "ur_16_a_wedged_thread_does_not_wedge_stop"
   },
   {
-   "id": "P276",
-   "name": "no thread's panic is a lost device (UR-16)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "                    if !is_control {",
-   "new": "                    if false {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_16_a_panicking_thread_is_a_lost_device"
-  },
-  {
    "id": "P277",
    "name": "a thread that does not join is left detached without a record (UR-16)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
@@ -17883,5 +17873,105 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_25_a_stop_whose_bound_does_not_fit_the_clock_is_refused_with_its_id_and_the_run_goes_on"
- }
+ },
+  {
+   "id": "N92-1",
+   "name": "#92: a uhd-control panic is recorded but is not a lost device (UR-16)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+   "old": "core_.device_lost(\"a Provider thread panicked\");",
+   "new": "if reported != \"uhd-control\" {\n                        core_.device_lost(\"a Provider thread panicked\");\n                    }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_16_a_uhd_control_panic"
+  },
+  {
+   "id": "N92-2",
+   "name": "#92: a uhd-control panic is not recorded in `rejected` (UR-16)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+   "old": "core_.reject_note(json!({ \"thread\": reported, \"reason\": \"panicked\" }));",
+   "new": "if reported != \"uhd-control\" {\n                        core_.reject_note(json!({ \"thread\": reported, \"reason\": \"panicked\" }));\n                    }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_16_a_uhd_control_panic"
+  },
+  {
+   "id": "N92-3",
+   "name": "#92: a second finder of the loss emits and marks it again (UR-16, UR-29)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "if self.lost.load(Ordering::Acquire) {",
+   "new": "if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_16_a_uhd_control_panic"
+  },
+  {
+   "id": "N92-4",
+   "name": "#92: a poisoned line makes the next `lock` panic (UR-16, UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "guard: m.lock().unwrap_or_else(|e| e.into_inner()),",
+   "new": "guard: m.lock().unwrap(),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_16_a_uhd_control_panic_holding_the_line_lock"
+  },
+  {
+   "id": "N92-6",
+   "name": "#92: `Provider::stop` books no end of the streams (RM-16, UR-26)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+   "old": "streams.end(&core, at, mode == StopMode::Abort, false);",
+   "new": "let _ = (&core, at, mode);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_26_a_provider_stop_books_one_end"
+  },
+  {
+   "id": "N92-7",
+   "name": "#92: `Provider::stop` writes no plan row after uhd-control is joined (UR-30)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+   "old": "if control_ran {",
+   "new": "if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_16_a_uhd_control_panic"
+  },
+  {
+   "id": "N92-7b",
+   "name": "#92: uhd-control writes the plan row when it sees the stop, beside `stop`'s (UR-30)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "if lock(&self.core.streams).stop.is_some() {\n                return;\n            }",
+   "new": "if lock(&self.core.streams).stop.is_some() {\n                let plan = lock(&self.core.streams).record();\n                self.core.timing(plan);\n                return;\n            }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_16_a_uhd_control_panic_after_it_returns"
+  },
+  {
+   "id": "N92-7c",
+   "name": "#92: a refused start, which never spawned uhd-control, writes a plan row (UR-30)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+   "old": "if control_ran {",
+   "new": "if true {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_15_a_failed_rx_owner_spawn_abandons_its_started_chain_before_cleanup"
+  },
+  {
+   "id": "N92-8",
+   "name": "#92: a loss is not published as lost, so a second finder emits again (UR-16, UR-29)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "self.lost.store(true, Ordering::Release);",
+   "new": "\n",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_16_a_uhd_control_panic"
+  },
+  {
+   "id": "N92-8b",
+   "name": "#92: the thread that finds the device lost does not end the streams (UR-16, UR-29)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "streams.end(self, at, false, true);\n        self.lost.store(true, Ordering::Release);",
+   "new": "self.lost.store(true, Ordering::Release);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_16_a_uhd_control_panic_under_a_continuing_policy"
+  }
 ]

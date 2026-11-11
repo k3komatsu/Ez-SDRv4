@@ -10,7 +10,7 @@
 - **2 本の流れまで．** 3 本以上は orchestrator の確認が粗くなる．
 - **流れ 1（中心）**：main の作業ツリー（`~/local_work/Ez-SDRv4`）．`ezsdr-radio-uhd`，試験の rig，変異の道具に触る項目．
 - **流れ 2（周辺）**：git worktree（`~/local_work/Ez-SDRv4-n<issue>`，自分の `.cargo/config.toml` で build の出力先を分ける）．`ezsdr-sink-capture`，`ezsdr-mock-radio`，`ezsdr-radio` の時刻の計算など，流れ 1 とファイルが重ならない項目．
-- **重い計算は重ねない．** 変異行の全件と gate は sim02・sim03 の 32 コアを使い切る．二つが重なると負荷に弱い試験が落ち，変異の判定が偽になる（`mech:wall-clock-test-oracle`）．片方が流す間はもう片方が待つ．待ちが長いときは流れ 1 が sim02，流れ 2 が sim03（1 台だと約 2 倍の時間）．実装役の rdev も流れごとに host を分ける．
+- **重い計算は重ねない．** 変異行の全件と gate は 2 台とも空いていれば 2 台で（`sim02:7,sim03:7`：28 コア．各台 4 コアをもう一方の流れの rdev に空ける），どちらかが使用中なら終わるまで待つ（owner 2026-11-12．1 台ずつに分けると両方が約 2 倍遅くなるだけで，計算量の合計は同じ）．負荷に弱い試験が落ちると変異の判定が偽になる（`mech:wall-clock-test-oracle`）ので，二つの重い計算を同時に流さない．
 - **Sol は 1 本ずつ**（同時に起動すると止まる）．
 - 各流れは自分の作業 branch．main に入れる前に main の最新に載せ直し，gate を流す．
 - 設計（読むだけの作業：Fable，Opus）は随時どちらの流れとも並べてよい．
@@ -24,7 +24,7 @@
 |---|---|---|---|
 | 1 | #96（s15 の parity の試験を観測した進みで） | 1 | 済（2026-11-12，記録 `reviews/n96-*`．受付の窓の 14 本は 2 で閉じる） |
 | 2 | 試験の時刻の設計とその段（#91 を含む） | 1 | 設計は決定済み（[51](51-test-timing.md)，owner 2026-11-12）．段階：0（表）→ M（変異の判定，#91）→ 1a〜1d → 2a〜2c → 3 → 1c-ii．gate の信頼 |
-| 3 | #92（uhd-control の panic で Run が終わらない） | 2 | RF の安全．2026-11-12 に流れ 2（worktree `Ez-SDRv4-n92`）で試験計画から始めた．方向〈uhd-control の panic も `DEVICE_LOST`，UR-16 を改める〉は owner の確認待ち |
+| 3 | #92（uhd-control の panic で Run が終わらない） | 2 | 済（2026-11-12，記録 `reviews/n92-*`．uhd-control の panic も DEVICE_LOST〈owner〉，KL は足さない〈owner〉） |
 | 4 | #90（大きな capture が Manifest から落ちる） | 2 | 済（2026-11-12，記録 `reviews/n90-*`．hash は Kernel の `ContentHasher`〈owner 2026-11-11〉） |
 | 5 | #95＋#94（時刻の overflow） | 2 | 済（2026-11-12，記録 `reviews/n95-*`．時計に収まらない送信の時刻と Stop は両 Provider で受付の拒否） |
 | 6 | 49 の E2b（Configure と Reopen を操作に） | 1 | 振る舞いは変えない．寿命の扱いを一つに |

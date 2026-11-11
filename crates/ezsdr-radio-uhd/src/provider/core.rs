@@ -656,18 +656,6 @@ impl Streams {
         }
     }
 
-    /// UR-26, design 38 D2 (4): `S`, the instant the Run's end was booked at, and whether a
-    /// loss was its cause — the stop's or the loss's, whichever came first; a loss at the same
-    /// instant counts as first, as MockRadio's order does.
-    pub fn ended_at(&self) -> Option<(i64, bool)> {
-        match (self.stop.map(|(at, _)| at), self.lost_at) {
-            (Some(stop), Some(lost)) if lost <= stop => Some((lost, true)),
-            (Some(stop), _) => Some((stop, false)),
-            (None, Some(lost)) => Some((lost, true)),
-            (None, None) => None,
-        }
-    }
-
     /// #63: once its owner has ended the segment command `by` began, the items before that
     /// command are pruned: nothing booked later takes effect before it, and no command before
     /// it can be refused any more.

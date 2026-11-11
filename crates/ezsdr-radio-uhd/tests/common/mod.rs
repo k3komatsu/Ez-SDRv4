@@ -347,6 +347,17 @@ pub fn tone(n: usize) -> Vec<(f32, f32)> {
 /// A Run's Assembly as the server's catalogue builds one (EA-7): the radio, the
 /// Authority on the same device, the capture Sink and the host Link.
 pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<ContentHash, Vec<u8>>, adjust: impl FnOnce(UhdRadio) -> UhdRadio) -> Assembly {
+    assembly_with_authority(profile_doc, device, inputs, adjust, |authority| Box::new(authority))
+}
+
+/// `assembly` with the Run's Authority wrapped by `wrap`, for a test that makes the Authority's time fail.
+pub fn assembly_with_authority(
+    profile_doc: &Json,
+    device: Arc<dyn Device>,
+    inputs: BTreeMap<ContentHash, Vec<u8>>,
+    adjust: impl FnOnce(UhdRadio) -> UhdRadio,
+    wrap: impl FnOnce(DeviceAuthority) -> Box<dyn Authority>,
+) -> Assembly {
     // A Run on the manual clock is the one a frozen clock can hang (R05); a real-clock device
     // is its own wall bound. The Assembly is built before the Run starts, so the watchdog is
     // armed before any wait a mutant could freeze.
@@ -392,7 +403,7 @@ pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<Co
     for placement in &profile.placements.links {
         links.insert(placement.link.clone(), Box::new(ezsdr_link_host::HostLinkModule::new()) as Box<dyn Link>);
     }
-    let mut assembly = Assembly::new(Box::new(authority), clocks);
+    let mut assembly = Assembly::new(wrap(authority), clocks);
     assembly.registry = registry;
     assembly.checks = checks;
     assembly.kinds = kinds;
@@ -491,7 +502,12 @@ pub fn session(profile: &Json, device: Arc<dyn Device>) -> RunHandle {
 }
 
 pub fn session_with(profile: &Json, device: Arc<dyn Device>, initial: &InitialRequests) -> RunHandle {
-    let run = connect(profile, initial, assembly(profile, device, BTreeMap::new(), |r| r), Lease::attached()).unwrap();
+    session_on(profile, initial, assembly(profile, device, BTreeMap::new(), |r| r))
+}
+
+/// A Session on a prepared Assembly.
+pub fn session_on(profile: &Json, initial: &InitialRequests, assembly: Assembly) -> RunHandle {
+    let run = connect(profile, initial, assembly, Lease::attached()).unwrap();
     assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
     run
 }

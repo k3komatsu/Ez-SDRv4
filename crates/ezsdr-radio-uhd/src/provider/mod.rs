@@ -370,15 +370,12 @@ impl UhdRadio {
         // §4.2, M1: the host clock registers the participant before the thread runs.
         let host = core.device.host();
         let reported = name.clone();
-        let is_control = name == "uhd-control";
         let handle = host
             .spawn(&name, move || {
                 if catch_unwind(AssertUnwindSafe(body)).is_err() {
-                    // UR-16: a panic is recorded; the stream the thread served is gone.
+                    // UR-16: a panic is recorded and ends the device, whichever thread it was.
                     core_.reject_note(json!({ "thread": reported, "reason": "panicked" }));
-                    if !is_control {
-                        core_.device_lost("a Provider thread panicked");
-                    }
+                    core_.device_lost("a Provider thread panicked");
                 }
             })
             .map_err(|e| rejected(format!("UR-15: {name}: {e}")))?;
@@ -690,7 +687,7 @@ impl Provider for UhdRadio {
             return Ok(());
         };
         // RM-16, VH-2: the streams end at the stop instant, booked at once, which uhd-rx and
-        // uhd-tx read at their next turn; then uhd-control records the plans.
+        // uhd-tx read at their next turn; then, once uhd-control is joined, `stop` records the plans (UR-30) if it ran.
         let at = {
             let mut streams = lock(&core.streams);
             let at = core.now();
@@ -699,7 +696,12 @@ impl Provider for UhdRadio {
             core.release_streams(streams);
             at
         };
+        let control_ran = self.running.as_ref().is_some_and(|r| r.threads.iter().any(|(n, _)| n == "uhd-control"));
         self.join(&core, "uhd-control");
+        if control_ran {
+            let plan = lock(&core.streams).record();
+            core.timing(plan);
+        }
         // Transmit before receive (RM-16): every transmit stream's thread first, in its
         // stream's order.
         for to_tx in &to_tx {
@@ -787,15 +789,20 @@ mod tests {
     /// A Provider bound to a fake device, whose `prepare` context is replaced by a `Prepared`
     /// of `rx` and `tx` streams with no channels, for `start`'s guard alone.
     fn prepared_with(rx: usize, tx: usize) -> UhdRadio {
+        prepared_rig(rx, tx).0
+    }
+
+    /// `prepared_with`, and the device and event collector of its core's rig (`close_streams` goes to the radio's own device).
+    fn prepared_rig(rx: usize, tx: usize) -> (UhdRadio, Arc<FakeDevice>, Arc<FakeDevice>, Arc<ezsdr_kernel::event::EventCollector>) {
         let binding: Binding = serde_json::from_value(json!({
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
             "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
         }))
         .unwrap();
-        let device: Arc<dyn Device> = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
-        let mut radio = UhdRadio::from_binding(&binding, device).unwrap();
-        let (core, _, _, _) = test_support::rig();
+        let radio_device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let mut radio = UhdRadio::from_binding(&binding, radio_device.clone()).unwrap();
+        let (core, rig_device, _, events) = test_support::rig();
         // The declared streams of the layout, for `start`'s threads alone (RM-29).
         *lock(&core.streams) = super::core::Streams::with_streams(rx, tx);
         let stream = PreparedStream { k: 0, handle: None, channels: Channels::first(0), clock: None };
@@ -806,7 +813,7 @@ mod tests {
             rx: (0..rx).map(|k| PreparedStream { k, ..stream.clone() }).collect(),
             tx: (0..tx).map(|k| PreparedStream { k, ..stream.clone() }).collect(),
         });
-        radio
+        (radio, radio_device, rig_device, events)
     }
 
     fn active_rx_chain(core: &Core, k: usize) {
@@ -1028,6 +1035,8 @@ mod tests {
 
         assert!(error.message.contains("scripted thread spawn failure"), "{error:?}");
         assert!(radio.stopped, "start failure ran Provider::stop");
+        // UR-30: uhd-control was never spawned, so the refused start has no plan row.
+        assert!(!lock(&core.rec).timing.iter().any(|row| row["what"] == "plan"), "{:?}", lock(&core.rec).timing);
         let started = inner.calls().iter().position(|call| call == "rx_start 0 0").expect("the initial RX start succeeded");
         let chain = core.rx_chain[0].lock();
         assert_eq!(chain.device(), core::RxDevice::Uncertain);
@@ -1230,5 +1239,308 @@ mod tests {
             .map(|row| row["thread"].as_str().unwrap().to_owned())
             .collect();
         assert_eq!(order, ["uhd-control", "uhd-tx-s0", "uhd-tx-s1", "uhd-rx-s0", "uhd-rx-s1"], "{rejected}");
+    }
+
+    /// UR-16's scenarios: a radio of two streams per direction whose threads the test spawns, with `running` set by hand (as `stop`
+    /// reads it), the device and event collector of its core, and nothing that waits on device time (the rig's clock is the real one).
+    fn running_radio() -> (UhdRadio, Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::event::EventCollector>) {
+        let (mut radio, _, device, events) = prepared_rig(2, 2);
+        radio.running = Some(Running { to_tx: Vec::new(), to_rx: Vec::new(), threads: Vec::new() });
+        let core = radio.prepared.as_ref().unwrap().core.clone();
+        (radio, core, device, events)
+    }
+
+    /// A thread named `name` that panics once the returned sender is released.
+    fn panics_when_released(radio: &mut UhdRadio, core: &Arc<Core>, name: &str) -> Sender<()> {
+        let (release, wait) = mpsc::channel::<()>();
+        radio
+            .spawn(core, name.to_owned(), move || {
+                let _ = wait.recv();
+                panic!("test: a Provider thread panics");
+            })
+            .unwrap();
+        release
+    }
+
+    fn thread_finished(radio: &UhdRadio, name: &str) -> bool {
+        radio.running.as_ref().unwrap().threads.iter().find(|(n, _)| n == name).is_some_and(|(_, handle)| handle.is_finished())
+    }
+
+    /// Waits, in wall time, until `reached`; the test's `bounded` is the only limit.
+    fn wall_until(mut reached: impl FnMut() -> bool) {
+        while !reached() {
+            std::thread::sleep(Wall::from_millis(1));
+        }
+    }
+
+    /// Every thread the test spawned has finished, so `stop` joins finished threads only and no handler is still running.
+    fn all_finished(radio: &UhdRadio) {
+        wall_until(|| radio.running.as_ref().unwrap().threads.iter().all(|(_, handle)| handle.is_finished()));
+    }
+
+    fn rows(core: &Core, what: &str) -> Vec<Json> {
+        lock(&core.rec).timing.iter().filter(|row| row["what"] == what).cloned().collect()
+    }
+
+    fn panic_rows(core: &Core, thread: &str) -> usize {
+        lock(&core.rec).rejected.iter().filter(|row| row["thread"] == thread && row["reason"] == "panicked").count()
+    }
+
+    /// The device's `mark_lost` calls (the core's device), the `DEVICE_LOST` events and the `device_lost` rows all number one.
+    fn assert_one_loss(core: &Core, device: &FakeDevice, events: &ezsdr_kernel::event::EventCollector, message: &str) {
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let lost: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).collect();
+        assert_eq!(lost.len(), 1, "{delivered:?}");
+        assert_eq!(lost[0].payload["message"], message);
+        assert_eq!(device.calls().iter().filter(|call| *call == "mark_lost").count(), 1, "{:?}", device.calls());
+        assert_eq!(rows(core, "device_lost").len(), 1);
+    }
+
+    /// UR-30: the plan row, once.
+    fn assert_one_plan_row(core: &Core) {
+        assert_eq!(rows(core, "plan").len(), 1, "{:?}", lock(&core.rec).timing);
+    }
+
+    /// uhd-control on transmit stream 0 with a clock, reading `actions`, for a scenario that books a Stop.
+    fn control_on(core: &Arc<Core>, actions: Arc<dyn ActionReceiver>) -> Control {
+        let mut config = core.description.defaults();
+        config.insert(super::core::key("radio.tx.c0.stream"), Value::from(0));
+        let mut start = control::Start { t0: 0, rx: vec![None; 2], tx: vec![None; 2] };
+        start.tx[0] = Some((core.register(Dir::Tx, 200, 0).unwrap(), Channels::first(1)));
+        Control::new(core.clone(), actions, config, false, start)
+    }
+
+    fn end_items(core: &Core) -> usize {
+        let streams = lock(&core.streams);
+        (0..2).map(|k| streams.line(stream_key(Dir::Tx, k)).unwrap().items.iter().filter(|item| matches!(item.kind, ezsdr_radio::timeline::Kind::End { .. })).count()).sum()
+    }
+
+    fn two_panics(first: &'static str, second: &'static str) {
+        test_support::bounded("two panics", Wall::from_secs(30), move || {
+            let (mut radio, core, device, events) = running_radio();
+            let (release_first, release_second) = (panics_when_released(&mut radio, &core, first), panics_when_released(&mut radio, &core, second));
+            // The first panic's handler finishes before the second thread is released, so the second finder meets the published loss.
+            release_first.send(()).unwrap();
+            wall_until(|| thread_finished(&radio, first));
+            release_second.send(()).unwrap();
+            all_finished(&radio);
+            radio.stop(StopMode::Orderly).unwrap();
+            radio.cleanup();
+            assert_one_loss(&core, &device, &events, "a Provider thread panicked");
+            assert_eq!(panic_rows(&core, "uhd-control"), 1);
+            assert_eq!(panic_rows(&core, "uhd-tx-s0"), 1);
+            assert!(!lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join"))), "{:?}", lock(&core.rec).rejected);
+            assert_one_plan_row(&core);
+        });
+    }
+
+    #[test]
+    fn ur_16_a_uhd_control_panic_after_a_uhd_tx_panic_is_one_device_lost() {
+        two_panics("uhd-tx-s0", "uhd-control");
+    }
+
+    #[test]
+    fn ur_16_a_uhd_control_panic_before_a_uhd_tx_panic_is_one_device_lost() {
+        two_panics("uhd-control", "uhd-tx-s0");
+    }
+
+    #[test]
+    fn ur_16_a_uhd_control_panic_simultaneous_with_a_uhd_tx_panic_is_one_device_lost() {
+        test_support::bounded("two simultaneous panics", Wall::from_secs(30), || {
+            let (mut radio, core, device, events) = running_radio();
+            let meet = Arc::new(std::sync::Barrier::new(2));
+            for name in ["uhd-control", "uhd-tx-s0"] {
+                let meet = meet.clone();
+                radio
+                    .spawn(&core, name.to_owned(), move || {
+                        meet.wait();
+                        panic!("test: a Provider thread panics");
+                    })
+                    .unwrap();
+            }
+            all_finished(&radio);
+            radio.stop(StopMode::Orderly).unwrap();
+            radio.cleanup();
+            assert_one_loss(&core, &device, &events, "a Provider thread panicked");
+            assert_eq!((panic_rows(&core, "uhd-control"), panic_rows(&core, "uhd-tx-s0")), (1, 1));
+            assert_one_plan_row(&core);
+        });
+    }
+
+    #[test]
+    fn ur_16_a_uhd_control_panic_after_the_end_is_booked_is_one_device_lost_and_stop_still_joins() {
+        test_support::bounded("a panic after the end is booked", Wall::from_secs(30), || {
+            let (mut radio, radio_device, device, events) = prepared_rig(2, 2);
+            radio.running = Some(Running { to_tx: Vec::new(), to_rx: Vec::new(), threads: Vec::new() });
+            let core = radio.prepared.as_ref().unwrap().core.clone();
+            // The state `stop` leaves before it joins uhd-control: the end booked under the lock.
+            let _control = control_on(&core, Arc::new(NoActions));
+            {
+                let mut streams = lock(&core.streams);
+                let at = core.now();
+                streams.stop = Some((at, StopMode::Orderly));
+                streams.end(&core, at, false, false);
+                core.release_streams(streams);
+            }
+            let release = panics_when_released(&mut radio, &core, "uhd-control");
+            release.send(()).unwrap();
+            all_finished(&radio);
+            radio.stop(StopMode::Orderly).unwrap();
+            radio.cleanup();
+            assert_one_loss(&core, &device, &events, "a Provider thread panicked");
+            assert_eq!(panic_rows(&core, "uhd-control"), 1);
+            // One `End` per transmit line, the stop's: the loss booked none.
+            assert_eq!(end_items(&core), 2);
+            let rejected = lock(&core.rec).rejected.clone();
+            assert!(!rejected.iter().any(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join")) || row.get("leaked").is_some()), "{rejected:?}");
+            // A lost device is not closed (UR-29), a panic of uhd-control now included.
+            assert!(!radio_device.calls().iter().any(|call| call == "close_streams"), "{:?}", radio_device.calls());
+            assert_one_plan_row(&core);
+            radio.stop(StopMode::Orderly).unwrap();
+            radio.cleanup();
+            assert_eq!(device.calls().iter().filter(|call| *call == "mark_lost").count(), 1, "a second stop and cleanup change nothing");
+            assert_one_plan_row(&core);
+        });
+    }
+
+    #[test]
+    fn ur_26_a_provider_stop_books_one_end_per_line() {
+        // RM-16, UR-26: `stop` books the end of every line itself, before it joins uhd-control.
+        let (mut radio, core, _device, _events) = running_radio();
+        let _control = control_on(&core, Arc::new(NoActions));
+        radio.stop(StopMode::Orderly).unwrap();
+        assert_eq!(end_items(&core), 2);
+        assert!(lock(&core.streams).stop.is_some());
+    }
+
+    #[test]
+    fn ur_16_a_uhd_control_panic_with_no_stream_running_is_a_lost_device() {
+        test_support::bounded("a panic with no stream running", Wall::from_secs(30), || {
+            // No `Control::new`: no stream has a line.
+            let (mut radio, core, device, events) = running_radio();
+            let release = panics_when_released(&mut radio, &core, "uhd-control");
+            release.send(()).unwrap();
+            all_finished(&radio);
+            radio.stop(StopMode::Orderly).unwrap();
+            radio.cleanup();
+            assert_one_loss(&core, &device, &events, "a Provider thread panicked");
+            assert_eq!(panic_rows(&core, "uhd-control"), 1);
+            assert_one_plan_row(&core);
+        });
+    }
+
+    #[test]
+    fn ur_16_a_uhd_control_panic_after_the_device_is_already_lost_is_recorded_once() {
+        test_support::bounded("a panic after a loss", Wall::from_secs(30), || {
+            let (mut radio, core, device, events) = running_radio();
+            let release = panics_when_released(&mut radio, &core, "uhd-control");
+            core.device_lost("scripted");
+            release.send(()).unwrap();
+            all_finished(&radio);
+            radio.stop(StopMode::Orderly).unwrap();
+            radio.cleanup();
+            assert_one_loss(&core, &device, &events, "scripted");
+            assert_eq!(panic_rows(&core, "uhd-control"), 1);
+            assert_one_plan_row(&core);
+        });
+    }
+
+    #[test]
+    fn ur_16_a_uhd_control_panic_holding_the_line_lock_does_not_deadlock_device_lost() {
+        // The panic poisons `streams`; the handler's `device_lost` takes it again, through `lock`'s recovery.
+        test_support::bounded("a panic holding the line lock", Wall::from_secs(30), || {
+            let (mut radio, core, device, events) = running_radio();
+            let held = core.clone();
+            let (release, wait) = mpsc::channel::<()>();
+            radio
+                .spawn(&core, "uhd-control".to_owned(), move || {
+                    let _line = lock(&held.streams);
+                    let _ = wait.recv();
+                    panic!("test: uhd-control panics holding the line");
+                })
+                .unwrap();
+            release.send(()).unwrap();
+            all_finished(&radio);
+            assert!(core.streams.is_poisoned(), "the panic left the line poisoned");
+            assert_one_loss(&core, &device, &events, "a Provider thread panicked");
+            radio.stop(StopMode::Orderly).unwrap();
+            radio.cleanup();
+            assert_one_plan_row(&core);
+            assert_eq!(panic_rows(&core, "uhd-control"), 1);
+        });
+    }
+
+    /// Dispatches one Stop, then panics at the next `recv`, before it takes its lock; a second Stop stays queued.
+    struct OneThenPanic {
+        queue: Mutex<std::collections::VecDeque<ezsdr_kernel::module_api::Dispatched>>,
+        handed: std::sync::atomic::AtomicBool,
+    }
+    impl ActionReceiver for OneThenPanic {
+        fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
+            assert!(!self.handed.load(Ordering::SeqCst), "test: uhd-control's receive panics after the first Action");
+            let next = self.queue.lock().unwrap().pop_front();
+            self.handed.store(next.is_some(), Ordering::SeqCst);
+            next
+        }
+    }
+
+    #[test]
+    fn ur_16_a_uhd_control_panic_between_two_actions_books_the_first_and_leaves_the_second() {
+        test_support::bounded("a panic between two Actions", Wall::from_secs(30), || {
+            let (mut radio, core, device, events) = running_radio();
+            let stop = |id| {
+                ezsdr_kernel::module_api::Dispatched::new(
+                    ezsdr_kernel::event::ActionId(id),
+                    ezsdr_kernel::event::Action::Stop { target: Some(test_support::target_of(&core.tx_id)) },
+                    Some(core.tx_id.clone()),
+                )
+            };
+            let actions = Arc::new(OneThenPanic { queue: Mutex::new([stop(1), stop(2)].into()), handed: Default::default() });
+            let control = control_on(&core, actions.clone());
+            radio.spawn(&core, "uhd-control".to_owned(), move || control.run()).unwrap();
+            all_finished(&radio);
+            // The first Stop is booked and recorded; the second was never taken, and nothing refuses it.
+            let applied = rows(&core, "tx_stop_applied");
+            let lost = rows(&core, "device_lost");
+            assert_eq!((applied.len(), lost.len()), (1, 1), "{:?}", lock(&core.rec).timing);
+            assert!(lost[0]["at"].as_i64() >= applied[0]["at"].as_i64());
+            assert_eq!(actions.queue.lock().unwrap().len(), 1, "the second Action is still queued");
+            let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+            assert!(!delivered.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED), "{delivered:?}");
+            let lost_events = delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count();
+            assert_eq!(lost_events, 1, "{delivered:?}");
+            assert_eq!(device.calls().iter().filter(|call| *call == "mark_lost").count(), 1);
+            radio.stop(StopMode::Orderly).unwrap();
+            radio.cleanup();
+        });
+    }
+
+    #[test]
+    fn ur_16_a_uhd_control_panic_after_it_returns_does_not_write_a_second_plan_row() {
+        // The stop's end is booked before uhd-control runs, so `run` returns at once; the panic that follows is a loss, and the plan is
+        // the one `stop` writes.
+        test_support::bounded("a panic after uhd-control returned", Wall::from_secs(30), || {
+            let (mut radio, core, device, events) = running_radio();
+            let control = control_on(&core, Arc::new(NoActions));
+            {
+                let mut streams = lock(&core.streams);
+                let at = core.now();
+                streams.stop = Some((at, StopMode::Orderly));
+                streams.end(&core, at, false, false);
+                core.release_streams(streams);
+            }
+            radio
+                .spawn(&core, "uhd-control".to_owned(), move || {
+                    control.run();
+                    panic!("test: uhd-control panics after it returned");
+                })
+                .unwrap();
+            all_finished(&radio);
+            radio.stop(StopMode::Orderly).unwrap();
+            radio.cleanup();
+            assert_one_loss(&core, &device, &events, "a Provider thread panicked");
+            assert_eq!(panic_rows(&core, "uhd-control"), 1);
+            assert_one_plan_row(&core);
+        });
     }
 }

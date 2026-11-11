@@ -1510,7 +1510,9 @@ fn section_of(instance: &ezsdr_kernel::module_api::ProviderInstance, suffix: &st
 
 /// The `timing` section's `plan` row (UR-30), each stream's segments in stream order.
 fn plan_row(timing: &Json) -> Json {
-    timing.as_array().unwrap().iter().find(|row| row["what"] == "plan").unwrap_or_else(|| panic!("no plan: {timing}")).clone()
+    let plans: Vec<&Json> = timing.as_array().unwrap().iter().filter(|row| row["what"] == "plan").collect();
+    assert_eq!(plans.len(), 1, "UR-30: exactly one plan row: {timing}");
+    plans[0].clone()
 }
 
 /// The plan's rows of `dir`'s stream `k`, in order (UR-30).
@@ -2316,7 +2318,7 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
 #[test]
 fn ur_25_a_receive_session_follows_its_recorded_plan() {
     // Spec 22, VH-8: the receive path end to end — uhd-control's booking, uhd-rx's thread, the
-    // streamer and the device's commands — carries out the plan uhd-control records: after two
+    // streamer and the device's commands — carries out the plan `Provider::stop` records: after two
     // `Stop`/`start_rx` pairs and the Run's stop, the plan has three segments,
     // in order and apart, and every SampleClock is one of them, in order, ended at its cut — or,
     // when uhd-rx had delivered past a `Stop`'s cut before it was booked, at the first sample it
@@ -7968,4 +7970,331 @@ fn n47s5_one_sample_after_a_burst_refusal_rehearsal_on_the_fake() {
         println!("rehearsal B8 end + {}, booked late {late_booking}: {outcome:?}", offset - 30_000);
         assert!(matches!(outcome, common::tone::Verdict::Pass(_)), "booked late {late_booking}: {outcome:?}");
     }
+}
+
+// ------------------------------------------------ #92: a uhd-control panic is a DEVICE_LOST (UR-16)
+
+/// A device whose `time_now` panics on uhd-control's thread once armed: the panic is put there by the test (UHD does not panic in `time_now`),
+/// and reaches uhd-control at its next 500 ms device check.
+struct PanicsInControl {
+    inner: Arc<FakeDevice>,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ezsdr_radio_uhd::Device for PanicsInControl {
+    fn describe(&self) -> Json {
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity {
+        self.inner.fidelity()
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.inner.master_clock_rate()
+    }
+    fn channels(&self, d: ezsdr_radio_uhd::Dir) -> usize {
+        self.inner.channels(d)
+    }
+    fn front_end(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> {
+        self.inner.front_end(d, c)
+    }
+    fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> {
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, d: ezsdr_radio_uhd::Dir, m: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.set_subdev_spec(d, m)
+    }
+    fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> {
+        self.inner.rates(d, c)
+    }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.set_sources(c, t)
+    }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.set_time_zero(p)
+    }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) && std::thread::current().name() == Some("uhd-control") {
+            panic!("fake: time_now panics on uhd-control");
+        }
+        self.inner.time_now()
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
+        self.inner.ref_locked()
+    }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        self.inner.apply(d, c, s)
+    }
+    fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_open(s, c)
+    }
+    fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_start(s, at)
+    }
+    fn rx_packet_samples(&self, s: usize) -> usize {
+        self.inner.rx_packet_samples(s)
+    }
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
+    }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
+        self.inner.rx_recv(s, n, t, one_packet)
+    }
+    fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.tx_open(s, c)
+    }
+    fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> {
+        self.inner.tx_send(s, b, at, sob, eob, t)
+    }
+    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> {
+        self.inner.tx_async(s, t)
+    }
+    fn rx_close(&self, s: usize) {
+        self.inner.rx_close(s)
+    }
+    fn tx_close(&self, s: usize) {
+        self.inner.tx_close(s)
+    }
+    fn close_streams(&self) {
+        self.inner.close_streams()
+    }
+    fn mark_lost(&self) {
+        self.inner.mark_lost()
+    }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.raise_thread_priority()
+    }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock {
+        self.inner.host()
+    }
+}
+
+/// An Authority whose time panics on uhd-control's thread, once, when armed: a panic inside `book` and under the line lock, where `book` reads
+/// the time (`DeviceAuthority::now` reads no device, so no device wrapper reaches it). The panic is injected, not evidence that the Authority
+/// panics.
+struct PanicsInBook {
+    inner: DeviceAuthority,
+    time: Arc<PanickingTime>,
+}
+
+struct PanickingTime {
+    inner: Arc<dyn ezsdr_kernel::time::TimeAuthority>,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ezsdr_kernel::time::TimeAuthority for PanickingTime {
+    fn primary_root(&self) -> ClockDomainId {
+        self.inner.primary_root()
+    }
+    fn pacing(&self) -> ezsdr_kernel::module_api::Pacing {
+        self.inner.pacing()
+    }
+    fn governs(&self, domain: ClockDomainId) -> bool {
+        self.inner.governs(domain)
+    }
+    fn now(&self, domain: ClockDomainId) -> Result<TimePoint, ezsdr_kernel::time::TimeError> {
+        if std::thread::current().name() == Some("uhd-control") && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            panic!("fake: the Authority's time panics on uhd-control");
+        }
+        self.inner.now(domain)
+    }
+    fn wait_until(&self, t: TimePoint) -> Result<(), ezsdr_kernel::time::TimeError> {
+        self.inner.wait_until(t)
+    }
+    fn schedule(&self, t: TimePoint, f: Box<dyn FnOnce(TimePoint) + Send>) -> Result<ezsdr_kernel::time::ScheduleHandle, ezsdr_kernel::time::TimeError> {
+        self.inner.schedule(t, f)
+    }
+    fn cancel(&self, h: ezsdr_kernel::time::ScheduleHandle) -> bool {
+        self.inner.cancel(h)
+    }
+}
+
+impl Authority for PanicsInBook {
+    fn descriptor(&self) -> &ezsdr_kernel::module_api::AuthorityDescriptor {
+        self.inner.descriptor()
+    }
+    fn time(&self) -> Arc<dyn ezsdr_kernel::time::TimeAuthority> {
+        self.time.clone()
+    }
+    fn next_wakeup(&self) -> Option<TimePoint> {
+        self.inner.next_wakeup()
+    }
+    fn relations(&self) -> Vec<ezsdr_kernel::time::ClockRelation> {
+        self.inner.relations()
+    }
+}
+
+fn panicking_control_device(config: FakeConfig) -> (Arc<PanicsInControl>, Arc<std::sync::atomic::AtomicBool>) {
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    (Arc::new(PanicsInControl { inner: fake(config), armed: armed.clone() }), armed)
+}
+
+/// What a Run that lost its device to a uhd-control panic (UR-16) shows, whichever way it ended: one fatal `DEVICE_LOST` with the panic's message,
+/// the panic in `rejected`, nothing that did not join, the device marked lost before it was closed, the plan once (UR-30), and every stream's clock
+/// ended (a transmit clock that no Stop cut stays open after a loss of the device itself, so the check is of the receive ones).
+fn assert_a_control_panic_ended_the_run(manifest: &Manifest, device: &FakeDevice) {
+    let lost = events_of(manifest, EventKind::DEVICE_LOST);
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!((lost[0].payload["message"].as_str(), lost[0].severity), (Some("a Provider thread panicked"), ezsdr_kernel::event::Severity::Fatal));
+    assert_eq!(lost[0].source, usrp());
+    let rejected = section(manifest, "rejected").as_array().unwrap();
+    assert!(rejected.iter().any(|row| row["thread"] == "uhd-control" && row["reason"] == "panicked"), "{rejected:?}");
+    assert!(!rejected.iter().any(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join"))), "{rejected:?}");
+    assert_marked_lost_before_closed(device);
+    plan_row(section(manifest, "timing"));
+    assert_the_receive_clocks_ended(&manifest.clocks.sample_clocks, false);
+}
+
+/// Every receive clock the Run registered is ended; `registered` also requires one (uhd-rx registers it at its first block, which a Run
+/// that is lost at once may not have reached).
+fn assert_the_receive_clocks_ended(records: &[ezsdr_kernel::time::SampleClockRecord], registered: bool) {
+    let receive: Vec<_> = records.iter().filter(|record| record.stream.path().starts_with("usrp/rx")).collect();
+    assert!(!(registered && receive.is_empty()) && receive.iter().all(|record| record.ended_at.is_some()), "{records:?}");
+}
+
+/// The Run ends at the loss under the default Policy: its termination is the Policy's, not KC-21a's budget or a horizon.
+fn assert_the_loss_ended_it(manifest: &Manifest) {
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
+}
+
+#[test]
+fn ur_16_a_uhd_control_panic_ends_the_run_with_a_lost_device() {
+    // The issue's sequence: a repeat plays, uhd-control panics at its next device check, and the Run ends at the loss, under the default Policy.
+    let run_once = |loss: Option<Wall>| {
+        let faults = loss.map(|at| vec![FakeFault::Lost(at)]).unwrap_or_default();
+        let (tested, armed) = panicking_control_device(FakeConfig { faults, ..FakeConfig::default() });
+        let (inner, probe) = (tested.inner.clone(), tested.inner.clone());
+        let manifest = bounded("a Run whose uhd-control panics", Wall::from_secs(30), move || {
+            let (mut run, _dir) = tx_session_on(tested);
+            let _ = send(&mut run, "start_repeat", Some(ms(8)), &tone(100));
+            // The repeat is playing once the device has its first experiment send (not arm's four-zero flush).
+            while tx_experiment_sends(&probe, "tx_send").is_empty() {
+                wait(&mut run, ms(5));
+            }
+            if loss.is_none() {
+                armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let result = run.run_until_end(after(&run, ms(5_000)));
+            assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
+            run.finish()
+        });
+        (manifest, inner)
+    };
+    let (manifest, device) = run_once(None);
+    assert_the_loss_ended_it(&manifest);
+    let rejected = section(&manifest, "rejected").as_array().unwrap();
+    assert!(rejected.iter().any(|row| row["thread"] == "uhd-control" && row["reason"] == "panicked"), "{rejected:?}");
+    assert!(!rejected.iter().any(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join"))), "{rejected:?}");
+    assert_a_control_panic_ended_the_run(&manifest, &device);
+    // A panic is no weaker an end than the loss the device itself reports: the same Run with `FakeFault::Lost` ends the same way, with the
+    // same streams ended.
+    let (reference, _) = run_once(Some(Wall::from_millis(2_300)));
+    assert_eq!(reference.termination.reason, manifest.termination.reason);
+    assert_eq!(
+        reference.clocks.sample_clocks.iter().map(|record| record.ended_at.is_some()).collect::<Vec<_>>(),
+        manifest.clocks.sample_clocks.iter().map(|record| record.ended_at.is_some()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn ur_16_a_uhd_control_panic_with_no_stream_sending_ends_the_run() {
+    let (device, armed) = panicking_control_device(FakeConfig::default());
+    let inner = device.inner.clone();
+    let manifest = bounded("an idle Run whose uhd-control panics", Wall::from_secs(30), move || {
+        let (mut run, _dir) = tx_session_on(device);
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = run.run_until_end(after(&run, ms(5_000)));
+        assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
+        run.finish()
+    });
+    assert_the_loss_ended_it(&manifest);
+    assert_a_control_panic_ended_the_run(&manifest, &inner);
+    // Only `arm`'s four-zero flush (UR-13) was sent.
+    assert_eq!(calls(&inner, "tx_send"), ["tx_send 0 n=4 at=- sob=true eob=true"], "{:?}", inner.calls());
+}
+
+#[test]
+fn ur_16_a_uhd_control_panic_while_a_submit_waits_ends_it_with_the_loss() {
+    // KC-21a's own sequence: the Session's Stop is dispatched to uhd-control and the submit waits for it to be taken; uhd-control panics in
+    // `book`, holding the line, so the Action is never acknowledged. The loss, not the 5 s budget, ends the Run.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let profile = profile(&dir, json!({}), json!({}), true);
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook = armed.clone();
+    let assembly = common::assembly_with_authority(
+        &profile,
+        device.clone(),
+        BTreeMap::new(),
+        |r| r,
+        move |authority| {
+            let time = Arc::new(PanickingTime { inner: ezsdr_kernel::module_api::Authority::time(&authority), armed: hook });
+            Box::new(PanicsInBook { inner: authority, time })
+        },
+    );
+    let manifest = bounded("a submit that waits on a panicking uhd-control", Wall::from_secs(30), {
+        let device = device.clone();
+        move || {
+            let mut run = session_on(&profile, &rx0_tx0(&profile), assembly);
+            past_t0(&mut run, ms(1));
+            past_tx_origin(&mut run);
+            let _keep = device;
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = run.submit(SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
+            run.finish()
+        }
+    });
+    assert_the_loss_ended_it(&manifest);
+    assert_a_control_panic_ended_the_run(&manifest, &device);
+}
+
+#[test]
+fn ur_16_a_uhd_control_panic_under_a_continuing_policy_still_stops_the_repeat() {
+    // A Policy that continues past `DEVICE_LOST` leaves the Run running: the Provider's own loss path must stop new work and end the
+    // streams, before anything shuts the Provider down (Oracle Q of the test plan).
+    const TX_CALLS: [&str; 7] = ["tx_send", "tx_open", "tx_close", "rx_open", "rx_start", "rx_recv", "close_streams"];
+    // What one pass of each owner can still do after it read the device as healthy: uhd-tx's send and its held tail (tx.rs), and one receive
+    // call of each of the two receive owners.
+    const IN_FLIGHT: usize = 4;
+    let new_work = |calls: &[String], after: usize| calls[after + 1..].iter().filter(|call| TX_CALLS.iter().any(|name| call.split(' ').next() == Some(name))).count();
+    let send_size = |call: &String| call.split(' ').find_map(|part| part.strip_prefix("n=")).and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+
+    let dir = TempDir::new();
+    let (device, armed) = panicking_control_device(FakeConfig::default());
+    let inner = device.inner.clone();
+    let (bytes, waveform) = waveform_of(&tone(1_000));
+    let mut spec = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, true, "send_asap_and_flag", 1_000);
+    spec["policies"] = json!({ "failure": { "ezsdr.DEVICE_LOST": "continue" } });
+    let doc = profile(&dir, json!({}), json!({}), false);
+    let inputs = BTreeMap::from([(waveform.hash.clone(), bytes)]);
+    let manifest = bounded("a Run that continues past a uhd-control panic", Wall::from_secs(60), {
+        let inner = inner.clone();
+        move || {
+            let mut run = spec_run(&spec, &doc, device, inputs);
+            running(&run);
+            past_t0(&mut run, ms(300));
+            while tx_experiment_sends(&inner, "tx_send").is_empty() {
+                wait(&mut run, ms(5));
+            }
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            while !inner.calls().iter().any(|call| call == "mark_lost") {
+                wait(&mut run, ms(20));
+            }
+            let at_loss = inner.calls();
+            let marked = at_loss.iter().position(|call| call == "mark_lost").unwrap();
+            let largest = at_loss[..marked].iter().filter(|call| call.starts_with("tx_send")).map(send_size).max().unwrap_or(0);
+            // Quiescence: the first window may hold what was already admitted; the second may not hold anything new.
+            wait(&mut run, ms(50));
+            let first = inner.calls();
+            wait(&mut run, ms(50));
+            let second = inner.calls();
+            assert!(new_work(&first, marked) <= IN_FLIGHT, "{first:?}");
+            assert_eq!(new_work(&second, marked), new_work(&first, marked), "new work was initiated after the owners could see the loss: {second:?}");
+            let played = |calls: &[String]| calls[marked + 1..].iter().filter(|call| call.starts_with("tx_send")).map(send_size).sum::<usize>();
+            assert!(played(&second) <= IN_FLIGHT * largest, "{second:?}");
+            // The streams ended at the loss, before any stop of the Provider.
+            assert_the_receive_clocks_ended(&run.sample_clocks(), true);
+            run.finish()
+        }
+    });
+    assert_a_control_panic_ended_the_run(&manifest, &inner);
 }

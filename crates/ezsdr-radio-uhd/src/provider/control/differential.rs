@@ -238,10 +238,6 @@ fn run(sequence: &Sequence) -> Record {
         let next_round = rounds.peek().map(|(round, _)| T0 + ticks(*round));
         now = [Some(now + MS), next_round, loss.filter(|loss| *loss > now)].into_iter().flatten().min().unwrap();
     }
-    // The end at the loss's instant records the plan.
-    if core.is_lost() {
-        control.finish();
-    }
     let records = core.clocks.sample_clock_records();
     let clocks_of = |stream| records.iter().filter(|r| r.stream == stream).map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|t| t.ticks_in(r.root).unwrap()))).collect();
     let rejected = lock(&core.rec).rejected.len();

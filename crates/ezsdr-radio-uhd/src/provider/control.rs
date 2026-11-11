@@ -235,7 +235,7 @@ impl Control {
         let mut last_check = self.host.now();
         loop {
             if lock(&self.core.streams).stop.is_some() {
-                return self.finish();
+                return;
             }
             // MA-14b: each Action is booked before the next `recv()`.
             while let Some(dispatched) = self.actions.recv() {
@@ -249,14 +249,6 @@ impl Control {
             }
             self.host.sleep(POLL);
         }
-    }
-
-    /// UR-26: `Provider::stop`, or a loss, which has booked the streams' end, records UR-30's
-    /// plans.
-    pub(super) fn finish(&mut self) {
-        lock(&self.core.streams).ended_at().expect("UR-26: the end was booked before uhd-control finishes");
-        let plan = lock(&self.core.streams).record();
-        self.core.timing(plan);
     }
 
     /// `node` is what the Kernel resolved the target to (KC-23), which is what a
