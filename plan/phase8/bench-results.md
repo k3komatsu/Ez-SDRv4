@@ -429,3 +429,13 @@ owner が電源を入れ直した後，att は三つの board とも 30 dB（own
 - **前線は時間で決める一つの規則（A）**：32 sample 以下の閉じた device burst の後の次の開始は送った終わり＋max(3 sample, 15 µs) 以降，ほかの閉じた burst の後は終わり＋3 sample 以降．補間の比ごとの表（B）と，比 80 以上だけの guard（C）は採らない．理由（owner）：32 sample 以下という限られた場合にしか生じないので，多くの corner case を生むより単純に解決できる方式がよい．
 - **送信の rate は 1 MS/s 以上（補間の比 200 以下）に限る**．受信は今のまま．0.5 MS/s で区切る案は粗い格子でしか確かめていないので採らない．利用者から見える Ceiling（KNOWN_LIMITATIONS に足す）．
 - #81・#82 は，この二つを入れる段階の後の実機（Module の試験を複数の rate で）で閉じる．
+
+## 2026-11-11：段階 F と E2a の後（#2＝X300 347D541＋UBX，#1＝X300 347D545＋OBX，commit `e355fdc`）
+
+条件と機械で読める結果は [bench/2026-11-11-after-stepF-e2a](../../bench/2026-11-11-after-stepF-e2a/README.md)（生の log は非公開の `k3komatsu/Ez-SDRv4-bench-raw` の release）．att は二台とも 30 dB の loopback（owner 確認）．基準は内部．[bench.md](bench.md) の「段階 F の後」から 30 分に絞った組（owner 2026-11-11）：(c) 前線，(d) 保留の尾と Stop の領域，E2a で期待が変わる switch と Stop の終わり．12:18〜12:30，電源の入れ直しなし．
+
+- (c)1 前線：6 長さ × 6 rate の 36 行が二台とも PASS．N-H1（gap g，16 試行／rate）も二台とも PASS．100・200 MS/s の長い閉じ（保持した尾＋0 の 3 sample 後）は二台とも 4 試行ずつ PASS（200 MS/s の＋3 は測った最小のままで，余裕 0 は変わらない）．→ **#81 を閉じた**．
+- (d)：J(e) の 3 行，二つの 0 の閉じの後の c＋5，R5-m5（c＋3＋g，12 試行／rate，6 rate）は二台とも PASS．Session の行は前と同じく INCONCLUSIVE．→ **#82 を閉じた**．
+- E2a：`hw_n47s5_repeat_switch`（時刻なし・あり）は二台とも PASS（行は applied，境目で 100 → 200 kHz，継ぎ目なし，新しい拒否なし）．`hw_b8_stop_end` は 3 試行とも許容の中（#2 −4000〜+4000，#1 −5400〜+11000 tick）．
+- 流していない：(b) T1 の回帰 9 試験（段階 F で期待の変わった `hw_b8_burst_one_sample_after_a_burst` と B7 の同調し直しを含む．FakeDevice の予行演習は通る）．次の実機で流す．
+- 判定の外の観測：(c)1 の tone の始まりは多くの行で予約の 30〜37 sample 後（loop の遅延は約 27）だが，2.857 MS/s と 10 MS/s の全行などは 8〜12 sample 後．許容 ±50 の中で，onset の検出の粗さかもしれない．追っていない．

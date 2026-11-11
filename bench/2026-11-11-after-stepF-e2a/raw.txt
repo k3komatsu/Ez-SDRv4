@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-11-11-after-stepF-e2a (private)
+asset:   2026-11-11-after-stepF-e2a.tar.xz  47904 bytes
+sha256:  e15b734103a0ad3f9303813724b0a58715a62b8fa27409870e0af395c270dbae
+source:  ~/.cache/ezsdr-bench/2026-11-11 on usrp-lnx03, plus the run script bench-1111.sh
+fetch:   gh release download 2026-11-11-after-stepF-e2a -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-11-11-after-stepF-e2a bench/2026-11-11-after-stepF-e2a/results

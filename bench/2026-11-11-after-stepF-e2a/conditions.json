@@ -1,0 +1,17 @@
+{
+  "session": "2026-11-11-after-stepF-e2a",
+  "commit": "4546f17 (code as e355fdc: step F d9fddf3 and note 49 E2a)",
+  "tools": { "hardware tests": "crates/ezsdr-radio-uhd/tests/hardware.rs at e355fdc", "runner": "bench-1111.sh in the raw archive (the hw() function of plan/phase8/bench.md, stops a board at its first failure)" },
+  "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0)",
+  "boards": [
+    { "id": "#2", "board_arg": "37", "serial": "347D541", "fpga": "39.3 (HG)", "slot_a": "UBX-160 v2", "slot_b": "CBX (not used)", "addr": "192.168.47.37", "nic": "enp1s0f0np0" },
+    { "id": "#1", "board_arg": "36", "serial": "347D545", "fpga": "39.3 (HG)", "slot_a": "OBX", "slot_b": "empty", "addr": "192.168.40.36", "nic": "enp1s0f1np1" }
+  ],
+  "rf": { "wiring": "each board's slot-A TX/RX -> 30 dB attenuator -> RX2, as on 2026-11-10", "attenuation_db": 30, "owner_confirmed": true, "frequency_hz": 1000000000, "tx_gain_db": 0, "envelope": "999-1001 MHz, max gain 0 dB" },
+  "reference": "internal",
+  "host": "usrp-lnx03; MTU 9000; frame 8000 bytes",
+  "rates_sps": [1000000, 2000000, 2857142.857, 10000000, 100000000, 200000000],
+  "tests": ["hw_n47s5_front_after_a_short_burst", "hw_n47s5_long_b_after_a_short_head_gap_below_and_at_the_front", "hw_n47s5_a_long_close_at_100_and_200_msps", "hw_n47s5_raw_front_gaps", "hw_n47s5_held_tail_and_stop", "hw_n47s5_repeat_switch", "hw_b8_stop_end"],
+  "not_run": "plan/phase8/bench.md 'after step F' (b), the T1 regression of 9 tests (owner 2026-11-11: a 30-minute set)",
+  "power_cycles": "none; no PLL lock failure"
+}
