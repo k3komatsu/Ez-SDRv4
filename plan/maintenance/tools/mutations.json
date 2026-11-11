@@ -6831,8 +6831,8 @@
   "id": "P627",
   "name": "MockRadio reads the TX in-flight window from its profile (MR-17)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        let window = time::ns_to_v(clocks, root, self.profile.timing().tx_in_flight_ns)\n            .map_err(|error| ModuleError::rejected(format!(\"MR-17: {error}\")))?;",
-  "new": "        let window = time::ns_to_v(clocks, root, 10_000_000)\n            .map_err(|error| ModuleError::rejected(format!(\"MR-17: {error}\")))?;",
+  "old": "self.root.expect(\"prepared root\"), self.profile.timing().tx_in_flight_ns)",
+  "new": "self.root.expect(\"prepared root\"), 10_000_000)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_25_a_stopped_burst_transmits_every_sample_before_the_stop"
@@ -13903,8 +13903,8 @@
     "id": "N47S4-17c",
     "name": "a Stop does not bound the UHD stream's Busy (RM-16, RM-21, S3)",
     "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-    "old": "Some((bound, Some((",
-    "new": "Some((i64::MAX, Some((",
+    "old": "Some((bound, clock.try_at_or_after(at)",
+    "new": "Some((i64::MAX, clock.try_at_or_after(at)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_value_is_taken_only_after_a_stopped_repeat_s_in_flight_window"
@@ -13973,7 +13973,7 @@
     "id": "N47S4-18b",
     "name": "a MockRadio burst does not book its stream (RM-21, S2)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "self.tx[k].book.book(held, end);",
+    "old": "self.tx[k].book.book(held, end.flatten());",
     "new": "self.tx[k].book.book(held, Some(i64::MIN));",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
@@ -14441,8 +14441,8 @@
     "id": "N47S5-13",
     "name": "5a: the repeat boundary is the floor of the first period at or after the bound, not its ceiling",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "(bound - origin).max(0) + period - 1",
-    "new": "(bound - origin).max(0)",
+    "old": "wait + period - 1",
+    "new": "wait",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_13_repeat_boundary_is_the_first_boundary_at_or_after_the_bound"
@@ -14591,7 +14591,7 @@
     "id": "N47S5-30",
     "name": "5b-2a: UHD's Stop adds no stop tail to the overlap record (RM-16, S7)",
     "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-    "old": "Some((clock.at_or_after(at), stop_sample(at, in_flight, |t| clock.at_or_after(t))))",
+    "old": "clock.try_at_or_after(at).map(|at_stop| (at_stop, stop_sample(at, in_flight, at_or_after)))",
     "new": "None",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -15304,8 +15304,8 @@
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_16_an_untimed_burst_is_not_judged_late",
-    "old": "let mut policy = if switch || untimed {",
-    "new": "let mut policy = if switch {"
+    "old": "let decision = if switch || untimed {",
+    "new": "let decision = if switch {"
   },
   {
     "id": "N47S5-121",
@@ -15492,7 +15492,7 @@
     "name": "rev 30 (F57), E2a-3: a switch takes its receipt's bound, not the first boundary of the replaced repeat's grid at or after it (the boundary rule is shared since E2a-3 (D9); the untimed switch's killer)",
     "file": "crates/ezsdr-radio/src/staging.rs",
     "old": "repeat_boundary(playing.origin, playing.period, bound_k.max(at_k))",
-    "new": "bound_k.max(at_k)",
+    "new": "Some(bound_k.max(at_k))",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
     "filter": "ur_21_s19_untimed_switch_takes_the_first_grid_boundary_after_its_receipt_window"
@@ -16490,8 +16490,8 @@
     "id": "E1-K3",
     "name": "E1: the Mock reads a booking before it is queued (RM-15)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "self.tx[k].book.book(held, end); self.read_tx(k, now, \"\")?;",
-    "new": "self.read_tx(k, now, \"\")?; self.tx[k].book.book(held, end);",
+    "old": "self.tx[k].book.book(held, end.flatten()); self.read_tx(k, now, \"\")?;",
+    "new": "self.read_tx(k, now, \"\")?; self.tx[k].book.book(held, end.flatten());",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_channel",
     "filter": "e1_mock_q10_a_booking_a_stop_and_a_booking_in_one_step"
@@ -17090,8 +17090,8 @@
   "id": "E2A3-07",
   "name": "#86: an untimed switch records its Kernel instant as its requested target",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "(!untimed && boundary != repeat_boundary(playing.origin, playing.period, at_k))",
-  "new": "(boundary != repeat_boundary(playing.origin, playing.period, at_k))",
+  "old": "(!untimed && Some(boundary) != repeat_boundary(playing.origin, playing.period, at_k))",
+  "new": "(Some(boundary) != repeat_boundary(playing.origin, playing.period, at_k))",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "txbook_receive_switch_requested_target_rule"
@@ -17100,7 +17100,7 @@
   "id": "E2A3-08",
   "name": "#86: a switch counts as pushed when its `at` is before the bound, not when its boundary passes the grid point of `at`",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "boundary != repeat_boundary(playing.origin, playing.period, at_k)",
+  "old": "Some(boundary) != repeat_boundary(playing.origin, playing.period, at_k)",
   "new": "at_k < bound_k",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
@@ -17683,5 +17683,205 @@
   "crate": "ezsdr-kernel",
   "test_bin": "hashing",
   "filter": "ov_17_a_hasher_fed_in_pieces_equals_the_hash_of_the_whole"
+ },
+ {
+  "id": "N95-01",
+  "name": "#94: repeat_boundary wraps a result past i64::MAX instead of returning None",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "i64::try_from(origin + (wait + period - 1) / period * period).ok()",
+  "new": "Some((origin + (wait + period - 1) / period * period) as i64)",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "rm_37_a_repeat_boundary_that_does_not_fit_is_none_never_a_panic_or_a_wrapped_value"
+ },
+ {
+  "id": "N95-02",
+  "name": "#94: repeat_boundary accepts a period of zero (a division by zero)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "if period <= 0 {",
+  "new": "if period < 0 {",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "rm_37_a_repeat_boundary_that_does_not_fit_is_none_never_a_panic_or_a_wrapped_value"
+ },
+ {
+  "id": "N95-03",
+  "name": "#94: repeat_boundary lets a bound before the origin pull the boundary before the origin",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "(i128::from(bound) - origin).max(0)",
+  "new": "(i128::from(bound) - origin)",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "rm_13_repeat_boundary_is_the_first_boundary_at_or_after_the_bound"
+ },
+ {
+  "id": "N95-04",
+  "name": "#94: a switch whose boundary does not fit the clock is refused as no playing repeat",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": ".ok_or(SwitchRefusal::TimeOverflow)",
+  "new": ".ok_or(SwitchRefusal::NoPlayingRepeat)",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_switch_whose_boundary_does_not_fit_the_clock_is_refused_and_changes_nothing"
+ },
+ {
+  "id": "N95-05",
+  "name": "#95: MockRadio: a target whose lead overflows fails the Run instead of refusing the burst",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "Ok(policy) => policy, Err(error) => { self.reject_action_at(Some(id), \"tx_burst\", &format!(\"MR-17: {error}\"), now)?; return Ok(()); }",
+  "new": "Ok(policy) => policy, Err(error) => { Err::<(), ModuleError>(ModuleError::rejected(format!(\"MR-17: {error}\")))?; return Ok(()); }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_16_a_burst_time_that_does_not_fit_the_clock_is_refused_with_its_id_and_the_run_goes_on"
+ },
+ {
+  "id": "N95-06",
+  "name": "#95: MockRadio: a waveform of more than 2^32 - 1 samples fails the Run instead of refusing the burst",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "self.reject_action_at(Some(id), \"tx_burst\", \"MR-16: the waveform has more samples than a burst can hold\", now)?;",
+  "new": "Err::<(), ModuleError>(ModuleError::rejected(\"MR-16: the waveform has more samples than a burst can hold\"))?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_16_a_burst_time_that_does_not_fit_the_clock_is_refused_with_its_id_and_the_run_goes_on"
+ },
+ {
+  "id": "N95-07",
+  "name": "#95: MockRadio: a start that does not fit the clock is not refused (a repeat is booked)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if start_v.is_none() || end.is_some_and(|end| end.is_none()) {",
+  "new": "if end.is_some_and(|end| end.is_none()) {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_16_a_burst_time_that_does_not_fit_the_clock_is_refused_with_its_id_and_the_run_goes_on"
+ },
+ {
+  "id": "N95-08",
+  "name": "#95: MockRadio: an end that does not fit the clock is not refused",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if start_v.is_none() || end.is_some_and(|end| end.is_none()) {",
+  "new": "if start_v.is_none() {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_16_a_burst_time_that_does_not_fit_the_clock_is_refused_with_its_id_and_the_run_goes_on"
+ },
+ {
+  "id": "N95-10",
+  "name": "#95: UHD: a repeat whose start does not fit the clock is not refused",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "clock.try_instant(start).is_none() || end.is_some_and(|end| end.is_none())",
+  "new": "end.is_some_and(|end| end.is_none())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_burst_time_that_does_not_fit_the_clock_is_refused_with_its_id_and_the_next_booking_is_served"
+ },
+ {
+  "id": "N95-11",
+  "name": "#95: UHD: an end that does not fit the clock is not refused",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "clock.try_instant(start).is_none() || end.is_some_and(|end| end.is_none())",
+  "new": "clock.try_instant(start).is_none()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_burst_time_that_does_not_fit_the_clock_is_refused_with_its_id_and_the_next_booking_is_served"
+ },
+ {
+  "id": "N95-12",
+  "name": "#94: UHD: a switch at the end of the range is not refused (the overflow check is gone)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "clock.try_instant(start).is_none() || end.is_some_and(|end| end.is_none())",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_38_a_switch_at_the_end_of_the_range_is_refused_with_its_id_and_the_next_one_is_taken"
+ },
+ {
+  "id": "N95-13",
+  "name": "#94: MockRadio: a switch whose boundary does not fit a one-tick clock is refused as having no playing repeat",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "Err(SwitchRefusal::TimeOverflow) => Some(overflow),",
+  "new": "",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_16_a_switch_whose_boundary_does_not_fit_a_clock_of_one_tick_a_sample_is_refused_by_the_book"
+ },
+ {
+  "id": "N95-14",
+  "name": "#94: UHD: a switch whose boundary does not fit a one-tick clock is refused as having no playing repeat",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "Err(SwitchRefusal::TimeOverflow) => Some(overflow),",
+  "new": "Err(SwitchRefusal::TimeOverflow) => Some(\"UR-21: a repeat switch needs a playing repeat and no pending switch\"),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_38_a_switch_whose_boundary_does_not_fit_a_clock_of_one_tick_a_sample_is_refused_by_the_book"
+ },
+ {
+  "id": "N95-15",
+  "name": "#95: stop_fits does not check the sample at the Stop's own instant",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "&& at_or_after(at).is_some()",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "rm_16_a_stop_fits_only_when_its_horizon_sample_and_instant_fit_the_clock"
+ },
+ {
+  "id": "N95-16",
+  "name": "#95: stop_fits saturates the sample plus STOP_FRONT instead of checking it",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": ".and_then(|k| k.checked_add(STOP_FRONT))",
+  "new": ".map(|k| k.saturating_add(STOP_FRONT))",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "rm_16_a_stop_fits_only_when_its_horizon_sample_and_instant_fit_the_clock"
+ },
+ {
+  "id": "N95-17",
+  "name": "#95: stop_fits does not check the bound's root tick",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": ".and_then(instant)",
+  "new": ".and_then(Some)",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "rm_16_a_stop_fits_only_when_its_horizon_sample_and_instant_fit_the_clock"
+ },
+ {
+  "id": "N95-18",
+  "name": "#95: MockRadio: a Stop whose bound does not fit is not refused",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if !self.tx_stop_fits(k, now)? {",
+  "new": "if false {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_25_a_stop_whose_bound_does_not_fit_the_clock_is_refused_with_its_id_and_the_run_goes_on"
+ },
+ {
+  "id": "N95-19",
+  "name": "#95: UHD: a Stop whose bound does not fit is not refused",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": ".is_some_and(|clock| !ezsdr_radio::staging::stop_fits(now, window, |t| clock.try_at_or_after(t), |k| clock.try_instant(k)))",
+  "new": ".is_some_and(|_| false)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stop_whose_bound_does_not_fit_the_clock_is_refused_with_its_id_and_changes_nothing"
+ },
+ {
+  "id": "N95-20",
+  "name": "#95: UHD: Provider::stop panics where the bound does not fit instead of saturating",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "|k| clock.try_instant(k).unwrap_or(i64::MAX)",
+  "new": "|k| clock.try_instant(k).expect(\"an instant\")",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stop_whose_bound_does_not_fit_the_clock_is_refused_with_its_id_and_changes_nothing"
+ },
+ {
+  "id": "N95-21",
+  "name": "#95: MockRadio: the stop's hand-over horizon fails where it passes i64::MAX instead of saturating",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let horizon = now.saturating_add(window);",
+  "new": "let horizon = now.checked_add(window).expect(\"a horizon\");",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_25_a_stop_whose_bound_does_not_fit_the_clock_is_refused_with_its_id_and_the_run_goes_on"
  }
 ]

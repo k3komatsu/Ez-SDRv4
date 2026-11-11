@@ -1,0 +1,10 @@
+# Brief — #95/#94 fix round after Sol's code review
+
+Work tree /home/komatsu/local_work/Ez-SDRv4-n95 (branch `work/n95`, your change committed). brief.md's rules bind (rdev `--host sim02`; long shell timeouts; no commit; no mutants in the tree). Read Sol's review /home/komatsu/.cache/ezsdr-fixes/2026-11-12-n95/sol-code.md and fix (orchestrator adopted all, 2026-11-12):
+
+1. **Major — a Stop can still fail the Mock Run**: `crates/ezsdr-mock-radio/src/lib.rs:~1174` returns `ModuleError::rejected` when `now + window` overflows ("MR-25: hand-over horizon overflow"), escaping `step`. Make every receipt-time overflow of a Stop (and any other transmit Action you find on the same paths — re-audit all `checked_*`/`?` on the Mock's and the UHD's receipt paths) a receipt refusal with the Action's id, the Run going on, the same answer on both Providers (check what the UHD does for the same Stop at the same instant; if the UHD fails differently, make them agree and say how). Test it on both (Sol's sequence: start, queue Stop(tx/s0), step at root tick `i64::MAX - 1`), plus that the Run goes on.
+2. **Minor 1 — the oracle keeps #94's arithmetic**: `crates/ezsdr-acceptance/tests/oracle/mod.rs:~171–173` computes the grid in `i64`; give it the same overflow semantics (no boundary, never a wrapped one) and pin that independently.
+3. **Minor 2 — the paired tests accept any id and any rule**: `parity.rs:~2193–2194`: assert each Provider's expected Action id and rule before comparing normalised reasons.
+4. **Minor 3 — the "unreachable" `TimeOverflow` arms are reachable**: X3xx at 200 MS/s has one root tick per sample (`crates/ezsdr-radio/src/x3xx.rs:17,34,65–66`). Keep the arms, add a test at that rate that reaches them on both Providers, and add rows for them. Correct the report's claim.
+
+Re-anchor any row your changes touch; new rows' killers checked in a copy outside the repository. `cargo fmt --all --check`; `rules.py --base aa478bc` 0 problems; `rdev --host sim02 -- cargo test --workspace` once. Append "Fix round after Sol" to report.md; final message: its summary.

@@ -162,21 +162,28 @@ pub fn place(p: &Params, regions: &[Region], recv: i64, at: Option<i64>, len: Op
 }
 
 /// RM-37: a switch's boundary is the first sample `origin + j * period` (`j >= 0`) at or after the later of its `at` and the receipt's
-/// sample plus the window and the device lead.
-pub fn switch_boundary(p: &Params, origin: i64, period: i64, recv: i64, at: Option<i64>) -> i64 {
-    grid(origin, period, p.clock.at_or_after(recv + p.window + p.lead).max(at.unwrap_or(i64::MIN)))
+/// sample plus the window and the device lead. None when no such sample fits an `i64` (or `period` is not positive): the switch has no
+/// boundary and is refused at receipt.
+pub fn switch_boundary(p: &Params, origin: i64, period: i64, recv: i64, at: Option<i64>) -> Option<i64> {
+    let bound = recv.checked_add(p.window)?.checked_add(p.lead)?;
+    grid(origin, period, p.clock.at_or_after(bound).max(at.unwrap_or(i64::MIN)))
 }
 
-/// The first `origin + j * period`, `j >= 0`, at or after `bound`.
-fn grid(origin: i64, period: i64, bound: i64) -> i64 {
-    let d = (bound - origin).max(0);
-    origin + (d + period - 1).div_euclid(period) * period
+/// The first `origin + j * period`, `j >= 0`, at or after `bound`; None when it does not fit an `i64`. Wide integers, so that no step wraps.
+fn grid(origin: i64, period: i64, bound: i64) -> Option<i64> {
+    if period <= 0 {
+        return None;
+    }
+    let (origin, period) = (i128::from(origin), i128::from(period));
+    let d = (i128::from(bound) - origin).max(0);
+    i64::try_from(origin + (d + period - 1).div_euclid(period) * period).ok()
 }
 
 /// RM-37 (#86): the requested target a switch's burst record carries: its `at` when it is timed and the receipt pushed its boundary past
-/// the grid point `at` alone gives; none for an untimed switch (RS-19) or one on that grid point.
+/// the grid point `at` alone gives; none for an untimed switch (RS-19), one on that grid point, or one that has no boundary.
 pub fn switch_requested_target(p: &Params, origin: i64, period: i64, recv: i64, at: i64, untimed: bool) -> Option<i64> {
-    (!untimed && switch_boundary(p, origin, period, recv, Some(at)) != grid(origin, period, at)).then_some(at)
+    let (boundary, own) = (switch_boundary(p, origin, period, recv, Some(at))?, grid(origin, period, at)?);
+    (!untimed && boundary != own).then_some(at)
 }
 
 /// A burst the oracle expects on the device: waveform `tag` of `len` samples from `start`, repeating or not, until `end` (exclusive).

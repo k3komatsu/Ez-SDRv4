@@ -79,14 +79,34 @@ fn o1_oracle_rm_14_placement() {
 fn o1_oracle_rm_37_switch_boundary() {
     let p = uhd();
     // Origin 2000, period 1000, received at 3 ms: bound = 3 000 + 10 000 + 2 000 = 15 000, on the grid.
-    assert_eq!(switch_boundary(&p, 2_000, 1_000, ms(3), None), 15_000);
+    assert_eq!(switch_boundary(&p, 2_000, 1_000, ms(3), None), Some(15_000));
     // A period that divides nothing: the grid is 2000 + 700 j, so 15 300 (j = 19) and 16 000 (j = 20); a bound of 15 995 takes 16 000.
     assert_eq!(2_000 + 700 * 19, 15_300);
-    assert_eq!(switch_boundary(&p, 2_000, 700, ms(4) - 1_000, None), 16_000);
-    assert_eq!(switch_boundary(&p, 2_000, 700, ms(4), None), 16_000, "bound 16 000 is on the grid");
-    assert_eq!(switch_boundary(&p, 2_000, 700, ms(4) + 200, None), 16_700, "bound 16 001 moves to the next grid point");
+    assert_eq!(switch_boundary(&p, 2_000, 700, ms(4) - 1_000, None), Some(16_000));
+    assert_eq!(switch_boundary(&p, 2_000, 700, ms(4), None), Some(16_000), "bound 16 000 is on the grid");
+    assert_eq!(switch_boundary(&p, 2_000, 700, ms(4) + 200, None), Some(16_700), "bound 16 001 moves to the next grid point");
     // An explicit `at` later than the receipt's bound takes the grid point at or after it.
-    assert_eq!(switch_boundary(&p, 2_000, 700, ms(4), Some(16_100)), 16_700);
+    assert_eq!(switch_boundary(&p, 2_000, 700, ms(4), Some(16_100)), Some(16_700));
+}
+
+#[test]
+fn o1_oracle_rm_37_a_switch_boundary_that_does_not_fit_is_none_never_a_wrapped_one() {
+    // RM-37 (#94), from the rule: the boundary is origin + j * period at or after the bound, and an i64 that does not hold it is no boundary.
+    let p = uhd();
+    // Origin 0, period 10: the last grid point that fits is 9_223_372_036_854_775_800, its own boundary; a bound past it has none.
+    assert_eq!(switch_boundary(&p, 0, 10, ms(3), Some(9_223_372_036_854_775_800)), Some(9_223_372_036_854_775_800));
+    assert_eq!(switch_boundary(&p, 0, 10, ms(3), Some(9_223_372_036_854_775_801)), None);
+    assert_eq!(switch_boundary(&p, 0, 10, ms(3), Some(i64::MAX)), None);
+    // A period of one has a boundary at every sample, i64::MAX included.
+    assert_eq!(switch_boundary(&p, 0, 1, ms(3), Some(i64::MAX)), Some(i64::MAX));
+    // A bound far below a negative origin takes the receipt's bound (15 000): -5 + 10 j, j = 1 501.
+    assert_eq!(switch_boundary(&p, -5, 10, ms(3), Some(i64::MIN)), Some(15_005));
+    // The span from the origin to the bound passes i64::MAX and does not wrap.
+    assert_eq!(switch_boundary(&p, i64::MIN, 10, ms(3), Some(i64::MAX)), None);
+    // A period that is not positive has no grid.
+    assert_eq!((switch_boundary(&p, 0, 0, ms(3), None), switch_boundary(&p, 0, -1, ms(3), None)), (None, None));
+    // A switch with no boundary carries no requested target.
+    assert_eq!(switch_requested_target(&p, 0, 10, ms(3), i64::MAX, false), None);
 }
 
 #[test]

@@ -2071,7 +2071,7 @@ fn ur_21_s19_untimed_switch_takes_the_first_grid_boundary_after_its_receipt_wind
     let grid = serde_json::to_value(bursts(&manifest)[0].target).unwrap()["ticks"].as_i64().unwrap();
     let receipt = rows[0]["selected_at"]["ticks"].as_i64().unwrap() - origin_ticks;
     let bound = (receipt + 12_000 * 200 + 199).div_euclid(200);
-    assert_eq!(rows[0]["boundary"].as_i64().unwrap(), ezsdr_radio::staging::repeat_boundary(grid, 1_024, bound));
+    assert_eq!(rows[0]["boundary"].as_i64().unwrap(), ezsdr_radio::staging::repeat_boundary(grid, 1_024, bound).unwrap());
     // #86: an untimed switch has no requested instant (RS-19), so its new repeat's record carries no requested target.
     assert_eq!(bursts(&manifest)[1].requested_target, None, "{:?}", bursts(&manifest));
 }

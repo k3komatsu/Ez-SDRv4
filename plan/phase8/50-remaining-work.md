@@ -26,7 +26,7 @@
 | 2 | 試験の時刻の設計とその段（#91 を含む） | 1 | owner の決定済み（`~/.cache/ezsdr-fixes/2026-11-11-test-timing/`，Fable 5.2 の下書き → Sol FAIL → Q3 を (c) に決め直し，Fable が手直し中）．gate の信頼 |
 | 3 | #92（uhd-control の panic で Run が終わらない） | 1 | RF の安全 |
 | 4 | #90（大きな capture が Manifest から落ちる） | 2 | 済（2026-11-12，記録 `reviews/n90-*`．hash は Kernel の `ContentHasher`〈owner 2026-11-11〉） |
-| 5 | #95＋#94（時刻の overflow） | 2 | #95 は Mock と UHD の振る舞いの差．#94 は同じ所．E3 より前に |
+| 5 | #95＋#94（時刻の overflow） | 2 | 済（2026-11-12，記録 `reviews/n95-*`．時計に収まらない送信の時刻と Stop は両 Provider で受付の拒否） |
 | 6 | 49 の E2b（Configure と Reopen を操作に） | 1 | 振る舞いは変えない．寿命の扱いを一つに |
 | 7 | 49 の E3（区切りの判断を `ezsdr_radio` へ） | 1 | Phase 8 の主題（Mock と実機をそろえる）．文書監査の D2 もここで |
 | 8 | 49 の C2（KL-42：Stop の後の `applied`） | 1 | 記録が実際と違う |

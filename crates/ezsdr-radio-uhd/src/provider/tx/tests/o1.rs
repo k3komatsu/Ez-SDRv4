@@ -358,7 +358,7 @@ fn o1_uhd_t4a_a_switch_takes_the_first_grid_point_at_or_after_its_bound() {
         let recv = if at.is_some() { 4 * MS } else { r_tick(bound - 12_000) };
         let asked = at.unwrap_or(bound - 12_000);
         let mut r = switched(700, 400, recv, asked);
-        let b = o::switch_boundary(&r.p, 2_000, 700, recv, at);
+        let b = o::switch_boundary(&r.p, 2_000, 700, recv, at).unwrap();
         let requested = o::switch_requested_target(&r.p, 2_000, 700, recv, asked, false);
         assert_eq!(requested.is_some(), at.is_none(), "{case}: an `at` before the bound is pushed");
         assert_eq!(b, if bound == 15_999 || bound == 16_000 && at.is_none() { 16_000 } else { 16_700 }, "{case}: the grid is 2000 + 700 j");
@@ -402,7 +402,7 @@ fn o1_uhd_t4b_an_owner_that_has_not_read_a_switch_never_hands_past_its_boundary(
     r.book(1, 0, 2_000, true, LatePolicy::DropAndFlag);
     r.turns(0, 3);
     book_switch(&mut r.rig, 2, 3_000, 1);
-    let b = o::switch_boundary(&r.p, 2_000, 1_000, 3 * MS, Some(3_000));
+    let b = o::switch_boundary(&r.p, 2_000, 1_000, 3 * MS, Some(3_000)).unwrap();
     assert_eq!(b, 15_000);
     for ms in 4..=7 {
         r.at(ms * MS);
@@ -433,7 +433,7 @@ fn o1_uhd_t4c_a_stop_before_the_boundary_cancels_the_switch() {
     // RM-37 (seq 4): R from 2 000, a switch received at 3 ms (boundary 15 000), a Stop at 4 ms whose bound 14 005 is before it: the switch
     // is cancelled and no sample of the new waveform sounds.
     let mut r = switched(1_000, 1_000, 3 * MS, 3_000);
-    let b = o::switch_boundary(&r.p, 2_000, 1_000, 3 * MS, Some(3_000));
+    let b = o::switch_boundary(&r.p, 2_000, 1_000, 3 * MS, Some(3_000)).unwrap();
     r.turns(4, 4);
     let (t_k, bound) = r.p.stop_bound(4 * MS);
     assert!(bound <= b, "the case needs B <= b");
@@ -450,7 +450,7 @@ fn o1_uhd_t4c_a_stop_before_the_boundary_cancels_the_switch() {
 /// A switch received at 3 ms (boundary 15 000), drained at once, and a Stop at `stop_ticks` after the owner's turns up to there.
 fn stopped_after_switch(stop_ticks: i64) -> (Rig, i64, i64, i64) {
     let mut r = switched(1_000, 1_000, 3 * MS, 3_000);
-    let b = o::switch_boundary(&r.p, 2_000, 1_000, 3 * MS, Some(3_000));
+    let b = o::switch_boundary(&r.p, 2_000, 1_000, 3 * MS, Some(3_000)).unwrap();
     assert_eq!(b, 15_000);
     r.turns(4, stop_ticks / MS);
     r.at(stop_ticks);

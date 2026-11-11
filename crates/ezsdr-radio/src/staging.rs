@@ -194,6 +194,8 @@ pub enum SwitchRefusal {
     /// UR-38: the repeat it replaces has not started on the device (its owner has issued none of it). Never on a Provider whose repeats
     /// start at acceptance ([`Started::AtAcceptance`]).
     NotStarted,
+    /// Its boundary does not fit the clock's `i64` samples: its `at` is too near the end of the range for the grid to reach it.
+    TimeOverflow,
 }
 
 /// A switch accepted at receipt (RM-37): its boundary, and the sample it asked for when the receipt pushed it past the boundary that
@@ -484,21 +486,24 @@ impl<P: Booked> TxBook<P> {
     }
 
     /// RM-37: the boundary a switch received now takes: the first sample of the playing repeat's grid at or after both its `at_k` and
-    /// `bound_k`, the receipt plus the in-flight window and the device lead. `None` when no repeat plays.
-    pub fn switch_boundary(&self, at_k: i64, bound_k: i64) -> Option<i64> {
-        self.playing.map(|playing| repeat_boundary(playing.origin, playing.period, bound_k.max(at_k)))
+    /// `bound_k`, the receipt plus the in-flight window and the device lead. Refused when no repeat plays, or when the boundary does not
+    /// fit the clock ([`SwitchRefusal::TimeOverflow`]).
+    pub fn switch_boundary(&self, at_k: i64, bound_k: i64) -> Result<i64, SwitchRefusal> {
+        let playing = self.playing.ok_or(SwitchRefusal::NoPlayingRepeat)?;
+        repeat_boundary(playing.origin, playing.period, bound_k.max(at_k)).ok_or(SwitchRefusal::TimeOverflow)
     }
 
     /// RM-37, UR-38: receipt of the switch `id` to a waveform of `period` samples, at `at_k` (`untimed`: the Kernel's instant), received at
     /// the sample `now_k` with the bound `bound_k` ([`TxBook::switch_boundary`]). Accepted, it is taken at its boundary: pending in the
     /// record until device time reaches it, and the playing repeat from now on. Refused (nothing changes) when no repeat plays, a switch
-    /// is pending, or the repeat it replaces has not started. A timed switch the bound pushed past the boundary of `at_k` alone records
+    /// is pending, the repeat it replaces has not started, or its boundary does not fit the clock. A timed switch the bound pushed past the boundary of `at_k` alone records
     /// `at_k` as its requested target (#86).
     pub fn receive_switch(&mut self, id: ActionId, period: i64, at_k: i64, bound_k: i64, untimed: bool, now_k: i64) -> Result<SwitchAccepted, SwitchRefusal> {
-        let (Some(playing), Some(boundary)) = (self.playing, self.switch_boundary(at_k, bound_k)) else { return Err(SwitchRefusal::NoPlayingRepeat) };
+        let playing = self.playing.ok_or(SwitchRefusal::NoPlayingRepeat)?;
+        let boundary = self.switch_boundary(at_k, bound_k)?;
         self.record.switch(id, boundary, now_k, playing.started)?;
         self.play(true, id, boundary, period);
-        let requested_target = (!untimed && boundary != repeat_boundary(playing.origin, playing.period, at_k)).then_some(at_k);
+        let requested_target = (!untimed && Some(boundary) != repeat_boundary(playing.origin, playing.period, at_k)).then_some(at_k);
         Ok(SwitchAccepted { boundary, requested_target })
     }
 
@@ -1050,6 +1055,13 @@ pub fn stop_bound(at: i64, in_flight: i64, at_or_after: impl Fn(i64) -> i64, ins
     instant(stop_sample(at, in_flight, at_or_after))
 }
 
+/// RM-16: whether a `Stop` at `at` has a bound the stream's clock holds: the horizon `at + in_flight`, the sample at or after it plus
+/// [`STOP_FRONT`] and that sample's root tick, and the sample at or after `at`, each checked (`None` is an overflow). A Stop that has no
+/// bound is refused at receipt on both Providers; [`stop_bound`] and [`stop_sample`] are its saturating twins for what is already received.
+pub fn stop_fits(at: i64, in_flight: i64, at_or_after: impl Fn(i64) -> Option<i64>, instant: impl Fn(i64) -> Option<i64>) -> bool {
+    at.checked_add(in_flight).and_then(&at_or_after).and_then(|k| k.checked_add(STOP_FRONT)).and_then(instant).is_some() && at_or_after(at).is_some()
+}
+
 /// RM-15 (note 47 stage 5 §1.3): the first sample a receipt at root tick `now` cannot yet be sure the owner has not handed: the
 /// owner hands only below `at_or_after(now + in_flight)` (`tx.rs:443-444`), so a booking that starts below it may be on the device.
 pub fn handover_horizon(now: i64, in_flight: i64, at_or_after: impl Fn(i64) -> i64) -> i64 {
@@ -1067,9 +1079,15 @@ pub fn write_settled(rows: &mut [serde_json::Value], settled: impl IntoIterator<
 }
 
 /// The first `origin + j·period` at or after `bound`, `j ≥ 0`: a repeat switch's boundary (note 47
-/// stage 5, §0), with `bound` the first sample the switch may take effect at.
-pub fn repeat_boundary(origin: i64, period: i64, bound: i64) -> i64 {
-    origin + ((bound - origin).max(0) + period - 1) / period * period
+/// stage 5, §0), with `bound` the first sample the switch may take effect at. `None` when the result does not fit an `i64` (or `period`
+/// is not positive): no boundary, never a wrapped one.
+pub fn repeat_boundary(origin: i64, period: i64, bound: i64) -> Option<i64> {
+    if period <= 0 {
+        return None;
+    }
+    let (origin, period) = (i128::from(origin), i128::from(period));
+    let wait = (i128::from(bound) - origin).max(0);
+    i64::try_from(origin + (wait + period - 1) / period * period).ok()
 }
 
 /// RM-13: whether a burst is a repeat switch: a repeat under `send_asap_and_flag` whose metadata is exactly the mark `radio.repeat_operation = "switch"`.

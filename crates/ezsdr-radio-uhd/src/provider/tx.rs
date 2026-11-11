@@ -6808,6 +6808,11 @@ mod tests {
     }
 
     fn switch_rig_with(waves: Vec<Vec<Iq>>, faults: Vec<FakeFault>) -> SwitchRig {
+        switch_rig_on(waves, faults, 200)
+    }
+
+    /// A rig whose transmit clock has `n` root ticks a sample on the 200 MHz root: 1 MS/s at 200, 200 MS/s at 1.
+    fn switch_rig_on(waves: Vec<Vec<Iq>>, faults: Vec<FakeFault>, n: i64) -> SwitchRig {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() }));
         let mut inputs = BTreeMap::new();
         let mut refs = Vec::new();
@@ -6820,8 +6825,8 @@ mod tests {
         let frozen = Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
-        let (control, cmds) = booking_control(&core);
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(200e6 / n as f64), ..Settings::default() }).unwrap();
+        let (control, cmds) = booking_control_on(&core, core.register(Dir::Tx, n, 0).unwrap());
         let clock = tx_clock(&core);
         let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         SwitchRig { core, device, time, events, control, tx, clock, waves: refs, _frozen: frozen }

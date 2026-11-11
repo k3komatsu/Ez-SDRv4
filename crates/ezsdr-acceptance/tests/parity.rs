@@ -2173,6 +2173,104 @@ fn s15_parity_switch_to_a_new_length() {
     assert_eq!(mock_rows, [(1, 1_000, 500, "applied".to_owned())], "{mock_rows:?}");
 }
 
+/// A pair on one transmit stream (as the S15 tests), for the refusals of a time that does not fit the clock.
+fn s16_pair() -> CancellationPair {
+    CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    )
+}
+
+/// The Action ids the next pushes get on each Provider (mock, UHD): a queue numbers its Actions in the order its Provider takes them, so
+/// the Providers number the same Action differently once one has had a barrier. Read while both queues are empty.
+fn next_ids(pair: &CancellationPair) -> (u64, u64) {
+    let next = |queue: &Queue| queue.given.load(Ordering::SeqCst) + queue.queued() as u64 + 1;
+    (next(&pair.mock.actions), next(&pair.uhd.actions))
+}
+
+/// What each `tx_burst` refusal says, without its Provider's rule prefix, once its Action id and rule are as `expected` (id, rule): the
+/// Providers answer alike when these are equal.
+fn tx_burst_refusals(events: &[Event], expected: &[(u64, &str)]) -> Vec<String> {
+    let refused: Vec<(u64, String, String)> = events
+        .iter()
+        .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["kind"] == "tx_burst")
+        .map(|event| {
+            let (rule, reason) = event.payload["reason"].as_str().unwrap().split_once(": ").unwrap();
+            (event.payload["action"].as_u64().expect("a refusal at receipt names its Action"), rule.to_owned(), reason.to_owned())
+        })
+        .collect();
+    assert_eq!(refused.iter().map(|(id, rule, _)| (*id, rule.as_str())).collect::<Vec<_>>(), expected, "the Action ids and rules of the refusals: {refused:?}");
+    refused.into_iter().map(|(_, _, reason)| reason).collect()
+}
+
+#[test]
+fn s16_parity_a_burst_time_that_does_not_fit_the_clock_is_refused_on_both_and_the_next_booking_is_served() {
+    // RM-22, MR-16, UR-21 (#95): a burst at 2^62 samples (its instant passes i64::MAX) and a target whose lead overflows (i64::MIN) are
+    // refused at receipt with their ids on both Providers, which go on; a burst received after them is booked and played on both.
+    let mut pair = s16_pair();
+    let hundred = pair.sized(100).clone();
+    let at = |ticks: i64| {
+        let at = |clocks: &ClockRegistry| TimePoint::new(tx_sample_time(clocks, 0, 0, 0).domain(), ticks);
+        (
+            tx_burst_action_with("tx/s0", &hundred, at(&pair.mock.clocks), ezsdr_kernel::stream::LatePolicy::DropAndFlag),
+            tx_burst_action_with("tx/s0", &hundred, at(&pair.uhd.clocks), ezsdr_kernel::stream::LatePolicy::DropAndFlag),
+        )
+    };
+    let (far, early) = (at(1 << 62), at(i64::MIN));
+    let (mock_id, uhd_id) = next_ids(&pair);
+    submit(&mut pair, 201, 6, |_| vec![far, early]);
+    // SendAsapAndFlag: a host that is late moves the start, it never drops the burst.
+    submit(&mut pair, 202, 12, |pair| vec![o1_asap(pair, &hundred, 60, false, false)]);
+    pair.uhd.wait_until(o1_uhd_now(&pair) + ms(100));
+    pair.mock.step(pair.t0 + ms(100));
+    let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+    // The lead of a target at i64::MIN overflows in the late policy: the Mock names MR-17 for it, the UHD UR-21, with one error text.
+    let mock_refused = tx_burst_refusals(&mock_events, &[(mock_id, "MR-16"), (mock_id + 1, "MR-17")]);
+    let uhd_refused = tx_burst_refusals(&uhd_events, &[(uhd_id, "UR-21"), (uhd_id + 1, "UR-21")]);
+    assert_eq!(mock_refused, uhd_refused, "the Providers answer alike");
+    assert_eq!(mock_refused[0], "the burst time overflows the transmit clock");
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    let samples = |instance: &ProviderInstance, namespace: &str| manifest_rows(instance, namespace).iter().map(|row| row["samples"].as_u64().unwrap()).collect::<Vec<_>>();
+    assert_eq!(samples(&mock, "ezsdr.radio.mock.bursts"), [100], "the Mock served the burst after the refusals");
+    assert_eq!(samples(&uhd, "ezsdr.radio.uhd.bursts"), [100], "UHD served the burst after the refusals");
+}
+
+#[test]
+fn s16_parity_a_switch_at_the_end_of_the_range_is_refused_on_both_and_the_next_one_is_taken() {
+    // RM-37, MR-16, UR-21 (#94): a switch at i64::MAX has no boundary: refused at receipt with its id on both Providers, which make no
+    // `switches` row for it and keep the repeat; a switch received after it is taken and applied on both.
+    let mut pair = s16_pair();
+    let long = pair.sized(1_000).clone();
+    let short = pair.sized(500).clone();
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &long, 20, true, false)]);
+    let rel = o1_wait_playing(&mut pair, 7);
+    let (mut mock, mut uhd) = (o1_asap(&pair, &short, 26, true, true).0, o1_asap(&pair, &short, rel, true, true).1);
+    for action in [&mut mock, &mut uhd] {
+        if let Action::TxBurst { at, .. } = action {
+            *at = ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(at.time_point.domain(), i64::MAX));
+        }
+    }
+    let (mock_id, uhd_id) = next_ids(&pair);
+    o1_mock_at(&mut pair, 24, mock);
+    o1_uhd_at(&mut pair, 202, rel, [uhd]);
+    s15_switch(&mut pair, 203, &[&short]);
+    pair.uhd.wait_until(o1_uhd_now(&pair) + ms(60));
+    pair.mock.step(pair.t0 + ms(60));
+    let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+    let (mock_refused, uhd_refused) = (tx_burst_refusals(&mock_events, &[(mock_id, "MR-16")]), tx_burst_refusals(&uhd_events, &[(uhd_id, "UR-21")]));
+    assert_eq!(mock_refused, uhd_refused, "the Providers answer alike");
+    assert_eq!(mock_refused, ["the burst time overflows the transmit clock"], "only the switch at i64::MAX is refused");
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    let (mock_rows, uhd_rows) = (switch_rows(&mock, "ezsdr.radio.mock.switches"), switch_rows(&uhd, "ezsdr.radio.uhd.switches"));
+    assert_eq!(mock_rows, uhd_rows, "the Providers record alike");
+    assert_eq!(mock_rows, [(1, 1_000, 500, "applied".to_owned())], "the second switch is the only row: {mock_rows:?}");
+}
+
 #[test]
 fn s15_parity_second_pending_switch_is_refused() {
     // S10 (RM-37): a second switch while the first is pending is refused with its id on both Providers, and the first still applies.
@@ -2795,7 +2893,7 @@ fn o1_parity_a_switched_repeat_changes_waveform_at_its_recorded_boundary_on_its_
     let mock_rows = o1_records(&mock, "ezsdr.radio.mock.bursts");
     let at = tx_samples_after(&pair.mock.clocks, 0, pair.t0 + ms(44), 0);
     let at = at.ticks_in(at.domain()).unwrap();
-    let mb = oracle::switch_boundary(&mp, mock_rows[0].0, 700, pair.t0 + ms(43), Some(at));
+    let mb = oracle::switch_boundary(&mp, mock_rows[0].0, 700, pair.t0 + ms(43), Some(at)).unwrap();
     let rows = manifest_rows(&mock, "ezsdr.radio.mock.switches");
     assert_eq!((rows.len(), rows[0]["boundary"].as_i64(), rows[0].get("moved_to")), (1, Some(mb), None), "{rows:?}");
     assert_eq!((rows[0]["action_id"].as_u64(), rows[0]["predecessor"].as_u64()), (Some(2), Some(1)), "the Mock's queue gives the repeat 1 and the switch 2: {rows:?}");

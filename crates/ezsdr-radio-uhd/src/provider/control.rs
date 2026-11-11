@@ -313,6 +313,13 @@ impl Control {
                     let stream = stream_key(Dir::Tx, k);
                     let mut streams = lock(&self.core.streams);
                     let now = self.core.now();
+                    // RM-16: a Stop with no bound that fits the stream's clock is refused with its id, nothing changed; the other streams go on.
+                    let window = self.core.tx_in_flight();
+                    if streams.stream_mut(stream).clock.is_some_and(|clock| !ezsdr_radio::staging::stop_fits(now, window, |t| clock.try_at_or_after(t), |k| clock.try_instant(k))) {
+                        drop(streams);
+                        self.core.command_rejected(Some(id), "stop", "UR-26: the Stop's bound overflows the transmit clock");
+                        continue;
+                    }
                     let seq = streams.next_seq();
                     if streams.book(&self.core, stream, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop }, Some(id)) {
                         if let Some(bound) = streams.stream_mut(stream).stop_at(now, self.core.tx_in_flight()) {
@@ -559,8 +566,9 @@ impl Control {
                 }
                 // The instants are computed before anything is booked: one that does not fit is a refusal, not a booked chain.
                 let end = (!repeat).then(|| clock.try_instant(start.saturating_add(len as i64)));
+                let overflow = "UR-21: the burst time overflows the transmit clock";
                 let refusal = if clock.try_instant(start).is_none() || end.is_some_and(|end| end.is_none()) {
-                    Some("UR-21: the burst time overflows the transmit clock")
+                    Some(overflow)
                 } else if clock.instant(start) < self.core.start_up.load(Ordering::Acquire) {
                     Some("UR-21: the burst begins before the device's start-up")
                 } else if switch {
@@ -573,6 +581,7 @@ impl Control {
                         }
                         Err(SwitchRefusal::NotStarted) => Some("UR-38: the repeat the switch replaces has not started on the device"),
                         Err(SwitchRefusal::NoPlayingRepeat | SwitchRefusal::PendingSwitch) => Some("UR-21: a repeat switch needs a playing repeat and no pending switch"),
+                        Err(SwitchRefusal::TimeOverflow) => Some(overflow),
                     }
                 } else if unplaced {
                     Some("UR-21: the burst overlaps an accepted booking")

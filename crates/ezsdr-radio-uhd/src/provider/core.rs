@@ -250,9 +250,14 @@ impl Clock {
         self.try_instant(k).expect("a representable stream instant")
     }
 
+    /// The first sample at or after root tick `t`, or `None` when it does not fit in an `i64`.
+    pub fn try_at_or_after(&self, t: i64) -> Option<i64> {
+        i64::try_from((i128::from(t) - i128::from(self.origin) + i128::from(self.n) - 1).div_euclid(i128::from(self.n))).ok()
+    }
+
     /// The first sample at or after root tick `t`.
     pub fn at_or_after(&self, t: i64) -> i64 {
-        i64::try_from((i128::from(t) - i128::from(self.origin) + i128::from(self.n) - 1).div_euclid(i128::from(self.n))).expect("a representable sample index")
+        self.try_at_or_after(t).expect("a representable sample index")
     }
 }
 
@@ -436,8 +441,10 @@ impl StreamState {
     /// RM-16: what a `Stop` at root tick `at` reaches on the record; none for a stream with no clock.
     pub fn stop_reach(&self, at: i64, in_flight: i64) -> Option<StopReach> {
         let clock = self.clock?;
-        let bound = stop_bound(at, in_flight, |t| clock.at_or_after(t), |k| clock.instant(k));
-        Some((bound, Some((clock.at_or_after(at), stop_sample(at, in_flight, |t| clock.at_or_after(t))))))
+        // A Stop received at a bound that does not fit is refused before this (`stop_fits`); what is not received (a Provider stop) saturates.
+        let at_or_after = |t| clock.try_at_or_after(t).unwrap_or(i64::MAX);
+        let bound = stop_bound(at, in_flight, at_or_after, |k| clock.try_instant(k).unwrap_or(i64::MAX));
+        Some((bound, clock.try_at_or_after(at).map(|at_stop| (at_stop, stop_sample(at, in_flight, at_or_after)))))
     }
 }
 

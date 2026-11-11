@@ -25,7 +25,9 @@ use ezsdr_kernel::stream::{
     BackPressure, BlockFlags, BlockHeader, BurstOpen, BurstRecord, BurstStep, BurstTracker, ChannelMask, DataLink, Direction, LateOutcome, LatePolicy, PublishOutcome, SampleBlock,
 };
 use ezsdr_kernel::time::{ClockRegistry, Duration, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimePoint};
-use ezsdr_radio::staging::{Bookings, Outcome, Overlap, Playing, Read, Staging, SwitchRecord, TxBook, TxSend, handover_horizon, is_switch, ordinary_k, stop_bound, stop_sample, write_settled};
+use ezsdr_radio::staging::{
+    Bookings, Outcome, Overlap, Playing, Read, Staging, SwitchRecord, SwitchRefusal, TxBook, TxSend, handover_horizon, is_switch, ordinary_k, stop_bound, stop_fits, stop_sample, write_settled,
+};
 use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment, StreamKey};
 use ezsdr_radio::{Addressed, channels, x3xx};
 use ezsdr_sim::channel::{Medium, RootInstant};
@@ -1157,8 +1159,7 @@ impl MockRadio {
         self.tx[k].book.list.halt(cancel_reason);
         if let Some(clock) = self.tx_now(k) {
             let (ratio, origin, domain) = (clock.handle.root_ticks_per_tick(), clock.origin, clock.domain);
-            let window = time::ns_to_v(self.clocks.as_ref().expect("prepared clocks"), self.root.expect("prepared root"), self.profile.timing().tx_in_flight_ns)
-                .map_err(|error| ModuleError::rejected(format!("MR-25: {error}")))?;
+            let window = self.tx_window()?;
             let bound = stop_bound(now, window, |t| time::k_at_or_after(origin, ratio, t).unwrap_or(i64::MAX), |k| time::v_of(origin, ratio, k).unwrap_or(i64::MAX));
             let region = time::k_at_or_after(origin, ratio, now).map(|at_stop| (at_stop, stop_sample(now, window, |t| time::k_at_or_after(origin, ratio, t).unwrap_or(i64::MAX))));
             self.tx[k].book.stop((bound, region));
@@ -1167,9 +1168,7 @@ impl MockRadio {
                 // MR-25's payload cut and MR-17's later-booking margin stay separate.
                 let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop);
                 let (until, cut) = if handover {
-                    let clocks = self.clocks.as_ref().expect("prepared clocks");
-                    let window = time::ns_to_v(clocks, self.root.expect("prepared root"), self.profile.timing().tx_in_flight_ns).map_err(|error| ModuleError::rejected(format!("MR-25: {error}")))?;
-                    let horizon = now.checked_add(window).ok_or_else(|| ModuleError::rejected("MR-25: hand-over horizon overflow"))?;
+                    let horizon = now.saturating_add(window);
                     let payload = self.tx_handed_end(k, now, self.next_order)?;
                     let previous = self.tx[k].stop_cut.filter(|front| front.domain == domain).map(|front| front.sample);
                     let cut = timeline::later_bound(at_stop, merge_front(payload, previous));
@@ -1378,14 +1377,24 @@ impl MockRadio {
         self.lines.line(Self::tx_key(k))?.plan.first()?.cut
     }
 
+    /// RM-16: the in-flight window of a transmit stream, in root ticks.
+    fn tx_window(&self) -> Result<i64, ModuleError> {
+        time::ns_to_v(self.clocks.as_ref().expect("prepared clocks"), self.root.expect("prepared root"), self.profile.timing().tx_in_flight_ns)
+            .map_err(|error| ModuleError::rejected(format!("MR-25: {error}")))
+    }
+
+    /// RM-16: whether a `Stop` at `now` has a bound on transmit stream `k`'s clock; a stream with no clock has nothing to bound.
+    fn tx_stop_fits(&self, k: usize, now: i64) -> Result<bool, ModuleError> {
+        let Some(clock) = self.tx_now(k) else { return Ok(true) };
+        let (ratio, origin) = (clock.handle.root_ticks_per_tick(), clock.origin);
+        Ok(stop_fits(now, self.tx_window()?, |t| time::k_at_or_after(origin, ratio, t), |k| time::v_of(origin, ratio, k)))
+    }
+
     /// RM-15: the handed payload end of stream `k`'s clock (MR-25's payload cut): the latest end of the bursts whose first send fits the hand-over window.
     fn tx_handed_end(&self, k: usize, now: i64, before: u64) -> Result<Option<i64>, ModuleError> {
         let Some(clock) = self.tx_now(k) else { return Ok(None) };
-        let root = self.root.expect("prepared root");
-        let clocks = self.clocks.as_ref().expect("prepared clocks");
-        let window = time::ns_to_v(clocks, root, self.profile.timing().tx_in_flight_ns).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
-        let horizon = now.checked_add(window).ok_or_else(|| ModuleError::rejected("MR-17: hand-over horizon overflow"))?;
-        let window_end = time::k_at_or_after(clock.origin, clock.handle.root_ticks_per_tick(), horizon).ok_or_else(|| ModuleError::rejected("MR-17: hand-over sample overflow"))?;
+        let horizon = now.saturating_add(self.tx_window()?);
+        let window_end = time::k_at_or_after(clock.origin, clock.handle.root_ticks_per_tick(), horizon).unwrap_or(i64::MAX);
         let mut payload = None;
         // MR-25: a burst not yet started is handed over once its first send's samples fit the window (UR-22 MIN_OPEN_FIRST_SEND).
         let mut include = |order: u64, start: i64, len: i64, repeat: bool, first: i64| {
@@ -1506,8 +1515,13 @@ impl MockRadio {
                 }
                 let streams: Vec<(Direction, usize)> =
                     if device { (0..self.tx.len()).map(|k| (Direction::Tx, k)).chain((0..self.rx.len()).map(|k| (Direction::Rx, k))).collect() } else { stream.into_iter().collect() };
+                // RM-16, MR-25: a stream whose Stop has no bound that fits its clock is refused with the Action's id, nothing changed; the others go on.
                 for (direction, k) in streams {
                     if direction == Direction::Tx {
+                        if !self.tx_stop_fits(k, now)? {
+                            self.reject_action_at(Some(id), "stop", "MR-25: the Stop's bound overflows the transmit clock", now)?;
+                            continue;
+                        }
                         self.stop_tx(k, now, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop)?;
                     } else {
                         let seq = self.arrival();
@@ -1584,7 +1598,11 @@ impl MockRadio {
             self.refuse_tx_burst(id, now)?;
             return Ok(());
         }
-        let length = i64::try_from(size_bytes / unit).map_err(|_| ModuleError::rejected("MR-16: waveform is too large"))?;
+        let Ok(waveform_len) = u32::try_from(size_bytes / unit) else {
+            self.reject_action_at(Some(id), "tx_burst", "MR-16: the waveform has more samples than a burst can hold", now)?;
+            return Ok(());
+        };
+        let length = i64::from(waveform_len);
         if repeat && (length as u64 > self.profile.repeat_max_samples() || length as u64 % self.profile.repeat_align_samples() != 0) {
             self.reject_action_at(Some(id), "tx_burst", "MR-16: repeated waveform violates RM-13's length or alignment limits", now)?;
             return Ok(());
@@ -1608,27 +1626,43 @@ impl MockRadio {
             },
         };
         let clocks = self.clocks.as_ref().expect("prepared clocks");
-        let lead = time::ns_to_v(clocks, root, self.profile.timing().min_timed_command_lead_ns).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
-        let join_lead = lead + time::ns_to_v(clocks, root, self.profile.delivery_allowance_ns()).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
-        let window = time::ns_to_v(clocks, root, self.profile.timing().tx_in_flight_ns).map_err(|error| ModuleError::rejected(format!("MR-25: {error}")))?;
-        // RM-15: decided at the clock's origin less the lead if that is later.
-        let decided = timeline::decided_at(now, origin, lead);
-        let now_tx = clocks.convert(TimePoint::new(root, now), tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?.floor();
-        let decided_tx = match clocks.convert(TimePoint::new(root, decided), tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))? {
-            ezsdr_kernel::time::Converted::Exact { point } => point,
-            ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.checked_add(Duration::new(tx_domain, 1)).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?,
+        // RM-22: a time that does not fit a clock is a refusal of the Action with its id, never a failed Run.
+        let instants = || -> Result<_, String> {
+            let lead = time::ns_to_v(clocks, root, self.profile.timing().min_timed_command_lead_ns).map_err(|error| format!("MR-17: {error}"))?;
+            let join_lead = lead + time::ns_to_v(clocks, root, self.profile.delivery_allowance_ns()).map_err(|error| format!("MR-17: {error}"))?;
+            let window = time::ns_to_v(clocks, root, self.profile.timing().tx_in_flight_ns).map_err(|error| format!("MR-25: {error}"))?;
+            // RM-15: decided at the clock's origin less the lead if that is later.
+            let decided = timeline::decided_at(now, origin, lead);
+            let now_tx = clocks.convert(TimePoint::new(root, now), tx_domain).map_err(|error| format!("MR-17: {error}"))?.floor();
+            let decided_tx = match clocks.convert(TimePoint::new(root, decided), tx_domain).map_err(|error| format!("MR-17: {error}"))? {
+                ezsdr_kernel::time::Converted::Exact { point } => point,
+                ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.checked_add(Duration::new(tx_domain, 1)).map_err(|error| format!("MR-17: {error}"))?,
+            };
+            let target = at.time_point.ticks_in(tx_domain).map_err(|error| format!("MR-17: {error}"))?;
+            Ok((lead, join_lead, window, decided, now_tx, decided_tx, target))
         };
-        let target = at.time_point.ticks_in(tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
+        let (lead, join_lead, window, decided, now_tx, decided_tx, target) = match instants() {
+            Ok(instants) => instants,
+            Err(reason) => {
+                self.reject_action_at(Some(id), "tx_burst", &reason, now)?;
+                return Ok(());
+            }
+        };
         let ordinary = ordinary_k(decided, lead, |t| time::k_at_or_after(origin, ratio, t).unwrap_or(i64::MAX), |k| time::v_of(origin, ratio, k).unwrap_or(i64::MAX));
         let now_k = time::k_at_or_after(origin, ratio, now).unwrap_or(i64::MAX);
         let horizon = handover_horizon(now, window, |t| time::k_at_or_after(origin, ratio, t).unwrap_or(i64::MAX));
         let join_by = |e: i64| time::v_of(origin, ratio, e).map_or(i64::MIN, |instant| instant.saturating_sub(join_lead));
-        let mut policy = if switch || untimed {
-            LateOutcome::OnTime {}
+        let decision = if switch || untimed {
+            Ok(LateOutcome::OnTime {})
         } else {
-            late_policy
-                .decide(clocks, at.time_point, decided_tx, Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.timing().min_timed_command_lead_ns))
-                .map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?
+            late_policy.decide(clocks, at.time_point, decided_tx, Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.timing().min_timed_command_lead_ns))
+        };
+        let mut policy = match decision {
+            Ok(policy) => policy,
+            Err(error) => {
+                self.reject_action_at(Some(id), "tx_burst", &format!("MR-17: {error}"), now)?;
+                return Ok(());
+            }
         };
         self.tx[k].book.record.prune(now_k);
         self.settle_switches(k);
@@ -1652,8 +1686,13 @@ impl MockRadio {
             LateOutcome::OnTime {} if late_policy == LatePolicy::SendAsapAndFlag && !switch && !untimed => {
                 match self.tx[k].book.record.region_move(target, (!repeat).then_some(length), now, join_by, horizon) {
                     Ok(moved) if moved != target => {
-                        let late_ns =
-                            time::to_ns(self.clocks.as_ref().expect("prepared clocks"), Duration::new(tx_domain, moved - target)).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
+                        let late_ns = match time::to_ns(self.clocks.as_ref().expect("prepared clocks"), Duration::new(tx_domain, moved - target)) {
+                            Ok(late_ns) => late_ns,
+                            Err(error) => {
+                                self.reject_action_at(Some(id), "tx_burst", &format!("MR-17: {error}"), now)?;
+                                return Ok(());
+                            }
+                        };
                         let late_by = Duration::new(ClockDomainId::HOST_MONOTONIC, late_ns);
                         start = moved;
                         policy = LateOutcome::SendAsap { late_by };
@@ -1691,9 +1730,13 @@ impl MockRadio {
             switched_from = self.tx[k].book.playing;
             start = self.tx[k].book.switch_boundary(target, switch_bound).unwrap_or(start);
         }
-        let start_v = time::v_of(origin, ratio, start).ok_or_else(|| ModuleError::rejected("MR-16: burst time overflow"))?;
-        let end = if repeat { None } else { Some(time::v_of(origin, ratio, start.saturating_add(length)).ok_or_else(|| ModuleError::rejected("MR-16: burst end overflow"))?) };
-        let refusal = if start_v < self.sync_end.unwrap_or(i64::MIN) {
+        // RM-22: the instants are computed before anything is booked: one that does not fit the clock is a refusal, not a booked chain.
+        let start_v = time::v_of(origin, ratio, start);
+        let end = (!repeat).then(|| time::v_of(origin, ratio, start.saturating_add(length)));
+        let overflow = "MR-16: the burst time overflows the transmit clock";
+        let refusal = if start_v.is_none() || end.is_some_and(|end| end.is_none()) {
+            Some(overflow)
+        } else if start_v.is_some_and(|start_v| start_v < self.sync_end.unwrap_or(i64::MIN)) {
             Some("MR-16: burst begins before synchronization")
         } else if switch {
             match self.tx[k].book.receive_switch(id, length, target, switch_bound, untimed, now_k) {
@@ -1703,6 +1746,7 @@ impl MockRadio {
                     requested = requested.or(accepted.requested_target.map(|_| at.time_point));
                     None
                 }
+                Err(SwitchRefusal::TimeOverflow) => Some(overflow),
                 Err(_) => Some("MR-16: a repeat switch needs a playing repeat and no pending switch"),
             }
         } else if unplaced {
@@ -1721,7 +1765,6 @@ impl MockRadio {
         if let Some(late_by) = send_asap_late_by {
             self.emit_late_burst(k, late_by, at.time_point, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::SendAsap)?;
         }
-        let waveform_len = u32::try_from(length).map_err(|_| ModuleError::rejected("MR-16: waveform length exceeds u32"))?;
         if let (Some(shared), Some((samples, clipped))) = (self.tx[k].plan.clone(), decoded) {
             let channel_numbers: Vec<u16> =
                 self.lines.line(Self::tx_key(k)).and_then(|line| line.plan.first()).map(|segment| segment.config.channels.iter().map(|number| number as u16).collect()).unwrap_or_default();
@@ -1755,7 +1798,7 @@ impl MockRadio {
             order: self.next_order,
             values,
         };
-        self.tx[k].book.book(held, end);
+        self.tx[k].book.book(held, end.flatten());
         self.read_tx(k, now, "")?;
         self.next_order = self.next_order.saturating_add(1);
         if let Some(from) = switched_from {

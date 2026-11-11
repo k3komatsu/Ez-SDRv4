@@ -10,6 +10,7 @@ use super::e1::{MS, at, book, handed_end, last_send_eob, notes, params, playing,
 use super::*;
 use crate::provider::tx::oracle as o;
 use ezsdr_radio::staging::STOP_FRONT;
+use ezsdr_radio::timeline::Kind;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -522,7 +523,7 @@ fn e2a_86_a_timed_switch_pushed_past_its_boundary_records_its_at() {
         run(&mut rig, 3, 20);
         stop(&mut rig);
         run(&mut rig, 21, 35);
-        let b = o::switch_boundary(&p, 2_000, 1_000, 3 * MS, Some(at_k));
+        let b = o::switch_boundary(&p, 2_000, 1_000, 3 * MS, Some(at_k)).unwrap();
         let row = switch_row(&rig.core, 0);
         assert_eq!((row["outcome"].as_str(), row["boundary"].as_i64(), row.get("moved_to")), (Some("applied"), Some(b), None), "{case}: {row}");
         let successor: Vec<serde_json::Value> = rows(&rig).into_iter().filter(|row| row["target"]["ticks"] == b).collect();
@@ -636,4 +637,83 @@ fn e2a_93_a_sequence_error_before_the_open_burst_s_first_tick_still_abandons_it(
     assert_eq!(rig.tx.open_next(), None, "B is abandoned");
     run(&mut rig, 7, 40);
     assert!(rig.device.transmitted(rig.clock.instant(11_000), 20_000).last() == Some(&None), "B's end never sounds: {:?}", rig.device.calls());
+}
+
+/// The refusals reported since the last call, as `(Action id, reason)`.
+fn refusals_by_id(events: &EventCollector) -> Vec<(u64, String)> {
+    rejected(events).iter().map(|event| (event.payload["action"].as_u64().expect("a refusal names its Action"), event.payload["reason"].as_str().unwrap().to_owned())).collect()
+}
+
+#[test]
+fn ur_21_a_burst_time_that_does_not_fit_the_clock_is_refused_with_its_id_and_the_next_booking_is_served() {
+    // RM-22, UR-21 (#95): a burst at 2^62 samples (its instant passes i64::MAX), a repeat there, a target whose lead overflows and a
+    // burst whose end passes i64::MAX are each refused at receipt with their ids and book nothing; a finite burst received after them is accepted and plays.
+    let mut rig = switch_rig(vec![o::ramp(5, 200)]);
+    book(&mut rig, 1, 0, 1 << 62);
+    book_with(&mut rig.control, &rig.core, 2, 0, rig.clock, 1 << 62, &rig.waves[0], true, LatePolicy::SendAsapAndFlag, BTreeMap::new());
+    book(&mut rig, 3, 0, i64::MIN);
+    // The last sample whose instant fits: a burst of 200 starts there and its end does not.
+    let last = (i64::MAX - rig.clock.origin) / rig.clock.n;
+    assert!(rig.clock.try_instant(last).is_some() && rig.clock.try_instant(last + 1).is_none());
+    book(&mut rig, 4, 0, last);
+    let refused = refusals_by_id(&rig.events);
+    assert_eq!(refused.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [1, 2, 3, 4], "{refused:?}");
+    for index in [0, 1, 3] {
+        assert_eq!(refused[index].1, "UR-21: the burst time overflows the transmit clock", "{refused:?}");
+    }
+    assert!(refused[2].1.starts_with("UR-21: "), "{refused:?}");
+    book(&mut rig, 5, 0, 10_000);
+    assert!(refusals_by_id(&rig.events).is_empty(), "the next booking is accepted: {:?}", lock(&rig.core.rec).rejected);
+    run(&mut rig, 0, 20);
+    assert_eq!(rig.device.transmitted(rig.clock.instant(10_000), 200), o::ramp(5, 200).into_iter().map(Some).collect::<Vec<_>>(), "{:?}", rig.device.calls());
+    assert_eq!(rows(&rig).len(), 1, "only the served burst is recorded: {:?}", rows(&rig));
+}
+
+#[test]
+fn ur_38_a_switch_at_the_end_of_the_range_is_refused_with_its_id_and_the_next_one_is_taken() {
+    // RM-37, UR-38 (#94): the repeat plays; a switch at i64::MAX is refused at receipt with its id and no `switches` row, the repeat
+    // plays on, and a switch received next is taken at its boundary.
+    let mut rig = playing();
+    book_switch(&mut rig, 2, i64::MAX, 1);
+    assert_eq!(refusals_by_id(&rig.events), [(2, "UR-21: the burst time overflows the transmit clock".to_owned())]);
+    assert!(lock(&rig.core.rec).switches.is_empty(), "a refused switch leaves no row");
+    book_switch(&mut rig, 3, 3_000, 1);
+    assert!(refusals_by_id(&rig.events).is_empty(), "the next switch is accepted: {:?}", lock(&rig.core.rec).rejected);
+    assert_eq!(lock(&rig.core.rec).switches.len(), 1);
+    assert_eq!(switch_row(&rig.core, 0)["action_id"], 3);
+}
+
+#[test]
+fn ur_26_a_stop_whose_bound_does_not_fit_the_clock_is_refused_with_its_id_and_changes_nothing() {
+    // RM-16, UR-26 (#95): a Stop whose bound's instant passes i64::MAX is refused at receipt with its id: no Stop is booked on the line and
+    // none reaches the owner. The rig's clock cannot hold a device time past i64::MAX / 5 (its host rescale overflows), so the horizon
+    // `at + tx_in_flight` cannot pass i64::MAX here; the stream's clock is replaced by one of 2^61 root ticks a sample (the registry caps a
+    // real one lower), whose bound's instant does. uhd-control goes on: a second Stop is refused alike.
+    let mut rig = switch_rig(vec![o::ramp(5, 200)]);
+    lock(&rig.core.streams).stream_mut(stream_key(Dir::Tx, 0)).clock = Some(Clock { n: 1 << 61, ..rig.clock });
+    at(&rig, 3 * MS);
+    stop_receipt(&mut rig);
+    stop_receipt(&mut rig);
+    let reason = "UR-26: the Stop's bound overflows the transmit clock".to_owned();
+    assert_eq!(refusals_by_id(&rig.events), [(9, reason.clone()), (9, reason)]);
+    assert!(lock(&rig.core.streams).line(stream_key(Dir::Tx, 0)).unwrap().items.iter().all(|item| item.kind != Kind::Stop), "no Stop is booked on the line");
+    assert!(lock(&rig.core.streams).stream_mut(stream_key(Dir::Tx, 0)).book.list.read().is_none(), "the Stop reached no one");
+    // `Provider::stop` is no Action, so it is not refused: its bound saturates, where an overflow would panic.
+    lock(&rig.core.streams).end(&rig.core, 3 * MS, false, false);
+    assert!(lock(&rig.core.streams).stream_mut(stream_key(Dir::Tx, 0)).book.list.read().is_some(), "the Provider's stop halts the stream");
+}
+
+#[test]
+fn ur_38_a_switch_whose_boundary_does_not_fit_a_clock_of_one_tick_a_sample_is_refused_by_the_book() {
+    // RM-37, UR-38 (#94): at 200 MS/s one sample is one root tick, so a switch at i64::MAX passes the instant checks (its instant fits). The
+    // repeat from 2 000 000 with period 1 000 has no grid point at or after i64::MAX that fits, so the book refuses it with its id,
+    // writes no row, and the repeat plays on.
+    let mut rig = switch_rig_on(vec![vec![OLD; 1_000], vec![NEW; 200]], Vec::new(), 1);
+    book_repeat(&mut rig, 1, 2_000_000, 0);
+    run(&mut rig, 0, 12);
+    assert!(rig.clock.try_instant(i64::MAX).is_some(), "the instant fits, so the instant checks do not refuse");
+    book_switch(&mut rig, 2, i64::MAX, 1);
+    assert_eq!(refusals_by_id(&rig.events), [(2, "UR-21: the burst time overflows the transmit clock".to_owned())]);
+    assert!(lock(&rig.core.rec).switches.is_empty(), "a refused switch leaves no row");
+    assert_eq!(lock(&rig.core.streams).stream(stream_key(Dir::Tx, 0)).book.playing.map(|playing| playing.id), Some(ActionId(1)), "the repeat plays on");
 }

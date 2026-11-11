@@ -1105,6 +1105,48 @@ fn mr_16_s2_a_booking_at_or_one_after_a_finite_burst_s_end_is_refused() {
     }
 }
 
+/// RM-22, MR-16 (#95): a burst whose time does not fit the transmit clock is refused at receipt with its id, never a failed Run; the
+/// booking received next is served. `harness.step` unwraps the Run's result, so a failed Run fails the test.
+#[test]
+fn mr_16_a_burst_time_that_does_not_fit_the_clock_is_refused_with_its_id_and_the_run_goes_on() {
+    let mut harness = tx_harness("ideal");
+    harness.arm_start(0).unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().rev().find(|record| record.stream == rid("mock/tx/s0")).unwrap();
+    let (domain, origin, ratio) = (record.domain, record.origin.ticks_in(record.root).unwrap(), record.root_ticks_per_tick);
+    // The last sample whose instant fits an i64: a burst of 4 starts there and its end does not.
+    let last = i64::try_from((i128::from(i64::MAX) - i128::from(origin)) * i128::from(ratio.den()) / i128::from(ratio.num())).unwrap();
+    assert!(last < 1 << 62, "the clock's samples are at least two root ticks apart, so 2^62 is past the end: {last}");
+    let mut too_many = tx_action(domain, 1_000, 2, false, LatePolicy::SendAsapAndFlag);
+    if let Action::TxBurst { waveform, .. } = &mut too_many {
+        waveform.size_bytes = (u64::from(u32::MAX) + 1) * 8;
+    }
+    let refused = [
+        ("a start that does not fit", tx_action(domain, 1 << 62, 2, false, LatePolicy::SendAsapAndFlag), "MR-16: the burst time overflows the transmit clock"),
+        ("a repeat that does not fit", tx_action(domain, 1 << 62, 2, true, LatePolicy::SendAsapAndFlag), "MR-16: the burst time overflows the transmit clock"),
+        ("an end that does not fit", tx_action(domain, last, 4, false, LatePolicy::SendAsapAndFlag), "MR-16: the burst time overflows the transmit clock"),
+        ("a target whose lead overflows", tx_action(domain, i64::MIN, 2, false, LatePolicy::DropAndFlag), "MR-17: "),
+        ("more samples than a burst holds", too_many, "MR-16: the waveform has more samples than a burst can hold"),
+    ];
+    for (case, action, reason) in &refused {
+        harness.actions.push(action.clone());
+        harness.step(0).unwrap();
+        let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let rejected: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
+        assert_eq!(rejected.len(), 1, "{case}: {events:?}");
+        assert_eq!(rejected[0].payload["kind"], "tx_burst", "{case}");
+        assert!(rejected[0].payload["action"].is_u64(), "{case}: the refusal names its Action: {:?}", rejected[0].payload);
+        assert!(rejected[0].payload["reason"].as_str().unwrap().starts_with(reason), "{case}: {:?}", rejected[0].payload);
+        // The next booking is judged and served: it overlaps nothing the refusals left behind.
+        harness.actions.push(tx_action(domain, 1_000 + 10_000 * rejected[0].payload["action"].as_i64().unwrap(), 2, false, LatePolicy::SendAsapAndFlag));
+        harness.step(0).unwrap();
+    }
+    harness.step(1_000_000_000).unwrap();
+    let rows = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].as_array().unwrap();
+    assert_eq!(rows.len(), refused.len(), "every ordinary booking after a refusal is served: {rows:?}");
+    let rejected = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()].as_array().unwrap();
+    assert_eq!(rejected.len(), refused.len(), "only the refusals are recorded: {rejected:?}");
+}
+
 /// S7 (Mock): after a Stop at `t`, a booking is refused before `stop_k(t)` and accepted from it (the Stop tail, RM-16).
 #[test]
 fn mr_25_s7_stop_tail_refuses_until_bound() {
@@ -1618,6 +1660,83 @@ fn mr_16_s9_switch_different_length_starts_on_the_boundary() {
     assert_eq!(new.target.ticks_in(domain).unwrap(), 2_018_000);
     assert_eq!(new.samples / 1_000, u64::from(new.wraps));
     assert_eq!(switch_rows(&harness)[0]["new_period"], serde_json::json!(1_000));
+}
+
+/// RM-37 (#94): a switch at the end of the `i64` range is refused at receipt with its id (`repeat_boundary` has no such boundary); the repeat
+/// plays on and the switch received next is taken at its boundary.
+#[test]
+fn mr_16_a_switch_at_the_end_of_the_range_is_refused_with_its_id_and_the_next_one_is_taken() {
+    let (mut harness, domain) = playing_x3xx();
+    harness.actions.push(switch_action(domain, i64::MAX, 1_000));
+    harness.step(2_005_000_000).unwrap();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+    let rejected: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
+    assert_eq!(rejected.len(), 1, "{events:?}");
+    assert!(rejected[0].payload["action"].is_u64(), "{:?}", rejected[0].payload);
+    assert_eq!(rejected[0].payload["reason"], "MR-16: the burst time overflows the transmit clock");
+    assert!(switch_rows(&harness).is_empty(), "a refused switch leaves no row");
+    harness.actions.push(switch_action(domain, 2_005_000, 1_000));
+    harness.step(2_005_000_000).unwrap();
+    harness.step(2_030_000_000).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    assert_eq!(switch_rows(&harness).iter().map(|row| (row["new_period"].clone(), row["outcome"].clone())).collect::<Vec<_>>(), [(serde_json::json!(1_000), serde_json::json!("applied"))]);
+}
+
+/// RM-16, MR-25 (#95): a Stop received where its bound does not fit the transmit clock (the in-flight window past it passes i64::MAX) is
+/// refused with its id and changes nothing, never a failed Run; the Run goes on and its own stop is not refused for the same reason.
+#[test]
+fn mr_25_a_stop_whose_bound_does_not_fit_the_clock_is_refused_with_its_id_and_the_run_goes_on() {
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    harness.step(i64::MAX - 1).unwrap();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+    let rejected: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
+    assert_eq!(rejected.len(), 1, "{events:?}");
+    assert_eq!((rejected[0].payload["kind"].as_str(), rejected[0].payload["action"].as_u64()), (Some("stop"), Some(1)), "{:?}", rejected[0].payload);
+    assert_eq!(rejected[0].payload["reason"], "MR-25: the Stop's bound overflows the transmit clock");
+    // Nothing changed and the Run goes on: the next step takes the instant again, and the Provider's own stop ends the Run.
+    harness.step(i64::MAX - 1).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    assert!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED));
+}
+
+/// RM-37, MR-16 (#94): at 200 MS/s on a 200 MHz root one sample is one root tick, so a switch at i64::MAX passes the instant checks (its
+/// instant fits). The repeat from `T0 + 800 000` with period 2 000 has no grid point at or after i64::MAX that fits, so the book refuses
+/// the switch (`SwitchRefusal::TimeOverflow`) with its id, no row, and the repeat plays on.
+#[test]
+fn mr_16_a_switch_whose_boundary_does_not_fit_a_clock_of_one_tick_a_sample_is_refused_by_the_book() {
+    let mut harness = Harness::new_with_options(
+        "x3xx",
+        &[("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(200_000_000.0).unwrap()))],
+        // 200 MS/s of one channel needs the 10 GbE image (RM-32).
+        &[("image", Value::List(vec![Scalar::from("xg")]))],
+        &[],
+        None,
+        ExecutionClass::Simulation,
+        Rational::new(200_000_000, 1).unwrap(),
+        0,
+        "rx0",
+    )
+    .unwrap();
+    let t0 = 400_000_000;
+    harness.arm_start(t0).unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().rev().find(|record| record.stream == rid("mock/tx/s0")).unwrap();
+    assert_eq!((record.root_ticks_per_tick.num(), record.root_ticks_per_tick.den()), (1, 1), "one root tick a sample");
+    let domain = record.domain;
+    let start = t0 + 800_000;
+    assert_ne!((i64::MAX - start) % 2_000, 0, "i64::MAX is not on the repeat's grid, and the next grid point does not fit");
+    harness.actions.push(tx_action(domain, start, 2_000, true, LatePolicy::SendAsapAndFlag));
+    harness.step(t0).unwrap();
+    harness.step(t0 + 1_000).unwrap();
+    harness.actions.push(switch_action(domain, i64::MAX, 1_000));
+    harness.step(t0 + 1_000).unwrap();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+    let rejected: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
+    assert_eq!(rejected.len(), 1, "{events:?}");
+    assert_eq!(rejected[0].payload["action"], 2);
+    assert_eq!(rejected[0].payload["reason"], "MR-16: the burst time overflows the transmit clock");
+    assert!(switch_rows(&harness).is_empty(), "a refused switch leaves no row");
 }
 
 /// RM-37 (note 47 stage 5, sequence 7, Mock): an untimed switch takes the same boundary as its timed twin, 2_018 000 (the switch is not placed).

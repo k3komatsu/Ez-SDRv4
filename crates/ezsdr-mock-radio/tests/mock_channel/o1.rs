@@ -356,7 +356,7 @@ fn o1_mock_t4a_a_switch_takes_the_first_grid_point_at_or_after_its_bound() {
         let recv = if at.is_some() { s + 1_000 } else { bound - 12_000 };
         let asked = at.unwrap_or(recv);
         let mut m = switched(700, 400, recv, asked);
-        let b = o::switch_boundary(&m.p, s, 700, m.tick(recv), at);
+        let b = o::switch_boundary(&m.p, s, 700, m.tick(recv), at).unwrap();
         let requested = o::switch_requested_target(&m.p, s, 700, m.tick(recv), asked, false);
         assert_eq!(requested.is_some(), at.is_none(), "{case}: an `at` before the bound is pushed");
         assert_eq!(b, if at.is_none() && bound <= g { g } else { g + 700 }, "{case}");
@@ -384,7 +384,7 @@ fn o1_mock_t4c_a_stop_before_the_boundary_cancels_the_switch() {
     // cancelled, the Mock cuts R at its exact MR-25 point and no new sample is radiated.
     let s = X + 2_000;
     let mut m = switched(1_000, 1_000, s + 2_000, s + 2_000);
-    let b = o::switch_boundary(&m.p, s, 1_000, m.tick(s + 2_000), Some(s + 2_000));
+    let b = o::switch_boundary(&m.p, s, 1_000, m.tick(s + 2_000), Some(s + 2_000)).unwrap();
     assert_eq!(b, s + 14_000);
     m.go(s + 3_000);
     let t = m.tick(s + 3_000);
@@ -467,7 +467,7 @@ fn mr_42_a_timed_switch_pushed_past_its_boundary_records_its_at() {
             m.radio.actions.1.store(true, Ordering::SeqCst);
         }
         m.push(action);
-        let b = o::switch_boundary(&m.p, s, 1_000, m.tick(recv), Some(at));
+        let b = o::switch_boundary(&m.p, s, 1_000, m.tick(recv), Some(at)).unwrap();
         m.go(X + 31_000);
         m.stop();
         m.go(X + 60_000);

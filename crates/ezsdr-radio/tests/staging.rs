@@ -7,7 +7,7 @@ use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_radio::CancelReason;
 use ezsdr_radio::staging::{
     Booked, Bookings, Outcome, Overlap, Playing, Read, Refusal, STOP_FRONT, Settle, Settled, Staging, Started, SwitchAccepted, SwitchOutcome, SwitchRefusal, TxBook, TxList, TxSend, Until,
-    closed_short_gap, ordinary_k, repeat_boundary, stop_bound,
+    closed_short_gap, ordinary_k, repeat_boundary, stop_bound, stop_fits,
 };
 
 fn key(name: &str) -> Key {
@@ -239,6 +239,26 @@ fn rm_16_stop_bound_is_at_or_after_plus_five() {
     let (origin, n) = (7, 200);
     let at_or_after = |t: i64| (t - origin + n - 1).div_euclid(n);
     assert_eq!(stop_bound(1_000, 1_000, at_or_after, |k| origin + k * n), 3_007);
+}
+
+#[test]
+fn rm_16_a_stop_fits_only_when_its_horizon_sample_and_instant_fit_the_clock() {
+    // Origin 0 and `n` root ticks a sample, each step checked as the Providers' clocks check it (`None` when it passes i64).
+    let fits = |n: i64, at: i64, window: i64| {
+        stop_fits(at, window, |t| i64::try_from((i128::from(t) + i128::from(n) - 1).div_euclid(i128::from(n))).ok(), |k| i64::try_from(i128::from(k) * i128::from(n)).ok())
+    };
+    let end = |back: i64| i64::MAX - back;
+    // The horizon `at + window` passes i64::MAX; the last `at` whose horizon fits goes on to the sample.
+    assert!(!fits(1, end(1), 10));
+    assert!(fits(1, end(20), 10));
+    // One tick a sample: the horizon sample plus STOP_FRONT passes i64::MAX at `at` = MAX - 12 (MAX - 2 + 5), and not at MAX - 15 (MAX - 5 + 5).
+    assert_eq!((fits(1, end(12), 10), fits(1, end(15), 10)), (false, true));
+    // 200 ticks a sample: the bound's instant, five samples (1 000 ticks) past the horizon's, passes i64::MAX.
+    assert_eq!((fits(200, end(1_000), 10), fits(200, end(5_000), 10)), (false, true));
+    // A stream's sample at `at` that does not fit refuses it on its own.
+    assert!(!stop_fits(100, 10, |t| (t != 100).then_some(t), Some));
+    // The Stop's own bound is the saturating twin's value wherever it fits.
+    assert_eq!(stop_bound(1_000, 1_000, |t| t, |k| k), 1_000 + 1_000 + STOP_FRONT);
 }
 
 #[test]
@@ -928,11 +948,28 @@ fn rm_16_a_stop_caps_a_33_sample_head_with_a_short_piece_at_the_bound() {
 
 #[test]
 fn rm_13_repeat_boundary_is_the_first_boundary_at_or_after_the_bound() {
-    assert_eq!(repeat_boundary(0, 10, 20), 20, "an equal bound is chosen");
-    assert_eq!(repeat_boundary(0, 10, 21), 30, "one past the boundary takes the next");
-    assert_eq!(repeat_boundary(100, 10, 50), 100, "an origin later than the bound");
-    assert_eq!(repeat_boundary(0, 1, 21), 21);
-    assert_eq!(repeat_boundary(0, 7, 15), 21, "a period that does not divide the distance");
+    assert_eq!(repeat_boundary(0, 10, 20), Some(20), "an equal bound is chosen");
+    assert_eq!(repeat_boundary(0, 10, 21), Some(30), "one past the boundary takes the next");
+    assert_eq!(repeat_boundary(100, 10, 50), Some(100), "an origin later than the bound");
+    assert_eq!(repeat_boundary(0, 1, 21), Some(21));
+    assert_eq!(repeat_boundary(0, 7, 15), Some(21), "a period that does not divide the distance");
+    assert_eq!(repeat_boundary(-30, 10, -5), Some(0), "a negative origin");
+}
+
+#[test]
+fn rm_37_a_repeat_boundary_that_does_not_fit_is_none_never_a_panic_or_a_wrapped_value() {
+    // #94: the edge of the i64 range. The old arithmetic panicked in a debug build and wrapped in a release one at each `None` but the last two.
+    assert_eq!(repeat_boundary(0, 10, i64::MAX), None, "the next grid point past i64::MAX does not exist");
+    assert_eq!(repeat_boundary(0, 1_024, i64::MAX - 1), None, "the period's multiple passes i64::MAX");
+    assert_eq!(repeat_boundary(5, 10, i64::MAX), None, "an origin offsets the grid");
+    assert_eq!(repeat_boundary(i64::MAX - 3, 10, i64::MAX - 3), Some(i64::MAX - 3), "a bound on the origin needs no step");
+    assert_eq!(repeat_boundary(i64::MAX - 3, 10, i64::MAX), None, "the next step passes i64::MAX");
+    assert_eq!(repeat_boundary(0, 1, i64::MAX), Some(i64::MAX), "the last sample is a boundary when the period is one");
+    assert_eq!(repeat_boundary(0, 10, i64::MAX - 7), Some(i64::MAX - 7), "the last grid point that fits");
+    assert_eq!(repeat_boundary(i64::MAX, 10, i64::MIN), Some(i64::MAX), "the difference of a bound and an origin overflows in i64 only");
+    assert_eq!(repeat_boundary(-1, 10, i64::MAX), None, "a bound minus an origin that passes i64::MAX");
+    assert_eq!(repeat_boundary(0, 0, 5), None, "no period, no grid");
+    assert_eq!(repeat_boundary(0, -3, 5), None, "no period, no grid");
 }
 
 #[test]
@@ -1737,7 +1774,7 @@ fn txbook_receive_switch_takes_the_boundary_at_receipt() {
     // P16: the boundary is the first of R's grid at or after both `at` and the bound; the switch is pending (not applied before device
     // time reaches it, applied once it does) and is the playing repeat from receipt, on its own grid, not started before its own issue.
     let mut book = playing_book(true);
-    assert_eq!(book.switch_boundary(3, 15), Some(20));
+    assert_eq!(book.switch_boundary(3, 15), Ok(20));
     assert_eq!(book.receive_switch(ActionId(2), 7, 3, 15, false, 0), Ok(SwitchAccepted { boundary: 20, requested_target: Some(3) }));
     assert_eq!(book.playing, Some(Playing { id: ActionId(2), origin: 20, period: 7, started: false }));
     book.advance(19);
@@ -1746,7 +1783,20 @@ fn txbook_receive_switch_takes_the_boundary_at_receipt() {
     assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Applied)], "applied at its boundary");
     let mut later = playing_book(true);
     assert_eq!(later.receive_switch(ActionId(2), 7, 33, 15, false, 0).map(|accepted| accepted.boundary), Ok(40), "an `at` past the bound decides");
-    assert_eq!(new_book().switch_boundary(3, 15), None, "no repeat plays");
+    assert_eq!(new_book().switch_boundary(3, 15), Err(SwitchRefusal::NoPlayingRepeat), "no repeat plays");
+}
+
+#[test]
+fn txbook_a_switch_whose_boundary_does_not_fit_the_clock_is_refused_and_changes_nothing() {
+    // #94: at the end of the i64 range the boundary does not exist: refused with its own reason, the repeat plays on, and an ordinary
+    // switch received next is taken.
+    let mut book = playing_book(true);
+    let (record, playing) = (book.record.clone(), book.playing);
+    assert_eq!(book.switch_boundary(i64::MAX, 15), Err(SwitchRefusal::TimeOverflow));
+    assert_eq!(book.receive_switch(ActionId(2), 10, i64::MAX, 15, false, 0), Err(SwitchRefusal::TimeOverflow));
+    assert_eq!(book.receive_switch(ActionId(2), 10, 3, i64::MAX, true, 0), Err(SwitchRefusal::TimeOverflow), "a bound at the end of the range");
+    assert_eq!((&book.record, book.playing), (&record, playing));
+    assert_eq!(book.receive_switch(ActionId(3), 10, 3, 15, false, 0), Ok(SwitchAccepted { boundary: 20, requested_target: Some(3) }));
 }
 
 #[test]
