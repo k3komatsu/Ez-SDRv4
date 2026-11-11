@@ -528,3 +528,8 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 - Q15 = yes: on hardware, a case with zero conclusive trials FAILs as 'not exercised'.
 - Q16 = (b″) (owner's refinement): a fake rehearsal whose trial is timing-INCONCLUSIVE fails with a timing marker; gate.py and mutate.py, after the whole run, re-run exactly those tests one at a time (--test-threads=1, exact filter), at most 2 times; pass if a re-run is conclusive and passes; counts in gate.json; manual cargo test shows a hint to re-run serially. No in-test retry.
 - Q17 = yes: a capture's (an Action the Kernel itself receives) receipt lateness is judged from the Kernel action log's LogEntry.time; Provider-addressed Actions still use the receipts section only.
+
+### 段階 0 の表の後（2026-11-12，`51-tables.md` と Opus の再確認 `~/.cache/ezsdr-fixes/2026-11-12-n51s0/recheck.md`）
+- Q17（owner 了承，2026-11-12）：Kernel の action log の `LogEntry.time` は `submit` の入口で打たれる（`pipeline.rs:939`）ので受け取りの下限であり，「遅い」は示せるが「間に合った」は示せない．Q17 はそのまま（安全側）．`submit` の中で遅れた capture は FAIL のまま残る．段階 2c で capture の記録した最初のサンプルを証人に使えるかを調べ，使えれば置き換える．
+- Q16 の文言：「判定できた」は「流し直しで時刻の印が出なかった」の意味．わざと遅く受け取らせる case は印を case ごとに出さない（段階 M と 2c）．
+- 表の食い違い 2〜7 は各段の実装の細部（2a：fixture 4b は target つきの Spec `stop`，`protocol.rs` の `ea_15` の入口．2c：`receipts` は `control.rs:491` の 1 回の読みから書く，R2 の窓の端 `J(e)` も試験側の literal に．M：fixture 3 は実時間の fake に長い `apply_delay` をまず試す）．
