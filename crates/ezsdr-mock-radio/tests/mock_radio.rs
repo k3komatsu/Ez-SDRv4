@@ -1828,6 +1828,7 @@ fn mr_25_s11_loss_and_provider_stop_cancel_pending_switch() {
         stopped.auth.advance_to(TimePoint::new(ROOT, 5_500_000)).unwrap();
         stopped.mock.stop(mode).unwrap();
         assert_eq!(switch_rows(&stopped)[0]["outcome"], "cancelled", "{mode:?}");
+        assert!(bursts(&stopped).iter().all(|record| record.target.ticks_in(domain).unwrap() != 6_000), "{mode:?}: the new waveform is never sent");
     }
 }
 

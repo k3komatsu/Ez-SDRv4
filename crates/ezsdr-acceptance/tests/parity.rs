@@ -1727,13 +1727,13 @@ fn s1_parity_grouped_and_split_fronts() {
 
 #[test]
 fn s1_parity_payload_cut_separate_from_padding() {
-    // UR-22 (S1): a two-sample burst is padded to four on the wire; its record counts the two samples of payload only. (A padded short send closes at once, so Stop cannot cut it.)
+    // UR-22 (S1): a two-sample burst is padded to four on the wire; its record counts the two samples of payload only. (A padded short send closes at once, so Stop cannot cut it.) The booking is SendAsapAndFlag: no instant here is the assertion, so a late host moves the burst and never drops it.
     let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
     let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
     let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
     let waveform = pair.waveform.clone();
-    submit(&mut pair, 209, 91, |pair| vec![short_booking(pair, &waveform, 0, 100, 0)]);
-    pair.uhd.wait_until(pair.uhd_t0 + ms(110));
+    submit(&mut pair, 209, 91, |pair| vec![o1_asap(pair, &waveform, 100, false, false)]);
+    pair.uhd.wait_until(o1_uhd_now(&pair) + ms(30));
     pair.mock.step(pair.t0 + ms(110));
     let mock = pair.mock.finish_in_place();
     let uhd = pair.uhd.finish_in_place();
@@ -2127,19 +2127,17 @@ fn s15_parity_s4b_three_bookings_b_continues_a_and_c_plays_on_time() {
     assert_eq!(uhd_sends.iter().filter(|call| call.contains("sob=true")).count(), 2, "A and B are one device burst, C another: {uhd_sends:?}");
 }
 
-/// A repeat of `waveform` on transmit stream 0, at `samples` after T0 + `relative` ms on each Provider; with the switch mark when
-/// `switch` (RM-37), which `start_repeat` compiles under SendAsapAndFlag.
-fn repeat_action(pair: &CancellationPair, waveform: &ezsdr_kernel::manifest::ArtifactRef, relative: i64, samples: i64, switch: bool) -> (Action, Action) {
-    let action = |at: TimePoint| Action::TxBurst {
-        target: Target::Resource { resource: Ident::parse("radio").unwrap(), path: "tx/s0".to_owned() },
-        waveform: waveform.clone(),
-        repeat: true,
-        at: ezsdr_kernel::time::AbsoluteDeadline::new(at),
-        requested_at: None,
-        late_policy: if switch { ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag } else { ezsdr_kernel::stream::LatePolicy::DropAndFlag },
-        metadata: if switch { BTreeMap::from([(key("radio.repeat_operation"), Value::Scalar(Scalar::from("switch")))]) } else { BTreeMap::new() },
-    };
-    (action(tx_samples_after(&pair.mock.clocks, 0, pair.t0 + ms(relative), samples)), action(tx_samples_after(&pair.uhd.clocks, 0, pair.uhd_t0 + ms(relative), samples)))
+/// Submits a switch to each of `waves`, in this order and at one receipt, once the UHD's repeat is observed started (`o1_wait_playing`: a
+/// switch received before the owner issued the repeat's first send is refused, UR-38, KL-41). The Mock receives them at 24 ms with `at` at
+/// 26 ms (it is stepped by the test); the UHD from the observed start, with `at` there too.
+fn s15_switch(pair: &mut CancellationPair, token: u64, waves: &[&ezsdr_kernel::manifest::ArtifactRef]) {
+    let rel = o1_wait_playing(pair, 7);
+    for wave in waves {
+        let mock = o1_asap(pair, wave, 26, true, true).0;
+        o1_mock_at(pair, 24, mock);
+    }
+    let uhd: Vec<Action> = waves.iter().map(|wave| o1_asap(pair, wave, rel, true, true).1).collect();
+    o1_uhd_at(pair, token, rel, uhd);
 }
 
 /// A Provider's `switches` rows as (predecessor, old period, new period, outcome). The action id is left out: UHD's barrier takes
@@ -2164,10 +2162,9 @@ fn s15_parity_switch_to_a_new_length() {
     );
     let long = pair.sized(1_000).clone();
     let short = pair.sized(500).clone();
-    submit(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 20, 0, false)]);
-    submit(&mut pair, 202, 24, |pair| vec![repeat_action(pair, &short, 26, 0, true)]);
-    submit(&mut pair, 203, 28, |_| Vec::new());
-    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &long, 20, true, false)]);
+    s15_switch(&mut pair, 202, &[&short]);
+    pair.uhd.wait_until(o1_uhd_now(&pair) + ms(60));
     pair.mock.step(pair.t0 + ms(60));
     let mock = pair.mock.finish_in_place();
     let uhd = pair.uhd.finish_in_place();
@@ -2188,10 +2185,9 @@ fn s15_parity_second_pending_switch_is_refused() {
     );
     let long = pair.sized(1_000).clone();
     let short = pair.sized(500).clone();
-    submit(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 20, 0, false)]);
-    submit(&mut pair, 202, 24, |pair| vec![repeat_action(pair, &short, 26, 0, true), repeat_action(pair, &long, 26, 0, true)]);
-    submit(&mut pair, 203, 28, |_| Vec::new());
-    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &long, 20, true, false)]);
+    s15_switch(&mut pair, 202, &[&short, &long]);
+    pair.uhd.wait_until(o1_uhd_now(&pair) + ms(60));
     pair.mock.step(pair.t0 + ms(60));
     let (mock, uhd) = (tx_decisions(&pair.mock.events()), tx_decisions(&pair.uhd.events()));
     let kinds = |decisions: &[(String, u64)]| decisions.iter().map(|(kind, _)| kind.clone()).collect::<Vec<_>>();
@@ -2226,17 +2222,30 @@ fn s15_parity_switch_mark_under_another_late_policy_is_refused_at_receipt() {
         };
         (policy(mock), policy(uhd))
     };
-    submit(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 20, 0, false)]);
-    submit(&mut pair, 202, 24, |pair| vec![dropping(repeat_action(pair, &short, 26, 0, true))]);
-    submit(&mut pair, 203, 28, |_| Vec::new());
-    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &long, 20, true, false)]);
+    let rel = o1_wait_playing(&mut pair, 7);
+    let (mock_switch, _) = dropping(o1_asap(&pair, &short, 26, true, true));
+    let (_, uhd_switch) = dropping(o1_asap(&pair, &short, rel, true, true));
+    o1_mock_at(&mut pair, 24, mock_switch);
+    o1_uhd_at(&mut pair, 202, rel, [uhd_switch]);
+    pair.uhd.wait_until(o1_uhd_now(&pair) + ms(60));
     pair.mock.step(pair.t0 + ms(60));
-    let (mock, uhd) = (tx_decisions(&pair.mock.events()), tx_decisions(&pair.uhd.events()));
+    let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+    let (mock, uhd) = (tx_decisions(&mock_events), tx_decisions(&uhd_events));
     assert_eq!(mock.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(), ["tx_burst"], "the marked repeat is refused: {mock:?}");
     assert_eq!(uhd.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(), ["tx_burst"], "the marked repeat is refused: {uhd:?}");
-    for events in [pair.mock.events(), pair.uhd.events()] {
-        assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "a refusal at receipt reports no TIME_ERROR: {events:?}");
-    }
+    // The refused switch reports no TIME_ERROR. The UHD's repeat may be late and report its own (send_asap, naming the repeat's target, which
+    // is not the switch's: a non-switch burst's TIME_ERROR names no action); the stepped Mock has none.
+    assert!(mock_events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "a refusal at receipt reports no TIME_ERROR: {mock_events:?}");
+    let repeat_at = tx_samples_after(&pair.uhd.clocks, 0, pair.uhd_t0 + ms(20), 0);
+    let repeat_ticks = repeat_at.ticks_in(repeat_at.domain()).unwrap();
+    assert!(
+        uhd_events
+            .iter()
+            .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR)
+            .all(|event| event.payload["outcome"] == "send_asap" && event.payload["target"]["ticks"].as_i64() == Some(repeat_ticks)),
+        "a refusal at receipt reports no TIME_ERROR for the switch: {uhd_events:?}"
+    );
     let mock = pair.mock.finish_in_place();
     let uhd = pair.uhd.finish_in_place();
     assert_eq!(switch_rows(&mock, "ezsdr.radio.mock.switches"), []);
@@ -2256,10 +2265,9 @@ fn s15_parity_switch_starts_on_the_old_repeats_end() {
     );
     let long = pair.sized(1_000).clone();
     let tone = pair.tone.clone();
-    submit(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 20, 0, false)]);
-    submit(&mut pair, 202, 24, |pair| vec![repeat_action(pair, &tone, 26, 0, true)]);
-    submit(&mut pair, 203, 28, |_| Vec::new());
-    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &long, 20, true, false)]);
+    s15_switch(&mut pair, 202, &[&tone]);
+    pair.uhd.wait_until(o1_uhd_now(&pair) + ms(60));
     pair.mock.step(pair.t0 + ms(60));
     let mock = pair.mock.finish_in_place();
     let uhd = pair.uhd.finish_in_place();
@@ -2283,7 +2291,15 @@ fn s15_parity_switch_starts_on_the_old_repeats_end() {
 #[test]
 fn s15_parity_provider_stop_cancels_a_pending_switch() {
     // S11, D58 (RM-37, UR-26, UR-38): a switch received at 22 ms is still pending when Provider::stop ends the Run at 23 ms, before its
-    // boundary. Both Providers cancel it, and the new waveform is never sent: the old repeat is the only burst.
+    // boundary. Both Providers cancel it, and the new waveform is never sent: the old repeat is the only burst. The Mock is stepped, so
+    // its half always runs. The UHD receives the switch from the repeat's observed start with `at` a second later, so its boundary is far
+    // past the Stop unless the test thread is away for a second between the receipt and the Stop. A Stop whose bound (RM-16: the first
+    // sample at or after the Stop's `at` plus the 10 ms in-flight window, plus five, which is what `Provider::stop` books and the oracle's
+    // `stop_bound` computes) lies before the boundary cancels the switch; one whose bound lies after it applies the switch (correctly).
+    // So the UHD half is judged only when the boundary is more than 1 ms past that bound, the Stop's `at` read from the `stop` row of the
+    // Manifest's timing section, and is "not established" otherwise. The frozen rigs own the unconditional case:
+    // `ur_23_provider_stop_and_loss_cancel_the_pending_switch` (UHD, tx.rs) and `mr_25_s11_loss_and_provider_stop_cancel_pending_switch`
+    // (Mock, mock_radio.rs).
     let mut pair = CancellationPair::new(
         selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
         &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
@@ -2293,17 +2309,32 @@ fn s15_parity_provider_stop_cancels_a_pending_switch() {
     );
     let long = pair.sized(1_000).clone();
     let tone = pair.tone.clone();
-    submit(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 20, 0, false)]);
-    submit(&mut pair, 202, 22, |pair| vec![repeat_action(pair, &tone, 26, 0, true)]);
-    pair.uhd.wait_until(pair.uhd_t0 + ms(23));
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &long, 20, true, false)]);
+    let rel = o1_wait_playing(&mut pair, 7);
+    let (mock_switch, _) = o1_asap(&pair, &tone, 26, true, true);
+    let (_, uhd_switch) = o1_asap(&pair, &tone, rel + 1_000, true, true);
+    o1_mock_at(&mut pair, 22, mock_switch);
+    o1_uhd_at(&mut pair, 202, rel, [uhd_switch]);
     pair.mock.step(pair.t0 + ms(23));
     let mock = pair.mock.finish_in_place();
     let uhd = pair.uhd.finish_in_place();
-    for (case, instance, namespace) in [("Mock", &mock, "ezsdr.radio.mock"), ("UHD", &uhd, "ezsdr.radio.uhd")] {
+    let check = |case: &str, instance: &ProviderInstance, namespace: &str| {
         let outcomes: Vec<String> = switch_rows(instance, &format!("{namespace}.switches")).into_iter().map(|row| row.3).collect();
         assert_eq!(outcomes, ["cancelled"], "{case}: the switch is cancelled");
         assert_eq!(manifest_rows(instance, &format!("{namespace}.bursts")).len(), 1, "{case}: the old repeat is the only burst");
+    };
+    check("Mock", &mock, "ezsdr.radio.mock");
+    let boundary = manifest_rows(&uhd, "ezsdr.radio.uhd.switches").first().map(|row| tx_device_tick(&pair.uhd.clocks, 0, row["boundary"].as_i64().unwrap()));
+    if let Some(boundary) = boundary {
+        let stop_at = manifest_rows(&uhd, "ezsdr.radio.uhd.timing").into_iter().find(|row| row["what"] == "stop").expect("the stop row")["at"].as_i64().unwrap();
+        let params = o1_params(&pair.uhd.clocks);
+        let bound = params.clock.instant(params.stop_bound(stop_at).1);
+        if boundary <= bound + ms(1) {
+            eprintln!("s15 stop: the Stop's bound {bound} is not 1 ms before the switch's boundary {boundary} (the test thread was away), so the outcome is not established; the frozen rigs own it");
+            return;
+        }
     }
+    check("UHD", &uhd, "ezsdr.radio.uhd");
     let origin = manifest_rows(&uhd, "ezsdr.radio.uhd.bursts")[0]["target"]["ticks"].as_i64().unwrap();
     assert!(!pair.uhd.device.transmitted(tx_device_tick(&pair.uhd.clocks, 0, origin), 30_000).contains(&Some([0.75, -0.25])), "{:?}", pair.uhd.device.calls());
 }
@@ -2327,9 +2358,9 @@ fn s15_parity_untimed_booking_after_stop() {
         BTreeMap::new(),
     );
     let long = pair.sized(1_000).clone();
-    submit_untimed(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 6, 0, false)]);
+    submit_untimed(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &long, 6, true, false)]);
     submit(&mut pair, 202, 20, |_| vec![stop_both("tx/s0")]);
-    submit_untimed(&mut pair, 203, 21, |pair| vec![repeat_action(pair, &long, 21, 0, false)]);
+    submit_untimed(&mut pair, 203, 21, |pair| vec![o1_asap(pair, &long, 21, true, false)]);
     pair.uhd.wait_until(pair.uhd_t0 + ms(60));
     pair.mock.step(pair.t0 + ms(60));
     let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
@@ -2380,14 +2411,20 @@ fn s15_parity_untimed_queue_behind_a_booking() {
     let ten = pair.sized(10).clone();
     submit(&mut pair, 201, 17, |pair| vec![o1_asap(pair, &ten, 30, false, false)]);
     submit_untimed(&mut pair, 202, 17, |pair| vec![short_booking(pair, &ten, 0, 30, 3)]);
-    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    pair.uhd.wait_until(o1_uhd_now(&pair) + ms(60));
     pair.mock.step(pair.t0 + ms(60));
     let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
     assert!(tx_decisions(&mock_events).is_empty() && tx_decisions(&uhd_events).is_empty(), "both bursts are accepted: {mock_events:?}");
-    // A late B reports its own TIME_ERROR (send_asap); the untimed burst never does: no TIME_ERROR names it (its action is the second booked).
+    // A late B reports its own TIME_ERROR (send_asap), which names B by its target (a non-switch burst's TIME_ERROR names no action, RM-22);
+    // the untimed burst never has one.
     assert!(mock_events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "the Mock is stepped by the test: no TIME_ERROR");
+    let b_at = tx_samples_after(&pair.uhd.clocks, 0, pair.uhd_t0 + ms(30), 0);
+    let b_ticks = b_at.ticks_in(b_at.domain()).unwrap();
     assert!(
-        uhd_events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).all(|event| event.payload["outcome"] == "send_asap" && event.payload["action"].as_u64() == Some(1)),
+        uhd_events
+            .iter()
+            .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR)
+            .all(|event| event.payload["outcome"] == "send_asap" && event.payload["target"]["ticks"].as_i64() == Some(b_ticks)),
         "only B may be late: {uhd_events:?}"
     );
     let mock = pair.mock.finish_in_place();
@@ -2582,11 +2619,17 @@ fn o1_mock_at(pair: &mut CancellationPair, relative: i64, action: Action) {
     pair.mock.step(pair.t0 + ms(relative));
 }
 
-/// The UHD receives `action` once its device clock is at `relative` ms from its T0 (or later, if a descheduled test thread let it pass).
-fn o1_uhd_at(pair: &mut CancellationPair, token: u64, relative: i64, action: Action) {
+/// The UHD receives `actions` in one receipt (they enter its queue under one lock, so uhd-control takes them with no device time between,
+/// whatever the test thread does) once its device clock is at `relative` ms from its T0 (or later, if a descheduled test thread let it pass).
+fn o1_uhd_at(pair: &mut CancellationPair, token: u64, relative: i64, actions: impl IntoIterator<Item = Action>) {
     pair.uhd.wait_until(pair.uhd_t0 + ms(relative));
-    pair.uhd.push(action);
+    pair.uhd.actions.actions.lock().unwrap().extend(actions.into_iter().map(|action| (action, false)));
     pair.uhd_barrier(token);
+}
+
+/// The UHD's device time now, in root ticks.
+fn o1_uhd_now(pair: &CancellationPair) -> i64 {
+    pair.uhd.time.now(pair.uhd.root).unwrap().ticks_in(pair.uhd.root).unwrap()
 }
 
 /// Advances the UHD's device clock a millisecond at a time from `from` ms until the owner has issued its first timed payload send (the first
@@ -2620,7 +2663,7 @@ fn o1_parity_a_repeat_keeps_its_phase_across_wraps_from_its_observed_start() {
     let rel = o1_wait_playing(&mut pair, 7).max(50);
     let (mock_stop, uhd_stop) = (o1_asap_stop(), o1_asap_stop());
     o1_mock_at(&mut pair, 50, mock_stop);
-    o1_uhd_at(&mut pair, 202, rel, uhd_stop);
+    o1_uhd_at(&mut pair, 202, rel, [uhd_stop]);
     pair.uhd.wait_until(pair.uhd_t0 + ms(rel + 70));
     pair.mock.step(pair.t0 + ms(120));
     let mock = pair.mock.finish_in_place();
@@ -2676,7 +2719,7 @@ fn o1_parity_a_stop_cuts_a_playing_burst_inside_the_applied_range() {
     submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &wave, 40, false, false)]);
     let rel = o1_wait_playing(&mut pair, 7).max(41);
     o1_mock_at(&mut pair, 41, o1_asap_stop());
-    o1_uhd_at(&mut pair, 202, rel, o1_asap_stop());
+    o1_uhd_at(&mut pair, 202, rel, [o1_asap_stop()]);
     pair.uhd.wait_until(pair.uhd_t0 + ms(rel + 70));
     pair.mock.step(pair.t0 + ms(120));
     let mock = pair.mock.finish_in_place();
@@ -2719,13 +2762,13 @@ fn o1_parity_a_switched_repeat_changes_waveform_at_its_recorded_boundary_on_its_
     let (mock_switch, _) = o1_asap(&pair, &new, 44, true, true);
     let (_, uhd_switch) = o1_asap(&pair, &new, rel, true, true);
     o1_mock_at(&mut pair, 43, mock_switch);
-    o1_uhd_at(&mut pair, 202, rel, uhd_switch);
+    o1_uhd_at(&mut pair, 202, rel, [uhd_switch]);
     // The Stop that ends the new repeat: the Mock at 70 ms; the UHD 30 ms after the device time at which it actually received the switch (so
     // the Stop's bound can never come before the switch's boundary, however late the test thread was).
-    let received = pair.uhd.time.now(pair.uhd.root).unwrap().ticks_in(pair.uhd.root).unwrap();
+    let received = o1_uhd_now(&pair);
     let stop_rel = (rel + 30).max((received - pair.uhd_t0 + ms(1) - 1) / ms(1) + 30);
     o1_mock_at(&mut pair, 70, o1_asap_stop());
-    o1_uhd_at(&mut pair, 203, stop_rel, o1_asap_stop());
+    o1_uhd_at(&mut pair, 203, stop_rel, [o1_asap_stop()]);
     pair.uhd.wait_until(pair.uhd_t0 + ms(stop_rel + 70));
     pair.mock.step(pair.t0 + ms(stop_rel + 70));
     let mock = pair.mock.finish_in_place();
