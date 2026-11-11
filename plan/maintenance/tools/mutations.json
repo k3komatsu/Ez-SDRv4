@@ -17255,5 +17255,363 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "e2a_93_a_sequence_error_before_the_open_burst_s_first_tick_still_abandons_it"
+ },
+ {
+  "id": "C89-1-01",
+  "name": "#89 (KC-36): the disconnect signal requests no end",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "if ending::request(&shared, Termination::Stopped { cause }, crate::run::CleanupMode::Orderly) && shared.device_paced() {",
+  "new": "if false && ending::request(&shared, Termination::Stopped { cause }, crate::run::CleanupMode::Orderly) && shared.device_paced() {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_36_a_disconnect_signal_ends_a_waiting_advance"
+ },
+ {
+  "id": "C89-1-02",
+  "name": "#89 (KC-36, KC-46a): the disconnect signal does not wake a control loop waiting in next_wakeup",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "paced::wake(&shared, true);",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_36_a_disconnect_signal_ends_a_waiting_advance"
+ },
+ {
+  "id": "C89-1-03",
+  "name": "#89 (KC-36): the disconnect signal requests its end in abort mode",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "crate::run::CleanupMode::Orderly) && shared.device_paced()",
+  "new": "crate::run::CleanupMode::Abort) && shared.device_paced()",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_36_a_disconnect_signal_ends_a_waiting_advance"
+ },
+ {
+  "id": "C89-1-04",
+  "name": "#89 (KC-36, Q2): the disconnect signal requests an end only in a device-paced class, so a Simulation Run is never cut",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "ending::request(&shared, Termination::Stopped { cause }, crate::run::CleanupMode::Orderly) && shared.device_paced()",
+  "new": "shared.device_paced() && ending::request(&shared, Termination::Stopped { cause }, crate::run::CleanupMode::Orderly)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_36_a_disconnect_signal_ends_a_simulated_advance"
+ },
+ {
+  "id": "C89-1-05",
+  "name": "#89 (KC-36, RS-23): the disconnect signal ends a Run whose Lease is Detached",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "self.lease.clone().on_disconnect(&*self.shared.ctx.host_clock)",
+  "new": "Some(crate::run::StopCause::ClientDisconnect {})",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_36_a_disconnect_signal_does_nothing_for_a_detached_lease_or_an_ended_run"
+ },
+ {
+  "id": "C89-1-06",
+  "name": "#89 (KC-36, N1): the disconnect signal holds the Run strongly and keeps it alive after its handle is gone",
+  "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+  "old": "Arc::downgrade(&self.shared)",
+  "new": "self.shared.clone()",
+  "old2": "shared.upgrade()",
+  "new2": "Some(shared.clone())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_36_a_disconnect_signal_does_nothing_for_a_detached_lease_or_an_ended_run"
+ },
+ {
+  "id": "C89-2-01",
+  "name": "#89 (EA-15): the watch's fire calls no signal",
+  "file": "crates/ezsdr-server/src/watch.rs",
+  "old": "for (_, signal) in &signals.held { signal();",
+  "new": "for (_, signal) in &signals.held { let _ = signal;",
+  "crate": "ezsdr-server",
+  "test_bin": "watch",
+  "filter": "ea_15_the_watch_calls_every_signal_it_holds_once_and_each_added_after_it_fired"
+ },
+ {
+  "id": "C89-2-02",
+  "name": "#89 (EA-15): a signal added to a fired watch is not called",
+  "file": "crates/ezsdr-server/src/watch.rs",
+  "old": "if signals.fired { signal();",
+  "new": "if signals.fired { let _ = &signal;",
+  "crate": "ezsdr-server",
+  "test_bin": "watch",
+  "filter": "ea_15_the_watch_calls_every_signal_it_holds_once_and_each_added_after_it_fired"
+ },
+ {
+  "id": "C89-2-03",
+  "name": "#89 (EA-15): removing a signal from the watch does nothing",
+  "file": "crates/ezsdr-server/src/watch.rs",
+  "old": "self.lock().held.retain(|(held, _)| *held != id);",
+  "new": "",
+  "crate": "ezsdr-server",
+  "test_bin": "watch",
+  "filter": "ea_15_the_watch_calls_every_signal_it_holds_once_and_each_added_after_it_fired"
+ },
+ {
+  "id": "C89-2-04",
+  "name": "#89 (EA-15): the input thread does not fire the watch at the end of the input",
+  "file": "crates/ezsdr-server/src/transport.rs",
+  "old": "Ok(0) => break,",
+  "new": "Ok(0) => return,",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_an_input_that_ends_during_an_advance_ends_the_session"
+ },
+ {
+  "id": "C89-2-05",
+  "name": "#89 (EA-15): A2: a frame read after the input ended is served",
+  "file": "crates/ezsdr-server/src/transport.rs",
+  "old": "if server.input_ended() {",
+  "new": "if false {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_an_input_that_ends_during_a_simulated_advance_ends_the_session_and_nothing_after_it_is_served"
+ },
+ {
+  "id": "C89-2-06",
+  "name": "#89 (EA-15): connect does not add the Session's disconnect signal to the watch",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "let watched = self.watch.as_ref().map(|watch| watch.add(run.disconnect_signal()));",
+  "new": "let watched = None;",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_an_input_that_ends_during_a_simulated_advance_ends_the_session_and_nothing_after_it_is_served"
+ },
+ {
+  "id": "C89-2-07",
+  "name": "#89 (EA-15): run_child's drive does not add the child's disconnect signal to the watch",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "let watched = watch.as_ref().map(|watch| watch.add(child.disconnect_signal()));",
+  "new": "let watched = None;",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_an_input_that_ends_during_a_child_run_ends_the_child"
+ },
+ {
+  "id": "C89-2-08",
+  "name": "#89 (EA-10): a Detached Lease is not refused at connect",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "if lease.as_ref().is_some_and(|lease| matches!(lease.mode, LeaseMode::Detached { .. })) {",
+  "new": "if false {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_10_a_detached_lease_is_refused"
+ },
+ {
+  "id": "C89-2-09",
+  "name": "#89 (EA-15): the binary exits 1 with a message when a reply meets a closed pipe",
+  "file": "crates/ezsdr-server/src/main.rs",
+  "old": "Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,",
+  "new": "",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_the_binary_exits_0_when_its_client_closes_both_pipes_during_a_request"
+ },
+ {
+  "id": "C89-2-10",
+  "name": "#89 (EA-15): the binary reads its input on the serving thread (serve, no watch)",
+  "file": "crates/ezsdr-server/src/main.rs",
+  "old": "match serve_watched(io::stdin(), io::stdout().lock(), config) {",
+  "new": "match ezsdr_server::serve(io::BufReader::new(io::stdin().lock()), io::stdout().lock(), config) {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_the_binary_exits_0_when_its_client_closes_both_pipes_during_a_request"
+ },
+ {
+  "id": "C89-2-11",
+  "name": "#89 (EA-15): N1: the watch calls its signals outside its lock",
+  "file": "crates/ezsdr-server/src/watch.rs",
+  "old": "for (_, signal) in &signals.held {",
+  "new": "let held = std::mem::take(&mut signals.held); drop(signals); for (_, signal) in &held {",
+  "crate": "ezsdr-server",
+  "test_bin": "watch",
+  "filter": "ea_15_a_removal_waits_for_a_fire_in_progress_so_the_owner_drops_last"
+ },
+ {
+  "id": "C89-2-12",
+  "name": "#89 (EA-15): N1: finish leaves the Session's signal to its holder's drop, after the Run is finished",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "let manifest = unwatched(live.watched, live.run).finish();",
+  "new": "let manifest = live.run.finish();",
+  "crate": "ezsdr-server",
+  "test_bin": "watch",
+  "filter": "ea_15_finish_removes_the_session_s_signal_before_it_finishes_the_run"
+ },
+ {
+  "id": "C89-2-16",
+  "name": "#89 (EA-15): connect adds the Session's signal only after the advance to T0",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "let watched = self.watch.as_ref().map(|watch| watch.add(run.disconnect_signal()));",
+  "new": "",
+  "old2": "let (RunState::Running {}, Some(start_instant)) = (run.state(), run.start_instant()) else {",
+  "new2": "let watched = self.watch.as_ref().map(|watch| watch.add(run.disconnect_signal())); let (RunState::Running {}, Some(start_instant)) = (run.state(), run.start_instant()) else {",
+  "crate": "ezsdr-server",
+  "test_bin": "watch",
+  "filter": "ea_15_a_connect_after_the_input_ended_ends_on_its_way_to_t0_and_leaves_no_signal"
+ },
+ {
+  "id": "C89-2-17",
+  "name": "#89 (EA-15): the input thread does not fire the watch when its input fails",
+  "file": "crates/ezsdr-server/src/transport.rs",
+  "old": "Err(_) => break,",
+  "new": "Err(_) => return,",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_a_read_error_during_an_advance_ends_the_session"
+ },
+ {
+  "id": "C89-2-18",
+  "name": "#89 (EA-15): N1: finish finishes the Run before it removes the Session's signal",
+  "file": "crates/ezsdr-server/src/lib.rs",
+  "old": "let manifest = unwatched(live.watched, live.run).finish();",
+  "new": "let manifest = unwatched(live.watched, live.run.finish());",
+  "crate": "ezsdr-server",
+  "test_bin": "watch",
+  "filter": "ea_15_finish_removes_the_session_s_signal_before_it_finishes_the_run"
+ },
+ {
+  "id": "C89-2-21",
+  "name": "#89 (EA-15): a signal's holder dropped leaves its signal in the watch",
+  "file": "crates/ezsdr-server/src/watch.rs",
+  "old": "fn drop(&mut self) { self.watch.remove(self.id); }",
+  "new": "fn drop(&mut self) {}",
+  "crate": "ezsdr-server",
+  "test_bin": "watch",
+  "filter": "ea_15_a_signal_is_removed_when_its_holder_is_dropped"
+ },
+ {
+  "id": "C89-2-20",
+  "name": "#89 (EA-15): the input thread takes an interrupted read for the end of the input",
+  "file": "crates/ezsdr-server/src/transport.rs",
+  "old": "Err(error) if error.kind() == io::ErrorKind::Interrupted => {}",
+  "new": "Err(error) if error.kind() == io::ErrorKind::Interrupted => break,",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_a_read_error_during_an_advance_ends_the_session"
+ },
+ {
+  "id": "C89-3-01",
+  "name": "#89 (EA-16): the server is started in the client's own session (start_new_session dropped)",
+  "file": "python/ezsdr/_client.py",
+  "old": "start_new_session=True",
+  "new": "start_new_session=False",
+  "python": "test_easy_api.Departure.test_ea_16_the_server_runs_in_a_session_of_its_own"
+ },
+ {
+  "id": "C89-3-02",
+  "name": "#89 (EA-16): an abandoned call does not close the server's input",
+  "file": "python/ezsdr/_client.py",
+  "old": "for stream in (self._process.stdin, self._process.stdout):",
+  "new": "for stream in (self._process.stdout,):",
+  "python": "test_easy_api.Departure.test_ea_16_an_interrupted_call_closes_both_pipes_and_ends_the_session"
+ },
+ {
+  "id": "C89-3-03",
+  "name": "#89 (EA-16): an abandoned call does not close the server's output",
+  "file": "python/ezsdr/_client.py",
+  "old": "for stream in (self._process.stdin, self._process.stdout):",
+  "new": "for stream in (self._process.stdin,):",
+  "python": "test_easy_api.Departure.test_ea_16_an_interrupted_call_closes_both_pipes_and_ends_the_session"
+ },
+ {
+  "id": "C89-3-04",
+  "name": "#89 (EA-16): the abandoned region begins after the write of the request",
+  "file": "python/ezsdr/_client.py",
+  "old": "        try:\n            try:\n                stdin.write(header.encode(\"utf-8\") + b\"\\n\" + body)\n                stdin.flush()\n            except BrokenPipeError:\n                raise ProtocolError(\"protocol\", \"the server has exited\", {}) from None\n            line = stdout.readline()",
+  "new": "        try:\n            stdin.write(header.encode(\"utf-8\") + b\"\\n\" + body)\n            stdin.flush()\n        except BrokenPipeError:\n            raise ProtocolError(\"protocol\", \"the server has exited\", {}) from None\n        try:\n            line = stdout.readline()",
+  "python": "test_easy_api.Departure.test_ea_16_an_exception_while_the_request_is_written_abandons_too"
+ },
+ {
+  "id": "C89-3-05",
+  "name": "#89 (EA-16): an error reply abandons the connection",
+  "file": "python/ezsdr/_client.py",
+  "old": "        except BaseException:\n            self._abandon()\n            raise\n        if \"error\" in reply:\n            _raise(reply[\"error\"])\n",
+  "new": "            if \"error\" in reply:\n                _raise(reply[\"error\"])\n        except BaseException:\n            self._abandon()\n            raise\n",
+  "python": "test_easy_api.EasyApi.test_ea_16_errors"
+ },
+ {
+  "id": "C89-3-07",
+  "name": "#89 (EA-16): close() after an abandon still sends finish",
+  "file": "python/ezsdr/session.py",
+  "old": "if not self._connection.abandoned:",
+  "new": "if True:",
+  "python": "test_easy_api.DepartureClose.test_ea_16_close_after_an_abandon_sends_no_finish_and_reads_after_the_exit"
+ },
+ {
+  "id": "C89-3-08",
+  "name": "#89 (EA-16): after an abandon close() reads manifest.json before it waits for the server's exit",
+  "file": "python/ezsdr/session.py",
+  "old": "            finally:\n                self._connection.close()\n",
+  "new": "            finally:\n                if not self._connection.abandoned:\n                    self._connection.close()\n",
+  "old2": "                        raise failed from None\n",
+  "new2": "                        raise failed from None\n            if self._connection.abandoned:\n                self._connection.close()\n",
+  "python": "test_easy_api.DepartureClose.test_ea_16_close_after_an_abandon_sends_no_finish_and_reads_after_the_exit"
+ },
+ {
+  "id": "C89-3-09",
+  "name": "#89 (EA-16): after close()'s own finish failed it reads manifest.json before it waits for the server's exit (the old order)",
+  "file": "python/ezsdr/session.py",
+  "old": "            finally:\n                self._connection.close()\n",
+  "new": "            finally:\n                if self._connection.abandoned:\n                    self._connection.close()\n",
+  "old2": "                        raise failed from None\n",
+  "new2": "                        raise failed from None\n            if not self._connection.abandoned:\n                self._connection.close()\n",
+  "python": "test_easy_api.DepartureClose.test_ea_16_close_reads_the_manifest_after_the_server_exited"
+ },
+ {
+  "id": "C89-3-10",
+  "name": "#89 (EA-16): a partial manifest.json is not tolerated after an abandon",
+  "file": "python/ezsdr/session.py",
+  "old": "except (OSError, ValueError):",
+  "new": "except OSError:",
+  "python": "test_easy_api.DepartureClose.test_ea_16_close_after_an_abandon_leaves_no_manifest_when_none_is_readable"
+ },
+ {
+  "id": "C89-3-11",
+  "name": "#89 (EA-16): a missing manifest.json raises after an abandon",
+  "file": "python/ezsdr/session.py",
+  "old": "except (OSError, ValueError):",
+  "new": "except ValueError:",
+  "python": "test_easy_api.DepartureClose.test_ea_16_close_after_an_abandon_leaves_no_manifest_when_none_is_readable"
+ },
+ {
+  "id": "C89-3-12",
+  "name": "#89 (EA-16): the abandoned region ends after the reply's header line (the body read is outside it)",
+  "file": "python/ezsdr/_client.py",
+  "old": "            frame = json.loads(line)\n            data = _read_exactly(stdout, frame.get(\"body_bytes\", 0))\n            reply = frame[\"reply\"]\n        except BaseException:\n            self._abandon()\n            raise\n",
+  "new": "            frame = json.loads(line)\n        except BaseException:\n            self._abandon()\n            raise\n        data = _read_exactly(stdout, frame.get(\"body_bytes\", 0))\n        reply = frame[\"reply\"]\n",
+  "python": "test_easy_api.Departure.test_ea_16_an_interruption_while_the_reply_body_is_read_abandons"
+ },
+ {
+  "id": "C89-3-13",
+  "name": "#89 (EA-16): a server that does not exit within 30 s is not killed",
+  "file": "python/ezsdr/_client.py",
+  "old": "            self._process.kill()\n",
+  "new": "            pass\n",
+  "python": "test_easy_api.DepartureClose.test_ea_16_a_server_that_does_not_exit_is_killed_and_close_keeps_no_manifest"
+ },
+ {
+  "id": "C89-3-14",
+  "name": "#89 (EA-16): an abandoned call does not mark the connection abandoned",
+  "file": "python/ezsdr/_client.py",
+  "old": "        self.abandoned = True\n",
+  "new": "        self.abandoned = False\n",
+  "python": "test_easy_api.Departure.test_ea_16_close_after_an_interrupt_keeps_no_manifest_that_is_elsewhere"
+ },
+ {
+  "id": "C89-3-15",
+  "name": "#89 (EA-16): an interrupt (KeyboardInterrupt, SystemExit) no longer abandons the connection",
+  "file": "python/ezsdr/_client.py",
+  "old": "        except BaseException:\n            self._abandon()\n",
+  "new": "        except Exception:\n            self._abandon()\n",
+  "python": "test_easy_api.Departure.test_ea_16_an_interrupted_call_closes_both_pipes_and_ends_the_session"
+ },
+ {
+  "id": "C89-3-16",
+  "name": "#89 (EA-16): a close whose own finish failed does not raise when no Manifest is readable",
+  "file": "python/ezsdr/session.py",
+  "old": "raise failed from None",
+  "new": "pass",
+  "python": "test_easy_api.DepartureClose.test_ea_16_a_close_whose_own_finish_fails_raises_unless_a_manifest_was_written"
  }
 ]

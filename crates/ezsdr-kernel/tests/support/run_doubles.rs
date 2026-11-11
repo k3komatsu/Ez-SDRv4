@@ -44,6 +44,11 @@ impl Probe {
         changed.notify_all();
     }
 
+    /// How many clones of this probe exist: a dropped Run's doubles hold none.
+    pub fn holders(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
     /// Copies every observation in order.
     pub fn lines(&self) -> Vec<String> {
         self.0.0.lock().unwrap_or_else(|e| e.into_inner()).clone()

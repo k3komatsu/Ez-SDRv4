@@ -405,7 +405,8 @@ class Rx(_Stream):
 
     def capture(self, n: int, at: Optional[dict] = None, timeout: Optional[float] = None) -> np.ndarray:
         """Captures ``n`` samples from this stream's recorder and returns them (EA-17).
-        ``at`` is a ``TimePoint``; ``timeout`` is in seconds of Run time."""
+        ``at`` is a ``TimePoint``; ``timeout`` is in seconds of Run time. An exception that ends
+        the call while it waits (``KeyboardInterrupt`` included) ends the Session, as ``close`` says."""
         if self._session._aligned is not None:
             raise Error("EA-16: capture waits, so it is refused inside aligned; use request, and result after the block")
         if timeout is not None:
@@ -432,7 +433,8 @@ class Rx(_Stream):
 
     def result(self, handle: CaptureRequest, timeout: Optional[float] = None) -> np.ndarray:
         """Waits, in Run time, for ``handle``'s capture and returns its samples (EA-17);
-        ``timeout`` defaults to ``n / rate + 1`` seconds."""
+        ``timeout`` defaults to ``n / rate + 1`` seconds. An exception that ends the call while it
+        waits (``KeyboardInterrupt`` included) ends the Session, as ``close`` says."""
         n, entry, start = handle.n, handle.entry, handle._start
         if timeout is None:
             timeout = n / float(self.sample_rate) + 1.0
@@ -600,7 +602,10 @@ class RunResult:
 
 class Session:
     """A Session: a Run whose Spec is implicit and whose Manifest records an action log
-    (Vision §3). Leaving the ``with`` block ends it and keeps its Manifest."""
+    (Vision §3). Leaving the ``with`` block ends it and keeps its Manifest. A call that ends
+    while its reply is awaited (an exception such as ``KeyboardInterrupt``) closes the server's
+    input and output, which ends the Session: later calls raise ``ProtocolError`` and ``close``
+    sends no ``finish`` (EA-16)."""
 
     def __init__(self, connection: Connection, connected: dict):
         self._connection = connection
@@ -695,17 +700,22 @@ class Session:
 
     def sleep(self, seconds: float) -> dict:
         """``run.wait_until(now + seconds)`` in the Run's time (Vision §54); never
-        ``time.sleep``. Returns the instant the Run stands at (EA-16, VE-6)."""
+        ``time.sleep``. Returns the instant the Run stands at (EA-16, VE-6). An exception that
+        ends the call while it waits (``KeyboardInterrupt`` included) ends the Session, as
+        ``close`` says."""
         return self._call({"op": "advance", "by": self._duration(seconds)})[0]["now"]
 
     def wait_until(self, t: dict) -> dict:
         """Advances the Run to the ``TimePoint`` ``t`` (Vision §15) and returns the instant
-        it stands at (EA-16, VE-6)."""
+        it stands at (EA-16, VE-6). An exception that ends the call while it waits
+        (``KeyboardInterrupt`` included) ends the Session, as ``close`` says."""
         return self._call({"op": "advance", "to": t})[0]["now"]
 
     def wait_for(self, kinds: Sequence[str], timeout: float) -> Optional[dict]:
         """Waits, in Run time, for the next event of one of ``kinds`` that this method has not
-        yet returned (Vision §15); returns it, or ``None`` after ``timeout`` seconds."""
+        yet returned (Vision §15); returns it, or ``None`` after ``timeout`` seconds. An exception
+        that ends the call while it waits (``KeyboardInterrupt`` included) ends the Session, as
+        ``close`` says."""
         result, _ = self._call(
             {"op": "wait_for", "kinds": list(kinds), "from": self._waited, "within": self._duration(timeout)}
         )
@@ -824,20 +834,36 @@ class Session:
     # -- the end
 
     def close(self) -> Optional[dict]:
-        """Ends the Session and returns its Manifest, also kept in ``manifest``."""
+        """Ends the Session and returns its Manifest, also kept in ``manifest`` (EA-15, EA-16).
+
+        After a call that ended while its reply was awaited (``KeyboardInterrupt`` or any other
+        exception), the connection is closed and the Session has ended: ``close`` sends no
+        ``finish``; it waits for the server to exit (``kill`` after 30 s) and keeps
+        ``<dir>/manifest.json`` in ``manifest`` when it can read it, else ``manifest`` stays
+        ``None`` and nothing is raised: the file is on the server's host, or was not written
+        (the server was killed, or its write failed; every exit of a server with a Session writes
+        the Manifest). ``close`` may be called again.
+        When ``close``'s own ``finish`` fails it raises ``ProtocolError``, unless the server
+        wrote the Manifest."""
         if self.manifest is None:
+            failed: Optional[ProtocolError] = None
             try:
-                result, _ = self._call({"op": "finish"})
-                self.manifest, self.manifest_path = result["manifest"], result["path"]
-            except ProtocolError:
-                # The server has gone; every exit of it writes the Manifest (EA-15).
-                written = os.path.join(self.dir, "manifest.json")
-                if not os.path.exists(written):
-                    raise
-                with open(written, encoding="utf-8") as file:
-                    self.manifest, self.manifest_path = json.load(file), written
+                if not self._connection.abandoned:
+                    result, _ = self._call({"op": "finish"})
+                    self.manifest, self.manifest_path = result["manifest"], result["path"]
+            except ProtocolError as error:
+                failed = error
             finally:
                 self._connection.close()
+            if self.manifest is None:
+                # The server has gone; every exit of it writes the Manifest (EA-15), after its exit.
+                written = os.path.join(self.dir, "manifest.json")
+                try:
+                    with open(written, encoding="utf-8") as file:
+                        self.manifest, self.manifest_path = json.load(file), written
+                except (OSError, ValueError):
+                    if failed is not None:
+                        raise failed from None
         return self.manifest
 
     def __enter__(self) -> "Session":
@@ -956,7 +982,12 @@ def connect(
     tx: Optional[Mapping[Union[int, str], Union[Stream, Sequence[int]]]] = None,
 ) -> Session:
     """Opens a Session (Vision §3): the server's default profile when ``profile`` is
-    ``None``. The Session stands at T0, the instant its devices start.
+    ``None``. The Session stands at T0, the instant its devices start. The server runs in a
+    session of its own, so a signal to this process's group (a terminal's Ctrl-C) does not reach
+    it; a wrapper that starts it (``ssh``) must not prompt. ``lease`` must be Attached, the
+    default: the server ends its Session when its input ends, so it refuses a Detached Lease
+    with ``ServerError`` ``refused`` (EA-10, EA-15). An exception during ``connect`` ends the
+    server, which finishes the Session it had begun and waits (up to 30 s) for it.
 
     ``rx`` and ``tx`` set the radio ``radio`` (default ``"radio"``) up: each maps a stream,
     by number or by name, to a ``Stream`` or a plain list of channels, and a direction's map

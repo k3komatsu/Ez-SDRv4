@@ -531,8 +531,8 @@
   "id": "P14",
   "name": "EA-16 close does not fall back to the written Manifest",
   "file": "python/ezsdr/session.py",
-  "old": "                if not os.path.exists(written):",
-  "new": "                if True:",
+  "old": "            if self.manifest is None:\n                # The server has gone",
+  "new": "            if False:\n                # The server has gone",
   "python": "test_easy_api.EasyApi.test_ea_16_close_after_the_server_exited"
  },
  {

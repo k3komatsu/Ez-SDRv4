@@ -164,6 +164,9 @@ fn ma_03_no_module_crate_depends_on_another() {
         assert_eq!(&normal, expected, "{package_name} normal dependencies must match plan/phase2/00-overview.md §5");
         let expected_dev = if package_name == "ezsdr-kernel" {
             BTreeSet::from(["ezsdr-kernel", "syn"])
+        } else if package_name == "ezsdr-server" {
+            // Its own `test-support` seams, which only its tests enable (#89's watch; plan/phase2/00-overview.md §5).
+            BTreeSet::from(["ezsdr-kernel", "ezsdr-server"])
         } else if package_name == "ezsdr-radio-uhd" {
             // Spec 18 §6: tests/fake.rs assembles a Run as the server's catalogue does,
             // with the capture Sink and the host Link (Phase 7; workspace crates only).
@@ -180,7 +183,7 @@ fn ma_03_no_module_crate_depends_on_another() {
 
 #[test]
 fn po_11_no_hashmap_and_no_wall_clock_in_simulation_code() {
-    const FORBIDDEN: [&str; 6] = ["HashMap", "HashSet", "SystemTime", "Instant::now", "thread::spawn", "rand::"];
+    const FORBIDDEN: [&str; 7] = ["HashMap", "HashSet", "SystemTime", "Instant::now", "thread::spawn", "thread::Builder", "rand::"];
     let root = workspace_root();
     let new_crates = [
         "ezsdr-acceptance",
@@ -201,8 +204,11 @@ fn po_11_no_hashmap_and_no_wall_clock_in_simulation_code() {
     // clock by definition; `kg_02_the_simulation_class_starts_no_thread` keeps a
     // Simulation Run out of it.
     let paced = root.join("crates/ezsdr-kernel/src/coordinator/paced.rs");
+    // The stdio server's input thread reads no clock and only reports the client's departure
+    // (KC-36, EA-15); the Simulation end instant it causes is recorded in `termination.at` (#89).
+    let input = root.join("crates/ezsdr-server/src/transport.rs");
     for source_root in source_roots {
-        for file in rust_files(&source_root).into_iter().filter(|file| *file != paced) {
+        for file in rust_files(&source_root).into_iter().filter(|file| *file != paced && *file != input) {
             let source = fs::read_to_string(&file).unwrap();
             for (line_number, line) in source.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or_default();

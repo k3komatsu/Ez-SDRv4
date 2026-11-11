@@ -29,6 +29,9 @@ schemars = "1.2.2"
 [features]
 # Links libuhd: the catalogue opens real USRPs (VE-5; spec 18 UR-2).
 uhd = ["ezsdr-radio-uhd/uhd"]
+# The seams of the crate's own tests of the watch (EA-15); only its dev-dependency on itself enables it.
+test-support = []
 
 [dev-dependencies]
 ezsdr-kernel = { path = "../ezsdr-kernel", features = ["testing"] }
+ezsdr-server = { path = ".", features = ["test-support"] }

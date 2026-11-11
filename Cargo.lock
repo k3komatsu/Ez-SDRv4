@@ -156,6 +156,7 @@ dependencies = [
  "ezsdr-mock-radio",
  "ezsdr-radio",
  "ezsdr-radio-uhd",
+ "ezsdr-server",
  "ezsdr-sim",
  "ezsdr-sim-engine",
  "ezsdr-sink",

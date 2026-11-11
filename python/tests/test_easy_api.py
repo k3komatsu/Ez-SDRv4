@@ -9,10 +9,12 @@ The server is required: without it every test fails, naming how to build it (GY-
 from __future__ import annotations
 
 import copy
+import faulthandler
 import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -495,6 +497,8 @@ class EasyApi(unittest.TestCase):
             with self.assertRaises(ezsdr.RunEnded) as ended:
                 sdr.set("radio", "radio.rx.c0.gain_db", 1)
             self.assertEqual(ended.exception.termination, {"kind": "stopped", "cause": {"kind": "client"}})
+            # An error reply is read whole and abandons nothing (EA-16).
+            self.assertIsInstance(sdr.events(), list)
         self.assertEqual(sdr.manifest["termination"]["reason"], {"kind": "stopped", "cause": {"kind": "client"}})
 
     def test_ea_17_each_capture_gets_its_own_samples(self) -> None:
@@ -1109,6 +1113,7 @@ class ConnectRequests(unittest.TestCase):
         connected = {"run": "test", "dir": "", "profile": {"bindings": {}}, "start_instant": at, "now": at, "root_rate": {"num": 1, "den": 1}}
         with unittest.mock.patch("ezsdr.session.Connection") as connection:
             connection.return_value.call.return_value = (connected, b"")
+            connection.return_value.abandoned = False
             ezsdr.connect(**kwargs)
             connection.return_value.call.assert_called_once()
             return connection.return_value.call.call_args.args[0]
@@ -1255,6 +1260,7 @@ class DurationRequests(unittest.TestCase):
 
     def session(self, reply: dict, rate: tuple = (1_000_000_000, 1), epoch: dict = None) -> ezsdr.Session:
         connection = Mock()
+        connection.abandoned = False
         connection.call.return_value = (reply, b"")
         fed = {"feed": {"port": {"component": "radio", "port": "rx0"}, "policy": "drop_oldest", "capacity": 64}}
         at = {"domain": self.ROOT, "ticks": 0}
@@ -1703,6 +1709,230 @@ class SampleValidity(unittest.TestCase):
         artifact = {"id": "rec", "continuity": [one, two]}
         with self.assertRaises(ezsdr.Error):
             ezsdr.samples(data, artifact)
+
+
+class _Interrupting:
+    """A pass-through to one of the server's pipes that raises ``KeyboardInterrupt`` once, at the
+    first call of ``on`` (``readline``, ``read`` or ``write``; a ``write`` first passes half of
+    its bytes on)."""
+
+    def __init__(self, stream: object, on: str):
+        self._stream, self._on, self._armed = stream, on, True
+
+    @property
+    def closed(self) -> bool:
+        return self._stream.closed
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def readline(self) -> bytes:
+        self._hit("readline")
+        return self._stream.readline()
+
+    def read(self, count: int) -> bytes:
+        self._hit("read")
+        return self._stream.read(count)
+
+    def write(self, data: bytes) -> int:
+        if self._armed and self._on == "write":
+            self._armed = False
+            self._stream.write(data[: len(data) // 2])
+            raise KeyboardInterrupt
+        return self._stream.write(data)
+
+    def _hit(self, name: str) -> None:
+        if self._armed and self._on == name:
+            self._armed = False
+            raise KeyboardInterrupt
+
+
+class Departure(unittest.TestCase):
+    """An exception while a reply is awaited is the client's departure: both pipes close, the
+    Session ends, and ``close()`` sends no ``finish`` (EA-15, EA-16), against the real server."""
+
+    def setUp(self) -> None:
+        ezsdr._client.find_server()  # fails with the build instruction when absent
+        self.runs = tempfile.mkdtemp(prefix="ezsdr-python-")
+        # A hung mutant ends the process rather than the run (the guard is only the backstop).
+        faulthandler.dump_traceback_later(60, exit=True)
+
+    def tearDown(self) -> None:
+        faulthandler.cancel_dump_traceback_later()
+        shutil.rmtree(self.runs, ignore_errors=True)
+
+    def connect(self) -> ezsdr.Session:
+        return ezsdr.connect(runs_dir=self.runs, rx={0: [0]})
+
+    def interrupt(self, sdr: ezsdr.Session, pipe: str, on: str) -> object:
+        """Installs the interrupting wrapper on ``pipe`` and returns the real pipe."""
+        process = sdr._connection._process
+        real = getattr(process, pipe)
+        setattr(process, pipe, _Interrupting(real, on))
+        return real
+
+    def departed(self, sdr: ezsdr.Session, stdin: object, stdout: object) -> dict:
+        self.assertTrue(stdin.closed and stdout.closed, "both pipes are closed when the call ends")
+        manifest = sdr.close()
+        self.assertEqual(manifest["termination"]["reason"], {"kind": "stopped", "cause": {"kind": "client_disconnect"}})
+        self.assertEqual(Path(sdr.manifest_path), Path(sdr.dir) / "manifest.json")
+        return manifest
+
+    def test_ea_16_an_interrupted_call_closes_both_pipes_and_ends_the_session(self) -> None:
+        sdr = self.connect()
+        stdin, stdout = sdr._connection._process.stdin, self.interrupt(sdr, "stdout", "readline")
+        with self.assertRaises(KeyboardInterrupt):
+            sdr.sleep(10**6)
+        self.assertTrue(stdin.closed and stdout.closed, "both pipes are closed when the call ends")
+        with self.assertRaises(ezsdr.ProtocolError):
+            sdr.events()
+        manifest = sdr.close()
+        self.assertEqual(manifest["termination"]["reason"], {"kind": "stopped", "cause": {"kind": "client_disconnect"}})
+        self.assertEqual(Path(sdr.manifest_path), Path(sdr.dir) / "manifest.json")
+        self.assertEqual(sdr._connection._process.returncode, 0)
+        self.assertEqual(sdr.close(), manifest, "close() is repeatable after an abandon")
+
+    def test_ea_16_an_exception_while_the_request_is_written_abandons_too(self) -> None:
+        sdr = self.connect()
+        stdin, stdout = self.interrupt(sdr, "stdin", "write"), sdr._connection._process.stdout
+        with self.assertRaises(KeyboardInterrupt):
+            sdr.sleep(1)
+        # The server saw half a header and then the end of its input.
+        self.departed(sdr, stdin, stdout)
+
+    def test_ea_16_an_interruption_while_the_reply_body_is_read_abandons(self) -> None:
+        sdr = self.connect()
+        sdr.rx.capture(100)
+        written = [e for e in sdr.events() if e["kind"] == ezsdr.session.CAPTURE_WRITTEN]
+        stdin, stdout = sdr._connection._process.stdin, self.interrupt(sdr, "stdout", "read")
+        with self.assertRaises(KeyboardInterrupt):
+            sdr.read(written[0]["payload"]["artifact"])
+        self.departed(sdr, stdin, stdout)
+
+    def test_ea_16_close_after_an_interrupt_keeps_no_manifest_that_is_elsewhere(self) -> None:
+        sdr = self.connect()
+        self.interrupt(sdr, "stdout", "readline")
+        with self.assertRaises(KeyboardInterrupt):
+            sdr.sleep(10**6)
+        sdr.dir = os.path.join(self.runs, "on-another-host")  # the server's host holds its Manifest, not this one
+        self.assertIsNone(sdr.close())
+        self.assertIsNone(sdr.manifest_path)
+        self.assertEqual(sdr._connection._process.returncode, 0)
+
+    def test_ea_16_the_server_runs_in_a_session_of_its_own(self) -> None:
+        with self.connect() as sdr:
+            pid = sdr._connection._process.pid
+            self.assertEqual(os.getsid(pid), pid, "the server leads a session of its own")
+            self.assertNotEqual(os.getsid(pid), os.getsid(0))
+
+    def test_ea_16_ctrl_c_to_the_client_group_does_not_kill_the_server(self) -> None:
+        script = (
+            "import ezsdr, sys\n"
+            "with ezsdr.connect(runs_dir=sys.argv[1], rx={0: [0]}) as sdr:\n"
+            "    print(sdr.dir, flush=True)\n"
+            "    sdr.sleep(10**6)\n"
+        )
+        env = dict(os.environ, PYTHONPATH=str(PYTHON_DIR), PYTHONDONTWRITEBYTECODE="1")
+        child = subprocess.Popen(
+            [sys.executable, "-c", script, self.runs], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        try:
+            directory = child.stdout.readline().strip()
+            self.assertTrue(directory, "the child connected")
+            # A SIGINT that lands just before the child blocks in its read is deferred until that read returns
+            # (CPython sets a flag and does not wake the syscall), so Ctrl-C is pressed again until the child ends,
+            # as a user would. The server holds the child's stderr, so `communicate` returns after both have exited.
+            for _ in range(15):
+                os.killpg(child.pid, signal.SIGINT)
+                try:
+                    child.communicate(timeout=3)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            self.assertIsNotNone(child.returncode, "the child ended")
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate()
+        # `client` when the signal came before the advance was written: either way the server lived to write it.
+        written = json.loads((Path(directory) / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["termination"]["reason"]["kind"], "stopped")
+        self.assertIn(written["termination"]["reason"]["cause"]["kind"], ("client_disconnect", "client"))
+
+
+class DepartureClose(unittest.TestCase):
+    """What ``Session.close`` does after a call that ended while its reply was awaited, over a
+    mocked connection (EA-16)."""
+
+    ROOT = {"node": 0, "local": 1}
+    DISCONNECTED = {"termination": {"reason": {"kind": "stopped", "cause": {"kind": "client_disconnect"}}}}
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="ezsdr-python-")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def session(self, connection: object) -> ezsdr.Session:
+        at = {"domain": self.ROOT, "ticks": 0}
+        connected = {"run": "test", "dir": self.dir, "profile": {"bindings": {}}, "start_instant": at, "now": at, "root_rate": {"num": 1, "den": 1}}
+        return ezsdr.Session(connection, connected)
+
+    def writing(self, text: str) -> Mock:
+        """A connection whose ``close`` (the wait for the server's exit) writes ``manifest.json``."""
+        connection = Mock()
+        connection.close.side_effect = lambda: (Path(self.dir) / "manifest.json").write_text(text, encoding="utf-8")
+        return connection
+
+    def test_ea_16_close_after_an_abandon_sends_no_finish_and_reads_after_the_exit(self) -> None:
+        connection = self.writing(json.dumps(self.DISCONNECTED))
+        connection.abandoned = True
+        sdr = self.session(connection)
+        self.assertEqual(sdr.close(), self.DISCONNECTED)
+        connection.call.assert_not_called()
+        connection.close.assert_called_once()
+
+    def test_ea_16_close_reads_the_manifest_after_the_server_exited(self) -> None:
+        connection = self.writing(json.dumps(self.DISCONNECTED))
+        connection.abandoned = False
+        connection.call.side_effect = ezsdr.ProtocolError("protocol", "the server has exited", {})
+        sdr = self.session(connection)
+        self.assertEqual(sdr.close(), self.DISCONNECTED)
+        self.assertEqual(sdr.manifest_path, os.path.join(self.dir, "manifest.json"))
+
+    def test_ea_16_close_after_an_abandon_leaves_no_manifest_when_none_is_readable(self) -> None:
+        for written in (None, "{"):
+            with self.subTest(written=written):
+                connection = Mock() if written is None else self.writing(written)
+                connection.abandoned = True
+                sdr = self.session(connection)
+                self.assertIsNone(sdr.close())
+                self.assertIsNone(sdr.manifest_path)
+                self.assertIsNone(sdr.close(), "and again")
+                connection.call.assert_not_called()
+
+    def test_ea_16_a_close_whose_own_finish_fails_raises_unless_a_manifest_was_written(self) -> None:
+        connection = Mock()
+        connection.abandoned = False
+        connection.call.side_effect = ezsdr.ProtocolError("protocol", "the server has exited", {})
+        with self.assertRaises(ezsdr.ProtocolError):
+            self.session(connection).close()
+        connection.close.assert_called_once()
+
+    def test_ea_16_a_server_that_does_not_exit_is_killed_and_close_keeps_no_manifest(self) -> None:
+        connection = object.__new__(ezsdr._client.Connection)
+        connection.abandoned = True
+        connection._process = Mock()
+        connection._process.wait.side_effect = [subprocess.TimeoutExpired("ezsdr-server", 30), -9]
+        sdr = self.session(connection)
+        self.assertIsNone(sdr.close())
+        connection._process.kill.assert_called_once_with()
+        self.assertEqual(connection._process.wait.call_args_list, [unittest.mock.call(timeout=30), unittest.mock.call()])
+        connection._process.stdout.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

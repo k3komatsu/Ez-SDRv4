@@ -5,15 +5,44 @@ UHD Module 0.4.0, profile x3xx 0.1.0, slot A's board (EZSDR_DROP_BOARD) in both 
 capture Sink, and the bench's RF envelope (1 GHz ± 1 MHz). The Session takes the server's default Lease, Attached.
 
 The script sets EZSDR_SERVER to its ssh wrapper and EZSDR_DROP_OUT to its output directory; the markers it waits for
-are written there: tx-started (with the Session's directory in session-dir) and driver-done.
+are written there: tx-started (with the Session's directory in session-dir), wait-start (time.time_ns() just before the
+wait) and driver-done.
+
+EZSDR_DROP_WAIT is how the Session waits for the drop: `time` (the default) is time.sleep, so the server is idle between
+requests when the link drops; `sleep` is sdr.sleep, so the server is inside one `advance` request (#89).
+
+    ssh-drop-driver.py --self-check     the parsing of EZSDR_DROP_WAIT, with no server and no device
 """
 
 import os
+import sys
 import time
 
-import numpy as np
 
-import ezsdr
+def wait_mode(value):
+    """EZSDR_DROP_WAIT: `time` when unset or empty, else `time` or `sleep`; anything else stops the run before a transmission."""
+    mode = value or "time"
+    if mode not in ("time", "sleep"):
+        raise SystemExit(f"ssh-drop-driver: EZSDR_DROP_WAIT must be time or sleep, not {value!r}")
+    return mode
+
+
+if sys.argv[1:] == ["--self-check"]:
+    assert [wait_mode(v) for v in (None, "", "time", "sleep")] == ["time", "time", "time", "sleep"]
+    for bad in ("Sleep", "sleep ", "1", "advance"):
+        try:
+            wait_mode(bad)
+        except SystemExit:
+            continue
+        raise AssertionError(f"EZSDR_DROP_WAIT={bad!r} was accepted")
+    print("ssh-drop-driver self-check passed: time (unset, empty, time) and sleep; any other value refused")
+    sys.exit(0)
+
+mode = wait_mode(os.environ.get("EZSDR_DROP_WAIT"))
+
+import numpy as np  # noqa: E402
+
+import ezsdr  # noqa: E402
 
 out = os.environ["EZSDR_DROP_OUT"]
 hold = float(os.environ.get("EZSDR_DROP_HOLD", "120"))
@@ -65,7 +94,11 @@ try:
     sdr.tx.repeat(wave)
     note("session-dir", sdr.dir)
     note("tx-started", "ok")
-    time.sleep(hold)
+    note("wait-start", str(time.time_ns()))
+    if mode == "sleep":
+        sdr.sleep(hold)
+    else:
+        time.sleep(hold)
     sdr.close()
     note("driver-done", "closed")
 except Exception as error:

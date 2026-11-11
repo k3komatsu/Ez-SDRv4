@@ -12,7 +12,22 @@ mod initial;
 pub mod protocol;
 
 mod transport;
-pub use transport::{Exit, serve};
+pub use transport::{Exit, serve, serve_watched};
+mod watch;
+use watch::{Watch, Watched, unwatched};
+
+/// Seams for the server's own tests of EA-15's watch, behind the `test-support` feature only
+/// they enable (a dev-dependency of the crate on itself).
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    pub use crate::watch::{Watch, Watched, unwatched};
+
+    /// A server whose Runs' disconnect signals `watch` holds while they run, as `serve_watched` builds it.
+    pub fn watched_server(config: crate::Config, watch: std::sync::Arc<Watch>) -> crate::Server {
+        crate::Server::watched(config, watch)
+    }
+}
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -25,7 +40,7 @@ use ezsdr_kernel::coordinator::{self, RunHandle, RunHandleError};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::module_api::Pacing;
-use ezsdr_kernel::run::{Lease, RunState};
+use ezsdr_kernel::run::{Lease, LeaseMode, RunState};
 use ezsdr_kernel::time::{ClockDomainKind, ClockRegistry, Duration, TimePoint};
 
 pub use catalogue::{OpenDevice, assemble, default_profile};
@@ -83,6 +98,9 @@ fn fail(kind: ErrorKind, message: impl Into<String>) -> Handled {
 
 /// The live Session: the Run, its clocks and its profile document.
 struct Live {
+    /// Its disconnect signal in the server's watch (EA-15). Declared before `run`: fields drop in
+    /// declaration order, so on an unwind the signal leaves the watch before the Run can drop (N1).
+    watched: Option<Watched>,
     run: RunHandle,
     clocks: Arc<ClockRegistry>,
     profile: serde_json::Value,
@@ -100,12 +118,26 @@ pub struct Server {
     readable: BTreeSet<String>,
     /// How far `readable` has scanned the Session's events.
     scanned: usize,
+    /// The watch on the input, under `serve_watched` (EA-15).
+    watch: Option<Arc<Watch>>,
 }
 
 impl Server {
     /// A server that has not yet been greeted.
     pub fn new(config: Config) -> Server {
-        Server { config, greeted: false, dir: None, live: None, readable: BTreeSet::new(), scanned: 0 }
+        Server { config, greeted: false, dir: None, live: None, readable: BTreeSet::new(), scanned: 0, watch: None }
+    }
+
+    /// A server whose Runs' disconnect signals `watch` holds while they run (EA-15).
+    pub(crate) fn watched(config: Config, watch: Arc<Watch>) -> Server {
+        let mut server = Server::new(config);
+        server.watch = Some(watch);
+        server
+    }
+
+    /// Whether the watched input has ended (EA-15, A2).
+    fn input_ended(&self) -> bool {
+        self.watch.as_ref().is_some_and(|watch| watch.fired())
     }
 
     /// Whether `hello` has been answered (EA-3).
@@ -183,9 +215,10 @@ impl Server {
 
     /// The end of the client's stream: an Attached Lease ends the Run (EA-15).
     pub fn disconnect(&mut self) {
-        if let Some(mut live) = self.live.take() {
-            live.run.disconnect();
-            let manifest = live.run.finish();
+        if let Some(live) = self.live.take() {
+            let mut run = unwatched(live.watched, live.run);
+            run.disconnect();
+            let manifest = run.finish();
             let _ = self.write_manifest("manifest.json", &manifest);
         }
     }
@@ -193,6 +226,9 @@ impl Server {
     fn connect(&mut self, profile: Option<serde_json::Value>, lease: Option<Lease>, initial: Option<BTreeMap<String, protocol::ResourceInit>>) -> Handled {
         if self.live.is_some() {
             return fail(ErrorKind::Protocol, "EA-4: a Session is already connected");
+        }
+        if lease.as_ref().is_some_and(|lease| matches!(lease.mode, LeaseMode::Detached { .. })) {
+            return fail(ErrorKind::Refused, "EA-10: this server ends its Session when its input ends (EA-15), so nothing could adopt a Detached Lease");
         }
         let dir = match self.session_dir() {
             Ok(dir) => dir,
@@ -226,6 +262,8 @@ impl Server {
             Ok(run) => run,
             Err(error) => return fail(ErrorKind::Refused, error.to_string()),
         };
+        // Before the advance to T0, so an input that ends during it ends the Run (EA-15).
+        let watched = self.watch.as_ref().map(|watch| watch.add(run.disconnect_signal()));
         if let (RunState::Running {}, Some(t0)) = (run.state(), run.start_instant()) {
             // A Run that ends on its way to T0 falls through to the `ended` reply below with
             // its Manifest written (Review H, P0-4); any other refusal is impossible for T0,
@@ -233,7 +271,7 @@ impl Server {
             let _ = run.advance_to(t0);
         }
         let (RunState::Running {}, Some(start_instant)) = (run.state(), run.start_instant()) else {
-            let manifest = run.finish();
+            let manifest = unwatched(watched, run).finish();
             let termination = manifest.termination.reason.clone();
             let _ = self.write_manifest("manifest.json", &manifest);
             return Handled::error(ProtocolError { termination: Some(termination), ..ProtocolError::new(ErrorKind::Ended, "EA-10: the Session ended while it was being connected") }).exiting();
@@ -253,7 +291,7 @@ impl Server {
             streams,
             channels,
         };
-        self.live = Some(Live { run, clocks, profile, device_paced });
+        self.live = Some(Live { run, clocks, profile, device_paced, watched });
         Handled::ok(response)
     }
 
@@ -295,6 +333,7 @@ impl Server {
             Err(message) => return fail(ErrorKind::Refused, message),
         };
         let clocks = assembly.clocks.clone();
+        let watch = self.watch.clone();
         if let Some(ns) = duration_ns {
             // A duration that does not fit the child's clock would run nothing (Review H, P2-3).
             let root = assembly.authority.time().primary_root();
@@ -316,7 +355,10 @@ impl Server {
                 },
                 None => TimePoint::new(t0.domain(), i64::MAX),
             };
+            // RS-25: an input that ends while the child runs ends the child too (EA-15).
+            let watched = watch.as_ref().map(|watch| watch.add(child.disconnect_signal()));
             let _ = child.run_until_end(horizon);
+            unwatched(watched, ());
         };
         let (entry, manifest) = match live.run.run_child(&spec, &profile, assembly, &mut drive) {
             Ok(result) => result,
@@ -339,7 +381,7 @@ impl Server {
         let Some(live) = self.live.take() else {
             return fail(ErrorKind::Protocol, "EA-4: no Session is connected");
         };
-        let manifest = live.run.finish();
+        let manifest = unwatched(live.watched, live.run).finish();
         // A Manifest that cannot be written is still returned (Review I, P2-7).
         let path = self.write_manifest("manifest.json", &manifest).ok();
         Handled::ok(Response::Finished { manifest: Box::new(manifest), path }).exiting()

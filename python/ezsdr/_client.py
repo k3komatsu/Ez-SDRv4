@@ -58,13 +58,16 @@ def find_server(server: Optional[str] = None) -> str:
 
 
 class Connection:
-    """One server process, spoken to one request at a time (EA-2)."""
+    """One server process, spoken to one request at a time (EA-2). It runs in a session of its
+    own, so a signal to this process's group (a terminal's Ctrl-C) does not reach it; a call that
+    ends while its reply is awaited closes both pipes, which ends the Session (EA-15, EA-16)."""
 
     def __init__(self, server: Optional[str] = None, runs_dir: Optional[str] = None):
         args = [find_server(server)]
         if runs_dir is not None:
             args += ["--runs-dir", os.fspath(runs_dir)]
-        self._process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.abandoned = False
+        self._process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
         try:
             self.call({"op": "hello", "protocol": PROTOCOL})
         except BaseException:
@@ -80,19 +83,34 @@ class Connection:
         if stdin is None or stdout is None or stdin.closed:
             raise ProtocolError("protocol", "the connection is closed", {})
         try:
-            stdin.write(header.encode("utf-8") + b"\n" + body)
-            stdin.flush()
-        except BrokenPipeError:
-            raise ProtocolError("protocol", "the server has exited", {}) from None
-        line = stdout.readline()
-        if not line:
-            raise ProtocolError("protocol", f"the server closed its output (exit {self._process.poll()})", {})
-        frame = json.loads(line)
-        data = _read_exactly(stdout, frame.get("body_bytes", 0))
-        reply = frame["reply"]
+            try:
+                stdin.write(header.encode("utf-8") + b"\n" + body)
+                stdin.flush()
+            except BrokenPipeError:
+                raise ProtocolError("protocol", "the server has exited", {}) from None
+            line = stdout.readline()
+            if not line:
+                raise ProtocolError("protocol", f"the server closed its output (exit {self._process.poll()})", {})
+            frame = json.loads(line)
+            data = _read_exactly(stdout, frame.get("body_bytes", 0))
+            reply = frame["reply"]
+        except BaseException:
+            self._abandon()
+            raise
         if "error" in reply:
             _raise(reply["error"])
         return reply["result"], data
+
+    def _abandon(self) -> None:
+        """An exchange that cannot complete is a departure (EA-16): closing both pipes ends the
+        server's input, and its output too, so a server writing a large reply is not left blocked.
+        Every later call is refused by the closed input."""
+        self.abandoned = True
+        for stream in (self._process.stdin, self._process.stdout):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
 
     def close(self) -> Optional[int]:
         """Closes the server's input and waits for it to exit."""

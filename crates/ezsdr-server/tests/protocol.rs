@@ -6,6 +6,8 @@
 #[path = "../../ezsdr-radio-uhd/tests/common/watchdog.rs"]
 mod watchdog;
 
+mod support;
+
 use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
@@ -170,18 +172,20 @@ fn serve_bytes(dir: &Path, input: Vec<u8>) -> (Vec<(ReplyFrame, Vec<u8>)>, Exit)
     let mut output = Vec::new();
     let exit = serve(Cursor::new(input), &mut output, config(dir)).unwrap();
     let mut reader = BufReader::new(Cursor::new(output));
-    let mut frames = Vec::new();
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap() == 0 {
-            break;
-        }
-        let frame: ReplyFrame = serde_json::from_str(&line).unwrap();
-        let mut body = vec![0; frame.body_bytes as usize];
-        reader.read_exact(&mut body).unwrap();
-        frames.push((frame, body));
+    (std::iter::from_fn(|| reply_from(&mut reader)).collect(), exit)
+}
+
+/// The next reply frame and its body, or `None` at the end of the output; a read error (a
+/// timeout included) fails the test.
+fn reply_from(reader: &mut impl BufRead) -> Option<(ReplyFrame, Vec<u8>)> {
+    let mut line = String::new();
+    if reader.read_line(&mut line).expect("a reply") == 0 {
+        return None;
     }
-    (frames, exit)
+    let frame: ReplyFrame = serde_json::from_str(&line).unwrap();
+    let mut body = vec![0; frame.body_bytes as usize];
+    reader.read_exact(&mut body).unwrap();
+    Some((frame, body))
 }
 
 fn error_of(frame: &ReplyFrame) -> &ProtocolError {
@@ -1935,4 +1939,279 @@ fn ea_11_a_start_the_line_cannot_represent_is_refused_in_the_submit_reply_with_i
     let (_, none) = submitted(&mut server, start_rx(None));
     assert!(none.is_empty(), "the Run continues and takes a later start: {none:?}");
     finish(&mut server);
+}
+
+// ---------------------------------------------------------------- #89: the watched input (EA-15)
+
+use support::{BOUND, eventually};
+
+/// A server served by `serve_watched` on a thread: the test feeds its input, one `read` per item
+/// (an error included), and reads its replies from a socket.
+struct Watched {
+    feed: Option<std::sync::mpsc::Sender<std::io::Result<Vec<u8>>>>,
+    reader: BufReader<std::os::unix::net::UnixStream>,
+    served: std::thread::JoinHandle<std::io::Result<Exit>>,
+}
+
+/// The input `serve_watched` reads: what the test fed, then its end when the feed is dropped.
+struct Fed {
+    from: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    rest: Vec<u8>,
+}
+
+impl Read for Fed {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.rest.is_empty() {
+            match self.from.recv() {
+                Ok(item) => self.rest = item?,
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = buffer.len().min(self.rest.len());
+        buffer[..n].copy_from_slice(&self.rest[..n]);
+        self.rest.drain(..n);
+        Ok(n)
+    }
+}
+
+fn watched(config: Config) -> Watched {
+    let (feed, from) = std::sync::mpsc::channel();
+    let (client, output) = std::os::unix::net::UnixStream::pair().unwrap();
+    let served = std::thread::spawn(move || ezsdr_server::serve_watched(Fed { from, rest: Vec::new() }, output, config));
+    Watched { feed: Some(feed), reader: BufReader::new(client), served }
+}
+
+impl Watched {
+    fn send(&mut self, request: Request, body: &[u8]) {
+        let mut frame = serde_json::to_vec(&json!({ "request": request, "body_bytes": body.len() })).unwrap();
+        frame.push(b'\n');
+        frame.extend_from_slice(body);
+        self.feed.as_ref().expect("the input has not ended").send(Ok(frame)).unwrap();
+    }
+
+    /// The input's next read returns `error`.
+    fn fail(&mut self, error: std::io::Error) {
+        self.feed.as_ref().expect("the input has not ended").send(Err(error)).unwrap();
+    }
+
+    /// Ends the client's input: its departure.
+    fn leave(&mut self) {
+        self.feed = None;
+    }
+
+    fn reply(&mut self) -> Option<Reply> {
+        reply_from(&mut self.reader).map(|(frame, _)| frame.reply)
+    }
+
+    fn result(&mut self) -> Response {
+        match self.reply().expect("a reply") {
+            Reply::Result(response) => response,
+            Reply::Error(error) => panic!("expected a result, got {error:?}"),
+        }
+    }
+
+    /// Every reply until the server's output ends.
+    fn rest(&mut self) -> Vec<Reply> {
+        std::iter::from_fn(|| self.reply()).collect()
+    }
+
+    fn exit(self) -> Exit {
+        self.served.join().unwrap().unwrap()
+    }
+
+    /// `hello` and `connect`: the Session's directory, `now` and root rate. Only from here on does a
+    /// reply that takes longer than [`BOUND`] fail the test: `connect` may take seconds on a loaded host.
+    fn join(&mut self, profile: Option<serde_json::Value>, initial: Initial) -> (PathBuf, TimePoint, Rational) {
+        self.send(Request::Hello { protocol: 2 }, &[]);
+        self.result();
+        self.send(Request::Connect { profile, lease: None, initial }, &[]);
+        let Response::Connected { dir, now, root_rate, .. } = self.result() else { panic!("connected") };
+        self.reader.get_ref().set_read_timeout(Some(BOUND)).unwrap();
+        (PathBuf::from(dir), now, root_rate)
+    }
+}
+
+/// Whether a capture's `*.sigmf-meta` appears in `dir` within [`BOUND`]: in Simulation, the
+/// control thread is then inside the request that waits (KG-2).
+fn meta_appears(dir: &Path) -> bool {
+    meta_appears_within(dir, BOUND)
+}
+
+/// As [`meta_appears`], for up to `bound`.
+fn meta_appears_within(dir: &Path, bound: std::time::Duration) -> bool {
+    support::within(bound, || std::fs::read_dir(dir).unwrap().any(|entry| entry.unwrap().path().extension().is_some_and(|ext| ext == "sigmf-meta")).then_some(())).is_some()
+}
+
+fn written_manifest(dir: &Path) -> Manifest {
+    serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap()
+}
+
+fn ticks_of(t: TimePoint) -> i64 {
+    t.ticks_in(t.domain()).unwrap()
+}
+
+fn advance_by(now: TimePoint, rate: Rational, s: u64) -> Request {
+    Request::Advance { to: None, by: Some(seconds(now, rate, s)) }
+}
+
+fn client_disconnect() -> Termination {
+    Termination::Stopped { cause: StopCause::ClientDisconnect {} }
+}
+
+fn ended_by_departure(reply: &Reply) -> bool {
+    matches!(reply, Reply::Error(error) if error.kind == ErrorKind::Ended && error.termination == Some(client_disconnect()))
+}
+
+#[test]
+fn ea_15_an_input_that_ends_during_an_advance_ends_the_session() {
+    let temp = TempDir::new("watched-advance");
+    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..FakeConfig::default() }));
+    let held = device.clone();
+    let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
+    let mut client = watched(Config { open_device: Some(open), ..config(&temp.0) });
+    let (dir, now, rate) = client.join(Some(uhd_profile(&temp.0)), loopback());
+    client.send(Request::Submit { action: repeat() }, &ramp(1_000));
+    let Response::Submitted { entry, .. } = client.result() else { panic!("submitted") };
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
+    // The `submitted` reply proves a booking, not a send: wait for a timed payload send (the
+    // untimed flush every transmit stream sends when it opens has `at=-`).
+    let timed = |calls: &[String]| calls.iter().position(|call| call.starts_with("tx_send 0 n=") && !call.contains("n=0 ") && !call.contains("at=-"));
+    let sent = eventually(|| timed(&device.calls())).unwrap_or_else(|| panic!("no timed payload send: {:?}", device.calls()));
+    client.send(advance_by(now, rate, 3_600), &[]);
+    // Not for the verdict, which holds either way: it lets the control thread take the advance
+    // first, so the run usually rehearses the bench's path, a waiting request cut (20 of 20 runs).
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    client.send(Request::Status {}, &[]);
+    client.leave();
+    // Whether the advance was taken before the end is a race: cut (`ended`) or skipped (A2).
+    let replies = client.rest();
+    let branch = if replies.is_empty() { "the advance was skipped" } else { "the advance was served and cut" };
+    assert!(replies.len() <= 1 && replies.iter().all(ended_by_departure), "{branch}: {replies:?}");
+    assert_eq!(client.exit(), Exit::EndOfInput, "{branch}");
+    let manifest = written_manifest(&dir);
+    assert_eq!(manifest.termination.reason, client_disconnect(), "{branch}");
+    assert!(manifest.lease.released, "{branch}");
+    assert!(ticks_of(manifest.termination.at.unwrap()) < ticks_of(now) + seconds(now, rate, 3_600).ticks_in(now.domain()).unwrap(), "{branch}");
+    let calls = device.calls();
+    let eob = calls.iter().rposition(|call| call.starts_with("tx_send 0 ") && call.ends_with("eob=true")).unwrap_or_else(|| panic!("{branch}: no end of burst: {calls:?}"));
+    let closed = calls.iter().position(|call| call == "close_streams").unwrap_or_else(|| panic!("{branch}: streams not closed: {calls:?}"));
+    assert!(sent < eob && eob < closed, "{branch}: {calls:?}");
+}
+
+#[test]
+fn ea_15_an_input_that_ends_during_a_simulated_advance_ends_the_session_and_nothing_after_it_is_served() {
+    let temp = TempDir::new("watched-simulated");
+    let mut client = watched(config(&temp.0));
+    let (dir, now, rate) = client.join(None, rx0());
+    client.send(Request::Submit { action: capture(1_000) }, &[]);
+    let Response::Submitted { entry, .. } = client.result() else { panic!("submitted") };
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
+    client.send(advance_by(now, rate, 1_000_000), &[]);
+    assert!(meta_appears(&dir), "the advance is not being served");
+    // The control thread is inside the advance: `status` can be taken only after the end.
+    client.send(Request::Status {}, &[]);
+    client.leave();
+    let replies = client.rest();
+    assert!(replies.len() == 1 && ended_by_departure(&replies[0]), "{replies:?}");
+    assert_eq!(client.exit(), Exit::EndOfInput);
+    let manifest = written_manifest(&dir);
+    assert_eq!(manifest.termination.reason, client_disconnect());
+    assert!(ticks_of(manifest.termination.at.unwrap()) < ticks_of(now) + seconds(now, rate, 1_000_000).ticks_in(now.domain()).unwrap());
+}
+
+#[test]
+fn ea_15_an_input_that_ends_during_a_child_run_ends_the_child() {
+    let temp = TempDir::new("watched-child");
+    let mut client = watched(config(&temp.0));
+    let (dir, _, _) = client.join(None, rx0());
+    client.send(Request::RunChild { spec: receive_spec(1_000), profile: None, inputs: Vec::new(), duration_ns: Some(1_000_000_000_000_000) }, &[]);
+    // The wait covers the child's assembly and pipeline, which take seconds on a loaded host as
+    // `connect` does; no verdict rests on it expiring, so it is the watchdog's, not BOUND.
+    assert!(meta_appears_within(&dir, std::time::Duration::from_secs(60)), "the child is not running");
+    client.leave();
+    let replies = client.rest();
+    let [Reply::Result(Response::Ran { manifest: Some(child), path: Some(path), .. })] = &replies[..] else { panic!("{replies:?}") };
+    assert_eq!(child.termination.reason, client_disconnect());
+    assert!(path.ends_with("child-0.manifest.json"), "{path}");
+    assert_eq!(client.exit(), Exit::EndOfInput);
+    let manifest = written_manifest(&dir);
+    assert_eq!(manifest.termination.reason, client_disconnect());
+    assert_eq!(manifest.run.children.len(), 1);
+}
+
+#[test]
+fn ea_15_a_read_error_during_an_advance_ends_the_session() {
+    let temp = TempDir::new("watched-error");
+    let mut client = watched(config(&temp.0));
+    let (dir, now, rate) = client.join(None, rx0());
+    // An interrupted read is retried: no departure.
+    client.fail(std::io::ErrorKind::Interrupted.into());
+    client.send(Request::Submit { action: capture(1_000) }, &[]);
+    let Response::Submitted { entry, .. } = client.result() else { panic!("submitted") };
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
+    client.send(advance_by(now, rate, 1_000_000), &[]);
+    assert!(meta_appears(&dir), "the advance is not being served");
+    client.fail(std::io::Error::other("the connection failed"));
+    let replies = client.rest();
+    assert!(replies.len() == 1 && ended_by_departure(&replies[0]), "{replies:?}");
+    assert_eq!(client.exit(), Exit::EndOfInput);
+    assert_eq!(written_manifest(&dir).termination.reason, client_disconnect());
+}
+
+#[test]
+fn ea_10_a_detached_lease_is_refused() {
+    let temp = TempDir::new("detached");
+    let mut server = greeted(&temp.0);
+    let lease = ezsdr_kernel::run::Lease::detached(5_000, false, "t", &ezsdr_kernel::run::SystemHostClock::new()).unwrap();
+    let error = err(server.handle(Request::Connect { profile: None, lease: Some(lease), initial: None }, Vec::new()));
+    assert_eq!(error.kind, ErrorKind::Refused);
+    assert!(error.message.starts_with("EA-10:"), "{}", error.message);
+    // Refused before the Session directory, or any Run, exists.
+    assert!(server.dir().is_none());
+    assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 0);
+    assert!(matches!(ok(server.handle(Request::Connect { profile: None, lease: None, initial: None }, Vec::new())), Response::Connected { .. }));
+    finish(&mut server);
+}
+
+#[test]
+fn ea_15_the_binary_exits_0_when_its_client_closes_both_pipes_during_a_request() {
+    let temp = TempDir::new("binary-departure");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ezsdr-server"))
+        .arg("--runs-dir")
+        .arg(&temp.0)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut ask = |request: &str| {
+        stdin.write_all(request.as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        reply_from(&mut stdout).expect("a reply").0.reply
+    };
+    assert!(matches!(ask(HELLO), Reply::Result(Response::Hello { .. })));
+    let Reply::Result(Response::Connected { dir, now, root_rate, .. }) = ask("{\"request\":{\"op\":\"connect\",\"initial\":{\"radio\":{\"rx\":[{\"number\":0,\"channels\":[0]}]}}}}\n") else {
+        panic!("connected")
+    };
+    let submit = serde_json::to_string(&json!({ "request": Request::Submit { action: capture(1_000) } })).unwrap();
+    assert!(matches!(ask(&format!("{submit}\n")), Reply::Result(Response::Submitted { .. })));
+    let advance = serde_json::to_string(&json!({ "request": advance_by(now, root_rate, 1_000_000) })).unwrap();
+    stdin.write_all(format!("{advance}\n").as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    let dir = PathBuf::from(dir);
+    assert!(meta_appears(&dir), "the advance is not being served");
+    // Its output first, so the cut `ended` reply meets a closed pipe (Rust ignores SIGPIPE).
+    drop(stdout);
+    drop(stdin);
+    let Some(status) = eventually(|| child.try_wait().unwrap()) else {
+        child.kill().unwrap();
+        panic!("the server did not exit");
+    };
+    let mut stderr = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    assert!(status.success(), "{status:?}: {stderr}");
+    assert_eq!(stderr, "");
+    assert_eq!(written_manifest(&dir).termination.reason, client_disconnect());
 }

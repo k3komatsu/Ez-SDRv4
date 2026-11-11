@@ -19,6 +19,11 @@ import csv, json, pathlib, re, sys
 def clean(line):
     return re.sub(r"U(?!n)", "", line.replace("L", ""))
 
+def verdict_of(text):
+    if text.startswith("E9 INCONCLUSIVE:"):  # ssh-drop-tx.sh: no measurement; the E9 measurement lines carry no verdict
+        return "INCONCLUSIVE"
+    return next((v for v in ("PASS", "FAIL", "INCONCLUSIVE") if f": {v}" in text), "")
+
 def board_of(name):
     m = re.search(r"[.-](36|37)(?:[.-]|$)", name)
     return m.group(1) if m else ""
@@ -33,7 +38,7 @@ def main(raw, out):
         for line in log.read_text(errors="replace").splitlines():
             if (i := line.find("VERDICT ")) >= 0:
                 text = line[i + len("VERDICT "):]
-                verdict = next((v for v in ("PASS", "FAIL", "INCONCLUSIVE") if f": {v}" in text), "")
+                verdict = verdict_of(text)
                 verdicts.append([rel, board, verdict, text])
                 continue
             c = clean(line)
@@ -82,5 +87,8 @@ def main(raw, out):
 
 if __name__ == "__main__":
     assert board_of("hw_x.37.2.log") == "37" and board_of("coarse-sweep-36-200.log") == "36" and board_of("console.log") == ""
+    assert verdict_of("E9 INCONCLUSIVE: no tone before the kill (quiet)") == "INCONCLUSIVE"
+    assert verdict_of("E9 the tone on the independent receiver ended after the kill: the first quiet reading at +80 ms") == ""
+    assert verdict_of("C1 x: PASS: y") == "PASS" and verdict_of("C2 x: FAIL: y") == "FAIL"
     assert clean("BurLLstAck=2 ULnderflow=1") == "BurstAck=2 Underflow=1"
     main(*sys.argv[1:3])

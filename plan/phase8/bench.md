@@ -1045,6 +1045,7 @@ fi
 - INCONCLUSIVE：C1 は server の終了時刻が読めないとき，drop の前に server が終わっていたとき，Manifest に attached の `client_disconnect` がないとき．C2 は drop の前に tone が読めないとき（配線と att を見直す），または monitor の state が読めなかったとき（`unavailable`）．C3 は受信機が tone を返すと走らない（NOT DONE）．
 - 注意：tone が止まったことは，clean な end of burst と FPGA の飢えを区別しない．RF の出力が 0 であることも示さない（LO の漏れが残りうる）．monitor の判定（`common/tone.rs` の `carries_drop_tone`）は，window の coherence が 0.9 を超え，周波数が 100 kHz ± 20 kHz にあり（`is_drop_tone_window`．125 kHz の格子点は外れる），power が最初の 1 秒の noise floor の 4 倍を超えること．1 % 以上の window がそうなら，その 200 ms は tone．起動は，最初の 1 秒の window の半分以上が drop の tone の形なら拒む（疎らな coherent window では拒まない）．200 ms の block の最後の sample が，その行を書く時刻の device 時刻より 300 ms を超えて遅れていれば，その行は unknown．ordinary な noise と 0.5 LSB の量子化 noise は，この判定で tone にならない（`common/tone.rs` の試験）．0.3〜0.4 LSB の量子化 noise は，lattice の window（窓の lag 積がすべて 45°）が 125 kHz で coherence 1 を読む．周波数の幅が ±25 kHz だったときは shape の window が 800 のうち平均約 6 個になり，1 % の bar（8 個）を超える run が約 3 割出た．±20 kHz で 125 kHz は外れ，平均約 0.3 個になる（シミュレーション，INFERRED）．DDC の後の相関した noise や ±2 の値は別の角度を作るので，C3 だけは二重の守りとして，shape に加えて平均電力が 4 LSB の振幅を超える window だけを tone と数える（`quiet_check`，`QUIET_CHECK_MIN_POWER`）．loopback の tone は約 −49 dBFS（INFERRED：`bench-results.md:27-28` から）で，この床より約 30 dB 上．C3 の verdict は最大の tone の形の window の振幅（LSB）を出すので，bench で level が残る．**未確認**：bench の noise 床が 0.3〜0.4 LSB のときの C3 の実測（P5〜P7 は雑音の coherence が高く INCONCLUSIVE だった）．）
 - stop：C1 FAIL（15 s 後も server が動いていた）は owner へ．後始末の後も `docker ps` に `ezsdr-drop-` の container が残るなら owner へ．monitor の container が残るなら `rx-monitor.sh stop`．PID でない kill はしない．
+- `EZSDR_DROP_WAIT=sleep`（server が `advance` の中にいるときの切断）と `EZSDR_DROP_CUT=kill`（server の死）は，この節の下の「#89 の後」の節．
 
 ### 時間の合計（estimate）
 
@@ -1140,3 +1141,82 @@ export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 &&
 ### 流した後
 
 orchestrator に返すもの：commit，各試験の VERDICT 行と log の path，(c)1 の 36 行，N-H1 の行（gap g − 1 と g），長い閉じの行（形と ACK），(c)2 の表，(d) の行，電源の入れ直しの有無．log は `~/.cache/ezsdr-bench/<日付>/`．
+
+## <DATE> の手順（#89 の後：client が去ったら，待っている request の中でも Session が終わる）
+
+`<NEW>` は #89（S1〜S3）が `main` に入った commit．`<OLD>` は `8dd1016`（#89 の前）．結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．出典：[design/16](../../design/16-easy-api.md) EA-15・EA-16，[design/06](../../design/06-kernel-coordinator.md) KC-36，[KNOWN_LIMITATIONS.md](../../KNOWN_LIMITATIONS.md) KL-43，この文書の (i)（2026-11-09 の ssh 切断，server が idle のとき）．
+
+目的：ssh が切れたとき server が `advance`（`sdr.sleep`）の中にいても Session が終わり，送信が止まること．(i) は idle の server しか調べていなかった．もう一つ，server が cleanup なしで死んだ後 X300 がどう止まるか（E9：INFERRED．repeat は host から供給される（KL-5）ので，samples が尽きて止まるはず．記録はまだない）を測る．**測るだけで，E9 の値を規則にはしない**．server の fail-stop（入力が終わって N 秒で exit する．A1）を足すかどうかは，E9 の結果を見て orchestrator と owner が決める．
+
+### 構成と順番
+
+- (i) の配線と同じ（二台を同時につなぐ）：#1 OBX の TX/RX → att（30 dB 以上）→ splitter．splitter の一方は #1 の RX2（C3 の loop），もう一方は #2 UBX slot A の RX2．att は splitter の前に 1 個で，両方の受信経路を覆う．#2 は ssh を通さず，`rx-monitor.sh` が直接受信する．
+- **送信の前に owner に配線と att を確認する**（毎回．script は `yes` を求め，答えがなければ docker にも device にも触れずに止まる）．三つの run は一つの session で続けて流す．順は (i-a) → (i-b) → (ii)．
+- 前提と monitor の起動は (i) の手順 1〜3 と同じ（`ssh -o BatchMode=yes localhost true`，`rx-monitor.sh start`，quiet を待つ）．**新しい client は server を自分の session で起動する**（`start_new_session`）ので，ssh の wrapper は prompt を出してはいけない．wrapper は `ssh -T -o BatchMode=yes` のまま．
+- どの run も，直前に monitor が fresh な quiet を読んだときだけ走る．run の間に `rx-monitor-state.sh "$STATE"` が quiet を返すのを待つ（最大 60 s）．
+- server と Python の client は `<COMMIT>` の tree から（script が snapshot を取る）．driver と relay は，いま走らせている tree のもの．だから (i-a) は **旧い server と旧い client に新しい driver** を使う．これが比べたい組である．
+- 試験の前に（送信しない）：`python3 plan/phase8/tools/ssh-drop-driver.py --self-check`，`python3 plan/phase8/tools/ssh-drop-relay.py --self-check`，`bash -n plan/phase8/tools/ssh-drop-tx.sh`，`bash plan/phase8/tools/ssh-drop-tx.sh --self-check`（E9 の判定を stub の docker・受信機・時計で調べる．装置も docker も ssh も要らず，数秒で終わる．`all cases pass` が出ること）．
+
+### 変数の意味
+
+- `EZSDR_DROP_WAIT=sleep`：driver が `sdr.sleep(hold)` で待つ．server は drop のとき一つの `advance` の中にいる．`time`（既定）は `time.sleep`：server は idle．
+- **evidence**（relay）：ssh の前に relay（`ssh-drop-relay.py`）が置かれ，client が書く request の header ごとに時刻と op を `$OUT/to-server.log` に書く．`sleep` では，drop の直前の request が `advance` で，drop の 1 s 以上前に書かれ，driver の `wait-start` より後であるとき，server が `advance` の中にいたと見なす（INFERRED：idle の server は frame を µs で取る）．無ければ C1 と C2 は `INCONCLUSIVE: no evidence that the server was inside advance at the drop: …`（本来の判定は括弧に残る）．
+- **hold の余裕**（F7）：drop の時に `sleep` の残りが 30 s 未満なら（15 s の期限に 15 s を足す）C1 と C2 は INCONCLUSIVE．既定の hold 120 s，settle 5 s なら残りは約 115 s．`EZSDR_DROP_HOLD` を変えるときは，settle と monitor の確認を足しても 30 s 以上残ること．
+- `EZSDR_DROP_CUT=kill`：local の ssh client を殺す代わりに server の container を `docker kill` する（server が cleanup なしで死ぬ）．C1 と C2 の代わりに `VERDICT E9 …` を出す．`EZSDR_DROP_RX_CHECK` が要る．
+- **E9 の起点**：container が止まった時刻．Docker の `State.FinishedAt`（daemon が記録した exit の時刻．プロセスの死より数 ms 遅れる，INFERRED）を使い，読めなければ container を止めた command（`docker kill` / `docker stop`）が返った時刻を使う（死より後なので，E9 を最大でその command の遅れだけ短く数える）．行にどちらかが書かれる．**起点を出すのは，`docker inspect` が `running=false` を読んだ container だけ**：動いている，または inspect できないときは起点がなく，E9 は測らない．誤差は，括弧つきの行では最後の tone の読みと最初の quiet の読みの間の幅（行が ms で書く．読めなかった読みが間にあれば，monitor の分解能 1 s より広い）．emergency stop の E9 は `docker stop -t 2` が返った後の時刻から数える（stop の待ちの最大 2 s は含まない）．
+- `docker kill` と `docker stop` を container 名（`ezsdr-drop-…`，一つに決まる）に対して使うのは，「PID でない kill はしない」の唯一の例外である（既存の emergency stop と同じ）．名前の pattern による kill はしない．
+- **E9 の保証**：測定の行は，container が止まったと確認できた後にだけ出て，次の二つのどちらかだけ（ほかは INCONCLUSIVE）：(1) 括弧つきの行（`ended after …`）は，止まった後に読んだ最後の tone と最初の quiet の時刻を書き，その幅を誤差として書く．(2) 上限の行（`ended by +N ms (upper bound: no tone was read after …; the last tone was read before it)`）は，止まった後の最初の読みがすでに quiet だったもので，tone の読みは死の前のものしかない．tone が死より前に止まっていたかもしれないので，E9 は N ms 以下，という上限だけを言う（A1 の判断には上限で足りる）．読めなかった読み（`unavailable`）は quiet に数えない．`was still on 60 s after` は，60 s の窓の最後の読みが tone のときだけ出る．それ以外はすべて `VERDICT E9 INCONCLUSIVE: …` で，測定ではなく，exit は 0 でない：kill の前に tone が読めなかった，`docker kill` が失敗した，**container が止まったと確認できなかった**（`the container was not confirmed stopped: state …`．server がまだ動き，装置がまだ送信しているかもしれない．stderr の警告を owner に伝える），tone を読んだ後で受信機が窓の終わりまで読めなかった（`the tone was last read at +N ms and the receiver was unreadable after it`），60 s の間一度も読めなかった．emergency stop の `docker stop` が失敗したときも stderr に出て，exit は 0 でない．
+
+### (i-a) `<OLD>`（`8dd1016`）で `sleep`：FAIL が期待（#1 OBX が送信，#2 が受信，TX あり，約 12 分，estimate）
+
+```sh
+if [[ $(plan/phase8/tools/rx-monitor-state.sh "$STATE") == quiet ]]; then
+  EZSDR_DROP_WAIT=sleep EZSDR_DROP_BOARD=obx EZSDR_BENCH_NIC=enp1s0f1np1 EZSDR_BENCH_SUBNET=40 EZSDR_UHD_ARGS=addr=192.168.40.36 \
+  EZSDR_DROP_RX_CHECK="$PWD/plan/phase8/tools/rx-monitor-state.sh $STATE" \
+    plan/phase8/tools/ssh-drop-tx.sh 8dd1016 2>&1 | tee ~/.cache/ezsdr-bench/$(date +%F)/89-ia.console.log
+fi
+```
+
+- 期待：`VERDICT C1 …: FAIL: server container … still running 15 s after the link dropped`（server は `advance` の中で ssh の切断を知らない），`VERDICT C2 …: FAIL: the tone was still on the independent receiver at +… s, the last reading before the 15 s deadline`．C3 は受信機の最後の読みが tone でなければ走る．exit 1 になるのが正しい．
+- INCONCLUSIVE になったら（evidence または hold の余裕）流し直す．FAIL でないなら，旧い commit で #89 の穴が再現しなかった：owner へ（設計の前提が崩れる）．
+- **E9 の最初の data point**（追加の run なし）：C1 と C2 を出した後，script は動いている server を `docker stop -t 2` で止める（PID 1 は handler のない SIGTERM を無視するので，実際は最大 2 s 後の SIGKILL．INFERRED）．これは host の unclean な死そのものなので，C2 が tone のままだったとき，script は container が止まったと確認できた後にだけ受信機を読み続け，`VERDICT E9 the tone on the independent receiver ended after the emergency docker stop …, counted from …`（最後の tone と最初の quiet の時刻と幅，ms，stop から．最初の読みが quiet なら上限の行 `ended by +N ms (upper bound: …)`）か，60 s 後も tone のままという行（最後の読みが tone のとき），または INCONCLUSIVE の行を出す．止まったと確認できなければ測らない．誤差は行が書く幅．
+- 60 s たっても tone が残るなら，device はまだ送信しているかもしれない：**owner に伝える**．host からは止められない（server は死んでいる）．止めるのは USRP の電源を入れ直すことで（その前に `docker ps` と monitor の log を残す），新しい UHD の session を開くのは owner の言葉があるときだけ．
+
+### (i-b) `<NEW>` で `sleep`：PASS が期待（同じ配線，約 12 分，estimate）
+
+```sh
+if [[ $(plan/phase8/tools/rx-monitor-state.sh "$STATE") == quiet ]]; then
+  EZSDR_DROP_WAIT=sleep EZSDR_DROP_BOARD=obx EZSDR_BENCH_NIC=enp1s0f1np1 EZSDR_BENCH_SUBNET=40 EZSDR_UHD_ARGS=addr=192.168.40.36 \
+  EZSDR_DROP_RX_CHECK="$PWD/plan/phase8/tools/rx-monitor-state.sh $STATE" \
+    plan/phase8/tools/ssh-drop-tx.sh <NEW> 2>&1 | tee ~/.cache/ezsdr-bench/$(date +%F)/89-ib.console.log
+fi
+```
+
+- 期待：C1 PASS（server が 15 s 以内に終了し，Manifest に `client_disconnect`，attached の Lease．`termination.at` は sleep の終わりより前），C2 PASS（期限の前に quiet），C3 PASS．exit 0．
+- 参考：(i)（2026-11-09，idle）では，切断から server の終了まで 1 s 未満，受信機は +0 s（1 s 単位）で quiet だった．`Provider::stop` は #1 で約 104 ms（同じ run の Manifest の `timing` の stop の行：at 1479191981，done 1500026409，200 MHz の root tick．VERIFIED，標本 1）．この run がそれと同程度なら，cut の待ちは stop の長さに足されていない．
+- FAIL は owner へ（#89 の直しが効いていない）．INCONCLUSIVE なら流し直す．
+
+### (ii) `<NEW>` で `kill`：E9 の測定（同じ配線，TX あり，約 12 分，estimate）
+
+```sh
+if [[ $(plan/phase8/tools/rx-monitor-state.sh "$STATE") == quiet ]]; then
+  EZSDR_DROP_CUT=kill EZSDR_DROP_BOARD=obx EZSDR_BENCH_NIC=enp1s0f1np1 EZSDR_BENCH_SUBNET=40 EZSDR_UHD_ARGS=addr=192.168.40.36 \
+  EZSDR_DROP_RX_CHECK="$PWD/plan/phase8/tools/rx-monitor-state.sh $STATE" \
+    plan/phase8/tools/ssh-drop-tx.sh <NEW> 2>&1 | tee ~/.cache/ezsdr-bench/$(date +%F)/89-ii.console.log
+fi
+```
+
+- repeat が鳴っている間に server の container を `docker kill`（SIGKILL）する．EOB も Manifest もない．出る行：`VERDICT E9 the tone on the independent receiver ended after the death of the server container by docker kill, counted from …: the last tone was read at +… ms, the first quiet reading at +… ms (the bracket is … ms wide: the error)`，または上限の行 `… ended by +N ms (upper bound: no tone was read after …; the last tone was read before it)`（止まった後の最初の読みが quiet．E9 は N ms 以下としか言えず，A1 の判断にはそれで足りる），または `… was still on 60 s after …`．C1 と C2 は出ない．C3 は quiet の後に走る．exit 0 は E9 が quiet を読み，C3 が PASS のとき．`VERDICT E9 INCONCLUSIVE: …`（上の「E9 の保証」の各場合）は測定ではない：配線か送信か受信機を直して流し直す（exit 1）．container が止まったと確認できないときは，装置が送信中かもしれないので先に owner に伝える．
+- 読み方：E9 の終わりが (i-b) の C2 の時刻と同程度なら，ホストが死んでも装置は短い時間で止まる．数秒以上かかる，または 60 s 後も tone なら，KL-43 の (b) の「samples が尽きて止まる」は成り立たない：A1（server の fail-stop）の採否の材料になる．どちらでも，tone が止まったことは，clean な end of burst と FPGA の飢えを区別しない．RF の出力が 0 であることも示さない（LO の漏れが残りうる）．
+- **E9 の条件を書く**（AGENTS §9 の bench の値）：rate は 1 MS/s，tone 100 kHz，1 GHz，振幅 0.4，#1 OBX，一回の run．ほかの rate や board に当てはめるには掃引の計画が先（境の近くで 1 セル 10 回以上）．
+- 60 s たっても tone が残るなら，device はまだ送信しているかもしれない：**owner に伝える**．止めるのは USRP の電源を入れ直すことで，新しい UHD の session を開くのは owner の言葉があるときだけ．
+
+### 閉じ方と記録
+
+- **#89**：(i-a) が FAIL（旧い commit で穴が再現），(i-b) の C1・C2・C3 が PASS．monitor が起動しなければ NOT DONE（閉じない）．
+- **E9**：(ii) の行と (i-a) の stop の後の行を bench-results.md に書く（条件つき）．A1 の採否と KL-43 の (b) の文は，その後に orchestrator と owner が決める．
+- stop：(i-b) の C1 FAIL，後始末の後も `docker ps` に `ezsdr-drop-` の container が残る，E9 で 60 s 後も tone，または container が止まったと確認できない（`not confirmed stopped`，`emergency docker stop … failed`）→ owner へ．monitor の container が残るなら `rx-monitor.sh stop`．PID でない kill はしない（container 名への `docker kill` / `docker stop` は上の例外）．
+
+### 流した後
+
+orchestrator に返すもの：`<NEW>` の commit，(i-a)・(i-b)・(ii) の VERDICT 行（C1，C2，C3，E9）と log の path，`drop.log`（`entry evidence` の行を含む）と `to-server.log`，`rx-check.log`，`docker ps` の残り，#2 の monitor の state file と log，電源 cycle の有無．log は (i) と同じ場所（`~/ezsdr-bench/<日付>/ssh-drop-*/` と `~/.cache/ezsdr-bench/<日付>/`）．raw は bench/ の規則（AGENTS §9）で private repo の release へ．

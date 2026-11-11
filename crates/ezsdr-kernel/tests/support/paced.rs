@@ -28,6 +28,8 @@ struct WallState {
     last_fired: Option<i64>,
     /// The callbacks that have run, for `firing_before_schedule_returns`.
     ran: std::collections::BTreeSet<u64>,
+    /// The tick a waiting `next_wakeup` waits for, for [`WallPark`].
+    parked_until: Option<i64>,
 }
 
 /// The clock of [`WallAuthority`]: a 1 GHz root counting host nanoseconds since the
@@ -183,6 +185,11 @@ impl WallAuthority {
         self
     }
 
+    /// A handle that sees the control loop wait in `next_wakeup` (#89, F1).
+    pub fn park_probe(&self) -> WallPark {
+        WallPark(self.time.clone())
+    }
+
     /// Publishes these relations instead of the measured ones (KG-11).
     pub fn with_relations(mut self, relations: Vec<ClockRelation>) -> WallAuthority {
         self.relations = relations;
@@ -192,6 +199,25 @@ impl WallAuthority {
     /// The relations it publishes.
     pub fn measured_relations(&self) -> Vec<ClockRelation> {
         self.relations.clone()
+    }
+}
+
+/// Sees a `next_wakeup` of [`WallAuthority`] wait.
+pub struct WallPark(Arc<WallTime>);
+
+impl WallPark {
+    /// Waits until a `next_wakeup` waits for `tick` of the root; false after `timeout`.
+    pub fn wait_parked_until(&self, tick: i64, timeout: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + timeout;
+        let mut state = self.0.lock();
+        while state.parked_until != Some(tick) {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            state = self.0.changed.wait_timeout(state, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        true
     }
 }
 
@@ -215,7 +241,10 @@ impl Authority for WallAuthority {
                 break tick;
             }
             let wait = std::time::Duration::from_nanos((tick - now) as u64);
+            state.parked_until = Some(tick);
+            time.changed.notify_all();
             state = time.changed.wait_timeout(state, wait).unwrap_or_else(|e| e.into_inner()).0;
+            state.parked_until = None;
         };
         state.last_fired = Some(tick);
         for _ in 0..ManualTimeAuthority::DEFAULT_CALLBACK_CAP {
@@ -319,6 +348,7 @@ pub struct ThreadedProvider {
     stop_tail: u32,
     never_finishing: bool,
     hold_after_take: Option<Arc<(Mutex<bool>, Condvar)>>,
+    stop_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
     deaf: bool,
     drain_after_stop: Option<std::time::Duration>,
     ctx: Option<Arc<ThreadedCtx>>,
@@ -344,6 +374,7 @@ impl ThreadedProvider {
             stop_tail: 0,
             never_finishing: false,
             hold_after_take: None,
+            stop_gate: None,
             deaf: false,
             drain_after_stop: None,
             ctx: None,
@@ -411,6 +442,12 @@ impl ThreadedProvider {
     /// Action is complete, and acknowledged, no earlier than the gate opens (MA-14b, KC-21a).
     pub fn hold_after_take(mut self, gate: Arc<(Mutex<bool>, Condvar)>) -> Self {
         self.hold_after_take = Some(gate);
+        self
+    }
+
+    /// Waits in `stop`, after recording it, until `gate` holds true.
+    pub fn gated_stop(mut self, gate: Arc<(Mutex<bool>, Condvar)>) -> Self {
+        self.stop_gate = Some(gate);
         self
     }
 
@@ -557,6 +594,12 @@ impl Provider for ThreadedProvider {
 
     fn stop(&mut self, _mode: StopMode) -> Result<(), ModuleError> {
         self.record("stop");
+        if let Some(gate) = &self.stop_gate {
+            let mut open = gate.0.lock().unwrap_or_else(|e| e.into_inner());
+            while !*open {
+                open = gate.1.wait(open).unwrap_or_else(|e| e.into_inner());
+            }
+        }
         let Some(ctx) = self.ctx.clone() else {
             return Ok(());
         };

@@ -2,11 +2,11 @@
 //! output (EA-2, EA-8). `EZSDR_PROFILE`, when set, names the BindingProfile `connect`
 //! without a profile uses (EA-9). Diagnostics go to standard error.
 
-use std::io::{self, BufReader};
+use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use ezsdr_server::{Config, Exit, serve};
+use ezsdr_server::{Config, Exit, serve_watched};
 
 fn main() -> ExitCode {
     let mut runs_dir = PathBuf::from("ezsdr-runs");
@@ -27,9 +27,11 @@ fn main() -> ExitCode {
     let mut config = Config::new(runs_dir);
     // The lab server's own default profile (EA-9, VE-5); the library reads no environment.
     config.default_profile = std::env::var_os("EZSDR_PROFILE").filter(|path| !path.is_empty()).map(PathBuf::from);
-    match serve(BufReader::new(io::stdin().lock()), io::stdout().lock(), config) {
+    match serve_watched(io::stdin(), io::stdout().lock(), config) {
         Ok(Exit::Replied | Exit::EndOfInput) => ExitCode::SUCCESS,
         Ok(Exit::BadFrame) => ExitCode::from(2),
+        // EA-15: a reply the client is no longer there to read is its departure.
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("ezsdr-server: {error}");
             ExitCode::FAILURE

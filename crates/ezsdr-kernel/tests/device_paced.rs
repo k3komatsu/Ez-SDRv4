@@ -15,7 +15,7 @@ use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::module_api::{ExecutionClass, ModuleErrorKind, Pacing, Provider, UpdateClass};
 use ezsdr_kernel::policy::{EventKindDecl, EventKindRegistry, Reaction};
-use ezsdr_kernel::run::{CleanupStep, Lease, RunState, Stage, StopCause, SystemHostClock, Termination};
+use ezsdr_kernel::run::{CleanupMode, CleanupStep, Lease, RunState, Stage, StopCause, SystemHostClock, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::{ClockRegistry, Duration, TimePoint};
@@ -520,6 +520,173 @@ fn kc_36_adopt_clears_the_deadline_the_data_thread_checks() {
     assert!(!provider_stopped(&probe), "{:?}", probe.lines());
     running(&run);
     assert_eq!(manifest_of(run).termination.reason, Termination::Stopped { cause: StopCause::Client {} });
+}
+
+// ---------------------------------------------------------------- KC-36's disconnect signal (#89)
+
+fn client_disconnect() -> Termination {
+    Termination::Stopped { cause: StopCause::ClientDisconnect {} }
+}
+
+/// Whether the Run entered `Stopping { Orderly }` and no other `Stopping`.
+fn stopped_orderly(manifest: &Manifest) -> bool {
+    let stopping: Vec<_> = manifest.run.transitions.iter().filter(|t| matches!(t.state, RunState::Stopping { .. })).collect();
+    stopping.len() == 1 && stopping[0].state == RunState::Stopping { mode: CleanupMode::Orderly }
+}
+
+#[test]
+fn kc_36_a_disconnect_signal_ends_a_waiting_advance() {
+    // F1: the signal comes only once the control loop waits in `next_wakeup` for the
+    // horizon; no event is ever delivered, so only the signal's own wake ends that wait.
+    let probe = Probe::new();
+    let mut park = None;
+    let rig = paced_with(|authority| {
+        park = Some(authority.park_probe());
+        authority
+    });
+    let park = park.unwrap();
+    let mut run = session(provider(rig.assembly, "radio", ThreadedProvider::new("radio", "radio", &probe)), &profile_one());
+    let signal = run.disconnect_signal();
+    let target = after(&run, Wall::from_secs(3600));
+    let (done, returned) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = run.advance_to(target);
+        let _ = done.send((result, run));
+    });
+    let root = target.domain();
+    assert!(park.wait_parked_until(target.ticks_in(root).unwrap(), Wall::from_secs(10)), "the control loop never waited for the horizon");
+    signal();
+    let (result, run) = returned.recv_timeout(Wall::from_secs(10)).expect("the signal ended the waiting advance");
+    assert_eq!(result, Err(RunHandleError::Ended { termination: client_disconnect() }));
+    assert_eq!(count(&probe, "radio:stop"), 1);
+    let manifest = manifest_of(run);
+    assert_eq!(manifest.termination.reason, client_disconnect());
+    assert!(manifest.termination.also.is_empty(), "{:?}", manifest.termination.also);
+    assert!(manifest.termination.at.unwrap().ticks_in(root).unwrap() < target.ticks_in(root).unwrap());
+    assert!(stopped_orderly(&manifest), "{:?}", manifest.run.transitions);
+}
+
+#[test]
+fn kc_36_a_disconnect_signal_ends_a_submit_waiting_for_its_provider() {
+    // KC-21a's wait looks at the end every 10 ms: the Provider holds the Action it took,
+    // and the signal ends the wait long before the 5 s budget would fail the Run.
+    let probe = Probe::new();
+    let hold = Arc::new((Mutex::new(false), Condvar::new()));
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).hold_after_take(hold.clone()));
+    let mut run = session(assembly, &profile_one());
+    let signal = run.disconnect_signal();
+    let (done, returned) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let entry = run.submit(gain(2.0), None);
+        let _ = done.send((entry, run));
+    });
+    assert!(probe.wait_for("radio:took:UpdateParameter", Wall::from_secs(10)), "{:?}", probe.lines());
+    signal();
+    let returned = returned.recv_timeout(Wall::from_secs(10));
+    *hold.0.lock().unwrap() = true;
+    hold.1.notify_all();
+    let (entry, run) = returned.expect("the submit returned");
+    let entry = entry.unwrap();
+    assert!(admitted(&entry), "{entry:?}");
+    assert!(!matches!(run.state(), RunState::Running {}), "{:?}", run.state());
+    let manifest = manifest_of(run);
+    assert_eq!(manifest.termination.reason, client_disconnect(), "{}", failure(&manifest));
+    assert!(manifest.termination.also.is_empty(), "{:?}", manifest.termination.also);
+}
+
+#[test]
+fn kc_36_a_disconnect_signal_ends_a_simulated_advance() {
+    // Q2: a Simulation Run is cut too. The signal comes while the control thread is held
+    // inside a step at 1000; the loop reads the end at its next round.
+    let probe = Probe::new();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let clocks = Arc::new(ClockRegistry::new());
+    let (authority, root) = SimAuthority::new(&clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+    let (spec, mut profile) = output_docs(64);
+    profile["environment"] = serde_json::json!({});
+    let stepped = SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).publishing_every(10).with_wakeups(&[1_000]).blocking_step_at(1_000, gate.clone());
+    let assembly = provider(assembly_with(Box::new(authority), clocks), "radio", stepped);
+    let mut run = start_spec_run(&spec, &profile, sink(assembly, RecordingSink::new("rec", &probe), &probe)).unwrap();
+    let signal = run.disconnect_signal();
+    let far = TimePoint::new(root, 1_000_000_000_000);
+    let (done, returned) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = run.advance_to(far);
+        let _ = done.send((result, run));
+    });
+    assert!(probe.wait_for("p:step:1000", Wall::from_secs(10)), "{:?}", probe.lines());
+    signal();
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    let (result, run) = returned.recv_timeout(Wall::from_secs(10)).expect("the signal ended the simulated advance");
+    assert_eq!(result, Err(RunHandleError::Ended { termination: client_disconnect() }));
+    let manifest = manifest_of(run);
+    assert!(manifest.termination.at.unwrap().ticks_in(root).unwrap() < 1_000_000_000_000);
+}
+
+#[test]
+fn kc_36_a_disconnect_signal_does_nothing_for_a_detached_lease_or_an_ended_run() {
+    let probe = Probe::new();
+    let mut run = detached_session(&probe, 60_000);
+    let signal = run.disconnect_signal();
+    signal();
+    signal();
+    let near = after(&run, Wall::from_millis(10));
+    assert_eq!(run.advance_to(near), Ok(()));
+    running(&run);
+    let manifest = manifest_of(run);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
+    assert!(manifest.termination.also.is_empty(), "{:?}", manifest.termination.also);
+    // The Run is gone: the signal neither panics nor keeps it, or its Provider, alive.
+    signal();
+    assert_eq!(probe.holders(), 1, "a signal kept the dropped Run alive");
+}
+
+#[test]
+fn kc_36_the_first_end_requested_stands_against_a_disconnect_signal() {
+    // (a) An idle Run: the signal runs no cleanup (KC-38); the next call does, and the
+    // signal's end, requested first, stands against `finish`'s (KC-32).
+    let probe = Probe::new();
+    let run = session(provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe)), &profile_one());
+    let signal = run.disconnect_signal();
+    signal();
+    running(&run);
+    assert!(!provider_stopped(&probe), "{:?}", probe.lines());
+    let manifest = manifest_of(run);
+    assert_eq!(manifest.termination.reason, client_disconnect());
+    assert!(manifest.termination.also.is_empty(), "{:?}", manifest.termination.also);
+
+    // (b) The Policy ended the Run first: the signal says nothing new.
+    let probe = Probe::new();
+    let run = lost_device_session(&probe);
+    let signal = run.disconnect_signal();
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(10)));
+    signal();
+    let manifest = manifest_of(run);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
+    assert!(manifest.termination.also.is_empty(), "{:?}", manifest.termination.also);
+}
+
+#[test]
+fn kc_36_a_disconnect_signal_during_finish_s_cleanup_does_not_change_its_end() {
+    // F3: `finish` asked first; a disconnect while its cleanup stops the Provider is dropped.
+    let probe = Probe::new();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let run = session(provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).gated_stop(gate.clone())), &profile_one());
+    let signal = run.disconnect_signal();
+    let (done, returned) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(run.finish());
+    });
+    let stopping = probe.wait_for("radio:stop", Wall::from_secs(10));
+    signal();
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    assert!(stopping, "{:?}", probe.lines());
+    let manifest = returned.recv_timeout(Wall::from_secs(10)).expect("finish returned");
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
+    assert!(manifest.termination.also.is_empty(), "{:?}", manifest.termination.also);
+    assert!(stopped_orderly(&manifest), "{:?}", manifest.run.transitions);
 }
 
 // ---------------------------------------------------------------- KG-3

@@ -257,6 +257,30 @@ impl RunHandle {
         }
     }
 
+    /// A function any thread may call, any number of times, to report that an Attached
+    /// Lease's client has gone (KC-36): it requests `Stopped { client_disconnect }` in
+    /// orderly mode and, when that request set the end in a class whose control loop waits
+    /// in host time, wakes that loop (KC-46a). It runs no cleanup: the control thread's call
+    /// in progress, or its next one that runs a round or settles, does (KC-38); a `submit`
+    /// in progress or made after it still dispatches until cleanup freezes dispatch. It holds the Run weakly and does nothing
+    /// for a Detached Lease or once the Run is gone. While it runs it holds the Run, so a
+    /// caller that may call it as the handle is dropped serialises the two: otherwise the
+    /// Run's last reference, and its devices, may be dropped on the calling thread.
+    pub fn disconnect_signal(&self) -> impl Fn() + Send + Sync + 'static {
+        // RS-23's one decision of what a disconnect means, on a copy: the Lease's mode never changes.
+        let cause = self.lease.clone().on_disconnect(&*self.shared.ctx.host_clock);
+        let shared = Arc::downgrade(&self.shared);
+        move || {
+            let (Some(cause), Some(shared)) = (cause.clone(), shared.upgrade()) else {
+                return;
+            };
+            // Only HardwareInLoop and Hardware reach Running among the classes that wait in host time (KC-2).
+            if ending::request(&shared, Termination::Stopped { cause }, crate::run::CleanupMode::Orderly) && shared.device_paced() {
+                paced::wake(&shared, true);
+            }
+        }
+    }
+
     /// Checks the Detached Lease deadline (KC-36).
     pub fn check_lease(&mut self) {
         if self.lease.expired(&*self.shared.ctx.host_clock) {
