@@ -101,7 +101,8 @@ is created with `Run::connect` / `Run::start_spec` (`ezsdr-acceptance`'s `uhd.rs
 `crates/ezsdr-acceptance/tests/governance.rs` fails any reference to `connect` / `start_spec_run` (a call, an import, a function value) or a `RunHandle` outside `run.rs`, a time read
 (`thread::sleep`, `Instant::now`, `.elapsed()`, `recv_timeout(`, `.time_now(`, `.host()`) inside a `#[test]` fn that is not on its per-fn
 allow list (a helper fn may read time; the scan sees tokens, not time sources reached through a helper), `Expect::Any` outside its three
-named loops, and a `.handle(` in `protocol.rs` outside `fn handle`. The wrapper checks how the Run ended at its creation, when `submit`,
+named loops, a `.handle(` in `protocol.rs` outside `fn handle`, and `assemble_on` (a FakeDevice assembly) in any `ezsdr-acceptance` test file but `uhd.rs`, so
+`support::session_run_with`'s raw `connect` cannot carry one. The wrapper checks how the Run ended at its creation, when `submit`,
 `advance_to`, `wait_for` or `run_until_end` returns, at `finish`, and at `Drop`. **A read-only call (`state`, `now`, `events`, ...) checks
 nothing**: the Run reaches `CleanedUp` only inside a call that settles it, so a bound that cuts in the background (a Policy end's
 `stop_early` on the data thread) shows at the next of those calls, at `finish` or at `Drop`. A real-time bound (KC-12a, KC-21a, a cleanup
@@ -119,7 +120,10 @@ any other bound is still written, and a test that expects no bound captures noth
 `EZSDR_RIG_DELAY_MS` (milliseconds; unset means no delay) with `EZSDR_RIG_DELAY_AT` (a comma list of `now`, `advance`, `submit`, `server`,
 or `all`) makes the calling thread sleep after the wrapper's `now`/`start_instant`, `submit` and waiting calls, and after `protocol.rs`'s
 `handle`, as a descheduled test thread would; it is a diagnostic for finding tests whose verdict depends on the test thread's timing, it
-gates and kills nothing, and no gate or bench run sets it.
+gates and kills nothing, and no gate or bench run sets it. The wrapper does not see when the test thread acts: a test whose verdict depends on it fails by its own
+assertion under the delay (stage 2b moved those it could: a booking made untimed or `send_asap`, the Stop's own log stamp, the window on the `Direct` rig). Thirteen
+tests are left to stage 2c, because their expectation needs a receipt instant (the Provider's `receipts`, or the Kernel log for `n47s5_stop_end_rehearsal_on_the_fake`; 9 of the 13 failed under the 2a sweep's delay): the `n47s5_*` rehearsals (7), `s1_short_first_sends…`,
+`p70_one_sample_burst_then_timed_burst…`, `rx_start_lead_group_runs_on_the_fake`, and the three `rehearsal_b7_*`.
 
 Before the B3/B4/B6/B7 waveform/index assertions and the single-burst assertion,
 `require_stream_timing` checks measured stream events and expired-timeline

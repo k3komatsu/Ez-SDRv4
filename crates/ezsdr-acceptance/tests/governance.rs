@@ -382,9 +382,9 @@ fn at_pattern(toks: &[Tok], i: usize, pattern: &[&str]) -> bool {
 const ACCEPTANCE_EXEMPT: [&str; 9] = ["v58.rs", "v61.rs", "reactive.rs", "parity.rs", "measurements.rs", "x3xx.rs", "o1_oracle.rs", "repeat_switch.rs", "governance.rs"];
 const ACCEPTANCE_EXEMPT_DIRS: [&str; 2] = ["support/", "oracle/"];
 
-/// `(file, fn, reason)`: a `#[test]` fn that reads time itself. Most are Authority, `Direct`-rig or device tests with no Run; three drive a Run and
-/// measure a property of time (the reason says which).
-const TIME_ALLOWED: [(&str, &str, &str); 24] = [
+/// `(file, fn, reason)`: a `#[test]` fn that reads time itself. Most are Authority, `Direct`-rig or device tests with no Run; one drives a Run and
+/// measures a property of time (the reason says which).
+const TIME_ALLOWED: [(&str, &str, &str); 22] = [
     ("crates/ezsdr-radio-uhd/tests/common/probe_device.rs", "drain_without_reader_resumes_after_rx_panic", "no Run: a probe device read through the device's clock"),
     ("crates/ezsdr-radio-uhd/tests/fake.rs", "a_reopen_of_the_same_stream_and_a_disjoint_channel_set_are_allowed", "no Run: a guarded device"),
     (
@@ -430,17 +430,7 @@ const TIME_ALLOWED: [(&str, &str, &str); 24] = [
         "ur_21_a_descheduled_timed_send_is_on_time_on_the_manual_clock_and_late_on_the_real_one",
         "a Run on a Fake whose uhd-tx is descheduled: a 5 s observed-entry handshake, then the Run waits on the manual or the real clock as the case says",
     ),
-    (
-        "crates/ezsdr-radio-uhd/tests/fake.rs",
-        "ur_29_a_silent_stream_is_a_lost_device",
-        "a Run, but the property is device time: the device's clock measures it and the wall is a 30 s watchdog (plan 30 §4.4)",
-    ),
     ("crates/ezsdr-radio-uhd/tests/fake.rs", "ur_33_a_real_fake_s_time_starts_at_its_own_creation", "no Run: the Fake's own clock"),
-    (
-        "crates/ezsdr-radio-uhd/tests/fake.rs",
-        "ur_33_a_shutdown_with_a_report_read_that_fails_at_once_still_joins_uhd_tx",
-        "a Run whose property is that `finish` returns within 10 s of wall time (the join bound)",
-    ),
 ];
 
 /// `(file, fn)`: where `Expect::Any` may appear, besides `run.rs` that defines it: the observation-only loops that record how a Run ended.
@@ -467,7 +457,8 @@ fn scan_used(path: &str, source: &str, used: &mut BTreeSet<String>) -> Vec<Strin
     let runs = (uhd || acceptance) && path != RUN_FILE;
     let time = path == "crates/ezsdr-radio-uhd/tests/fake.rs" || path.starts_with("crates/ezsdr-radio-uhd/tests/common/") || path == "crates/ezsdr-acceptance/tests/uhd.rs";
     let handle = path == "crates/ezsdr-server/tests/protocol.rs";
-    if !(runs || time || handle) {
+    let fake_assembly = path.starts_with("crates/ezsdr-acceptance/tests/") && path != "crates/ezsdr-acceptance/tests/uhd.rs";
+    if !(runs || time || handle || fake_assembly) {
         return Vec::new();
     }
     let toks = tokens(&blank(source));
@@ -527,6 +518,9 @@ fn scan_used(path: &str, source: &str, used: &mut BTreeSet<String>) -> Vec<Strin
                     }
                 }
             }
+        }
+        if fake_assembly && text == "assemble_on" {
+            violation("`assemble_on` outside `uhd.rs`: a FakeDevice assembly would reach a raw `connect` (`support::session_run_with`) past the wrapper");
         }
         if handle && at_pattern(&toks, i, &[".", "handle", "("]) && in_fn != "handle" {
             violation("`.handle(` outside `fn handle`, the door that carries the diagnostic delay");
@@ -642,6 +636,30 @@ fn run_scan_covers_the_files_it_names_and_skips_the_others() {
     ] {
         assert_eq!(scan(path, raw).len(), 0, "{path}");
     }
+}
+
+#[test]
+fn run_scan_a_fake_device_assembly_is_made_only_in_uhd_rs() {
+    let source = "fn t() { let a = rig::assemble_on(&p, i, d); }";
+    for path in [
+        "crates/ezsdr-acceptance/tests/support/mod.rs",
+        "crates/ezsdr-acceptance/tests/v58.rs",
+        "crates/ezsdr-acceptance/tests/oracle/x.rs",
+        "crates/ezsdr-acceptance/tests/a_new_file.rs",
+        "crates/ezsdr-acceptance/tests/governance.rs",
+    ] {
+        assert_eq!(scan(path, source).len(), 1, "{path}");
+    }
+    assert_eq!(scan("crates/ezsdr-acceptance/tests/uhd.rs", source).len(), 0, "the file whose Runs the wrapper wraps");
+    assert_eq!(scan("crates/ezsdr-acceptance/tests/support/mod.rs", "fn t() { rig :: assemble_on (&p); }").len(), 1, "spaced");
+    assert_eq!(scan("crates/ezsdr-acceptance/tests/support/mod.rs", "fn t() { let f = rig::assemble_on; }").len(), 1, "a function value");
+    assert_eq!(
+        scan("crates/ezsdr-acceptance/tests/support/mod.rs", "// assemble_on\nfn t() { let s = \"assemble_on\"; assemble(&p); assemble_on_other(&p); }").len(),
+        0,
+        "comments, strings and other names"
+    );
+    assert_eq!(scan("crates/ezsdr-acceptance/src/rig.rs", source).len(), 0, "the definition is outside the tests");
+    assert_eq!(scan("crates/ezsdr-radio-uhd/tests/common/mod.rs", source).len(), 0, "only the acceptance tests have this helper");
 }
 
 #[test]

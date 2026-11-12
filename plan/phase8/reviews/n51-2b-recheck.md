@@ -1,0 +1,6 @@
+# Note 51 stage 2b — Opus narrow re-check of the orchestrator's fix (2026-11-13; read-only, Claude Opus 5.5 effort high; nothing built)
+
+CLOSED.
+1. `direct.finish();` (crates/ezsdr-radio-uhd/tests/fake.rs:2003) runs after the four observations and before every assert; `Direct::finish` (fake.rs:1543-1547) calls `radio.stop(Orderly)` (provider/mod.rs:685-727: joins uhd-control, then Shutdown to every uhd-tx/uhd-rx and joins them; returns Ok on every shown path) and `cleanup()` (mod.rs:729-748). The asserted values are owned and taken before `finish`, which consumes the rig. VERIFIED.
+2. An assertion failure no longer leaks. Pre-existing residual: `Direct` and `UhdRadio` have no `Drop`, so a panic before `finish` (in `clock_of`, `until`) leaves threads running in every `Direct` test — to the Phase 8-end test-architecture review. No other test in the 2b diff returns without finishing.
+3. Text: the ea_16 log stamp is taken at crates/ezsdr-kernel/src/coordinator/pipeline.rs:939 before compile (~960) and dispatch (1034), VERIFIED; the Run path never registers the test thread as a clock driver, so device time can move during a stall after the stamp (INFERRED, consistent with the sweep); 9 of the 13 deferred tests failed in the 2a sweep (the four that did not: `n47s5_stop_end_rehearsal_on_the_fake` and the three `rehearsal_b7_*`), VERIFIED.

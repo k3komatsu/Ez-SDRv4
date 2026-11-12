@@ -20587,5 +20587,65 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "the_trace_names_the_late_blocks_and_the_fresh_starts_offset"
+ },
+ {
+  "id": "N51-2B-01",
+  "name": "`assemble_on` is not found as a token, so a FakeDevice assembly made outside `uhd.rs` passes the scan (note 51 stage 2b)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "text == \"assemble_on\"",
+  "new": "text == \"assemble\"",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_a_fake_device_assembly_is_made_only_in_uhd_rs"
+ },
+ {
+  "id": "N51-2B-02",
+  "name": "`uhd.rs` is not exempt from the `assemble_on` rule, so the one file that assembles a FakeDevice Run trips the scan (note 51 stage 2b)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "&& path != \"crates/ezsdr-acceptance/tests/uhd.rs\"",
+  "new": "",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_a_fake_device_assembly_is_made_only_in_uhd_rs"
+ },
+ {
+  "id": "N51-2B-03",
+  "name": "the `assemble_on` rule skips the files the Run rule exempts (`support/`, `v58.rs`), where the raw `connect` path is (note 51 stage 2b)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "let fake_assembly = path.starts_with(\"crates/ezsdr-acceptance/tests/\")",
+  "new": "let fake_assembly = acceptance",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_a_fake_device_assembly_is_made_only_in_uhd_rs"
+ },
+ {
+  "id": "N51-2B-04",
+  "name": "a file only the `assemble_on` rule covers is not scanned at all, so the rule never runs there (note 51 stage 2b)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "!(runs || time || handle || fake_assembly)",
+  "new": "!(runs || time || handle)",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_a_fake_device_assembly_is_made_only_in_uhd_rs"
+ },
+ {
+  "id": "N51-2B-05",
+  "name": "the `assemble_on` rule covers every scanned file, so the helper's own definition and the other crates' tests trip it (note 51 stage 2b)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "let fake_assembly = path.starts_with(\"crates/ezsdr-acceptance/tests/\") &&",
+  "new": "let fake_assembly = true &&",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_a_fake_device_assembly_is_made_only_in_uhd_rs"
+ },
+ {
+  "id": "N51-2B-06",
+  "name": "a refused burst is removed from its stream's Bookings, end included: the early corrected value is accepted, on the Direct rig where no delay of the test thread moves it (N47S4-13b's mutant; note 51 stage 2b)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.record.drop_piece(k, len);",
+  "new": "self.record = Bookings::unarmed();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_a_refused_configure_keeps_its_burst_s_span_until_its_booked_end_on_the_direct_rig"
  }
 ]

@@ -487,8 +487,10 @@ fn ea_16_untimed_repeat_after_stop_starts_at_the_stop_region_end() {
     admitted(&mut run, repeat.clone(), Some(&bytes));
     let now = run.now();
     run.advance_to(TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + 20 * MS)).unwrap();
-    admitted(&mut run, SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
-    let now = run.now();
+    // The Stop's own log stamp, taken before the Provider's receipt, not a time read after `submit` returned: a delayed thread reads a later time (note 51 §3).
+    let stopped = run.submit(SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None).unwrap();
+    assert!(matches!(stopped.outcome, Outcome::Admitted { .. }), "{:?}", stopped.outcome);
+    let now = stopped.time;
     let stop_root = now.ticks_in(now.domain()).unwrap();
     let record = run.sample_clocks().into_iter().find(|r| r.stream.path().ends_with("tx/s0")).expect("the transmit SampleClock");
     let origin = record.origin.ticks_in(record.origin.domain()).unwrap();
