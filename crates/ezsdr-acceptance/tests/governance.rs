@@ -207,8 +207,10 @@ fn po_11_no_hashmap_and_no_wall_clock_in_simulation_code() {
     // The stdio server's input thread reads no clock and only reports the client's departure
     // (KC-36, EA-15); the Simulation end instant it causes is recorded in `termination.at` (#89).
     let input = root.join("crates/ezsdr-server/src/transport.rs");
+    // The binary's fail-stop timer (EA-15, A1) is a wall-clock thread by definition; it runs after the input ended.
+    let backstop = root.join("crates/ezsdr-server/src/main.rs");
     for source_root in source_roots {
-        for file in rust_files(&source_root).into_iter().filter(|file| *file != paced && *file != input) {
+        for file in rust_files(&source_root).into_iter().filter(|file| *file != paced && *file != input && *file != backstop) {
             let source = fs::read_to_string(&file).unwrap();
             for (line_number, line) in source.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or_default();

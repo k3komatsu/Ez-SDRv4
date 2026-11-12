@@ -2218,3 +2218,60 @@ fn ea_15_the_binary_exits_0_when_its_client_closes_both_pipes_during_a_request()
     assert_eq!(stderr, "");
     assert_eq!(written_manifest(&dir).termination.reason, client_disconnect());
 }
+
+#[test]
+fn ea_15_the_binary_exits_with_status_3_after_the_failstop_delay_when_it_cannot_finish() {
+    let temp = TempDir::new("binary-failstop");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ezsdr-server"))
+        .arg("--runs-dir")
+        .arg(&temp.0)
+        .env("EZSDR_SERVER_FAILSTOP_SECS", "2")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut send = |request: &Request| {
+        stdin.write_all(format!("{}\n", json!({ "request": request })).as_bytes()).unwrap();
+        stdin.flush().unwrap();
+    };
+    let mut ask = |request: Request| {
+        send(&request);
+        reply_from(&mut stdout).expect("a reply").0.reply
+    };
+    assert!(matches!(ask(Request::Hello { protocol: 2 }), Reply::Result(Response::Hello { .. })));
+    let initial =
+        Some(BTreeMap::from([("radio".to_owned(), ResourceInit { rx: vec![StreamInit { number: Some(0), channels: vec![ChannelRef::Number(0)], ..StreamInit::default() }], tx: Vec::new() })]));
+    let Reply::Result(Response::Connected { now, .. }) = ask(Request::Connect { profile: None, lease: None, initial }) else { panic!("connected") };
+    assert!(matches!(ask(Request::Submit { action: capture(40_000) }), Reply::Result(Response::Submitted { .. })));
+    let within = Some(Duration::new(now.domain(), 1_000_000_000));
+    let Reply::Result(Response::Waited { event: Some(event), .. }) = ask(Request::WaitFor { kinds: vec![written()], from: 0, within, until: None }) else { panic!("no capture") };
+    let uri = event.payload["artifact"]["uri"].as_str().unwrap().to_owned();
+    // The 320 kB body of this reply, which nobody reads, fills the stdout pipe: the server blocks in the write, where it cannot see its own input end.
+    send(&Request::Read { uri });
+    let mut header = String::new();
+    stdout.read_line(&mut header).unwrap();
+    assert!(header.contains("\"read\""), "{header}");
+    drop(stdin);
+    // `ended` is taken after the close, and each poll's instant before its `try_wait`: the last poll that found the server alive proves
+    // it lived until at least then, whenever the parent is scheduled, so a backstop that fires at once finds no such poll.
+    let ended = std::time::Instant::now();
+    let mut alive_until = ended;
+    let Some(status) = eventually(|| {
+        let polled = std::time::Instant::now();
+        let status = child.try_wait().unwrap();
+        if status.is_none() {
+            alive_until = polled;
+        }
+        status
+    }) else {
+        watchdog::infra::infra("the server did not exit within the test's bound");
+        child.kill().unwrap();
+        let _ = child.wait();
+        panic!("the server did not exit");
+    };
+    assert_eq!(status.code(), Some(3));
+    let lived = alive_until.duration_since(ended);
+    assert!(lived >= std::time::Duration::from_secs(1), "the backstop fired long before its 2 s delay: the server was last seen alive {lived:?} after its input ended");
+}

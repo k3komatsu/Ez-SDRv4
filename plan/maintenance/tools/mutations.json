@@ -17402,7 +17402,7 @@
   "id": "C89-2-10",
   "name": "#89 (EA-15): the binary reads its input on the serving thread (serve, no watch)",
   "file": "crates/ezsdr-server/src/main.rs",
-  "old": "match serve_watched(io::stdin(), io::stdout().lock(), config) {",
+  "old": "match serve_watched(Backstop { input: io::stdin(), after }, io::stdout().lock(), config) {",
   "new": "match ezsdr_server::serve(io::BufReader::new(io::stdin().lock()), io::stdout().lock(), config) {",
   "crate": "ezsdr-server",
   "test_bin": "protocol",
@@ -18367,5 +18367,37 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "m1_drive_a_thread_driving_two_clocks"
+ },
+ {
+  "id": "A1-1",
+  "name": "A1: the backstop's timer is never started when the input ends",
+  "file": "crates/ezsdr-server/src/main.rs",
+  "old": "if matches!(read, Ok(0)) || read.as_ref().is_err_and(|error| error.kind() != io::ErrorKind::Interrupted) {",
+  "new": "if false {",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_the_binary_exits_with_status_3_after_the_failstop_delay_when_it_cannot_finish",
+  "kill": "bound"
+ },
+ {
+  "id": "A1-2",
+  "name": "A1: the delay EZSDR_SERVER_FAILSTOP_SECS gives is ignored for the default",
+  "file": "crates/ezsdr-server/src/main.rs",
+  "old": "Ok(secs) => Duration::from_secs(secs),",
+  "new": "Ok(secs) => { let _: u64 = secs; Duration::from_secs(FAILSTOP_SECS) },",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_the_binary_exits_with_status_3_after_the_failstop_delay_when_it_cannot_finish",
+  "kill": "bound"
+ },
+ {
+  "id": "A1-3",
+  "name": "A1: the backstop exits at once, without its delay",
+  "file": "crates/ezsdr-server/src/main.rs",
+  "old": "std::thread::sleep(after);",
+  "new": "let _ = after;",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_15_the_binary_exits_with_status_3_after_the_failstop_delay_when_it_cannot_finish"
  }
 ]
