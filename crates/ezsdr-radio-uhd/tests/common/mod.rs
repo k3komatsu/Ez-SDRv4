@@ -43,6 +43,7 @@ pub mod n47s5;
 pub mod observations;
 pub mod probe_device;
 pub mod raw;
+pub mod rig;
 pub mod tone;
 
 // ---------------------------------------------------------------- fixtures
@@ -459,6 +460,8 @@ pub fn set_sources_with_pll_retries_every(device: &dyn Device, clock: &str, time
 pub fn fake(config: FakeConfig) -> Arc<FakeDevice> {
     // The smoke set runs on the manual clock (plan 30 §4.4): the device's time stops while
     // a Provider thread is busy, so host load cannot miss a device deadline.
+    // `TxBlocks` is a permanent busy loop in `tx_send`: on a manual clock it stops the clock for good (note 51 §4.3).
+    assert!(!config.faults.contains(&FakeFault::TxBlocks), "a manual-clock fake refuses FakeFault::TxBlocks: it stops the clock for good (use fake_real)");
     watch();
     Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..config }))
 }

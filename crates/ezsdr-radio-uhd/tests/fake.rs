@@ -32,6 +32,7 @@ use ezsdr_radio::payloads::{TimeErrorOutcome, TimeErrorPayload};
 use ezsdr_radio_uhd::{ClockMode, Device, DeviceAuthority, Dir, FakeConfig, FakeDevice, FakeFault, TxCode, UhdRadio};
 use serde_json::{Value as Json, json};
 
+use common::rig::{AuthorityGuard, assert_joined, assert_stands_still};
 use common::*;
 
 // ---------------------------------------------------------------- identity (UR-1…UR-5)
@@ -1306,16 +1307,24 @@ fn attached_reading(port: &str) -> (AttachedPort, Arc<dyn ezsdr_kernel::stream::
     (AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(link.clone())), link)
 }
 
-/// A queue the test pushes Actions into, as the coordinator dispatches them.
-#[derive(Default)]
-struct Pushed(Mutex<std::collections::VecDeque<Action>>, std::sync::atomic::AtomicU64);
+/// A queue the test pushes Actions into, as the coordinator dispatches them: stamped with the device clock at the push, so that an Action is received at the first poll strictly after it
+/// (R2, `common::rig::Stamped`).
+struct Pushed {
+    actions: rig::Stamped<Action>,
+    given: std::sync::atomic::AtomicU64,
+}
+impl Pushed {
+    fn new(clock: ezsdr_radio_uhd::HostClock) -> Pushed {
+        Pushed { actions: rig::Stamped::new(Some(clock)), given: std::sync::atomic::AtomicU64::new(0) }
+    }
+}
 impl ActionReceiver for Pushed {
     // The coordinator's resolution (KC-23): the test's target is the node it resolves to,
     // `<resource>[/<path>]`, so a test may name a stream's node; ids count from 1, as the
     // Kernel's do (KC-24).
     fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
-        let id = || ActionId(self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
-        self.0.lock().unwrap().pop_front().map(|action| {
+        let id = || ActionId(self.given.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
+        self.actions.take().map(|action| {
             let node = action.target().and_then(|target| match target {
                 Target::Resource { resource, path } if path.is_empty() => ResourceId::parse(resource.as_str()).ok(),
                 Target::Resource { resource, path } => ResourceId::parse(&format!("{resource}/{path}")).ok(),
@@ -1329,6 +1338,9 @@ impl ActionReceiver for Pushed {
 /// The Provider driven without the coordinator: prepared, armed and started at `S`,
 /// with Actions pushed into its queue and events read from its collector.
 struct Direct {
+    /// First, so that it drops before the Authority: `DeviceAuthority::drop` waits in real time for `uhd-clock`, and a thread still registered (busy) would hold the clock that `uhd-clock` may be
+    /// asleep on (note 51 §4.2). On a real clock (`Gated`) it registers nothing.
+    _driver: ezsdr_radio_uhd::host::Driver,
     radio: UhdRadio,
     device: Arc<FakeDevice>,
     queue: Arc<Pushed>,
@@ -1337,7 +1349,7 @@ struct Direct {
     root: ClockDomainId,
     clocks: Arc<ClockRegistry>,
     delivered: Vec<Event>,
-    _authority: DeviceAuthority,
+    _authority: AuthorityGuard,
 }
 
 impl Direct {
@@ -1370,7 +1382,13 @@ impl Direct {
 
     fn armed_on(device: Arc<FakeDevice>, tested: Arc<dyn Device>, constraints: &[(&str, Scalar)], links: Vec<AttachedPort>, selector: Json, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Direct {
         let clocks = Arc::new(ClockRegistry::new());
-        let authority = DeviceAuthority::new(tested.clone(), clocks.clone(), "internal", "internal", ARGS).unwrap();
+        let authority = DeviceAuthority::new(tested.clone(), clocks.clone(), "internal", "internal", ARGS).unwrap_or_else(|error| {
+            // The Authority's first read has a real-time bound (UR-7, 5 s): an expiry is the host's, so it is a marker (note 51 §6.2).
+            if error.contains("did not come within") {
+                infra(&format!("the rig's Authority: {error}"));
+            }
+            panic!("{error}")
+        });
         let (time, root) = (authority.time(), authority.root());
         let mut registry = ModuleRegistry::new();
         let (mut checks, mut kinds) = (AdmissionCheckRegistry::new(), EventKindRegistry::with_kernel_kinds());
@@ -1382,7 +1400,8 @@ impl Direct {
             .flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k)))
             .collect();
         let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
-        let queue = Arc::new(Pushed::default());
+        let host = tested.host();
+        let queue = Arc::new(Pushed::new(host.clone()));
         let ctx = {
             let mut ctx = PrepareContext::testing(EventSource::Node { node: ResourceId::parse("usrp").unwrap() }, time.clone(), clocks.clone(), events.clone(), queue.clone(), Arc::new(NoSubmit));
             ctx.run = RunId::from_string("direct".to_owned());
@@ -1410,14 +1429,29 @@ impl Direct {
         };
         radio.prepare(&fragment, ctx).unwrap();
         radio.arm().unwrap();
-        Direct { radio, device, queue, events, time, root, clocks, delivered: Vec::new(), _authority: authority }
+        // Last, so that no error or unwind path above holds a live registration; the Authority's first read (5 s), `prepare` and `arm` stay outside it.
+        let driver = host.drive();
+        Direct { _driver: driver, radio, device, queue, events, time, root, clocks, delivered: Vec::new(), _authority: AuthorityGuard::new(authority) }
     }
 
     /// Starts the armed Provider at T0 and waits a millisecond past it (UR-15).
     fn start(&mut self) {
         let t0 = self.time.now(self.root).unwrap().ticks_in(self.root).unwrap() + ms(2_000) + ms(1);
         self.radio.start(Some(TimePoint::new(self.root, t0))).unwrap();
-        self.time.wait_until(TimePoint::new(self.root, t0 + ms(1))).unwrap();
+        self.wait_until(t0 + ms(1));
+    }
+
+    /// Advances the device clock to `tick` as an idle participant, then ends the wait (R1).
+    fn wait_until(&mut self, tick: i64) {
+        self.time.wait_until(TimePoint::new(self.root, tick)).unwrap();
+        self.end_wait();
+    }
+
+    /// The end of every wait that ends on an instant the test chose (R1, test plan 1c "M3"; `until` ends on an observed state, which is whole once seen): one microsecond more on the clock, so every
+    /// participant due at the instant the wait ended on has run (M4 holds the instant until each has). The order of the test thread and a poll at the instant *after* it is the queue's, not the wait's:
+    /// an Action is received at the first poll strictly after its push (R2, `rig::Stamped`).
+    fn end_wait(&self) {
+        self.device.host().sleep(Wall::from_micros(1));
     }
 
     fn now(&self) -> i64 {
@@ -1425,7 +1459,7 @@ impl Direct {
     }
 
     fn push(&self, action: Action) {
-        self.queue.0.lock().unwrap().push_back(action);
+        self.queue.actions.push(action);
     }
 
     fn update(&self, key: &str, value: Value, class: ezsdr_kernel::module_api::UpdateClass, at: Option<i64>) {
@@ -1474,19 +1508,29 @@ impl Direct {
     }
 
     fn settle(&mut self, wall: Wall) -> Vec<Event> {
-        // The test thread is a non-participant; it waits on the device's host clock so that
-        // the device's time advances while its threads are idle (plan 30 §4.5).
+        // The test thread is a participant (`_driver`): idle in this wait, so the device's time advances; between waits it is busy and the clock stands (note 51 §4.2).
         self.device.host().sleep(wall);
+        self.end_wait();
         self.delivered.extend(self.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)));
         self.delivered.clone()
     }
 
-    /// Advances the fake host clock until the observed state is reached; the real-time bound
-    /// is only a watchdog, not the condition the test asserts.
-    fn until(&mut self, what: &str, mut reached: impl FnMut(&mut Self) -> bool) {
-        let deadline = Instant::now() + Wall::from_secs(10);
+    /// Advances the fake host clock until the observed state is reached, within 5 s of device time (the test's own verdict) and 10 s of real time (the host's: the marker).
+    fn until(&mut self, what: &str, reached: impl FnMut(&mut Self) -> bool) {
+        self.until_within(what, Wall::from_secs(5), Wall::from_secs(10), reached);
+    }
+
+    /// `horizon` is device time, the one the state must be reached in: a plain failure. `bound` is real time, which a stopped clock never ends: its expiry says nothing about the code under test,
+    /// so it writes the marker (note 51 §6.2). The horizon is checked first, so a failure that took `horizon` of device time stays a verdict. Arguments only so that a fixture can expire either.
+    fn until_within(&mut self, what: &str, horizon: Wall, bound: Wall, mut reached: impl FnMut(&mut Self) -> bool) {
+        let begun = self.device.host().now();
+        let deadline = Instant::now() + bound;
         while !reached(self) {
-            assert!(Instant::now() < deadline, "timed out waiting for {what}: {:?}", self.device.calls());
+            assert!(self.device.host().now() - begun < horizon, "{what} did not come within {horizon:?} of device time: {:?}", self.device.calls());
+            if Instant::now() >= deadline {
+                infra(&format!("the rig's wait for {what} did not end within {bound:?} of real time"));
+                panic!("timed out waiting for {what}: {:?}", self.device.calls());
+            }
             self.device.host().sleep(Wall::from_millis(1));
             self.delivered.extend(self.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)));
         }
@@ -5819,18 +5863,8 @@ fn ur_26_two_receive_streams_end_at_their_own_stops() {
     // The packet between them is pinned by `ur_26_a_stream_s_delivered_is_cleared_alone`,
     // `ur_26_an_end_takes_delivered_only_from_the_segment_it_cuts` and
     // `ur_26_an_end_takes_delivered_from_each_segment_s_own_stream` (design note 37).
-    // A watchdog, not the verdict's bound: the state is what is asserted below.
-    let deadline = Instant::now() + Wall::from_secs(10);
-    let ended_before_abort = loop {
-        if direct.clocks.sample_clock_records().iter().any(|record| record.stream.path() == "usrp/rx/s1" && record.ended_at.is_some()) {
-            break true;
-        }
-        assert!(Instant::now() < deadline, "stream 1's own Stop did not end it within 10 s: {:?}", direct.clocks.sample_clock_records());
-        direct.device.host().sleep(Wall::from_millis(1));
-    };
-    // The state, not a time bound: stream 1's own Stop ended it before the abort, so its end
-    // is not the abort's cut.
-    assert!(ended_before_abort, "stream 1's own Stop did not end it before the abort: {:?}", direct.clocks.sample_clock_records());
+    // The state, not a time bound: stream 1's own Stop ended it before the abort, so its end is not the abort's cut.
+    direct.until("stream 1's own Stop to end it", |direct| direct.clocks.sample_clock_records().iter().any(|record| record.stream.path() == "usrp/rx/s1" && record.ended_at.is_some()));
     direct.radio.stop(ezsdr_kernel::module_api::StopMode::Abort).unwrap();
     direct.radio.cleanup();
     let instance = direct.radio.instance();
@@ -6040,22 +6074,47 @@ fn ur_16_a_panicking_later_stream_ends_the_run() {
 struct HoldAfterApply {
     inner: Arc<FakeDevice>,
     pending: Mutex<Option<usize>>,
-    reached: Mutex<Option<std::sync::mpsc::Sender<()>>>,
-    release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    entered: std::sync::atomic::AtomicBool,
+    released: std::sync::atomic::AtomicBool,
+    timed_out: std::sync::atomic::AtomicBool,
 }
 
 impl HoldAfterApply {
     fn new(inner: Arc<FakeDevice>) -> HoldAfterApply {
-        HoldAfterApply { inner, pending: Mutex::new(None), reached: Mutex::new(None), release: Mutex::new(None) }
+        HoldAfterApply { inner, pending: Mutex::new(None), entered: false.into(), released: false.into(), timed_out: false.into() }
     }
 
-    fn hold_channel(&self, chan: usize) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
-        let (reached, reached_rx) = std::sync::mpsc::channel();
-        let (release, release_rx) = std::sync::mpsc::channel();
+    /// The next receive `apply` of channel `chan` holds its owner after the call.
+    fn hold(&self, chan: usize) {
         *self.pending.lock().unwrap() = Some(chan);
-        *self.reached.lock().unwrap() = Some(reached);
-        *self.release.lock().unwrap() = Some(release_rx);
-        (reached_rx, release)
+    }
+
+    /// The owner is inside its configuration and still held.
+    fn held(&self) -> bool {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst) && !self.released.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn entered(&self) -> bool {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Lets the owner go on; `false` if its own real-time bound had already ended the hold (the setup failed, not the code under test).
+    fn release(&self) -> bool {
+        self.released.store(true, std::sync::atomic::Ordering::SeqCst);
+        !self.timed_out.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The hold is a wait on the device's clock, which the owner (a participant) spends idle: a driver that polls on the same clock can see `entered` while the owner is held, and the clock
+    /// keeps running. Its bound is real time.
+    fn wait_for_release(&self) {
+        let deadline = Instant::now() + Wall::from_secs(10);
+        while !self.released.load(std::sync::atomic::Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                self.timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+            self.inner.host().sleep(Wall::from_millis(1));
+        }
     }
 }
 
@@ -6101,12 +6160,8 @@ impl ezsdr_radio_uhd::Device for HoldAfterApply {
         let hold = d == ezsdr_radio_uhd::Dir::Rx && *self.pending.lock().unwrap() == Some(c);
         if hold {
             *self.pending.lock().unwrap() = None;
-            if let Some(reached) = self.reached.lock().unwrap().take() {
-                let _ = reached.send(());
-            }
-            if let Some(release) = self.release.lock().unwrap().take() {
-                let _ = release.recv_timeout(Wall::from_secs(10));
-            }
+            self.entered.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.wait_for_release();
         }
         Ok(applied)
     }
@@ -6167,14 +6222,20 @@ fn ur_26_a_receive_start_queued_by_the_stop_is_issued_and_ends_at_its_origin() {
     direct.start();
     direct.settle(Wall::from_millis(50));
     while link1.receive().is_some() {}
-    let (hold, release) = spy.hold_channel(1);
+    spy.hold(1);
     // The Stop of stream 1 cuts its segment, and the `start_rx` after it queues the start whose configuration is held.
     direct.stop_at("usrp/rx/s1");
     direct.start_rx_at("usrp/rx/s1", None);
-    hold.recv_timeout(Wall::from_secs(10)).expect("the owner's configure");
+    direct.until("the owner's configuration", |_| spy.entered());
+    // The ordering the test is about: the Provider's Stop comes while the owner is inside its configuration, and the owner is still held when the Stop has returned.
+    assert!(spy.held(), "the owner is held in its configuration when the Stop is issued");
     direct.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
+    assert!(spy.held(), "the owner was still held in its configuration while the Stop ran");
     while link1.receive().is_some() {}
-    let _ = release.send(());
+    if !spy.release() {
+        infra("the held owner's own real-time bound ended its hold before the test released it");
+        panic!("the hold ended by its own bound: the Stop did not come during the configuration");
+    }
     direct.settle(Wall::from_millis(300));
     let log = direct.device.calls();
     assert_eq!(calls(&direct.device, "rx_start 1").len(), 2, "the owner still issues its timed start: {log:?}");
@@ -8376,4 +8437,236 @@ fn ur_16_a_uhd_control_panic_under_a_continuing_policy_still_stops_the_repeat() 
         }
     });
     assert_a_control_panic_ended_the_run(&manifest, &inner);
+}
+
+// ---------------------------------------------------------------- the `Direct` rig (note 51 stage 1c)
+
+fn one_stream_direct(config: FakeConfig) -> Direct {
+    Direct::build(config, &[], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)], json!({}))
+}
+
+#[test]
+fn direct_rig_refuses_a_fault_that_stops_the_manual_clock_for_good() {
+    let refused = std::panic::catch_unwind(|| one_stream_direct(FakeConfig { faults: vec![FakeFault::TxBlocks], ..FakeConfig::default() }));
+    let text = refused.err().and_then(|payload| payload.downcast_ref::<String>().cloned().or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))).expect("the constructor panics");
+    assert!(text.contains("TxBlocks"), "{text}");
+}
+
+/// Runs the fixture `name` in a child process (the marker is written to the process's own stderr, so only a child shows it) and returns its stderr.
+fn run_fixture(name: &str) -> String {
+    let out = std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact", name, "--test-threads=1", "--nocapture"]).env("EZSDR_RIG_FIXTURE", name).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success(), "the fixture fails: {}", unmarked(&stderr));
+    stderr
+}
+
+/// The child's stderr as a failure message: its marker line is the child's, and a parent that printed it would be counted by the runner as a bound that expired in this test.
+fn unmarked(stderr: &str) -> String {
+    stderr.replace("EZSDR-INFRA", "child's marker")
+}
+
+fn fixture_runs(name: &str) -> bool {
+    std::env::var("EZSDR_RIG_FIXTURE").is_ok_and(|fixture| fixture == name)
+}
+
+#[test]
+fn direct_rig_until_writes_the_infra_marker_when_its_real_time_bound_expires() {
+    let stderr = run_fixture("direct_rig_fixture_until_real_bound");
+    assert!(stderr.contains("EZSDR-INFRA: direct_rig_fixture_until_real_bound: the rig's wait for an event that never comes did not end within"), "{stderr}");
+}
+
+/// Run by the test above in a child process; a no-op otherwise.
+#[test]
+fn direct_rig_fixture_until_real_bound() {
+    if fixture_runs("direct_rig_fixture_until_real_bound") {
+        one_stream_direct(FakeConfig::default()).until_within("an event that never comes", Wall::from_secs(60), Wall::from_millis(50), |_| false);
+    }
+}
+
+#[test]
+fn direct_rig_until_fails_at_its_device_time_horizon_without_a_marker() {
+    let stderr = run_fixture("direct_rig_fixture_until_horizon");
+    assert!(stderr.contains("an event that never comes did not come within"), "{}", unmarked(&stderr));
+    assert!(!stderr.contains("EZSDR-INFRA"), "the horizon is the test's verdict, not the host's: {}", unmarked(&stderr));
+}
+
+/// Run by the test above in a child process; a no-op otherwise.
+#[test]
+fn direct_rig_fixture_until_horizon() {
+    if fixture_runs("direct_rig_fixture_until_horizon") {
+        one_stream_direct(FakeConfig::default()).until_within("an event that never comes", Wall::from_millis(50), Wall::from_secs(5), |_| false);
+    }
+}
+
+/// A rig that is built but not started: nothing has run on its device clock past `prepare` and `arm`.
+fn armed_direct(config: FakeConfig) -> Direct {
+    Direct::armed(config, &[], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)], json!({}))
+}
+
+/// A Stop whose target is refused at its receipt (UR-26), so the `COMMAND_REJECTED` event's time is the instant the Action was received.
+fn push_refused_stop(direct: &Direct) {
+    direct.stop_at("usrp/gpio");
+}
+
+fn receipts(direct: &mut Direct) -> Vec<i64> {
+    let root = direct.root;
+    direct.of("radio.COMMAND_REJECTED").iter().map(|event| event.time.ticks_in(root).unwrap()).collect()
+}
+
+fn refusals(direct: &mut Direct) -> usize {
+    direct.of("radio.COMMAND_REJECTED").len()
+}
+
+#[test]
+fn direct_rig_the_device_clock_stands_still_while_the_test_thread_works_after_each_wait() {
+    let mut direct = one_stream_direct(FakeConfig::default());
+    let host = direct.device.host();
+    assert_stands_still(&host, "built");
+    direct.settle(Wall::from_millis(5));
+    assert_stands_still(&host, "settle");
+    push_refused_stop(&direct);
+    direct.until("the refusal", |direct| refusals(direct) == 1);
+    assert_stands_still(&host, "until");
+    let tick = direct.now() + ms(3);
+    direct.wait_until(tick);
+    assert_stands_still(&host, "wait_until");
+    let _ = direct.finish();
+    let gone = host.now();
+    std::thread::sleep(Wall::from_millis(20));
+    assert!(host.now() > gone, "the clock runs again once the rig is gone");
+}
+
+#[test]
+fn direct_rig_settle_advances_the_device_clock_by_its_duration_and_wait_until_reaches_its_tick() {
+    let mut direct = armed_direct(FakeConfig::default());
+    let host = direct.device.host();
+    let before = host.now();
+    direct.settle(Wall::from_millis(7));
+    assert_eq!(host.now() - before, Wall::from_millis(7) + Wall::from_micros(1), "settle is the driver's own idle wait on the device clock, and ends one microsecond past its duration (R1)");
+    let tick = direct.now() + ms(3);
+    direct.wait_until(tick);
+    let reached = direct.now();
+    // One microsecond past the tick (a tick of the root clock is 5 ns, and the conversion to the host clock rounds by one): every participant due at the tick has run before the test continues.
+    assert!(reached >= tick + ms(1) / 1_000 - 1 && reached < tick + ms(1), "wait_until returns just after its tick: {reached} for {tick}");
+    // `start` books its first instant 2 s ahead and waits for it (UR-15): the same rule, on the one wait it makes.
+    let begun = direct.now();
+    direct.start();
+    let started = direct.now();
+    assert!(started >= begun + ms(2_002) + ms(1) / 1_000 - 1 && started < begun + ms(2_002) + ms(1), "start returns just after its first instant: {started} for {begun}");
+    direct.finish();
+}
+
+#[test]
+fn direct_rig_an_action_is_not_received_at_the_instant_it_was_pushed() {
+    let mut direct = armed_direct(FakeConfig::default());
+    push_refused_stop(&direct);
+    assert!(direct.queue.recv().is_none(), "the driver is busy, so the clock stands at the instant of the push: a poll at it must not take the Action");
+    direct.settle(Wall::from_micros(1));
+    assert!(direct.queue.recv().is_some(), "the clock has moved past the push");
+}
+
+#[test]
+fn direct_rig_an_action_pushed_after_wait_until_is_received_at_the_first_poll_after_its_tick() {
+    let mut direct = armed_direct(FakeConfig::default());
+    // uhd-control is spawned inside `start`, at an instant the clock stands at while this thread works, so its polls are at `s0 + k ms`: each tick below is an instant at which a poll is due, and
+    // the receipt is the next one, every time, never the same instant.
+    let s0 = direct.now();
+    direct.radio.start(Some(TimePoint::new(direct.root, s0 + ms(2_001)))).unwrap();
+    let ticks: Vec<i64> = (0..60).map(|k| 10 + 3 * k).collect();
+    for tick in &ticks {
+        direct.wait_until(s0 + ms(*tick));
+        push_refused_stop(&direct);
+    }
+    direct.until("every refusal", |direct| refusals(direct) == ticks.len());
+    for (receipt, tick) in receipts(&mut direct).iter().zip(&ticks) {
+        // A receipt's tick is the Authority's extrapolation of the host clock: the nanosecond of the poll converted to root ticks, which rounds by one tick.
+        assert!(receipt.abs_diff(s0 + ms(tick + 1)) <= 1, "the Stop pushed at {tick} ms is received at the poll one millisecond after it: {receipt} for {}", s0 + ms(tick + 1));
+    }
+    direct.finish();
+}
+
+#[test]
+fn direct_rig_a_wait_that_ends_on_a_poll_instant_still_receives_at_the_next_poll() {
+    let mut direct = armed_direct(FakeConfig::default());
+    let host = direct.device.host();
+    let (s0, g0) = (direct.now(), host.now());
+    direct.radio.start(Some(TimePoint::new(direct.root, s0 + ms(2_001)))).unwrap();
+    let mut pushed_on = Vec::new();
+    for k in 1..=12usize {
+        // The next poll instant at least 2 ms ahead. `settle` ends one microsecond past its duration (R1): this one ends exactly on the poll, where the driver's wake and the poll share the instant.
+        let m = (host.now() - g0).as_millis() as u64 + 2;
+        let grid = g0 + Wall::from_millis(m);
+        direct.settle(grid - Wall::from_micros(1) - host.now());
+        assert_eq!(host.now(), grid, "the wait ended on a poll instant");
+        push_refused_stop(&direct);
+        pushed_on.push(m as i64);
+        direct.until("the refusal", |direct| refusals(direct) == k);
+    }
+    for (receipt, m) in receipts(&mut direct).iter().zip(&pushed_on) {
+        assert!(receipt.abs_diff(s0 + ms(m + 1)) <= 1, "the Stop pushed at poll {m} is received at the poll after it: {receipt} for {}", s0 + ms(m + 1));
+    }
+    direct.finish();
+}
+
+#[test]
+fn direct_rig_pushes_after_the_test_thread_was_away_are_received_at_the_same_instant() {
+    let mut direct = one_stream_direct(FakeConfig::default());
+    push_refused_stop(&direct);
+    std::thread::sleep(Wall::from_millis(200));
+    push_refused_stop(&direct);
+    direct.until("both refusals", |direct| refusals(direct) == 2);
+    let received = receipts(&mut direct);
+    assert_eq!(received[0], received[1], "the clock stood while the test thread was away: {received:?}");
+    direct.finish();
+}
+
+#[test]
+fn direct_rig_two_rigs_on_one_thread_move_only_the_clock_the_thread_waits_on() {
+    let mut a = armed_direct(FakeConfig::default());
+    let mut b = armed_direct(FakeConfig::default());
+    let (host_a, host_b) = (a.device.host(), b.device.host());
+    let (a0, b0) = (host_a.now(), host_b.now());
+    a.settle(Wall::from_millis(7));
+    assert_eq!(host_a.now() - a0, Wall::from_millis(7) + Wall::from_micros(1), "A moved by the wait on A");
+    assert_eq!(host_b.now(), b0, "B stood still while the thread waited on A");
+    let a1 = host_a.now();
+    b.settle(Wall::from_millis(5));
+    assert_eq!(host_b.now() - b0, Wall::from_millis(5) + Wall::from_micros(1), "B moved by the wait on B");
+    assert_eq!(host_a.now(), a1, "A stood still while the thread waited on B");
+}
+
+fn direct_with_uhd_clock_asleep_inside_its_read() -> Direct {
+    let direct = armed_direct(FakeConfig { faults: vec![FakeFault::Unreachable(common::rig::FAULT_AT)], ..FakeConfig::default() });
+    let host = direct.device.host();
+    common::rig::asleep_inside_its_read(
+        direct,
+        &host,
+        |direct| Arc::strong_count(&direct.time),
+        |direct, wall| {
+            direct.settle(wall);
+        },
+    )
+}
+
+#[test]
+fn direct_rig_dropped_joins_uhd_clock_even_asleep_inside_its_read() {
+    let mut direct = direct_with_uhd_clock_asleep_inside_its_read();
+    let seen = direct._authority.install_probe(&direct.time, direct.device.host());
+    let before = direct.device.host().now();
+    drop(direct);
+    assert_joined(&seen, before, "dropped");
+}
+
+#[test]
+fn direct_rig_unwound_joins_uhd_clock_even_asleep_inside_its_read() {
+    let probe = Mutex::new(None);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut direct = direct_with_uhd_clock_asleep_inside_its_read();
+        let seen = direct._authority.install_probe(&direct.time, direct.device.host());
+        *probe.lock().unwrap() = Some((seen, direct.device.host().now()));
+        panic!("the test body fails");
+    }));
+    assert!(result.is_err());
+    let (seen, before) = probe.into_inner().unwrap().unwrap();
+    assert_joined(&seen, before, "unwound");
 }

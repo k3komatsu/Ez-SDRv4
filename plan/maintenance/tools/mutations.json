@@ -18703,7 +18703,7 @@
  {
   "id": "N51B-09",
   "name": "the rig's probe reads the Authority's time before the Authority is dropped, so it sees uhd-clock's reference",
-  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "file": "crates/ezsdr-radio-uhd/tests/common/rig.rs",
   "old": "drop(self.authority.take());",
   "new": "",
   "crate": "ezsdr-acceptance",
@@ -19159,5 +19159,178 @@
   "old": "self.with_book(|book| book.end_open(end)); true",
   "new": "self.with_book(|book| book.end_open(DeviceEnd::Keep)); true",
   "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
+ },
+ {
+  "id": "N51C-03",
+  "name": "a manual-clock fake accepts FakeFault::TxBlocks, which stops its clock for good (note 51 stage 1c)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+  "old": "assert!(!config.faults.contains(&FakeFault::TxBlocks), \"a manual-clock fake refuses FakeFault::TxBlocks: it stops the clock for good (use fake_real)\");",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_refuses_a_fault"
+ },
+ {
+  "id": "N51C-04",
+  "name": "the Direct rig's wait for an event expires with no infra marker, so a runner counts the host's bound as a kill",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "infra(&format!(\"the rig's wait for {what} did not end within {bound:?} of real time\"));",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_until_writes_the_infra_marker"
+ },
+ {
+  "id": "N51C-05",
+  "name": "the Direct rig's wait has no device-time horizon, so an event that never comes ends only on the real bound (a marker, an ERROR row)",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "assert!(self.device.host().now() - begun < horizon, \"{what} did not come within {horizon:?} of device time: {:?}\", self.device.calls());",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_until_fails_at_its_device_time_horizon"
+ },
+ {
+  "id": "N51C-13",
+  "name": "the UhdRig's wait for events has no device-time horizon",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "assert!(self.device.host().now() - begun < horizon, \"{what} did not come within {horizon:?} of device time: {:?}\", self.device.calls());",
+  "new": "",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_wait_for_events_fails_at_its_device_time_horizon"
+ },
+ {
+  "id": "N51C-14",
+  "name": "a rig's queue hands an Action to a poll at the very instant it was pushed (the order of the pusher and the poll then decides the receipt)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/rig.rs",
+  "old": "*stamp >= now",
+  "new": "*stamp > now",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "rig_an_entry_is_taken_only_at_a_later_clock_instant"
+ },
+ {
+  "id": "N51C-15",
+  "name": "the UhdRig's queue stamps nothing: a poll at the instant of a push takes the Action",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "Arc::new(Queue::new(Some(device.host())))",
+  "new": "Arc::new(Queue::new(None))",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_an_action_is_not_received_at_the_instant_it_was_pushed"
+ },
+ {
+  "id": "N51C-16",
+  "name": "the UhdRig's settle does not end with the rig's last microsecond",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "self.device.host().sleep(wall); self.end_wait();",
+  "new": "self.device.host().sleep(wall);",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_settle_advances"
+ },
+ {
+  "id": "N51C-17",
+  "name": "the UhdRig's wait_until does not end with the rig's last microsecond",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "let _ = self.time.wait_until(TimePoint::new(self.root, tick)); self.end_wait();",
+  "new": "let _ = self.time.wait_until(TimePoint::new(self.root, tick));",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_settle_advances"
+ },
+ {
+  "id": "N51C-01",
+  "name": "the Direct rig does not register its thread on the device's clock (note 51 stage 1c): the test thread is a non-participant and the clock runs while it works",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "let driver = host.drive();",
+  "new": "let driver = ezsdr_radio_uhd::HostClock::real().drive();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_the_device_clock_stands_still"
+ },
+ {
+  "id": "N51C-02",
+  "name": "the Direct rig's driver drops after the Authority, so the clock stands across the Authority's drop: uhd-clock's read cannot end, the thread is detached and a reference to the Authority's time is left",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "_driver: ezsdr_radio_uhd::host::Driver,",
+  "new": "",
+  "old2": "_authority: AuthorityGuard, }",
+  "new2": "_authority: AuthorityGuard, _driver: ezsdr_radio_uhd::host::Driver, }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "joins_uhd_clock_even_asleep_inside_its_read"
+ },
+ {
+  "id": "N51C-06",
+  "name": "the Direct rig's event poll sleeps in wall time, so its driver stays busy, the clock stands and the event never comes: only the 10 s real bound ends it, with its marker",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "self.device.host().sleep(Wall::from_millis(1));",
+  "new": "std::thread::sleep(Wall::from_millis(1));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_the_device_clock_stands_still",
+  "kill": "bound"
+ },
+ {
+  "id": "N51C-07",
+  "name": "the Direct rig's settle sleeps in wall time, so its driver stays busy and the clock does not move",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "self.device.host().sleep(wall);",
+  "new": "std::thread::sleep(wall);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_settle_advances"
+ },
+ {
+  "id": "N51C-08",
+  "name": "the Direct rig's settle does not end with the rig's last microsecond",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "self.device.host().sleep(wall); self.end_wait();",
+  "new": "self.device.host().sleep(wall);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_settle_advances"
+ },
+ {
+  "id": "N51C-09",
+  "name": "the Direct rig's wait_until does not end with the rig's last microsecond",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "self.time.wait_until(TimePoint::new(self.root, tick)).unwrap(); self.end_wait();",
+  "new": "self.time.wait_until(TimePoint::new(self.root, tick)).unwrap();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_settle_advances"
+ },
+ {
+  "id": "N51C-10",
+  "name": "the Direct rig's probe reads the Authority's time before the Authority is dropped, so it sees uhd-clock's reference",
+  "file": "crates/ezsdr-radio-uhd/tests/common/rig.rs",
+  "old": "drop(self.authority.take());",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "joins_uhd_clock_even_asleep_inside_its_read"
+ },
+ {
+  "id": "N51C-12",
+  "name": "the Direct rig's start waits for its first instant without the rig's last microsecond",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "self.wait_until(t0 + ms(1));",
+  "new": "self.time.wait_until(TimePoint::new(self.root, t0 + ms(1))).unwrap();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_settle_advances"
+ },
+ {
+  "id": "N51C-18",
+  "name": "the Direct rig's queue stamps nothing: a poll at the instant of a push takes the Action",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "Pushed { actions: rig::Stamped::new(Some(clock)),",
+  "new": "Pushed { actions: rig::Stamped::new(None),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_an_action_is_not_received_at_the_instant_it_was_pushed"
  }
 ]

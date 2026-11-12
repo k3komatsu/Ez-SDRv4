@@ -41,9 +41,9 @@ advances. Such a sequence is one of: (1) book it in the Spec, before the Run sta
 basis; (3) where the delay cannot change the verdict, book a burst that may be moved with
 the `send_asap_and_flag` policy (`start_repeat`); or (4) where the timing window is the
 property itself, pin it in a controlled-clock unit test. Booking "well ahead" only lowers
-the chance and is not (2). The one exception is the `Direct` rig's start in `fake.rs`,
-booked 2 s ahead: an integration test cannot hold the clock (design note 37 §4), and the
-rig's tests have no window beyond it.
+the chance and is not (2). There is no exception: the two driving rigs (`UhdRig` in the
+acceptance crate and `Direct` in `fake.rs`) hold their device clock while the test thread
+works, so a delay of the test thread cannot move a receipt (below).
 
 The clock rules are pinned by the unit tests in `src/host.rs` (one per rule M1–M7 and
 §4.7, each with a wall-clock bound), and the Authority's manual-clock behaviour by the
@@ -55,14 +55,18 @@ process with the test's name once `EZSDR_TEST_WATCHDOG_SECS` (default 120 s) pas
 instead of hanging the suite, after writing an `EZSDR-INFRA:` marker line straight to stderr
 (`common/infra.rs`: libtest's capture would lose a printed line to the abort); a watchdog that
 cannot start fails its test at once. The same marker is written, once, before the one panic of a
-Run or rig that ends at its creation on a real-time bound (`session_with`, `spec_run`, the parity
-rig's constructor and its `wait_for_events`), and `EZSDR-TIMING:` names a test that a serial re-run
-may pass. The parity rig's thread is a participant of its device clock (`HostClock::drive`, held
-for the rig's life), so a delay of the test thread does not move a receipt: between its waits the
-clock stands. `UhdRig::wait_until` ends with a one-microsecond wait, so that every participant due at
-the tick (uhd-control's 1 ms poll has the phase of the Run's `uhd_t0`) has run before the test thread
-pushes: an Action pushed after it is received at the first poll strictly after max(the tick, now),
-never at the tick itself (`uhd_rig_an_action_pushed_after_wait_until_…`). The mutation runner reads both from the output (`mutate.py`'s docstring): a marker makes a row `ERROR` unless
+Run or rig that ends at its creation or in a wait on a real-time bound (`session_with`, `spec_run`, the parity
+rig's constructor and its `wait_for_events`, the `Direct` rig's Authority and its `until`), and `EZSDR-TIMING:` names a test that a serial re-run
+may pass. Each driving rig's thread is a participant of its device clock (`HostClock::drive`, held
+for the rig's life; the guard drops before the Authority, so the clock runs while `uhd-clock` is joined), so a delay of the test thread does not move a receipt: between its waits the
+clock stands. Two rules make a receipt a function of the poll grid alone (`common/rig.rs`; note 51 stage 1c): a wait that ends on an instant the
+test chose (`UhdRig::settle`, `wait_until`; `Direct::settle`, `wait_until`, `start`) ends with a one-microsecond wait, so every participant due at that instant has run
+before the test thread continues; and the rig's Action queue withholds an Action until the device clock is strictly later than its push
+(`rig::Stamped`), so an Action is received at the first poll strictly after its push, whichever order the test thread and a poll
+woke in at a shared instant, even one the microsecond itself lands on (`uhd_rig_a_wait_that_ends_on_a_poll_instant_…`, `direct_rig_a_wait_that_ends_on_a_poll_instant_…`). A participant
+due one microsecond *after* the wait may or may not have run: a test reads an event or a call by its own device time, or waits for it
+with `wait_for_events` / `until`, which end on an observed state (no microsecond), whose horizon is device time (a plain failure) and whose real-time bound writes the marker. A `Direct` test on a
+real clock (the two `Gated` ones) is outside this guarantee: the rig registers nothing there. The mutation runner reads both from the output (`mutate.py`'s docstring): a marker makes a row `ERROR` unless
 the row declares `"kill": "bound"`. `infra_fixtures/` holds the tests `mutate.py --e2e` runs to
 pin that; they return at once unless `EZSDR_INFRA_FIXTURE` names them. The real clock stays where a real host deadline
 is the point: the Authority's own diagnostics, `ur_07_now_is_monotonic_across_a_reanchor` (a diagnostic, since the guard is
