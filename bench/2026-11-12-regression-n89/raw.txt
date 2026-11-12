@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-11-12-regression-n89 (private)
+asset:   2026-11-12-regression-n89.tar.xz  27020 bytes
+sha256:  bb1eabb3869bf5e887bdfb7cfef5fbc8247a452cbed036f5ae00bdd34b244b38
+source:  ~/.cache/ezsdr-bench/2026-11-12 and ~/ezsdr-bench/2026-11-12 (ssh-drop logs, without the source snapshots) on usrp-lnx03, plus the run script bench-1112.sh
+fetch:   gh release download 2026-11-12-regression-n89 -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-11-12-regression-n89 bench/2026-11-12-regression-n89/results

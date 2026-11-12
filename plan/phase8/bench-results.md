@@ -439,3 +439,12 @@ owner が電源を入れ直した後，att は三つの board とも 30 dB（own
 - E2a：`hw_n47s5_repeat_switch`（時刻なし・あり）は二台とも PASS（行は applied，境目で 100 → 200 kHz，継ぎ目なし，新しい拒否なし）．`hw_b8_stop_end` は 3 試行とも許容の中（#2 −4000〜+4000，#1 −5400〜+11000 tick）．
 - 流していない：(b) T1 の回帰 9 試験（段階 F で期待の変わった `hw_b8_burst_one_sample_after_a_burst` と B7 の同調し直しを含む．FakeDevice の予行演習は通る）．次の実機で流す．
 - 判定の外の観測：(c)1 の tone の始まりは多くの行で予約の 30〜37 sample 後（loop の遅延は約 27）だが，2.857 MS/s と 10 MS/s の全行などは 8〜12 sample 後．許容 ±50 の中で，onset の検出の粗さかもしれない．追っていない．
+
+## 2026-11-12：T1 の回帰，Stop と切り替えの組，#89 の後（#2＝X300 347D541＋UBX〈slot B の CBX は owner が外した〉，#1＝X300 347D545＋OBX，commit `1231462`）
+
+条件と機械で読める結果は [bench/2026-11-12-regression-n89](../../bench/2026-11-12-regression-n89/README.md)（生の log は非公開の `k3komatsu/Ez-SDRv4-bench-raw` の release）．att は 30 dB 以上（owner 確認，配線 A と B の両方）．基準は内部．E2b（`bdf3493`）と #95 の後のコード．
+
+- (b) T1 の回帰 9 試験：二台とも 9/9 PASS．TIME_ERROR と TX_UNDERFLOW は 0．段階 F で期待の変わった `hw_b8_burst_one_sample_after_a_burst`（end＋3 は受付で拒否，end＋4 は鳴る）と B7 の同調し直しも PASS．
+- Stop と切り替えの組（`hw_n47s5_held_tail_and_stop`，`hw_n47s5_repeat_switch`，`hw_b8_stop_end`）：二台とも PASS（Session の行は前と同じく INCONCLUSIVE）．
+- #89（配線 B：#1 OBX が送信，#2 UBX が独立の受信機）：(i-a) 旧い `8dd1016` で `sleep` は C1・C2 が FAIL（穴が再現），(i-b) `1231462` で C1・C2・C3 が PASS（server は +0 s で終了，Manifest に `client_disconnect`）．→ **#89 を閉じた**．
+- E9（server の死から，独立の受信機で tone が止まるまで）：`docker kill` で 81〜608 ms，非常停止で 54〜582 ms（括弧は最後の tone と最初の quiet の読みの間）．条件：1 MS/s，100 kHz の tone，振幅 0.4，1 GHz，#1 OBX，各 1 回．ほかの rate と board には当てはめない．→ owner が A1（server の fail-stop の backstop）を採った（2026-11-12）．

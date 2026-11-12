@@ -1,0 +1,24 @@
+{
+  "session": "2026-11-12-regression-n89",
+  "commit": "1231462 (code as bdf3493: E2b; #89 is fe86629); #89's old commit 8dd1016",
+  "tools": { "hardware tests": "crates/ezsdr-radio-uhd/tests/hardware.rs at 1231462", "runner": "bench-1112.sh in the raw archive (the hw() function of plan/phase8/bench.md, stops a board at its first failure)", "ssh drop": "plan/phase8/tools/ssh-drop-tx.sh, rx-monitor.sh at 1231462" },
+  "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0)",
+  "boards": [
+    { "id": "#2", "board_arg": "37", "serial": "347D541", "fpga": "39.3 (HG)", "slot_a": "UBX-160 v2", "slot_b": "empty (CBX removed by the owner, 2026-11-12)", "addr": "192.168.47.37", "nic": "enp1s0f0np0" },
+    { "id": "#1", "board_arg": "36", "serial": "347D545", "fpga": "39.3 (HG)", "slot_a": "OBX", "slot_b": "empty", "addr": "192.168.40.36", "nic": "enp1s0f1np1" }
+  ],
+  "rf": {
+    "wiring_a": "each board's slot-A TX/RX -> 30 dB attenuator -> RX2 (T1 regression and the Stop/switch set)",
+    "wiring_b": "#1 OBX TX/RX -> >=30 dB attenuator -> splitter -> #1 RX2 and #2 UBX slot-A RX2 (#89 runs; #2 receive only)",
+    "attenuation_db": 30, "owner_confirmed": true, "frequency_hz": 1000000000, "tx_gain_db": 0
+  },
+  "reference": "internal",
+  "host": "usrp-lnx03; MTU 9000; frame 8000 bytes",
+  "tests": {
+    "t1": ["hw_s1_short_first_sends", "hw_p70_one_sample_burst_then_timed_burst", "hw_p72_timed_tx_chunks_are_timed_and_flushed", "hw_b6_txrx_and_repeat", "hw_b7_session_loopback", "hw_b8_burst_at_a_sent_burst_s_end", "hw_b8_burst_one_sample_after_a_burst", "hw_h5_held_last_sample", "hw_txp_b0_send_sizes"],
+    "set": ["hw_n47s5_held_tail_and_stop", "hw_n47s5_repeat_switch", "hw_b8_stop_end"],
+    "n89": ["(i-a) sleep at 8dd1016", "(i-b) sleep at 1231462", "(ii) kill at 1231462 (E9)"]
+  },
+  "e9_conditions": "1 MS/s, 100 kHz tone, amplitude 0.4, 1 GHz, #1 OBX, one run per mode; receiver #2 UBX via rx-monitor (1 s resolution windows, bracket printed)",
+  "power_cycles": "none"
+}
