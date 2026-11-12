@@ -390,8 +390,13 @@ impl UhdRadio {
         let Some(position) = running.threads.iter().position(|(n, _)| n == name) else { return };
         let (name, handle) = running.threads.remove(position);
         let until = Instant::now() + JOIN_BOUND;
-        while !handle.is_finished() && Instant::now() < until {
-            std::thread::sleep(Wall::from_millis(1));
+        let host = core.device.host();
+        loop {
+            let seen = host.generation();
+            if handle.is_finished() || Instant::now() >= until {
+                break;
+            }
+            host.wait(None, Some(Instant::now() + Wall::from_millis(1)), seen);
         }
         if handle.is_finished() {
             let _ = handle.join();
@@ -1239,6 +1244,78 @@ mod tests {
             .map(|row| row["thread"].as_str().unwrap().to_owned())
             .collect();
         assert_eq!(order, ["uhd-control", "uhd-tx-s0", "uhd-tx-s1", "uhd-rx-s0", "uhd-rx-s1"], "{rejected}");
+    }
+
+    fn manual_core() -> (Arc<Core>, crate::HostClock) {
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let host = device.host();
+        let (core, _time, _events) = test_support::rig_on(device, Vec::new(), 2_000);
+        (core, host)
+    }
+
+    fn did_not_join(core: &Core) -> usize {
+        lock(&core.rec).rejected.iter().filter(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join"))).count()
+    }
+
+    #[test]
+    fn ur_16_join_waits_idle_on_the_manual_clock_so_a_thread_that_needs_the_clock_ends() {
+        test_support::bounded("a join of a thread that sleeps on the held clock", Wall::from_secs(30), || {
+            let (core, host) = manual_core();
+            let mut radio = prepared_with(1, 1);
+            radio.running = Some(Running { to_tx: Vec::new(), to_rx: Vec::new(), threads: Vec::new() });
+            // Registered before the thread exists: the clock stays held, and so the thread's sleep pending, until the join waits.
+            let _driver = host.drive();
+            let h = host.clone();
+            let handle = host.spawn("uhd-control", move || h.sleep(Wall::from_millis(1))).unwrap();
+            radio.running.as_mut().unwrap().threads.push(("uhd-control".to_owned(), handle));
+            let deadline = Instant::now() + Wall::from_secs(10);
+            while host.blocked() < 1 {
+                assert!(Instant::now() < deadline, "the thread entered its sleep");
+                std::thread::sleep(Wall::from_millis(1));
+            }
+            radio.join(&core, "uhd-control");
+            assert_eq!(did_not_join(&core), 0, "{:?}", lock(&core.rec).rejected);
+            assert!(radio.detached.is_empty());
+        });
+    }
+
+    #[test]
+    fn ur_16_the_join_bound_cuts_in_real_time_while_the_manual_clock_is_held() {
+        test_support::bounded("a join of a thread that holds the clock", Wall::from_secs(30), || {
+            let (core, host) = manual_core();
+            let mut radio = prepared_with(1, 1);
+            radio.running = Some(Running { to_tx: Vec::new(), to_rx: Vec::new(), threads: Vec::new() });
+            let (release, released) = mpsc::channel::<()>();
+            let handle = host
+                .spawn("uhd-control", move || {
+                    let _ = released.recv();
+                })
+                .unwrap();
+            radio.running.as_mut().unwrap().threads.push(("uhd-control".to_owned(), handle));
+            let (woken, woken_rx) = mpsc::channel();
+            let (go, gate) = mpsc::channel::<()>();
+            let joiner = {
+                let core = core.clone();
+                std::thread::spawn(move || {
+                    crate::host::pause_next_wake(woken, gate);
+                    let began = Instant::now();
+                    radio.join(&core, "uhd-control");
+                    (radio, began.elapsed())
+                })
+            };
+            if let Err(error) = woken_rx.recv_timeout(Wall::from_secs(10)) {
+                // A joiner that panicked before any wake drops the sender: a failure, not a bound.
+                assert!(matches!(error, std::sync::mpsc::RecvTimeoutError::Timeout), "the joiner ended before any clock wait: {error:?}");
+                test_support::infra("a clock wait of the join did not end on its own real deadline within 10 s while the clock was held");
+                panic!("a clock wait of the join ended on its own real deadline while the clock was held");
+            }
+            let _ = go.send(());
+            let (radio, elapsed) = joiner.join().unwrap();
+            assert!(elapsed >= JOIN_BOUND, "{elapsed:?}");
+            assert_eq!(did_not_join(&core), 1);
+            assert!(radio.detached.contains("uhd-control"));
+            drop(release);
+        });
     }
 
     /// UR-16's scenarios: a radio of two streams per direction whose threads the test spawns, with `running` set by hand (as `stop`

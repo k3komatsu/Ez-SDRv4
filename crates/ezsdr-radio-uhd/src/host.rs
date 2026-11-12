@@ -5,9 +5,12 @@
 //!
 //! The rules (maintenance plan 30 §1):
 //!
-//! - **M1** A participant is a thread the uhd crate itself starts; [`HostClock::spawn`]
-//!   registers it before the thread runs and a guard unregisters it when the thread ends,
-//!   a panic included. A start that fails registers nothing.
+//! - **M1** A participant is a thread the uhd crate itself starts, or one that registers
+//!   itself with [`HostClock::drive`]. [`HostClock::spawn`] registers a thread before it runs
+//!   and a guard unregisters it when the thread ends, a panic included; a start that fails
+//!   registers nothing. A [`Driver`] unregisters its thread when dropped, a panic included.
+//!   A thread is registered at most once on a manual clock: a second `drive` is refused
+//!   before anything is registered. A real clock registers nothing.
 //! - **M2** A participant is idle only while it waits on the clock — a sleep, a clock
 //!   condition wait, or the clock lock — and busy otherwise, a standard mutex included.
 //! - **M3** While any participant is busy the clock stops.
@@ -16,7 +19,9 @@
 //!   instant too.
 //! - **M5** While every participant is idle the clock advances no faster than real time; it
 //!   never takes back the time it lost while busy.
-//! - **M6** A non-participant thread waits on the same clock but its wait stops nothing.
+//! - **M6** A non-participant thread (the Kernel's, or a test's that does not drive the
+//!   clock) waits on the same clock but its wait stops nothing. A thread registered on one
+//!   clock is a non-participant of every other.
 //! - **M7** `sleep(d)` ends only once the clock has advanced by `d`; no notify or spurious
 //!   wake ends it early.
 //!
@@ -30,7 +35,7 @@
 //! which the clock cannot beat (M5); while it is stopped the wait blocks with no timeout, so
 //! a stopped clock costs no CPU.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -38,8 +43,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 thread_local! {
-    /// The participant id of the running thread, `None` for a non-participant (M6).
-    static PARTICIPANT: Cell<Option<u64>> = const { Cell::new(None) };
+    /// The running thread's participant id on each clock it is one of (clock identity, id); a clock not listed has the thread as a non-participant (M6).
+    static PARTICIPANTS: RefCell<Vec<(usize, u64)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -225,13 +230,12 @@ fn block<'a>(m: &'a Mutex<State>, mut st: MutexGuard<'a, State>, key: u64, cond:
 /// The wait [`HostClock::sleep`] and [`HostClock::wait`] share, entered with the state locked
 /// at `now`: a participant is idle while it lasts (M2), its manual deadline capping the clock
 /// (M4), and busy again when it returns.
-fn park<'a>(m: &'a Mutex<State>, mut st: MutexGuard<'a, State>, now: Instant, manual: Option<Duration>, real: Option<Instant>, seen: Option<u64>) {
+fn park<'a>(m: &'a Mutex<State>, mut st: MutexGuard<'a, State>, now: Instant, me: Option<u64>, manual: Option<Duration>, real: Option<Instant>, seen: Option<u64>) {
     #[cfg(test)]
     hooks::pass();
     if ended(&st, now, manual, real, seen) {
         return;
     }
-    let me = PARTICIPANT.with(Cell::get);
     let key = st.next_wait;
     st.next_wait += 1;
     let cond = Arc::new(Condvar::new());
@@ -313,9 +317,10 @@ impl HostClock {
             std::thread::sleep(d);
             return;
         };
+        let me = self.my_id();
         let (st, now) = state(m);
         let deadline = now_locked(&st, now) + d;
-        park(m, st, now, Some(deadline), None, None);
+        park(m, st, now, me, Some(deadline), None, None);
     }
 
     /// The notify generation, read **before** the predicate [`Self::wait`] is to wait on: a
@@ -337,8 +342,9 @@ impl HostClock {
         let Some(m) = &self.inner.manual else {
             return self.wait_real(manual, real, seen);
         };
+        let me = self.my_id();
         let (st, now) = state(m);
-        park(m, st, now, manual, real, Some(seen));
+        park(m, st, now, me, manual, real, Some(seen));
     }
 
     /// [`Self::wait`] on the real clock, whose time is real time since its origin.
@@ -395,6 +401,25 @@ impl HostClock {
         Ok(handle)
     }
 
+    /// The clock's identity: its allocation, which a live registration's guard keeps from being reused.
+    fn identity(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
+    }
+
+    /// The running thread's participant id on this clock.
+    fn my_id(&self) -> Option<u64> {
+        let key = self.identity();
+        PARTICIPANTS.with(|p| p.borrow().iter().find(|(clock, _)| *clock == key).map(|(_, id)| *id))
+    }
+
+    /// Makes the running thread a participant of this clock until the returned guard drops (M1). Panics, before it registers anything,
+    /// if the thread already is one of this manual clock; a real clock registers nothing.
+    pub fn drive(&self) -> Driver {
+        assert!(self.my_id().is_none(), "this thread is already a participant of this clock");
+        let guard = self.register().map(|id| ParticipantGuard::new(self.clone(), id));
+        Driver { _guard: guard, _not_send: std::marker::PhantomData }
+    }
+
     /// Registers a running participant (M1, M3): the clock stops while it is busy.
     fn register(&self) -> Option<u64> {
         let m = self.inner.manual.as_ref()?;
@@ -428,7 +453,7 @@ impl HostClock {
     /// Acquires the clock lock `key`; `None` on the real clock, whose plain mutex is enough.
     fn acquire_lock(&self, key: u64) -> Option<u64> {
         let m = self.inner.manual.as_ref()?;
-        let participant = PARTICIPANT.with(Cell::get);
+        let participant = self.my_id();
         let (mut st, now) = state(m);
         let token = st.next_token;
         st.next_token += 1;
@@ -506,7 +531,7 @@ impl Drop for PreStart {
     }
 }
 
-/// Sets the participant id of the spawned thread and clears it when the thread ends (M1).
+/// Registers the running thread's id on its clock and removes it when the guard drops (M1).
 struct ParticipantGuard {
     clock: HostClock,
     id: u64,
@@ -514,7 +539,7 @@ struct ParticipantGuard {
 
 impl ParticipantGuard {
     fn new(clock: HostClock, id: u64) -> ParticipantGuard {
-        PARTICIPANT.with(|c| c.set(Some(id)));
+        PARTICIPANTS.with(|p| p.borrow_mut().push((clock.identity(), id)));
         ParticipantGuard { clock, id }
     }
 }
@@ -522,8 +547,25 @@ impl ParticipantGuard {
 impl Drop for ParticipantGuard {
     fn drop(&mut self) {
         self.clock.unregister(self.id);
-        PARTICIPANT.with(|c| c.set(None));
+        let me = (self.clock.identity(), self.id);
+        let _ = PARTICIPANTS.try_with(|p| p.borrow_mut().retain(|entry| *entry != me));
     }
+}
+
+/// A thread registered by [`HostClock::drive`]: a participant until dropped. It belongs to its thread.
+///
+/// ```compile_fail
+/// let driver = ezsdr_radio_uhd::HostClock::manual().drive();
+/// std::thread::spawn(move || drop(driver));
+/// ```
+///
+/// ```
+/// let driver = ezsdr_radio_uhd::HostClock::manual().drive();
+/// drop(driver);
+/// ```
+pub struct Driver {
+    _guard: Option<ParticipantGuard>,
+    _not_send: std::marker::PhantomData<*const ()>,
 }
 
 /// A lock that is the clock lock (§4.7) on a manual clock and a plain mutex on the real one.
@@ -600,6 +642,7 @@ impl<T> Drop for ClockGuard<'_, T> {
 #[cfg(test)]
 mod hooks {
     use super::*;
+    use std::cell::Cell;
     use std::sync::mpsc::{Receiver, Sender};
 
     type Pause = Cell<Option<(Sender<()>, Receiver<()>)>>;
@@ -1300,5 +1343,412 @@ mod tests {
         }
         let passes = waiter.join().unwrap();
         assert!(passes <= 4, "a near wait on a stopped clock passed {passes} times");
+    }
+
+    /// This thread's ids on `clock` only, so a test is right on a worker thread of the harness or on the main thread.
+    fn ids_on(clock: &HostClock) -> Vec<u64> {
+        let key = clock.identity();
+        PARTICIPANTS.with(|p| p.borrow().iter().filter(|(c, _)| *c == key).map(|(_, id)| *id).collect())
+    }
+
+    fn refused<T>(f: impl FnOnce() -> T) -> bool {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err()
+    }
+
+    #[test]
+    fn m1_drive_a_driver_that_sleeps_in_wall_time_does_not_move_the_clock() {
+        let clock = HostClock::manual();
+        let _driver = clock.drive();
+        let at = clock.now();
+        std::thread::sleep(200 * MS);
+        assert_eq!(clock.now(), at, "the clock ran while its driver slept");
+    }
+
+    /// A second driver, on its own thread, runs `f` while the test thread's driver holds the clock; once `f` is blocked on
+    /// the clock the test checks that only the holder is busy, then drops the holder so the clock reaches `f`'s deadline.
+    fn idle_driver_runs(what: &str, f: impl FnOnce(&HostClock) -> Duration + Send + 'static) -> Duration {
+        let clock = Arc::new(HostClock::manual());
+        let holder = clock.drive();
+        let c = clock.clone();
+        let (done, finished) = channel();
+        let driver = std::thread::spawn(move || {
+            let _driver = c.drive();
+            let _ = done.send(f(&c));
+        });
+        until_blocked(&clock, 1, what);
+        assert_eq!(state_of(&clock).busy.iter().copied().collect::<Vec<_>>(), vec![0], "{what}: only the holder is busy, the driver is idle");
+        drop(holder);
+        let elapsed = bounded(&finished, what);
+        joined(driver, what).unwrap();
+        elapsed
+    }
+
+    #[test]
+    fn m1_drive_a_driver_sleeping_on_the_clock_is_idle_and_the_clock_stops_at_its_deadline() {
+        let slept = idle_driver_runs("the driver's sleep", |c| {
+            let begun = c.now();
+            c.sleep(30 * MS);
+            c.now() - begun
+        });
+        assert_eq!(slept, 30 * MS);
+    }
+
+    #[test]
+    fn m1_drive_a_driver_waiting_on_the_clock_is_idle_and_the_clock_stops_at_its_deadline() {
+        let waited = idle_driver_runs("the driver's wait", |c| {
+            let seen = c.generation();
+            let begun = c.now();
+            c.wait(Some(begun + 20 * MS), None, seen);
+            c.now() - begun
+        });
+        assert_eq!(waited, 20 * MS);
+    }
+
+    #[test]
+    fn m1_drive_a_sleeping_participant_waits_for_its_busy_driver_and_goes_on_when_it_sleeps() {
+        let clock = Arc::new(HostClock::manual());
+        let c = clock.clone();
+        within("the driver", move || {
+            // Registered before the sleeper exists: the clock cannot reach its deadline until the driver waits.
+            let _driver = c.drive();
+            let (done, finished) = channel();
+            let s = c.clone();
+            let sleeper = participant(&c, move || {
+                let begun = s.now();
+                s.sleep(50 * MS);
+                let _ = done.send(s.now() - begun);
+            });
+            until_blocked(&c, 1, "the sleeper entered its sleep");
+            assert_eq!(state_of(&c).busy.iter().copied().collect::<Vec<_>>(), vec![0], "only the driver is busy");
+            assert!(finished.try_recv().is_err(), "the sleeper ended while the driver was busy");
+            c.sleep(60 * MS);
+            assert_eq!(bounded(&finished, "the sleeper ended"), 50 * MS);
+            joined(sleeper, "the sleeper").unwrap();
+        });
+    }
+
+    #[test]
+    fn m1_drive_a_driver_queued_on_a_clock_lock_is_idle_and_is_handed_it() {
+        let clock = Arc::new(HostClock::manual());
+        let mutex = Arc::new(clock.clock_mutex(0u32));
+        let (locked, locked_rx) = channel();
+        let (go, gate) = channel::<()>();
+        let holder = {
+            let (m, c) = (mutex.clone(), clock.clone());
+            participant(&clock, move || {
+                let _guard = m.lock();
+                let _ = locked.send(());
+                let _ = gate.recv_timeout(BOUND);
+                c.sleep(5 * MS);
+            })
+        };
+        bounded(&locked_rx, "the holder took the lock");
+        let (c, m) = (clock.clone(), mutex.clone());
+        let driver = std::thread::spawn(move || {
+            let _driver = c.drive();
+            drop(m.lock());
+        });
+        let deadline = Instant::now() + BOUND;
+        while mutex.queued() < 1 {
+            assert!(Instant::now() < deadline, "the driver queued within {BOUND:?}");
+            std::thread::sleep(MS);
+        }
+        assert_eq!(state_of(&clock).busy.iter().copied().collect::<Vec<_>>(), vec![0], "only the holder is busy, the queued driver is idle");
+        let _ = go.send(());
+        joined(holder, "the holder").unwrap();
+        joined(driver, "the driver").unwrap();
+    }
+
+    #[test]
+    fn m1_drive_a_driver_of_one_clock_is_not_a_participant_of_another() {
+        let (a, b) = (Arc::new(HostClock::manual()), Arc::new(HostClock::manual()));
+        let (ran, ran_rx) = channel();
+        let (release, released) = channel::<()>();
+        let other = participant(&b, move || {
+            let _ = ran.send(());
+            let _ = released.recv();
+        });
+        bounded(&ran_rx, "the other clock's participant ran");
+        let (entered, entered_rx) = channel();
+        let (ca, cb) = (a.clone(), b.clone());
+        let driver = std::thread::spawn(move || {
+            let _driver = ca.drive();
+            let _ = entered.send(());
+            cb.sleep(20 * MS);
+        });
+        bounded(&entered_rx, "the driver registered");
+        until_blocked(&b, 1, "the driver's sleep on the other clock");
+        {
+            let (sa, sb) = (state_of(&a), state_of(&b));
+            assert_eq!((sa.busy.iter().copied().collect::<Vec<_>>(), sb.busy.iter().copied().collect::<Vec<_>>()), (vec![0], vec![0]), "both clocks number their participants from 0");
+            assert!(sb.deadlines.is_empty(), "the driver's sleep set a deadline on a clock it is not a participant of");
+        }
+        let _ = release.send(());
+        joined(other, "the other clock's participant").unwrap();
+        joined(driver, "the driver").unwrap();
+    }
+
+    #[test]
+    fn m1_drive_a_driver_of_one_clock_queued_on_anothers_lock_leaves_its_holder_busy() {
+        let (a, b) = (Arc::new(HostClock::manual()), Arc::new(HostClock::manual()));
+        let mutex = Arc::new(b.clock_mutex(()));
+        let (locked, locked_rx) = channel();
+        let (release, released) = channel::<()>();
+        let holder = {
+            let m = mutex.clone();
+            participant(&b, move || {
+                let _guard = m.lock();
+                let _ = locked.send(());
+                let _ = released.recv();
+            })
+        };
+        bounded(&locked_rx, "the holder took the lock");
+        let (entered, entered_rx) = channel();
+        let (ca, m) = (a.clone(), mutex.clone());
+        let driver = std::thread::spawn(move || {
+            let _driver = ca.drive();
+            let _ = entered.send(());
+            let _guard = m.lock();
+        });
+        bounded(&entered_rx, "the driver registered");
+        let deadline = Instant::now() + BOUND;
+        while mutex.queued() < 1 {
+            assert!(Instant::now() < deadline, "the driver queued within {BOUND:?}");
+            std::thread::sleep(MS);
+        }
+        assert_eq!(state_of(&b).busy.iter().copied().collect::<Vec<_>>(), vec![0], "the holder is still busy");
+        let _ = release.send(());
+        joined(holder, "the holder").unwrap();
+        joined(driver, "the driver").unwrap();
+    }
+
+    #[test]
+    fn m1_drive_a_second_registration_on_the_same_clock_panics_before_it_registers_anything() {
+        let clock = Arc::new(HostClock::manual());
+        let first = clock.drive();
+        assert!(refused(|| clock.drive()), "a second drive on one clock");
+        let clone = clock.clone();
+        assert!(refused(|| clone.drive()), "a second drive through a clone of the clock");
+        {
+            let st = state_of(&clock);
+            assert_eq!((st.next_id, st.busy.len()), (1, 1), "the refused drive allocated a participant");
+        }
+        assert_eq!(ids_on(&clock), [0]);
+        drop(first);
+        assert!(state_of(&clock).busy.is_empty());
+        assert!(ids_on(&clock).is_empty());
+        let c = clock.clone();
+        within("a sleep once the driver is gone", move || c.sleep(5 * MS));
+    }
+
+    /// One thread drives A, then B (both ids 0), a sleeper waits on each; the drivers are dropped in the order `first_a` names.
+    fn drivers_of_two_clocks_dropped(first_a: bool) {
+        let clocks = [Arc::new(HostClock::manual()), Arc::new(HostClock::manual())];
+        let cs = clocks.clone();
+        within("the two drivers", move || {
+            let mut drivers = [Some(cs[0].drive()), Some(cs[1].drive())];
+            let mut finished = Vec::new();
+            let mut sleepers = Vec::new();
+            for clock in &cs {
+                let (done, rx) = channel();
+                let c = clock.clone();
+                sleepers.push(participant(clock, move || {
+                    c.sleep(10 * MS);
+                    let _ = done.send(());
+                }));
+                finished.push(rx);
+                until_blocked(clock, 1, "a sleeper");
+            }
+            let (first, second) = if first_a { (0, 1) } else { (1, 0) };
+            drop(drivers[first].take());
+            bounded(&finished[first], "the clock ran on once its driver was gone");
+            assert_eq!(state_of(&cs[second]).busy.iter().copied().collect::<Vec<_>>(), vec![0], "the other clock lost its driver with the first");
+            assert!(finished[second].try_recv().is_err());
+            assert_eq!(ids_on(&cs[second]), [0]);
+            cs[second].sleep(5 * MS);
+            drop(drivers[second].take());
+            bounded(&finished[second], "the other clock ran on once its driver was gone");
+            assert!(ids_on(&cs[0]).is_empty() && ids_on(&cs[1]).is_empty());
+            for sleeper in sleepers {
+                joined(sleeper, "a sleeper").unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn m1_drive_drivers_of_two_clocks_dropped_in_either_order_leave_each_clock_to_its_own() {
+        drivers_of_two_clocks_dropped(true);
+        drivers_of_two_clocks_dropped(false);
+    }
+
+    #[test]
+    fn m1_drive_a_driver_that_panics_leaves_the_clock_and_the_thread_free() {
+        let clock = Arc::new(HostClock::manual());
+        assert!(refused(|| {
+            let _driver = clock.drive();
+            panic!("a driver panics");
+        }));
+        assert!(state_of(&clock).busy.is_empty());
+        assert!(ids_on(&clock).is_empty());
+        let _again = clock.drive();
+    }
+
+    #[test]
+    fn m1_drive_a_real_clock_registers_nothing() {
+        let clock = HostClock::real();
+        let first = clock.drive();
+        let second = clock.drive();
+        assert!(ids_on(&clock).is_empty());
+        drop((first, second));
+    }
+
+    #[test]
+    fn m1_drive_a_thread_driving_a_manual_clock_stays_busy_on_it_while_it_waits_on_a_real_one() {
+        let (manual, real) = (Arc::new(HostClock::manual()), Arc::new(HostClock::real()));
+        let (ready, ready_rx) = channel();
+        let (done, finished) = channel();
+        let (m, r) = (manual.clone(), real.clone());
+        let driver = std::thread::spawn(move || {
+            let _manual = m.drive();
+            let _real = r.drive();
+            let s = m.clone();
+            let sleeper = participant(&m, move || {
+                s.sleep(5 * MS);
+                let _ = done.send(());
+            });
+            until_blocked(&m, 1, "the sleeper entered its sleep");
+            let seen = r.generation();
+            let _ = ready.send(());
+            r.wait(None, None, seen);
+            m.sleep(10 * MS);
+            joined(sleeper, "the sleeper").unwrap();
+        });
+        bounded(&ready_rx, "the driver is about to wait on the real clock");
+        assert_eq!(state_of(&manual).busy.iter().copied().collect::<Vec<_>>(), vec![0], "the driver is busy on the manual clock");
+        assert!(finished.try_recv().is_err(), "the manual clock ran while its driver waited on a real one");
+        real.notify_all();
+        joined(driver, "the driver").unwrap();
+        bounded(&finished, "the sleeper ended once the driver slept");
+    }
+
+    #[test]
+    fn m1_drive_a_participant_thread_may_drive_another_clock_but_not_its_own_again() {
+        let (a, b) = (Arc::new(HostClock::manual()), Arc::new(HostClock::manual()));
+        let (done, finished) = channel();
+        let (ca, cb) = (a.clone(), b.clone());
+        let handle = participant(&a, move || {
+            let driver = cb.drive();
+            assert_eq!((ids_on(&ca), ids_on(&cb)), (vec![0], vec![0]));
+            drop(driver);
+            assert!(ids_on(&cb).is_empty() && ids_on(&ca) == [0]);
+            let begun = ca.now();
+            ca.sleep(10 * MS);
+            let slept = ca.now() - begun;
+            assert!(refused(|| ca.drive()), "a participant thread drives its own clock");
+            let _ = done.send(slept);
+        });
+        assert_eq!(bounded(&finished, "the participant ran"), 10 * MS);
+        joined(handle, "the participant").unwrap();
+    }
+
+    #[test]
+    fn m1_drive_two_drivers_on_two_threads_and_a_refused_spawn_leave_the_others_registered() {
+        let clock = Arc::new(HostClock::manual());
+        let (ready, ready_rx) = channel();
+        let mut releases = Vec::new();
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let (c, ready) = (clock.clone(), ready.clone());
+            let (release, released) = channel::<()>();
+            releases.push(release);
+            handles.push(std::thread::spawn(move || {
+                let _driver = c.drive();
+                let _ = ready.send(());
+                let _ = released.recv();
+            }));
+        }
+        bounded(&ready_rx, "a driver");
+        bounded(&ready_rx, "the other driver");
+        assert!(refused(|| clock.spawn("a\0b", || {})));
+        assert_eq!(state_of(&clock).busy.len(), 2);
+        let _ = releases.remove(0).send(());
+        joined_thread(handles.remove(0));
+        assert_eq!(state_of(&clock).busy.len(), 1, "the clock lost both drivers with one");
+        let _ = releases.remove(0).send(());
+        joined_thread(handles.remove(0));
+        assert!(state_of(&clock).busy.is_empty());
+    }
+
+    #[derive(Clone, Copy)]
+    enum How {
+        Sleep,
+        Wait,
+        Queue,
+    }
+
+    /// One thread drives A, then B, while A's or B's own participant (id 0 there, holding the clock and a clock lock) is busy:
+    /// the thread's wait on the target clock leaves its registration there idle and the other one busy, whichever clock it is.
+    fn only_the_waited_on_clock_sees_the_thread_idle(how: How, second: bool) {
+        let (a, b) = (Arc::new(HostClock::manual()), Arc::new(HostClock::manual()));
+        let (target, other) = if second { (b.clone(), a.clone()) } else { (a.clone(), b.clone()) };
+        let mutex = Arc::new(target.clock_mutex(()));
+        let (held, held_rx) = channel();
+        let (release, released) = channel::<()>();
+        let holder = {
+            let m = mutex.clone();
+            participant(&target, move || {
+                let _guard = m.lock();
+                let _ = held.send(());
+                let _ = released.recv();
+            })
+        };
+        bounded(&held_rx, "the holder took the lock");
+        let (up, up_rx) = channel();
+        let (t, m) = (target.clone(), mutex.clone());
+        let driver = std::thread::spawn(move || {
+            let _da = a.drive();
+            let _db = b.drive();
+            let _ = up.send(());
+            match how {
+                How::Sleep => t.sleep(10 * MS),
+                How::Wait => {
+                    let seen = t.generation();
+                    let until = t.now() + 10 * MS;
+                    t.wait(Some(until), None, seen)
+                }
+                How::Queue => drop(m.lock()),
+            }
+        });
+        bounded(&up_rx, "the driver registered on both clocks");
+        until_blocked(&target, 1, "the driver's wait on the target clock");
+        let ids = |clock: &HostClock| state_of(clock).busy.iter().copied().collect::<Vec<_>>();
+        assert_eq!(ids(&target), vec![0], "the driver is idle on the clock it waits on (only the holder is busy)");
+        assert_eq!(ids(&other), vec![0], "the driver is still busy on the other clock");
+        assert_eq!((other.blocked(), state_of(&other).deadlines.len()), (0, 0), "the other clock sees no wait of the driver");
+        let _ = release.send(());
+        joined(holder, "the holder").unwrap();
+        joined(driver, "the driver").unwrap();
+    }
+
+    #[test]
+    fn m1_drive_a_thread_driving_two_clocks_sleeps_idle_only_on_the_clock_it_sleeps_on() {
+        only_the_waited_on_clock_sees_the_thread_idle(How::Sleep, false);
+        only_the_waited_on_clock_sees_the_thread_idle(How::Sleep, true);
+    }
+
+    #[test]
+    fn m1_drive_a_thread_driving_two_clocks_waits_idle_only_on_the_clock_it_waits_on() {
+        only_the_waited_on_clock_sees_the_thread_idle(How::Wait, false);
+        only_the_waited_on_clock_sees_the_thread_idle(How::Wait, true);
+    }
+
+    #[test]
+    fn m1_drive_a_thread_driving_two_clocks_queues_idle_only_on_the_clock_whose_lock_it_queues_on() {
+        only_the_waited_on_clock_sees_the_thread_idle(How::Queue, false);
+        only_the_waited_on_clock_sees_the_thread_idle(How::Queue, true);
+    }
+
+    fn joined_thread(handle: JoinHandle<()>) {
+        joined(handle, "a driver thread").unwrap();
     }
 }

@@ -1,0 +1,6 @@
+# Stage 1a test plan — orchestrator adjudication of Sol's review (sol-plan.md: FAIL), decided by the orchestrator
+All adopted.
+- M1: add cases waiting on A and on B with both `Driver`s live (sleep, clock wait and the clock-lock queue path), asserting only the selected clock's participant goes idle; add the last-entry-only lookup mutant with its killer.
+- M2: register the driver before spawning sleepers; handshake J1's pending sleep before joining (the worker must still be sleeping when join starts); observe J2's wait through a held entry hook, not transient polling; take J2's elapsed time inside the joiner immediately before `join`; remove E2's 100 ms wall sleep (only test (1) may use a wall sleep, as stimulus).
+- Minor: reconcile the probe claims with probe/mut.log (state only what the log shows); final rows are verified through `remote_mutate.py`, not the custom runner. UR-16's new wording: "the joining participant is idle during the clock wait; the join bound remains real time" (no claim that manual participants run, no cap on manual time). Scope the duplicate-registration wording to manual clocks.
+- Accepted as planned: rows 14–15 declare `"kill": "bound"`; the real-clock no-op.

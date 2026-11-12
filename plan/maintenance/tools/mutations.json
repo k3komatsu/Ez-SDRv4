@@ -2845,8 +2845,8 @@
   "id": "J283",
   "name": "a non-participant's wait stops the clock as a participant's does (M6)",
   "file": "crates/ezsdr-radio-uhd/src/host.rs",
-  "old": "    let me = PARTICIPANT.with(Cell::get);",
-  "new": "    let me = PARTICIPANT.with(Cell::get).or(Some(u64::MAX));",
+  "old": "    let key = st.next_wait;",
+  "new": "    let me = me.or(Some(u64::MAX));\n    let key = st.next_wait;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "m6_a_non_participant_wait_stops_nothing"
@@ -3020,8 +3020,8 @@
   "id": "J301",
   "name": "a sleep ends on any notify instead of only at its deadline (M7)",
   "file": "crates/ezsdr-radio-uhd/src/host.rs",
-  "old": "        park(m, st, now, Some(deadline), None, None);",
-  "new": "        let seen = st.notified;\n        park(m, st, now, Some(deadline), None, Some(seen));",
+  "old": "        park(m, st, now, me, Some(deadline), None, None);",
+  "new": "        let seen = st.notified;\n        park(m, st, now, me, Some(deadline), None, Some(seen));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "m7_a_notify_does_not_end_a_sleep_early"
@@ -18191,5 +18191,181 @@
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "txbook_take_with_an_operation_in_flight_panics"
+ },
+ {
+  "id": "N51A-01",
+  "name": "the participant lookup takes the thread's first registration, not the one on this clock (M1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": ".iter().find(|(clock, _)| *clock == key).map(|(_, id)| *id)",
+  "new": ".first().map(|(_, id)| *id)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_driver_of_one_clock_is_not_a_participant_of_another"
+ },
+ {
+  "id": "N51A-02",
+  "name": "sleep does not use the thread's id on its clock (M2)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "scope": "pub fn sleep",
+  "old": "let me = self.my_id();",
+  "new": "let me = None::<u64>;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_driver_sleeping_on_the_clock_is_idle"
+ },
+ {
+  "id": "N51A-03",
+  "name": "wait does not use the thread's id on its clock (M2)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "scope": "pub fn wait",
+  "old": "let me = self.my_id();",
+  "new": "let me = None::<u64>;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_driver_waiting_on_the_clock_is_idle"
+ },
+ {
+  "id": "N51A-04",
+  "name": "the clock lock's queue does not use the thread's id on its clock (4.7)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "let participant = self.my_id();",
+  "new": "let participant = None::<u64>;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_driver_queued_on_a_clock_lock_is_idle"
+ },
+ {
+  "id": "N51A-05",
+  "name": "drive registers before it checks that the thread is not yet a participant, so a refusal leaks an id (Q7)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "assert!(self.my_id().is_none(), \"this thread is already a participant of this clock\"); let guard = self.register().map(|id| ParticipantGuard::new(self.clone(), id));",
+  "new": "let id = self.register(); assert!(self.my_id().is_none(), \"this thread is already a participant of this clock\"); let guard = id.map(|id| ParticipantGuard::new(self.clone(), id));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_second_registration_on_the_same_clock_panics"
+ },
+ {
+  "id": "N51A-06",
+  "name": "drive does not refuse a second registration of the thread on the same manual clock (Q7)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "assert!(self.my_id().is_none(), \"this thread is already a participant of this clock\");",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_second_registration_on_the_same_clock_panics"
+ },
+ {
+  "id": "N51A-07",
+  "name": "a participant guard removes the thread's entry by id, whatever clock it is on (M1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": ".retain(|entry| *entry != me)",
+  "new": ".retain(|entry| entry.1 != me.1)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_drivers_of_two_clocks_dropped_in_either_order"
+ },
+ {
+  "id": "N51A-08",
+  "name": "a participant guard removes the thread's last entry, not its own (M1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": ".retain(|entry| *entry != me)",
+  "new": ".pop()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_drivers_of_two_clocks_dropped_in_either_order"
+ },
+ {
+  "id": "N51A-09",
+  "name": "drive on a real clock registers an entry (M1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "let guard = self.register().map(|id| ParticipantGuard::new(self.clone(), id));",
+  "new": "let guard = Some(self.register().map_or_else(|| ParticipantGuard::new(self.clone(), 0), |id| ParticipantGuard::new(self.clone(), id)));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_real_clock_registers_nothing"
+ },
+ {
+  "id": "N51A-10",
+  "name": "drive on a real clock panics (M1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "let guard = self.register().map(|id| ParticipantGuard::new(self.clone(), id));",
+  "new": "let guard = Some(ParticipantGuard::new(self.clone(), self.register().expect(\"a manual clock\")));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_real_clock_registers_nothing"
+ },
+ {
+  "id": "N51A-11",
+  "name": "a participant guard that is dropped without a panic does not unregister (M1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "self.clock.unregister(self.id);",
+  "new": "if std::thread::panicking() {\n            self.clock.unregister(self.id);\n        }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_second_registration_on_the_same_clock_panics_before_it_registers_anything"
+ },
+ {
+  "id": "N51A-12",
+  "name": "a participant guard that is dropped by a panic leaves the thread's entry (M1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "let _ = PARTICIPANTS.try_with(|p| p.borrow_mut().retain(|entry| *entry != me));",
+  "new": "if !std::thread::panicking() {\n            let _ = PARTICIPANTS.try_with(|p| p.borrow_mut().retain(|entry| *entry != me));\n        }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_driver_that_panics_leaves_the_clock_and_the_thread_free"
+ },
+ {
+  "id": "N51A-13",
+  "name": "the join waits in wall time, so a thread that needs the clock cannot end (UR-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "host.wait(None, Some(Instant::now() + Wall::from_millis(1)), seen);",
+  "new": "std::thread::sleep(Wall::from_millis(1));\n            let _ = seen;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_16_join_waits_idle_on_the_manual_clock_so_a_thread_that_needs_the_clock_ends"
+ },
+ {
+  "id": "N51A-14",
+  "name": "the join's 1 ms wait is a clock deadline, which a held manual clock never reaches (UR-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "host.wait(None, Some(Instant::now() + Wall::from_millis(1)), seen);",
+  "new": "host.sleep(Wall::from_millis(1));\n            let _ = seen;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_16_the_join_bound_cuts_in_real_time_while_the_manual_clock_is_held",
+  "kill": "bound"
+ },
+ {
+  "id": "N51A-15",
+  "name": "the join bound is read on the host clock, not in real time (UR-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "let until = Instant::now() + JOIN_BOUND;",
+  "new": "let until = core.device.host().now() + JOIN_BOUND;",
+  "old2": "Instant::now() >= until {",
+  "new2": "core.device.host().now() >= until {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_16_the_join_bound_cuts_in_real_time_while_the_manual_clock_is_held",
+  "kill": "bound"
+ },
+ {
+  "id": "N51A-16",
+  "name": "drive registers nothing on a manual clock (M1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": "let guard = self.register().map(|id| ParticipantGuard::new(self.clone(), id));",
+  "new": "let guard: Option<ParticipantGuard> = None;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_driver_that_sleeps_in_wall_time_does_not_move_the_clock"
+ },
+ {
+  "id": "N51A-17",
+  "name": "the participant lookup reaches only a thread's last registration (M1)",
+  "file": "crates/ezsdr-radio-uhd/src/host.rs",
+  "old": ".iter().find(|(clock, _)| *clock == key).map(|(_, id)| *id)",
+  "new": ".last().filter(|(clock, _)| *clock == key).map(|(_, id)| *id)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "m1_drive_a_thread_driving_two_clocks"
  }
 ]

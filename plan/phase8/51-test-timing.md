@@ -1,6 +1,6 @@
 # 51 — スレッドの走る時点で判定が変わるテストを型ごと止める（`mech:wall-clock-test-oracle`）
 
-**決定済み**（owner 2026-11-11〜12：Q1〜Q17 と (i)，末尾の付録）。下は Fable 5.2 の v3.1 に orchestrator の訂正（§5.3a）を加えたもの．v1〜v3 と各レビュー（Sol 2 回，Opus 2 回）は `~/.cache/ezsdr-fixes/2026-11-11-test-timing/` にあり，段階を閉じる記録で `reviews/` に移す．段階 0（`51-tables.md`）と M（記録 `reviews/n51m-*`，#91 を閉じる）は済（2026-11-12）．次は 1a．
+**決定済み**（owner 2026-11-11〜12：Q1〜Q17 と (i)，末尾の付録）。下は Fable 5.2 の v3.1 に orchestrator の訂正（§5.3a）を加えたもの．v1〜v3 と各レビュー（Sol 2 回，Opus 2 回）は `~/.cache/ezsdr-fixes/2026-11-11-test-timing/` にあり，段階を閉じる記録で `reviews/` に移す．段階 0（`51-tables.md`）と M（記録 `reviews/n51m-*`，#91 を閉じる）は済（2026-11-12）．1a（記録 `reviews/n51-1a-*`）も済．次は 1b．
 
 | 項目 | 内容 |
 |---|---|

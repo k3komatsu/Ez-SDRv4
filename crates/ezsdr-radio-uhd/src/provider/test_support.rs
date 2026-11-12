@@ -287,18 +287,30 @@ pub(super) fn probe(core: &Core, name: &'static str, f: impl Fn(Option<&super::c
     core.probes.lock().unwrap().insert(name, Arc::new(f));
 }
 
-/// Runs `f` on its own thread and fails the test if it does not finish within `bound`: a mutant that
-/// deadlocks or wedges the Provider must fail the test, not hang the suite. A failure inside `f` fails
-/// the test at once.
+/// Writes `EZSDR-INFRA: <test>: <what>` straight to stderr, not captured by libtest, before a test panics on an
+/// expired real-time bound: `mutate.py` and `gate.py` then count the failure as a bound, not as an assertion (note 51 §6.3).
+pub(super) fn infra(what: &str) {
+    use std::io::Write;
+    let line = format!("EZSDR-INFRA: {}: {what}\n", std::thread::current().name().unwrap_or("a test"));
+    let _ = std::io::stderr().write_all(line.as_bytes());
+}
+
+/// Runs `f` on its own thread, named as the test's so that an [`infra`] marker inside it names the test, and fails
+/// the test if it does not finish within `bound`: a mutant that deadlocks or wedges the Provider must fail the
+/// test, not hang the suite. A failure inside `f` fails the test at once.
 pub(super) fn bounded<T: Send + 'static>(what: &str, bound: Wall, f: impl FnOnce() -> T + Send + 'static) -> T {
     let (done, finished) = channel();
-    let _ = std::thread::spawn(move || {
+    let name = std::thread::current().name().unwrap_or("a test").to_owned();
+    let _ = std::thread::Builder::new().name(name).spawn(move || {
         let _ = done.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| ()));
     });
     match finished.recv_timeout(bound) {
         Ok(Ok(value)) => value,
         Ok(Err(())) => panic!("{what} failed"),
-        Err(_) => panic!("{what} did not finish within {bound:?}"),
+        Err(_) => {
+            infra(&format!("{what} did not finish within {bound:?}"));
+            panic!("{what} did not finish within {bound:?}")
+        }
     }
 }
 
