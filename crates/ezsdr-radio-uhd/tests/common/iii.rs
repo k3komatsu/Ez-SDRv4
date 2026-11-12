@@ -896,6 +896,126 @@ pub fn repeat_sizes_verdict(sizes: &[usize], closing: &[usize], chunk: usize, wa
     Verdict::Pass(format!("{} payload sends sized as the window allows; closing sends {closing:?}", sizes.len()))
 }
 
+/// What #67's probe (`hw_67_stop_before_origin`) calls a start it cancels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cancel {
+    /// Control: the start is near, the untimed stop comes after its origin (spec 22 VH-6's path today).
+    Control,
+    /// A start for a distant origin, the untimed stop before it.
+    StopBefore,
+    /// A start for a distant origin, `close_streams` before it and a fresh streamer opened.
+    CloseBefore,
+}
+
+impl Cancel {
+    pub fn name(self) -> &'static str {
+        match self {
+            Cancel::Control => "stop_after_origin",
+            Cancel::StopBefore => "stop_before_origin",
+            Cancel::CloseBefore => "close_before_origin",
+        }
+    }
+}
+
+/// Ticks after a running control's stop in which a block is still its tail (2 ms: the stop takes about 0.4 ms to reach the device).
+/// A cancelled start has no tail: a block from it is the evidence.
+pub const TAIL_TICKS: i64 = 2 * TICKS_PER_MS;
+
+/// How far past the cancelled origin the observation has to reach for a silence to mean anything.
+pub const OBSERVE_TICKS: i64 = 500 * TICKS_PER_MS;
+
+/// One trial of #67's probe, as the device showed it. `cancel_entered` and `cancel_returned` are the device times before and after the
+/// cancel call (a stop, or `close_streams` plus `rx_open`). `before` is the number of blocks read between the start and the cancel,
+/// `after` the blocks (first tick, samples) read from the cancel's return until `observed_to`, the last device time the observation saw;
+/// `next` is the first block of the fresh start for `new_origin` (tick, samples, finite and not all zero), or `None` when none came.
+/// `errors` holds every call that failed and every receive outcome other than samples and a timeout, from the start to the end of the cleanup.
+#[derive(Debug, Clone)]
+pub struct CancelTrial {
+    pub cancel: Cancel,
+    pub rate: f64,
+    pub origin: i64,
+    pub cancel_entered: i64,
+    pub cancel_returned: i64,
+    pub before: usize,
+    pub after: Vec<(i64, usize)>,
+    pub observed_to: i64,
+    pub new_origin: i64,
+    pub next: Option<(i64, usize, bool)>,
+    pub errors: Vec<String>,
+}
+
+impl CancelTrial {
+    fn distant(&self) -> bool {
+        self.cancel != Cancel::Control
+    }
+
+    /// The blocks that are not the stopped control's tail; every block after the cancel of a start that was not yet due.
+    fn late(&self) -> Vec<&(i64, usize)> {
+        self.after.iter().filter(|(first, _)| self.distant() || *first > self.cancel_returned + TAIL_TICKS).collect()
+    }
+
+    fn latency_ms(&self) -> i64 {
+        (self.cancel_returned - self.cancel_entered) / TICKS_PER_MS
+    }
+
+    /// The trace line's body: every field the verdict reads, with the first and last late blocks.
+    pub fn trace(&self) -> Json {
+        let late = self.late();
+        json!({
+            "cancel": self.cancel.name(), "rate": self.rate, "origin": self.origin, "cancel_entered": self.cancel_entered, "cancel_returned": self.cancel_returned,
+            "cancel_latency_ms": self.latency_ms(), "before_blocks": self.before, "after_blocks": self.after.len(), "late_blocks": late.len(),
+            "first_late": late.first(), "last_late": late.last(), "observed_to": self.observed_to,
+            "new_origin": self.new_origin, "next": self.next, "next_offset_ticks": self.next.map(|(first, _, _)| first - self.new_origin),
+            "errors": self.errors,
+        })
+    }
+}
+
+/// #67's probe, one trial. PASS when the cancel returns before the cancelled origin, no block arrives from the cancelled start, the
+/// observation reaches the origin plus 500 ms, and the fresh start's first block is at its origin with sane samples. FAIL on an error (a
+/// failed call, `time_now` included, or an outcome other than samples and a timeout), a distant cancel that returned at or after its
+/// origin, a block before the cancel from a start that is not yet due, a late block after the cancel, a first block that is not at the
+/// fresh origin, or insane samples. INCONCLUSIVE when the control produced no block before its stop, the observation stopped short of
+/// the origin plus 500 ms, or no block of the fresh start came.
+pub fn cancel_trial_verdict(trial: &CancelTrial) -> Verdict {
+    if !trial.errors.is_empty() {
+        return Verdict::Fail(format!("{:?}", trial.errors));
+    }
+    if trial.distant() && trial.cancel_returned >= trial.origin {
+        return Verdict::Fail(format!("cancel returned after the origin (entered {} ms before it, took {} ms)", (trial.origin - trial.cancel_entered) / TICKS_PER_MS, trial.latency_ms()));
+    }
+    match (trial.cancel, trial.before) {
+        (Cancel::Control, 0) => return Verdict::Inconclusive("the control's near start gave no block before its stop".to_owned()),
+        (Cancel::Control, _) => {}
+        (_, 0) => {}
+        (_, n) => return Verdict::Fail(format!("{n} block(s) before the cancel from a start whose origin is {} ms away", (trial.origin - trial.cancel_entered) / TICKS_PER_MS)),
+    }
+    let late = trial.late();
+    if let Some((first, samples)) = late.first() {
+        return Verdict::Fail(format!(
+            "{} block(s) after the cancel, the first at {first} ({samples} samples, {} ms after it returned; origin {})",
+            late.len(),
+            (first - trial.cancel_returned) / TICKS_PER_MS,
+            trial.origin
+        ));
+    }
+    if trial.observed_to < trial.origin + OBSERVE_TICKS {
+        return Verdict::Inconclusive(format!("the observation reached {}, short of the origin {} + 500 ms", trial.observed_to, trial.origin));
+    }
+    match trial.next {
+        None => Verdict::Inconclusive(format!("no block of the fresh start for {}", trial.new_origin)),
+        Some((first, _, _)) if first != trial.new_origin => {
+            Verdict::Fail(format!("the fresh start's first block is at {first}, {:+} ticks from its origin {}", first - trial.new_origin, trial.new_origin))
+        }
+        Some((_, _, false)) => Verdict::Fail("the fresh start's first block is all zeros or not finite".to_owned()),
+        Some((_, samples, true)) => Verdict::Pass(format!(
+            "cancel took {} ms; no block from the cancelled start ({} tail); the fresh start's first block ({samples} samples) is at its origin",
+            trial.latency_ms(),
+            trial.after.len()
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tone::PER_1MSPS;
@@ -1110,6 +1230,129 @@ mod tests {
         };
         assert!(stage_trial(TrialClass::Success, &per_stream(0)).is_ok());
         assert!(stage_trial(TrialClass::Success, &per_stream(1)).is_err());
+    }
+
+    fn cancel_trial(cancel: Cancel) -> CancelTrial {
+        CancelTrial {
+            cancel,
+            rate: 1e6,
+            origin: 400_000_000,
+            cancel_entered: 20_000_000,
+            cancel_returned: 20_100_000,
+            before: usize::from(cancel == Cancel::Control),
+            after: Vec::new(),
+            observed_to: 400_000_000 + OBSERVE_TICKS,
+            new_origin: 500_000_000,
+            next: Some((500_000_000, 5_000, true)),
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_cancel_with_no_late_block_and_a_fresh_start_at_its_origin_passes() {
+        for cancel in [Cancel::Control, Cancel::StopBefore, Cancel::CloseBefore] {
+            assert!(matches!(cancel_trial_verdict(&cancel_trial(cancel)), Verdict::Pass(_)), "{cancel:?}");
+        }
+    }
+
+    #[test]
+    fn the_stopped_streams_tail_is_not_late_but_a_block_past_it_is() {
+        let mut trial = cancel_trial(Cancel::Control);
+        trial.after = vec![(trial.cancel_returned + TAIL_TICKS, 5_000)];
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Pass(_)));
+        trial.after.push((trial.cancel_returned + TAIL_TICKS + 1, 5_000));
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(text) if text.contains("1 block(s) after the cancel")));
+    }
+
+    #[test]
+    fn a_block_at_the_cancelled_origin_fails_a_distant_variant() {
+        let mut trial = cancel_trial(Cancel::CloseBefore);
+        trial.after = vec![(trial.origin, 5_000), (trial.origin + 1_000, 5_000)];
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(text) if text.contains("2 block(s) after the cancel")));
+    }
+
+    #[test]
+    fn a_stop_that_returns_after_the_origin_is_not_excused_by_its_own_tail_allowance() {
+        let mut trial = cancel_trial(Cancel::StopBefore);
+        trial.cancel_returned = trial.origin + 50 * TICKS_PER_MS;
+        trial.after = vec![(trial.origin, 5_000), (trial.origin + 25 * TICKS_PER_MS, 5_000), (trial.origin + 50 * TICKS_PER_MS, 5_000)];
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(_)));
+    }
+
+    #[test]
+    fn a_distant_cancel_that_returns_at_or_after_its_origin_fails_even_without_a_block() {
+        let mut trial = cancel_trial(Cancel::StopBefore);
+        trial.cancel_returned = trial.origin - 1;
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Pass(_)));
+        trial.cancel_returned = trial.origin;
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(text) if text.contains("cancel returned after the origin")));
+    }
+
+    #[test]
+    fn a_controls_stop_returns_after_its_origin_as_a_matter_of_course() {
+        let mut trial = cancel_trial(Cancel::Control);
+        trial.cancel_returned = trial.origin + 100 * TICKS_PER_MS;
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Pass(_)));
+    }
+
+    #[test]
+    fn a_block_just_after_a_cancelled_starts_cancel_is_not_a_tail() {
+        let mut trial = cancel_trial(Cancel::StopBefore);
+        trial.after = vec![(trial.cancel_returned + 1, 5_000)];
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(text) if text.contains("1 block(s) after the cancel")));
+    }
+
+    #[test]
+    fn an_observation_that_stops_short_of_the_origin_plus_500_ms_is_inconclusive() {
+        let mut trial = cancel_trial(Cancel::CloseBefore);
+        trial.observed_to = trial.origin + OBSERVE_TICKS - 1;
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Inconclusive(text) if text.contains("short of the origin")));
+        trial.after = vec![(trial.origin, 5_000)];
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(_)), "a block is the evidence however short the observation");
+    }
+
+    #[test]
+    fn a_block_before_a_distant_cancel_fails_and_none_before_the_controls_stop_is_inconclusive() {
+        let mut trial = cancel_trial(Cancel::StopBefore);
+        trial.before = 1;
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(_)));
+        let mut control = cancel_trial(Cancel::Control);
+        control.before = 0;
+        assert!(matches!(cancel_trial_verdict(&control), Verdict::Inconclusive(_)));
+    }
+
+    #[test]
+    fn the_fresh_starts_first_block_must_exist_sit_at_its_origin_and_hold_samples() {
+        let mut trial = cancel_trial(Cancel::StopBefore);
+        trial.next = None;
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Inconclusive(_)));
+        trial.next = Some((trial.new_origin - 2, 5_000, true));
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(text) if text.contains("-2 ticks")));
+        trial.next = Some((trial.new_origin + 3, 5_000, true));
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(text) if text.contains("+3 ticks")));
+        trial.next = Some((trial.new_origin, 5_000, false));
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(_)));
+    }
+
+    #[test]
+    fn an_error_fails_before_anything_else_is_read() {
+        let mut trial = cancel_trial(Cancel::StopBefore);
+        trial.errors = vec!["LateCommand".to_owned()];
+        trial.next = None;
+        assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(text) if text.contains("LateCommand")));
+    }
+
+    #[test]
+    fn the_trace_names_the_late_blocks_and_the_fresh_starts_offset() {
+        let mut trial = cancel_trial(Cancel::StopBefore);
+        trial.after = vec![(trial.origin, 5_000)];
+        trial.next = Some((trial.new_origin + 7, 5_000, true));
+        let trace = trial.trace();
+        assert_eq!((trace["late_blocks"].as_u64(), trace["next_offset_ticks"].as_i64()), (Some(1), Some(7)));
+        assert_eq!(trace["cancel_latency_ms"], 0, "100 000 ticks are 0.5 ms");
+        trial.cancel_returned = trial.cancel_entered + 30 * TICKS_PER_MS;
+        assert_eq!(trial.trace()["cancel_latency_ms"], 30);
+        assert_eq!(trace["cancel"], "stop_before_origin");
     }
 }
 

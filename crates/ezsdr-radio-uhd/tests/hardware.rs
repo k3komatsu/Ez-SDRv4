@@ -433,6 +433,126 @@ fn hw_b8_raw_restart_lead() {
     measurement::push_raw_observation("hw_b8_raw_restart_lead", 21, serde_json::json!({ "restarts": observations }));
 }
 
+/// Runs `body` on a thread of its own under a wall bound: when the bound passes, the process writes an `EZSDR-INFRA:` marker and aborts, because
+/// a device call that never returns cannot be interrupted. `body` makes, uses and drops its device, so the bound covers opening, every call,
+/// teardown, and the unwind of a failure; a panic in `body` is caught on its thread and rethrown here once `body`'s locals are dropped.
+fn bounded(limit: Wall, what: &str, body: impl FnOnce() + Send + 'static) {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)));
+    });
+    match finished.recv_timeout(limit) {
+        Ok(Ok(())) => {}
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        Err(_) => {
+            infra(&format!("{what} did not finish within {limit:?}: a device call never returned. Aborting."));
+            std::process::abort();
+        }
+    }
+}
+
+/// One trial of `hw_67_stop_before_origin` at `rate`: a timed start for a near (control) or a distant origin, its cancel (an untimed stop after
+/// the control's origin, an untimed stop or `close_streams` plus a fresh streamer before the other two's), a read through the origin plus 500 ms,
+/// then a fresh start 100 ms ahead on the same streamer. Receive only; nothing is transmitted.
+fn n67_trial(device: &dyn Device, cancel: iii::Cancel, rate: f64) -> iii::CancelTrial {
+    use iii::Cancel::{CloseBefore, Control};
+    fn note<E: std::fmt::Debug>(errors: &mut Vec<String>, what: &str, result: Result<(), E>) {
+        if let Err(error) = result {
+            errors.push(format!("{what}: {error:?}"));
+        }
+    }
+    let (per, n) = ((200e6 / rate) as i64, (rate / 200.0) as usize);
+    let mut errors = Vec::new();
+    let others = |phase: &str, got: &Read| got.other.iter().filter(|(_, outcome)| outcome != "Timeout").map(|(at, outcome)| format!("{phase}: {outcome} at {at}")).collect::<Vec<_>>();
+    let (reached, clock_failed) = (std::cell::Cell::new(0), std::cell::Cell::new(false));
+    let read_until = |end: i64| {
+        reached.set(0);
+        read_with(device, 0, n, Wall::from_secs(6), None, |_| match device.time_now() {
+            Ok(now) => {
+                reached.set(now);
+                now >= end
+            }
+            Err(_) => {
+                clock_failed.set(true);
+                true
+            }
+        })
+    };
+    let now = device.time_now().unwrap();
+    let origin = align_to(now + if cancel == Control { 300 } else { 2_000 } * TICKS_PER_MS, per);
+    note(&mut errors, "rx_start", device.rx_start(0, origin));
+    let before = read_until(if cancel == Control { origin + 100 * TICKS_PER_MS } else { now + 100 * TICKS_PER_MS });
+    errors.extend(others("before the cancel", &before));
+    let cancel_entered = device.time_now().unwrap();
+    match cancel {
+        CloseBefore => {
+            device.close_streams();
+            note(&mut errors, "rx_open", device.rx_open(0, &[d9_channel()]));
+        }
+        _ => note(&mut errors, "rx_stop", device.rx_stop(0)),
+    }
+    let cancel_returned = device.time_now().unwrap();
+    let after = read_until(origin + iii::OBSERVE_TICKS);
+    let observed_to = reached.get();
+    errors.extend(others("after the cancel", &after));
+    let new_origin = align_to(device.time_now().unwrap() + 100 * TICKS_PER_MS, per);
+    note(&mut errors, "rx_start (fresh)", device.rx_start(0, new_origin));
+    let got = read_with(device, 0, n, Wall::from_secs(2), Some(per), |r| !r.blocks.is_empty() || r.other.iter().any(|(_, outcome)| outcome != "Timeout"));
+    errors.extend(others("fresh start", &got));
+    let next = got.blocks.first().map(|(first, count)| {
+        let samples = || got.samples.iter().take(*count).map(|(_, s)| s);
+        (*first, *count, samples().all(|s| s[0].is_finite() && s[1].is_finite()) && samples().any(|s| *s != [0.0, 0.0]))
+    });
+    note(&mut errors, "rx_stop (cleanup)", device.rx_stop(0));
+    let drained = read_with(device, 0, n, Wall::from_secs(3), None, |r| n47::drain_quiet(&r.events));
+    errors.extend(others("cleanup", &drained));
+    if !n47::drain_quiet(&drained.events) {
+        errors.push("cleanup: the stream did not go quiet within 3 s".to_owned());
+    }
+    if clock_failed.get() {
+        errors.push("time_now failed while observing".to_owned());
+    }
+    iii::CancelTrial { cancel, rate, origin, cancel_entered, cancel_returned, before: before.blocks.len(), after: after.blocks, observed_to, new_origin, next, errors }
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_67_stop_before_origin() {
+    // #67: may uhd-rx stop waiting for a distant origin once `Provider::stop` has begun (spec 22 VH-6 stops untimed only after the origin)?
+    // That is safe only if the X310 takes an untimed stop, or a close, of a streamer with a queued timed start before the origin. Receive only
+    // (no transmit, so no attenuator is needed), 1 GHz, three rates, ten trials of each of three cells a rate, in turn. Each trial prints a
+    // TRACE line (`iii::CancelTrial::trace`) and a VERDICT line (`iii::cancel_trial_verdict`). The device's whole life (opening, the 90 trials,
+    // teardown, a failure's unwind) is bounded to 15 min (the probe takes about 5): a bound that passes writes `EZSDR-INFRA:` and aborts, and
+    // is read as a hang.
+    const TRIALS: usize = 10;
+    bounded(Wall::from_secs(900), "hw_67_stop_before_origin", || {
+        let device = raw();
+        let mut cells: std::collections::BTreeMap<String, [usize; 3]> = Default::default();
+        for rate in [1e6, 10e6, 100e6] {
+            raw_rx(&*device, rate, 1e9);
+            for trial in 0..TRIALS {
+                for cancel in [iii::Cancel::Control, iii::Cancel::StopBefore, iii::Cancel::CloseBefore] {
+                    let done = n67_trial(&*device, cancel, rate);
+                    let (claim, outcome) = (format!("n67 {} {} MS/s trial {trial}", cancel.name(), rate / 1e6), iii::cancel_trial_verdict(&done));
+                    println!("TRACE n67 {}", done.trace());
+                    print_verdict(&claim, &outcome);
+                    let counts = cells.entry(format!("{} {} MS/s", cancel.name(), rate / 1e6)).or_default();
+                    counts[match outcome {
+                        Verdict::Pass(_) => 0,
+                        Verdict::Fail(_) => 1,
+                        Verdict::Inconclusive(_) => 2,
+                    }] += 1;
+                }
+            }
+        }
+        for (cell, [pass, fail, inconclusive]) in &cells {
+            println!("N67 cell {cell}: {pass} PASS, {fail} FAIL, {inconclusive} INCONCLUSIVE of {TRIALS}");
+        }
+        let failed: usize = cells.values().map(|counts| counts[1]).sum();
+        assert_eq!(failed, 0, "n67: {failed} trial(s) FAILed; their VERDICT lines say why");
+    });
+}
+
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_b8_raw_timed_tune_phase() {

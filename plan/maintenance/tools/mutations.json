@@ -20437,5 +20437,155 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "n99_u7"
+ },
+ {
+  "id": "N67-01",
+  "name": "#67 probe: a failed call or an odd receive outcome no longer fails the trial (cancel_trial_verdict's error check)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "if !trial.errors.is_empty() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "an_error_fails_before_anything_else_is_read"
+ },
+ {
+  "id": "N67-02",
+  "name": "#67 probe: a distant cancel that returns exactly at its origin passes (cancel_trial_verdict's cancel-returned check)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "trial.distant() && trial.cancel_returned >= trial.origin",
+  "new": "trial.distant() && trial.cancel_returned > trial.origin",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_distant_cancel_that_returns_at_or_after_its_origin_fails_even_without_a_block"
+ },
+ {
+  "id": "N67-03",
+  "name": "#67 probe: a control that gave no block before its stop is judged (cancel_trial_verdict's control precondition)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "(Cancel::Control, 0) =>",
+  "new": "(Cancel::Control, 99) =>",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_block_before_a_distant_cancel_fails_and_none_before_the_controls_stop_is_inconclusive"
+ },
+ {
+  "id": "N67-04",
+  "name": "#67 probe: a block before a distant cancel passes (cancel_trial_verdict's not-yet-due check)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "(_, 0) => {}",
+  "new": "(_, _) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_block_before_a_distant_cancel_fails_and_none_before_the_controls_stop_is_inconclusive"
+ },
+ {
+  "id": "N67-05",
+  "name": "#67 probe: a block exactly at the end of the stopped stream's tail is late (CancelTrial::late)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "*first > self.cancel_returned + TAIL_TICKS",
+  "new": "*first >= self.cancel_returned + TAIL_TICKS",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_stopped_streams_tail_is_not_late_but_a_block_past_it_is"
+ },
+ {
+  "id": "N67-06",
+  "name": "#67 probe: a first block after the fresh origin passes (cancel_trial_verdict's origin comparison)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "Some((first, _, _)) if first != trial.new_origin",
+  "new": "Some((first, _, _)) if first < trial.new_origin",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_fresh_starts_first_block_must_exist_sit_at_its_origin_and_hold_samples"
+ },
+ {
+  "id": "N67-07",
+  "name": "#67 probe: a first block before the fresh origin passes (cancel_trial_verdict's origin comparison)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "Some((first, _, _)) if first != trial.new_origin",
+  "new": "Some((first, _, _)) if first > trial.new_origin",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_fresh_starts_first_block_must_exist_sit_at_its_origin_and_hold_samples"
+ },
+ {
+  "id": "N67-08",
+  "name": "#67 probe: insane samples pass (cancel_trial_verdict's sanity flag)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "Some((_, _, false)) => Verdict::Fail(",
+  "new": "Some((_, _, false)) => Verdict::Pass(",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_fresh_starts_first_block_must_exist_sit_at_its_origin_and_hold_samples"
+ },
+ {
+  "id": "N67-09",
+  "name": "#67 probe: a fresh start with no block passes (cancel_trial_verdict's missing-block case)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "None => Verdict::Inconclusive(format!(",
+  "new": "None => Verdict::Pass(format!(",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_fresh_starts_first_block_must_exist_sit_at_its_origin_and_hold_samples"
+ },
+ {
+  "id": "N67-10",
+  "name": "#67 probe: the trace's late-block count is off by one (CancelTrial::trace)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "\"late_blocks\": late.len(),",
+  "new": "\"late_blocks\": late.len() + 1,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_trace_names_the_late_blocks_and_the_fresh_starts_offset"
+ },
+ {
+  "id": "N67-11",
+  "name": "#67 probe: the trace's fresh-start offset has the wrong sign (CancelTrial::trace)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "first - self.new_origin",
+  "new": "self.new_origin - first",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_trace_names_the_late_blocks_and_the_fresh_starts_offset"
+ },
+ {
+  "id": "N67-12",
+  "name": "#67 probe: the cancel-returned check applies to the control too (cancel_trial_verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "trial.distant() && trial.cancel_returned",
+  "new": "true && trial.cancel_returned",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_controls_stop_returns_after_its_origin_as_a_matter_of_course"
+ },
+ {
+  "id": "N67-13",
+  "name": "#67 probe: a cancelled start gets the stopped control's tail allowance (CancelTrial::late)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "self.distant() ||",
+  "new": "false ||",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_block_just_after_a_cancelled_starts_cancel_is_not_a_tail"
+ },
+ {
+  "id": "N67-14",
+  "name": "#67 probe: an observation that stops short of the origin plus 500 ms is judged (cancel_trial_verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "if trial.observed_to < trial.origin + OBSERVE_TICKS {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "an_observation_that_stops_short_of_the_origin_plus_500_ms_is_inconclusive"
+ },
+ {
+  "id": "N67-15",
+  "name": "#67 probe: the cancel latency in the trace has the wrong sign (CancelTrial::latency_ms)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "self.cancel_returned - self.cancel_entered",
+  "new": "self.cancel_entered - self.cancel_returned",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_trace_names_the_late_blocks_and_the_fresh_starts_offset"
  }
 ]

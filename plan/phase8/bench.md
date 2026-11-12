@@ -1220,3 +1220,39 @@ fi
 ### 流した後
 
 orchestrator に返すもの：`<NEW>` の commit，(i-a)・(i-b)・(ii) の VERDICT 行（C1，C2，C3，E9）と log の path，`drop.log`（`entry evidence` の行を含む）と `to-server.log`，`rx-check.log`，`docker ps` の残り，#2 の monitor の state file と log，電源 cycle の有無．log は (i) と同じ場所（`~/ezsdr-bench/<日付>/ssh-drop-*/` と `~/.cache/ezsdr-bench/<日付>/`）．raw は bench/ の規則（AGENTS §9）で private repo の release へ．
+
+## 2026-11-15 の項目：#67 の raw probe `hw_67_stop_before_origin`（origin より前の untimed stop と close，受信のみ，TX なし，約 5 分 / 台，estimate）
+
+問い：[#67](https://github.com/k3komatsu/Ez-SDRv4/issues/67)。uhd-rx は，遠い origin に timed start を積んだ後 `Provider::stop` が来ても，spec 22 VH-6（#56）により origin を過ぎてから untimed stop するので，origin が 1 s より遠いと join に間に合わない。`Provider::stop` が始まったら origin を待たない修正は，**origin より前に untimed stop または close された streamer を X310 が安全に扱う**ときだけ成り立つ。既存の `hw_56_stop_between_starts` と `hw_56_stop_lag` はどちらも origin の後に止めるので，この問いに答えない（`~/.cache/ezsdr-fixes/2026-11-13-bench/procedure.md` §0-2）。
+
+- **UHD 4.10 の読み（VERIFIED，v4.10.0.0 の source，Sol の code review）**：X310 の RX core は **STOP が acquisition-command FIFO を bypass して clear する**（origin を待っている timed start も消える）。よって `stop_before_origin` は **PASS するはず**（予想であって結果ではない）。「untimed の command は timed の command の後ろで待つ」という一般則は，この acquisition STOP には当てはまらない（[FIFO の扱い](https://github.com/EttusResearch/uhd/blob/v4.10.0.0/fpga/usrp3/lib/rfnoc/blocks/rfnoc_block_radio/radio_rx_core.v#L163-L184)，[待ち状態での STOP](https://github.com/EttusResearch/uhd/blob/v4.10.0.0/fpga/usrp3/lib/rfnoc/blocks/rfnoc_block_radio/radio_rx_core.v#L524-L550)）。**`close` は STOP を送らない**（streamer の destructor は graph の接続を外すだけ：[destructor](https://github.com/EttusResearch/uhd/blob/v4.10.0.0/host/lib/rfnoc/rfnoc_rx_streamer.cpp#L109-L114)，[切断 callback](https://github.com/EttusResearch/uhd/blob/v4.10.0.0/host/lib/usrp/multi_usrp_rfnoc.cpp#L340-L354)）ので，`close_before_origin` の結果が**本当の問い**である。新しい streamer が静かでも，古い acquisition が取り消されたことの証拠にはならない：origin + 500 ms まで観測して初めて意味を持つ。
+
+- **TX なし**：受信だけ（RX2，gain 0，1 GHz）で，`tx_open` も送信もしない。att の確認は要らない（配線は他の項目のままでよい）。
+- 流し方（`hw` は上の節の定義。`BOARD` と NIC は機材ごと）：
+
+  ```sh
+  export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_67_stop_before_origin   # #2 UBX
+  export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_67_stop_before_origin   # #1 OBX
+  ```
+
+  結果は単独で log に出る（記録 suite には入れていない）。`grep -h 'VERDICT\|N67 cell\|TRACE n67\|EZSDR-INFRA' <log>`（`EZSDR-INFRA` は 15 分の上限を越えた hang の印）。
+- 構成：1 GHz，rate 1・10・100 MS/s，rate ごとに 3 つの cell × 10 trial（trial ごとに cell を順に回す），**計 90 trial**。1 trial は 1 本の streamer で次を行う。
+  - `stop_before_origin`：`rx_start(at = now + 2 s)`，約 100 ms 読む（何も来ないはず），untimed `rx_stop`（呼び出しの入りと戻りの device 時刻を別々に記録する），origin + 500 ms まで読む，同じ streamer で新しい origin（100 ms 先）に `rx_start`，最初の block を見る。
+  - `close_before_origin`：同じだが stop の代わりに `close_streams()` の後 `rx_open` し直し（新しい streamer は start しない），その streamer で origin + 500 ms まで読む。
+  - `stop_after_origin`（control，VH-6 の今の道）：`rx_start(at = now + 300 ms)`，origin + 100 ms まで読み（block が来るはず），untimed `rx_stop`，origin + 500 ms まで読む，新しい start。
+  - どの trial も最後に untimed `rx_stop` と drain（2 回続けて timeout で quiet）をして次へ。
+- **VERDICT**（`VERDICT n67 <cell> <rate> MS/s trial <i>: …`，定義は `iii::cancel_trial_verdict`）：
+  - PASS：遠い origin の cancel の呼び出しが **origin より前に戻り**，cancel の後に block が 1 つも来ず（control だけは停止した stream の尾として戻りの後 2 ms まで許す。取り消した start には尾の許容はない），観測が origin + 500 ms まで届き，新しい start の最初の block の tick が新しい origin とちょうど一致し，samples が有限で全 0 でない。cancel の latency（入りから戻りまで）は**全 trial の TRACE と PASS の行に出る**。
+  - FAIL：呼び出しの失敗（`time_now` の失敗を含む），または samples と timeout 以外の `rx_recv` の結果（`LateCommand`，`Overflow` など），**遠い origin の cancel が origin の後に戻った（`cancel returned after the origin`）**，遠い origin の cancel の前に block が来た，cancel の後の block（遠い origin の 2 variant は 1 つでも，control は尾の 2 ms を過ぎたもの），新しい start の最初の block が origin と違う，samples が全 0 か非有限，cleanup の drain が 3 s で静かにならない。
+  - INCONCLUSIVE：control が stop の前に block を出さなかった，観測が origin + 500 ms に届かなかった，または新しい start の block が 2 s 待っても来ない（stream が戻らない）。
+  - この probe は streamer の leak を見ない：device は全 trial を通して 1 つで，`uhd_kept_count` は device の drop しか数えないので，trial ごとの streamer の leak の証拠にならない（検査から外した）。
+  - **hang**：device の**一生全体**（開く・設定する・90 trial・destructor・失敗の unwind）が **15 min** を過ぎると `EZSDR-INFRA:` の行を書いて abort する（UHD の呼び出しは中断できない。期待は約 5 分）。trial ごとの bound はない。hang した trial の VERDICT 行はない。X310 が戻らなければ電源の入れ直しが要るかもしれない：owner へ。
+- 最後に cell ごとの `N67 cell <cell> <rate> MS/s: n PASS, n FAIL, n INCONCLUSIVE of 10`。FAIL が 1 つでもあれば test は失敗する（exit 1）。INCONCLUSIVE だけなら `test result: ok` で終わるので，cell の行を必ず読む。`TRACE n67 {json}` は trial ごとの tick 列（origin，`cancel_entered`，`cancel_returned`，`cancel_latency_ms`，`observed_to`，late の最初と最後，新しい origin との差，errors）。
+- #67 への読み方（**結果は bench-results.md に書く（orchestrator）。条件を超えて一般化しない：1 GHz，この 3 rate，origin 2 s，1 cell 10 trial，この board**）。まず **trial の FAIL と「cancel が安全でない」という証拠を分ける**：
+  - `Overflow`，`LateCommand`，host の scheduling（`time_now` の失敗，100 MS/s で host が追いつかない）は観測を無効にする：#67 については INCONCLUSIVE として読む（test の VERDICT は厳しく FAIL のまま）。**証拠になるのは，取り消した start の位置から来た block と，位置のずれた次の start だけ**。「新しい block が来ない」は壊れた証拠ではない（INCONCLUSIVE）。`cancel returned after the origin` は cancel の呼び出し自体の証拠（stop や close が origin まで戻らないなら，#67 の join には役に立たない）だが，host が止まっていたのが原因でないか latency を見て確かめる。
+  - control が通っていても，他の trial の一時的な overload を除外したことにはならない。cell の 10 trial を見て，FAIL の理由を VERDICT の行で確かめる。
+  - `stop_before_origin` と `close_before_origin` が全 rate で 10/10 PASS：origin の前の untimed stop と close を X310 は安全に扱う。ただし close の PASS は「開き直した streamer が静かで，次の start が origin どおり」を示すだけで，古い start の出力がその streamer に届く場合にだけ取り消しの証拠になる（INFERRED，未確認）。`Provider::stop` の後に origin を待たない shutdown が許される（設計は orchestrator と owner が決める）。
+  - `stop_before_origin` が FAIL（cancel の後 origin で block が来る）：積んだ start は untimed stop で消えない。VH-6 のとおり origin を待つしかない（または別の取り消し方が要る）。UHD の読みと食い違うので，source と照らして orchestrator へ。
+  - `close_before_origin` だけが FAIL：close は安全でない。stop は安全。
+  - どちらかで次の start が誤った位置（block がある）：origin 前の cancel が streamer か device の状態を壊した証拠。block が来ないだけなら INCONCLUSIVE で，再現を見る。
+  - `stop_after_origin`（control）が FAIL か INCONCLUSIVE：条件が成り立っていない（100 MS/s で host が追いつかず `Overflow`，新しい start が origin からずれる，など）。同じ rate の他の cell を読まない。`TRACE` の `next_offset_ticks` が control でも 0 でないなら，それは #67 と関係がない。

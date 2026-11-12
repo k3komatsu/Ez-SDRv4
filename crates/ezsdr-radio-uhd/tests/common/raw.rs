@@ -62,10 +62,15 @@ pub fn read(device: &dyn Device, limit: Wall, keep: Option<i64>, until: impl Fn(
 
 /// `read` on stream `k`'s streamer.
 pub fn read_on(device: &dyn Device, k: usize, limit: Wall, keep: Option<i64>, until: impl Fn(&Read) -> bool) -> Read {
+    read_with(device, k, 2_000, limit, keep, until)
+}
+
+/// `read_on` asking `n` samples a call: a rate of 100 MS/s needs calls of tens of thousands to keep up.
+pub fn read_with(device: &dyn Device, k: usize, n: usize, limit: Wall, keep: Option<i64>, until: impl Fn(&Read) -> bool) -> Read {
     let mut out = Read::default();
     let begun = Instant::now();
     while begun.elapsed() < limit && !until(&out) {
-        match device.rx_recv(k, 2_000, Wall::from_millis(100), false) {
+        match device.rx_recv(k, n, Wall::from_millis(100), false) {
             ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
                 out.blocks.push((first_tick, samples[0].len()));
                 out.events.push("samples".to_owned());
