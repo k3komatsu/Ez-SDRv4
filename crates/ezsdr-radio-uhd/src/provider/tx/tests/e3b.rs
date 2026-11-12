@@ -53,7 +53,7 @@ fn dev_tail(tx: &Tx) -> bool {
     tx.chain().tail().is_some()
 }
 
-fn dev_front(tx: &Tx) -> Option<i64> {
+pub(super) fn dev_front(tx: &Tx) -> Option<i64> {
     tx.chain().front().map(|(_, sample)| sample)
 }
 
@@ -77,7 +77,7 @@ fn poke_reopen_needed(tx: &mut Tx) {
 
 /// The record's verdict on a one-sample booking at each sample of `from..to`, asked of a clone of the record (nothing is booked), written as
 /// runs: `.` accepted, `E` refused for overlapping a booking, `H` refused for starting before a chain the owner may have handed.
-fn receipt_runs(core: &Core, clock: Clock, from: i64, to: i64) -> String {
+pub(super) fn receipt_runs(core: &Core, clock: Clock, from: i64, to: i64) -> String {
     let (record, now, horizon) = {
         let streams = lock(&core.streams);
         (streams.stream(stream_key(Dir::Tx, 0)).book.record.clone(), core.now(), ezsdr_radio::staging::handover_horizon(core.now(), core.tx_in_flight(), |t| clock.at_or_after(t)))
@@ -97,7 +97,7 @@ fn receipt_runs(core: &Core, clock: Clock, from: i64, to: i64) -> String {
     runs.iter().map(|(a, b, c)| format!("{c}{a}..={b}")).collect::<Vec<_>>().join(" ")
 }
 
-fn accepted(core: &Core, clock: Clock, at: i64, len: i64) -> Result<(), Overlap> {
+pub(super) fn accepted(core: &Core, clock: Clock, at: i64, len: i64) -> Result<(), Overlap> {
     let (mut record, now, horizon) = {
         let streams = lock(&core.streams);
         (streams.stream(stream_key(Dir::Tx, 0)).book.record.clone(), core.now(), ezsdr_radio::staging::handover_horizon(core.now(), core.tx_in_flight(), |t| clock.at_or_after(t)))
@@ -274,12 +274,7 @@ const C1: Expected = &[
     ),
     (
         "1 MS/s: a finite burst abandoned by a short send",
-        &[
-            "tx_send 0 n=99 at=1000000 sob=true eob=false",
-            "tx_send 0 n=2 at=1019800 sob=false eob=true",
-            "device front Some(5116) next None tail false",
-            "receipt E5000..=5199 .5200..=5200 E5201..=5203 .5204..=5239",
-        ],
+        &["tx_send 0 n=99 at=1000000 sob=true eob=false", "tx_send 0 n=2 at=1019800 sob=false eob=true", "device front Some(5116) next None tail false", "receipt E5000..=5203 .5204..=5239"],
     ),
     ("200 MS/s: a failed padded EOB", &["tx_send 0 n=2 at=500000 sob=true eob=false", "device front None next None tail false", "receipt E500000..=503003 .503004..=503011", "recovering true"]),
     (
@@ -717,7 +712,7 @@ const C4: Expected = &[
 
 /// Runs `f` on this thread immediately before its `n`th next `core::lock` of the mutex `field` selects (the first when `n` is 1), with no guard
 /// of that call held. A hook that runs while the owner holds the streams guard must not lock it.
-fn at_nth_lock<T: 'static>(core: &Arc<Core>, field: fn(&Core) -> &std::sync::Mutex<T>, n: usize, f: Box<dyn FnOnce()>) {
+pub(super) fn at_nth_lock<T: 'static>(core: &Arc<Core>, field: fn(&Core) -> &std::sync::Mutex<T>, n: usize, f: Box<dyn FnOnce()>) {
     if n <= 1 {
         on_next_lock(field(core), f);
     } else {
@@ -983,7 +978,7 @@ fn e3b_c5_receipts_by_provider_uhd_column() {
 // ------------------------------------------------------------------------------------------------------------ C6
 
 #[test]
-fn e3b_c6_f1_and_f4_as_they_are() {
+fn e3b_c6_f1_as_it_is() {
     // F1 (plan §1.4): a long burst whose last send closes the device burst directly leaves the device front at its padded end plus three, and
     // the record's front at its end plus four: a booking at 5 043 is refused at receipt although the device would take it (UR-22's measured
     // minimum is three samples). Pinned as it is: the receipt answers from the record alone (K1 = S; issue #99 covers the same family).
@@ -999,34 +994,10 @@ fn e3b_c6_f1_and_f4_as_they_are() {
     assert_eq!(accepted(&core, clock, 5_043, 1), Err(Overlap::Booking), "the receipt refuses what the device front allows");
     assert_eq!(accepted(&core, clock, 5_044, 1), Ok(()), "the record's front is the end plus four");
     assert!(!dev_open(&tx), "the device burst is closed");
-
-    // F4 (issue #99, mech:planned-state-read-as-actual): a finite burst abandoned by a short send leaves the record's chain joinable at its
-    // end `e`. A 10-sample piece booked there is accepted as a joined piece (front end + 4) and is then sent as a fresh closed short burst
-    // (the device burst is closed), whose front is the gap (15): a 4-sample `DropAndFlag` booking accepted at the joined front is dropped at
-    // dispatch.
-    let mut rig = switch_rig_with(vec![o::ramp(5, 2_000), o::ramp(6, 10), o::ramp(7, 4)], vec![FakeFault::ShortSend(0)]);
-    book(&mut rig, 1, 0, 10_000);
-    run(&mut rig, 0, 1);
-    assert_eq!(sends(&rig.device), [(500, true, false), (2, false, true)], "{:?}", rig.device.calls());
-    assert_eq!(dev_front(&rig.tx), Some(10_517), "the abandon's front: the cursor plus two plus the gap");
-    assert!(!dev_open(&rig.tx));
-    assert!(evs(&rig.events).is_empty(), "no event at the abandon");
-    book(&mut rig, 2, 1, 12_000);
-    assert!(evs(&rig.events).is_empty(), "the piece at e is accepted as a join of the abandoned burst");
-    let clock = rig.clock;
-    assert_eq!(accepted(&rig.core, clock, 12_013, 1), Err(Overlap::Booking));
-    assert_eq!(accepted(&rig.core, clock, 12_014, 1), Ok(()), "the record's front of the joined piece: its end plus four");
-    book(&mut rig, 3, 2, 12_014);
-    assert!(evs(&rig.events).is_empty(), "C is accepted at receipt");
-    let before = sends(&rig.device).len();
-    run(&mut rig, 1, 20);
-    assert_eq!(sends(&rig.device)[before..], [(10, true, true)], "B is a fresh standalone closed burst: {:?}", rig.device.calls());
-    assert_eq!(evs(&rig.events), ["radio.TIME_ERROR \"drop\""], "C is dropped at dispatch instead of refused at receipt");
-    assert_eq!(dev_front(&rig.tx), Some(12_025), "the standalone burst's front: its padded end plus the gap");
 }
 
 /// The events since the last call, as `kind outcome-or-reason`.
-fn evs(events: &EventCollector) -> Vec<String> {
+pub(super) fn evs(events: &EventCollector) -> Vec<String> {
     events
         .drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
         .into_iter()

@@ -15101,8 +15101,8 @@
     "id": "N47S5-140",
     "name": "rev 30 (S2): a surviving head of at most 32 samples keeps its join (the closing threshold of remove_head is zero)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "if c.closed_short() {",
-    "new": "if c.closed_short() && c.end - c.start <= 0 {",
+    "old": "if self.closed_short() {",
+    "new": "if self.closed_short() && self.end - self.start <= 0 {",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_a_short_head_left_alone_is_closed_and_takes_no_join"
@@ -15111,8 +15111,8 @@
     "id": "N47S5-141",
     "name": "rev 30 (S2): a surviving short head keeps its joined front, not its standalone one (remove_head does not set the front)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.front = predicted_front(&PACKETS, gap, c.start, Some(c.end - c.start), false).unwrap_or(c.front);",
-    "new": "let _ = c.end - c.start;",
+    "old": "self.front = predicted_front(&PACKETS, gap, self.start, Some(self.end - self.start), false).unwrap_or(self.front);",
+    "new": "let _ = self.end - self.start;",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_a_moved_untimed_head_goes_after_its_joined_pieces"
@@ -15141,7 +15141,7 @@
     "id": "N47S5-145",
     "name": "rev 31 (S2, Opus re-check): a piece left behind a head that leaves keeps its own front, as a standalone head (the last piece of 1–3 samples ends at start + 5)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.front = c.front.max(pieces);",
+    "old": "self.front = self.front.max(pieces);",
     "new": "let _ = pieces;",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -15151,7 +15151,7 @@
     "id": "N47S5-146",
     "name": "rev 31 (S2, Opus re-check): a chain whose head leaves with pieces behind it clears its join flag",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.join = false;\n                    let starts",
+    "old": "self.join = false; let starts",
     "new": "let starts",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -15171,21 +15171,21 @@
     "id": "N47S5-151",
     "name": "rev 32 (S4 neighbour, fix round 7): an abandon with no open burst does not end the repeat a switch joined at the cursor continues",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": ".unwrap_or_else(|| (self.with_held(|map| map.get(&cursor).is_some_and(|held| held.switch)), None));",
-    "new": ".unwrap_or_else(|| (false, None));",
+    "old": ".unwrap_or_else(|| (self.with_held(|map| map.get(&cursor).is_some_and(|held| held.switch)), None, Some(cursor)));",
+    "new": ".unwrap_or_else(|| (false, None, Some(cursor)));",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_s4_a_report_between_the_join_and_the_switch_s_open_cancels_it"
   },
   {
     "id": "N47S5-153",
-    "name": "rev 33, E2a-2b: a finite burst's abandon reaches the record (KL-39: it keeps its whole region and the pending switch of a repeat it has not started)",
+    "name": "rev 33, E2a-2b (#99): a finite burst's abandon reaches the record (KL-39: it keeps its whole region and the pending switch of a repeat it has not started; the end of its join)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "if !repeat { return 0; }",
-    "new": "let _ = repeat;",
+    "old": "if !repeat {",
+    "new": "if false && !repeat {",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
-    "filter": "txbook_a_finite_abandon_changes_nothing"
+    "filter": "txbook_a_finite_abandon_ends_its_chain"
   },
   {
     "id": "N47S5-154",
@@ -16060,8 +16060,8 @@
     "id": "E1-U13",
     "name": "E1: an abandon queues the Run end's halt (UR-26)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.with_book(|book| book.abandon(repeat, id, cursor, now, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))));",
-    "new": "self.with_book(|book| { let cancelled = book.abandon(repeat, id, cursor, now, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))); book.list.halt(ezsdr_radio::CancelReason::ProviderStop); cancelled });",
+    "old": "self.with_book(|book| book.abandon(repeat, id, cursor, now, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP)), finite_end.filter(|_| !self.core.is_lost())));",
+    "new": "self.with_book(|book| { let cancelled = book.abandon(repeat, id, cursor, now, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP)), finite_end.filter(|_| !self.core.is_lost())); book.list.halt(ezsdr_radio::CancelReason::ProviderStop); cancelled });",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "e1_q5_a_booking_waiting_when_the_repeat_is_abandoned_still_plays"
@@ -16611,8 +16611,8 @@
   "id": "E2A2B-13",
   "name": "UHD: an abandoned open booking is taken for a repeat whatever it is, so a finite abandon reaches the record (KL-39)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": ".map(|open| (open.booking.repeat, open.booking.settings.action()))",
-  "new": ".map(|open| (true, open.booking.settings.action()))",
+  "old": ".map(|open| (open.booking.repeat, open.booking.settings.action(), open.booking.record_len().map(|len| open.booking.k + len)))",
+  "new": ".map(|open| (true, open.booking.settings.action(), open.booking.record_len().map(|len| open.booking.k + len)))",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "e2a_kl39_a_finite_burst_abandoned_by_a_short_send_keeps_its_whole_region"
@@ -20267,5 +20267,175 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "run_capture_keeps_only_the_markers_of_the_bounds_it_expects"
+ },
+ {
+  "id": "N99-01",
+  "name": "#99: the chain an abandon ends may start at or after the abandoned end, so a chain booked before it is split at the abandoned end",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "c.start < e && e <= c.end && e < c.front",
+  "new": "e <= c.end && e < c.front",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p7"
+ },
+ {
+  "id": "N99-02",
+  "name": "#99: the abandoned booking's chain is found though it ends below the abandoned end (a one-sample piece the chain's last)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "c.start < e && e <= c.end && e < c.front",
+  "new": "c.start < e && e < c.front",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p1"
+ },
+ {
+  "id": "N99-03",
+  "name": "#99: the chain an abandon ends is found even when a Stop cut its front below the abandoned end (the stale chain is taken for the booking's)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "c.start < e && e <= c.end && e < c.front",
+  "new": "c.start < e && e <= c.end",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p6"
+ },
+ {
+  "id": "N99-04",
+  "name": "#99: an abandoned finite booking's chain keeps taking joins (the split keeps the join the abandon ends)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "let joinable = std::mem::replace(&mut c.join, false);",
+  "new": "let joinable = c.join;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p1"
+ },
+ {
+  "id": "N99-05",
+  "name": "#99: an abandon at the chain's end builds an empty rest chain behind it instead of only ending the join",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "if c.end == e { return; }",
+  "new": "if c.end == e && false { return; }",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p1"
+ },
+ {
+  "id": "N99-06",
+  "name": "#99: the abandoned piece's start stays a join point of the chain behind it",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "behind.retain(|&j| j != e);",
+  "new": "let _ = &behind;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p2"
+ },
+ {
+  "id": "N99-07",
+  "name": "#99: the abandoned head is fronted as a joined piece and an abandoned joined piece as a standalone head",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "Some(e - abandoned), abandoned != c.start)",
+  "new": "Some(e - abandoned), abandoned == c.start)",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p3"
+ },
+ {
+  "id": "N99-08",
+  "name": "#99: the abandoned part's front stays the whole chain's (the footprint is not set to the abandoned piece's end)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "c.front = predicted_front(&PACKETS, gap, abandoned, Some(e - abandoned), abandoned != c.start).unwrap_or(c.front);",
+  "new": "let _ = abandoned;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p3"
+ },
+ {
+  "id": "N99-09",
+  "name": "#99: the pieces behind the abandoned booking keep the joined front (no left-without-head framing)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "rest.left_without_head(gap);",
+  "new": "let _ = gap;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p2"
+ },
+ {
+  "id": "N99-10",
+  "name": "#99: the pieces behind the abandoned booking are forgotten (the rest chain is not kept)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.chains.push(rest);",
+  "new": "let _ = rest;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p2"
+ },
+ {
+  "id": "N99-11",
+  "name": "#99: the pieces behind the abandoned booking never take a join (a long piece alone behind it loses its join)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "front: c.front, join: joinable }",
+  "new": "front: c.front, join: false }",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "n99_p2"
+ },
+ {
+  "id": "N99-12",
+  "name": "#99, F1: a finite abandon rewrites the record a halt the owner has not read already ended",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "finite_end.filter(|_| !self.list.halted())",
+  "new": "finite_end",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_finite_abandon_after_a_halt"
+ },
+ {
+  "id": "N99-13",
+  "name": "#99: a finite abandon never reaches the record (TxBook::abandon drops the end)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.record.end_finite(e);",
+  "new": "let _ = e;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_finite_abandon_ends_its_chain"
+ },
+ {
+  "id": "N99-14",
+  "name": "#99, F1: the unread-halt test reads the bookings instead of the halts",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "matches!(arrival, Arrival::Halt(_))",
+  "new": "matches!(arrival, Arrival::Booking(_))",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_finite_abandon_after_a_halt"
+ },
+ {
+  "id": "N99-15",
+  "name": "#99: the end of an abandoned open booking is its start, not its end (the Provider passes k, not k + len)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": ".map(|len| open.booking.k + len)",
+  "new": ".map(|len| open.booking.k)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "n99_u1"
+ },
+ {
+  "id": "N99-16",
+  "name": "#99: an abandon with no open booking (the waiting device burst) passes no end, so the record is not written",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "None, Some(cursor)));",
+  "new": "None, None));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "n99_u6"
+ },
+ {
+  "id": "N99-17",
+  "name": "#99, F1: the Provider passes the abandon's end for a lost device, whose loss already ended every chain",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "finite_end.filter(|_| !self.core.is_lost())",
+  "new": "finite_end",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "n99_u7"
  }
 ]

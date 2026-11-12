@@ -876,11 +876,13 @@ impl Tx {
         if let (Some(cursor), Some(clock)) = (cursor, self.clock) {
             // An abandoned repeat ends in the record at the handed cursor, with no in-flight window (the device has nothing past it) (S4,
             // #80). A switch joined at the cursor but not yet opened continues the repeat it replaces.
-            let (repeat, id) = self
-                .with_book(|book| book.open.as_ref().map(|open| (open.booking.repeat, open.booking.settings.action())))
-                .unwrap_or_else(|| (self.with_held(|map| map.get(&cursor).is_some_and(|held| held.switch)), None));
+            // A finite booking ends its chain's join at its end in the same section (#99): the waiting device burst, with no open booking, ends at the
+            // cursor; a lost device ends nothing, as its loss already ended every chain.
+            let (repeat, id, finite_end) = self
+                .with_book(|book| book.open.as_ref().map(|open| (open.booking.repeat, open.booking.settings.action(), open.booking.record_len().map(|len| open.booking.k + len))))
+                .unwrap_or_else(|| (self.with_held(|map| map.get(&cursor).is_some_and(|held| held.switch)), None, Some(cursor)));
             let now = clock.at_or_after(self.core.now());
-            let cancelled = self.with_book(|book| book.abandon(repeat, id, cursor, now, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))));
+            let cancelled = self.with_book(|book| book.abandon(repeat, id, cursor, now, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP)), finite_end.filter(|_| !self.core.is_lost())));
             for _ in 0..cancelled {
                 self.report_cancelled_burst("UR-22: the repeat switch was cancelled with the repeat it replaces", ezsdr_radio::CancelReason::Stop);
             }
@@ -1307,6 +1309,7 @@ mod tests {
     mod e2b;
     mod e3;
     mod e3b;
+    mod n99;
     mod o1;
 
     fn held(clock: &super::Clock, k: i64, len: usize, policy: LatePolicy) -> Held {

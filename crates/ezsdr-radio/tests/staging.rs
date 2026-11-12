@@ -1522,7 +1522,7 @@ fn txbook_abandon_equals_a_stop_at_the_cursor_except_the_named_differences() {
         let pending_at = name.contains("pending S");
         for c in cursors {
             let mut book = TxBook { record: record.clone(), ..new_book() };
-            book.abandon(true, Some(ActionId(1)), c, c, abandon_bound(c));
+            book.abandon(true, Some(ActionId(1)), c, c, abandon_bound(c), None);
             let mut today = abandon_today(&record, pending_at.then_some(10), c);
             assert_eq!(book.record, today, "{name}, cursor {c}");
             assert_eq!(book.record.take_settled(), today.take_settled(), "{name}, cursor {c}: the settled switches");
@@ -1547,7 +1547,7 @@ fn txbook_abandon_keeps_a_later_booking_its_chain_playing_and_busy_end() {
         record.book(len.map(|len| (300 + len) * 200));
         let playing = if len.is_none() { b_repeat } else { PLAYING };
         let mut book = TxBook { record, playing: Some(playing), ..new_book() };
-        book.abandon(true, Some(ActionId(1)), 20, 20, abandon_bound(20));
+        book.abandon(true, Some(ActionId(1)), 20, 20, abandon_bound(20), None);
         assert_eq!(book.record.accept(300, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}: B's chain stays");
         assert_eq!(book.record.accept(24, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}: R's footprint is [0, 25)");
         assert_eq!(book.record.clone().accept(25, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "{case}: 25 is free");
@@ -1564,7 +1564,7 @@ fn txbook_abandon_keeps_a_later_booking_its_chain_playing_and_busy_end() {
     }
     // With no later booking, the value rule is capped at the abandon's bound (today's).
     let mut book = TxBook { record: stopped(), playing: Some(PLAYING), ..new_book() };
-    book.abandon(true, Some(ActionId(1)), 20, 20, abandon_bound(20));
+    book.abandon(true, Some(ActionId(1)), 20, 20, abandon_bound(20), None);
     assert_eq!(book.record.stageable(abandon_bound(20)), Ok(()));
     assert_eq!(book.record.stageable(abandon_bound(20) - 1), Err(Refusal::TxBusy { until: Until::At(abandon_bound(20)) }));
     assert_eq!(book.playing, None);
@@ -1578,7 +1578,7 @@ fn txbook_abandon_at_a_switch_boundary_extends_the_old_repeat_to_its_footprint()
     // boundary send was taken, so the cursor is past it (C2).
     let c = 10;
     let mut book = TxBook { record: switch_pending(), ..new_book() };
-    book.abandon(true, Some(ActionId(1)), c, c, abandon_bound(c));
+    book.abandon(true, Some(ActionId(1)), c, c, abandon_bound(c), None);
     assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)]);
     assert_eq!(book.record.region_move(11, Some(100), 0, ON_TIME, UNHANDED), Ok(11), "not moved");
     assert_eq!(book.record.accept(11, Some(100), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "refused at receipt");
@@ -1592,25 +1592,219 @@ fn txbook_abandon_sets_the_repeat_s_front_to_its_footprint_even_when_a_stop_cut_
     let mut record = repeat_at(0);
     record.halt(2, 2 + STOP_FRONT);
     let mut book = TxBook { record, ..new_book() };
-    book.abandon(true, Some(ActionId(1)), 10, 10, abandon_bound(10));
+    book.abandon(true, Some(ActionId(1)), 10, 10, abandon_bound(10), None);
     assert_eq!(book.record.accept(10 + STOP_FRONT - 1, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "R holds [0, c + 5)");
     assert_eq!(book.record.accept(10 + STOP_FRONT, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "the footprint ends at c + 5");
 }
 
 #[test]
-fn txbook_a_finite_abandon_changes_nothing() {
-    // P13 (KL-39, RM-15): a finite booking abandoned at its cursor keeps its whole region, and a switch pending on a repeat behind it is
-    // left as it is: the record, its settled switches and `playing` are unchanged.
+fn txbook_a_finite_abandon_ends_its_chain_and_changes_nothing_else() {
+    // P13 (KL-39, RM-15): a finite booking abandoned at its cursor keeps its whole region and ends its chain's join at its end; a switch pending on a
+    // repeat behind it is left as it is: the record's other chains, its settled switches and `playing` are unchanged. A repeat's abandon ignores the end.
     let mut record = armed();
     record.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     record.book(Some(40 * 200));
     record.accept(100, None, 0, ON_TIME, UNHANDED).unwrap();
     record.book(None);
     assert!(record.switch(ActionId(2), 120, 100, true, Carried::Sent).is_ok());
+    let mut ended = record.clone();
+    ended.end_finite(40);
+    assert_ne!(ended, record, "the end of the join is a write");
     let mut book = TxBook { record: record.clone(), playing: Some(PLAYING), ..new_book() };
-    book.abandon(false, Some(ActionId(5)), 20, 20, abandon_bound(20));
-    assert_eq!((&book.record, book.playing), (&record, Some(PLAYING)));
+    book.abandon(false, Some(ActionId(5)), 20, 20, abandon_bound(20), Some(40));
+    assert_eq!((&book.record, book.playing), (&ended, Some(PLAYING)));
     assert!(settled(&mut book.record).is_empty());
+    assert_eq!(book.record.accept(40, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "no booking at its end joins it");
+    assert_eq!(book.record.accept(44, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "its footprint ends at its end plus four");
+    // The Provider passes no end for a lost device: the abandon changes nothing.
+    let mut lost = TxBook { record: record.clone(), playing: Some(PLAYING), ..new_book() };
+    lost.abandon(false, Some(ActionId(5)), 20, 20, abandon_bound(20), None);
+    assert_eq!((&lost.record, lost.playing), (&record, Some(PLAYING)));
+}
+
+#[test]
+fn txbook_a_finite_abandon_after_a_halt_changes_nothing() {
+    // F1 (RM-16): a Stop or `Provider::stop` ended every chain the record held when it was received, in the section that put its halt on the list. An
+    // abandon the owner makes before it reads that halt (its send was in flight, or a report came first) leaves the record as the halt left it: a head of
+    // 100 and a piece of 10 behind it, a Stop at 50 with the bound 400 keeps the chain's front at the piece's 114.
+    let mut record = armed();
+    record.accept(0, Some(100), 0, ON_TIME, UNHANDED).unwrap();
+    record.book(Some(100 * 200));
+    record.accept(100, Some(10), 0, ON_TIME, UNHANDED).unwrap();
+    record.book(Some(110 * 200));
+    record.halt(50, 400);
+    assert_eq!(verdicts(&record, 100, 130), " ERR@100 ok@114", "after the Stop: the chain's front is the piece's");
+    let mut book = TxBook { record: record.clone(), ..new_book() };
+    book.list.halt(CancelReason::Stop);
+    book.abandon(false, Some(ActionId(5)), 60, 60, abandon_bound(60), Some(100));
+    assert_eq!(book.record, record, "a halt waits on the list: the abandon writes nothing");
+    // The same abandon with no halt on the list re-frames the piece (the front rises to its own: 110 + 15): the guard is the halt, not the record's shape.
+    let mut free = TxBook { record: record.clone(), ..new_book() };
+    free.abandon(false, Some(ActionId(5)), 60, 60, abandon_bound(60), Some(100));
+    assert_eq!(verdicts(&free.record, 100, 130), " ERR@100 ok@125");
+    // Once the owner has read the halt the guard is gone; a booking received after the Stop is then abandoned as any other.
+    assert!(matches!(book.read(), Some(Read::Halt { .. })));
+    assert!(!book.list.halted());
+    let mut after = TxBook { record: record.clone(), ..new_book() };
+    after.record.accept(500, Some(100), 0, ON_TIME, UNHANDED).unwrap();
+    after.record.book(Some(600 * 200));
+    assert_eq!(after.record.clone().accept(600, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "a booking received after the Stop takes a join at its end");
+    after.abandon(false, Some(ActionId(6)), 520, 520, abandon_bound(520), Some(600));
+    assert_eq!(after.record.clone().accept(600, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "its abandon, with no halt unread, ends its join");
+    assert_eq!(verdicts(&after.record, 100, 130), " ERR@100 ok@114", "and leaves the chain the Stop ended as it was");
+}
+
+/// The chain of `pieces` (start, length), each accepted and booked in order at receipt.
+fn chain_of(pieces: &[(i64, i64)]) -> Bookings {
+    let mut record = armed();
+    for &(start, len) in pieces {
+        record.accept(start, Some(len), 0, ON_TIME, UNHANDED).unwrap();
+        record.book(Some((start + len) * 200));
+    }
+    record
+}
+
+/// The verdicts of a one-sample booking at each start in `from..=to`, as runs: `ERR@a ok@b`.
+fn verdicts(record: &Bookings, from: i64, to: i64) -> String {
+    let mut runs = String::new();
+    let mut last = None;
+    for start in from..=to {
+        let ok = record.clone().accept(start, Some(1), 0, ON_TIME, UNHANDED).is_ok();
+        if last != Some(ok) {
+            runs += &format!(" {}@{start}", if ok { "ok" } else { "ERR" });
+            last = Some(ok);
+        }
+    }
+    runs
+}
+
+#[test]
+fn n99_p1_an_abandoned_finite_chain_takes_no_join_and_keeps_its_footprint() {
+    // A head of 40 abandoned at its end: a booking there no longer joins it (before: accepted), and its footprint is its end plus four (KL-39).
+    let mut record = chain_of(&[(0, 40)]);
+    assert!(record.clone().accept(40, Some(10), 0, ON_TIME, UNHANDED).is_ok(), "before: a booking at the end joins");
+    record.end_finite(40);
+    assert_eq!(verdicts(&record, 39, 60), " ERR@39 ok@44");
+    assert_eq!(record.clone().accept(40, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
+    // A piece joined at 40 and abandoned: the chain keeps both and takes no join at 50.
+    let mut record = chain_of(&[(0, 40), (40, 10)]);
+    record.end_finite(50);
+    assert_eq!(verdicts(&record, 49, 70), " ERR@49 ok@54");
+    // No chain holds the sample before `e`: the record is unchanged (a booking the owner never abandons, a repeat's end, an end past every chain's).
+    for e in [999, 42, 0, -5] {
+        let mut record = chain_of(&[(0, 40)]);
+        let before = record.clone();
+        record.end_finite(e);
+        assert_eq!(record, before, "end_finite({e})");
+    }
+}
+
+#[test]
+fn n99_p2_the_pieces_behind_the_abandoned_booking_are_a_chain_of_their_own() {
+    // Head 40, pieces 10 and 4 joined behind it; the head is abandoned: the pieces keep their regions as when a head leaves (RM-15): the front of the
+    // chain and each piece's own: 54 + 15 for the short last piece.
+    let mut record = chain_of(&[(0, 40), (40, 10), (50, 4)]);
+    record.end_finite(40);
+    assert_eq!(verdicts(&record, 40, 80), " ERR@40 ok@69");
+    // A single long piece behind it is a chain that still takes a join (RM-15: a booking at the end of a chain of more than 32 samples joins it).
+    let mut record = chain_of(&[(0, 40), (40, 100)]);
+    record.end_finite(40);
+    assert_eq!(record.clone().accept(140, Some(10), 0, ON_TIME, UNHANDED), Ok(()));
+    assert_eq!(verdicts(&record, 40, 150), " ERR@40 ok@140 ERR@141 ok@144", "the long piece joins at its start 140 and fronts at 144");
+    // A single short piece behind it is closed at its standalone front: 50 + 15.
+    let mut record = chain_of(&[(0, 40), (40, 10)]);
+    record.end_finite(40);
+    assert_eq!(verdicts(&record, 40, 80), " ERR@40 ok@65");
+    assert_eq!(record.clone().accept(50, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "no booking at its end joins it");
+    // The abandoned piece in the middle: the long piece behind it still takes a join, the pieces before it keep the chain.
+    let mut record = chain_of(&[(0, 40), (40, 10), (50, 100)]);
+    record.end_finite(50);
+    assert_eq!(record.clone().accept(150, Some(10), 0, ON_TIME, UNHANDED), Ok(()));
+    assert_eq!(record.clone().accept(50, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
+}
+
+#[test]
+fn n99_p3_the_abandoned_footprint_outlives_the_pieces_behind_it() {
+    // The pieces behind the abandoned booking leave later (a drop at dispatch): the abandoned footprint stays at its end plus four.
+    let mut record = chain_of(&[(0, 40), (40, 10)]);
+    record.end_finite(40);
+    record.drop_piece(40, Some(10));
+    assert_eq!(verdicts(&record, 40, 60), " ERR@40 ok@44");
+    // An abandoned joined piece keeps the joined front (its end + 4), not a standalone one (its end + 15).
+    let mut record = chain_of(&[(0, 40), (40, 10), (50, 4)]);
+    record.end_finite(50);
+    record.drop_piece(50, Some(4));
+    assert_eq!(verdicts(&record, 50, 70), " ERR@50 ok@54");
+}
+
+#[test]
+fn n99_p4_a_head_that_leaves_and_an_abandoned_one_leave_the_same_chain_behind_them() {
+    // One rule, two callers: from the abandoned footprint's end on, the verdicts after the head's drop at dispatch equal those after its abandon.
+    for pieces in [vec![(0, 40), (40, 10), (50, 4)], vec![(0, 40), (40, 100)], vec![(0, 40), (40, 10)], vec![(0, 40), (40, 10), (50, 100)], vec![(0, 40), (40, 1)]] {
+        let mut left = chain_of(&pieces);
+        left.drop_piece(0, Some(40));
+        let mut abandoned = chain_of(&pieces);
+        abandoned.end_finite(40);
+        assert_eq!(verdicts(&left, 44, 200), verdicts(&abandoned, 44, 200), "{pieces:?}");
+        assert_eq!(left.clone().accept(150, Some(10), 0, ON_TIME, UNHANDED), abandoned.clone().accept(150, Some(10), 0, ON_TIME, UNHANDED), "{pieces:?}: a join at 150");
+    }
+}
+
+#[test]
+fn n99_p5_a_receipt_s_prune_does_not_hide_the_abandoned_booking_s_chain() {
+    // F2: a receipt at 12 001 drops the join point 12 000 from the chain; the abandon of A (ends 12 000) still ends A's chain and frames B and C.
+    let mut record = chain_of(&[(10_000, 2_000), (12_000, 2_000), (14_000, 10)]);
+    record.prune(12_001);
+    record.end_finite(12_000);
+    assert_eq!(verdicts(&record, 11_990, 14_040), " ERR@11990 ok@14025");
+    assert_eq!(record.clone().accept(14_010, Some(4), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "C is not continued");
+    assert_eq!(record.clone().accept(12_000, Some(4), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
+}
+
+#[test]
+fn n99_p6_a_chain_a_stop_cut_is_not_the_abandoned_booking_s_chain() {
+    // F2: three pieces of 100 from 0 (end 300), a Stop at 50 with the bound 70 leaves the chain's front at 70, its end at 300 and no join. A booking of
+    // 220 from 80, received after the Stop, ends at 300 too: its abandon ends its own chain, and the stale one is not touched.
+    let mut record = chain_of(&[(0, 100), (100, 100), (200, 100)]);
+    record.halt(50, 70);
+    record.accept(80, Some(220), 0, ON_TIME, UNHANDED).unwrap();
+    record.book(Some(300 * 200));
+    assert_eq!(record.clone().accept(300, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "before the abandon the booking's chain takes a join");
+    let mut ended = record.clone();
+    ended.end_finite(300);
+    assert_eq!(ended.clone().accept(300, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the booking's chain takes no join");
+    assert_eq!(verdicts(&ended, 0, 79), verdicts(&record, 0, 79), "the stale chain is as it was");
+}
+
+#[test]
+fn n99_p7_a_booking_before_the_abandoned_one_does_not_hold_its_chain() {
+    // A chain booked at 5 000 before the abandoned one: the abandon of the booking ending at 40 does not touch it.
+    let mut record = chain_of(&[(5_000, 100)]);
+    record.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
+    record.book(Some(40 * 200));
+    let mut ended = record.clone();
+    ended.end_finite(40);
+    assert_eq!(ended.clone().accept(5_100, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "the chain at 5 000 still takes its join");
+    assert_eq!(ended.clone().accept(40, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
+    assert_eq!(verdicts(&ended, 44, 4_900), " ok@44", "nothing between the two chains is held: the abandon split no chain at 40");
+}
+
+#[test]
+fn n99_p8_successive_abandons_leave_each_footprint_and_the_last_piece_alone_moves_or_leaves() {
+    // A (40), B (100) and C (10) joined; A is abandoned, then B (whose chain is the one A's abandon left behind it): A and B keep their fronts (44 and 144), and
+    // C, a chain head of its own, is the only booking a dispatch move or drop changes (a joined piece that is not a head is refused, D24).
+    let mut record = chain_of(&[(0, 40), (40, 100), (140, 10)]);
+    assert_eq!(record.clone().move_untimed(140, 140, Some(10)), None, "joined behind B, C is not a head");
+    record.end_finite(40);
+    record.end_finite(140);
+    assert_eq!(verdicts(&record, 0, 200), " ERR@0 ok@165", "A's and B's footprints end at 44 and 144; C's own front is 140 + 10 + 15");
+    assert_eq!(record.clone().accept(140, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "no booking at B's end joins it");
+    let mut dropped = record.clone();
+    dropped.drop_piece(140, Some(10));
+    assert_eq!(verdicts(&dropped, 0, 200), " ERR@0 ok@144", "C leaves; A's and B's footprints stay");
+    let mut moved = record.clone();
+    assert_eq!(moved.move_untimed(140, 140, Some(10)), Some(144), "C moves to the first sample past the footprints");
+    assert_eq!(verdicts(&moved, 0, 200), " ERR@0 ok@169");
 }
 
 #[test]
@@ -2599,7 +2793,7 @@ fn c2_txbook_an_abandon_that_leaves_the_switch_waiting_ends_the_playing_repeat()
     for id in [Some(ActionId(2)), None] {
         let record = switch_carried(Carried::Sent);
         let mut book = TxBook { record, playing: Some(Playing { id: ActionId(2), origin: 100, period: 10, started: true }), ..new_book() };
-        book.abandon(true, id, 150, 50, abandon_bound(150));
+        book.abandon(true, id, 150, 50, abandon_bound(150), None);
         assert_eq!(settled(&mut book.record), [], "{id:?}: the switch waits");
         assert_eq!(book.playing, None, "{id:?}: the repeat is over");
     }

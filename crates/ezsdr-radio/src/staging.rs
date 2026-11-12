@@ -139,6 +139,22 @@ impl Chain {
     fn closed_short(&self) -> bool {
         self.joined.is_empty() && self.short_head()
     }
+
+    /// The chain once its head has left (a refused configure, a drop at dispatch, an abandon): `start` is the first piece's. A surviving head of at
+    /// most 32 samples with no piece behind it is one closed device burst, so no later booking joins it (S2, UR-23); pieces left behind keep their
+    /// regions: the front stays, and each piece's own front is kept as well.
+    fn left_without_head(&mut self, gap: Option<i64>) {
+        if self.closed_short() {
+            self.join = false;
+            self.front = predicted_front(&PACKETS, gap, self.start, Some(self.end - self.start), false).unwrap_or(self.front);
+        } else if !self.joined.is_empty() {
+            self.join = false;
+            let starts = std::iter::once(self.start).chain(self.joined.iter().copied());
+            let ends = self.joined.iter().copied().chain(std::iter::once(self.end));
+            let pieces = starts.zip(ends).filter_map(|(s, e)| predicted_front(&PACKETS, gap, s, Some(e - s), false)).max().unwrap_or(self.front);
+            self.front = self.front.max(pieces);
+        }
+    }
 }
 
 /// What became of the send that carries the sample at a pending switch's boundary, the first of its own booking (RM-37, UR-38).
@@ -324,6 +340,11 @@ impl<P> TxList<P> {
             Arrival::Booking(booking) => Read::Booking(booking),
             Arrival::Halt(reason) => Read::Halt { reason, cancelled: std::mem::take(&mut self.held) },
         })
+    }
+
+    /// Whether a halt waits to be read.
+    pub fn halted(&self) -> bool {
+        self.unread.iter().any(|arrival| matches!(arrival, Arrival::Halt(_)))
     }
 
     /// Whether a receipt waits to be read.
@@ -935,11 +956,17 @@ impl<P: Booked, T: Copy> TxBook<P, T> {
     }
 
     /// UR-22, RM-37: the owner abandons the open booking `id` at the handed cursor `cursor_k`, device time being the sample `now_k`
-    /// ([`Bookings::abandon`], `bound` the root tick of `cursor_k + STOP_FRONT`). Only a `repeat` reaches the record: a finite booking keeps its whole region (RM-15). The playing repeat
+    /// ([`Bookings::abandon`], `bound` the root tick of `cursor_k + STOP_FRONT`). A `repeat` reaches the record through [`Bookings::abandon`]; a finite booking
+    /// keeps its whole region and ends its chain's join there ([`Bookings::end_finite`] at `finite_end`, the end of the abandoned booking), unless a halt waits in
+    /// the list: a Stop or `Provider::stop` the record already holds ended every chain it had (RM-16), and the Provider passes `None` for a lost device, whose
+    /// loss did the same, so the abandon changes nothing then. The playing repeat
     /// stops being one only when it is the abandoned booking or a switch the abandon settled; each switch it cancelled goes through
     /// [`TxBook::cancel_switch`]. Returns the number of switch payloads removed, each of which the Provider reports with one note.
-    pub fn abandon(&mut self, repeat: bool, id: Option<ActionId>, cursor_k: i64, now_k: i64, bound: i64) -> usize {
+    pub fn abandon(&mut self, repeat: bool, id: Option<ActionId>, cursor_k: i64, now_k: i64, bound: i64, finite_end: Option<i64>) -> usize {
         if !repeat {
+            if let Some(e) = finite_end.filter(|_| !self.list.halted()) {
+                self.record.end_finite(e);
+            }
             return 0;
         }
         let settled = self.record.abandon(cursor_k, now_k, bound);
@@ -1103,6 +1130,28 @@ impl Bookings {
     /// `join` ends at `e` and `now` is at or before `join_by(e)`.
     pub fn continuation_open(&self, e: i64, now: i64, join_by: impl Fn(i64) -> i64) -> bool {
         self.chains.iter().any(|c| c.join && ((c.joined.is_empty() && c.start == e) || c.joined.contains(&e) || (c.end == e && now <= join_by(e))))
+    }
+
+    /// RM-15, UR-22: the owner abandons the finite booking that ends at `e`. The chain that holds its last sample `e - 1` takes no join from now on and keeps
+    /// the abandoned piece's footprint (KL-39); the pieces joined behind it, accepted before the abandon was known, are a chain of their own from `e`, by the
+    /// rule for a head that leaves ([`Chain::left_without_head`]). The chain is found by the samples it holds below its front, not by a join point (a receipt's
+    /// [`Bookings::prune`] drops those) or its end: a chain a Stop cut has its front at the cut, below the samples of a booking received after it. No such
+    /// chain: the record is unchanged.
+    pub fn end_finite(&mut self, e: i64) {
+        let gap = self.gap;
+        let Some(c) = self.chains.iter_mut().find(|c| c.start < e && e <= c.end && e < c.front) else { return };
+        let joinable = std::mem::replace(&mut c.join, false);
+        if c.end == e {
+            return;
+        }
+        let mut behind = c.joined.split_off(c.joined.partition_point(|&j| j < e));
+        behind.retain(|&j| j != e);
+        let abandoned = c.last();
+        let mut rest = Chain { start: e, end: c.end, joined: behind, front: c.front, join: joinable };
+        c.end = e;
+        c.front = predicted_front(&PACKETS, gap, abandoned, Some(e - abandoned), abandoned != c.start).unwrap_or(c.front);
+        rest.left_without_head(gap);
+        self.chains.push(rest);
     }
 
     /// RM-16 (the owner's close at `e`): the chain that ends at `e` with `join` no longer takes a booking, so one received later is refused by [`Bookings::accept`]. Returns its front.
@@ -1464,16 +1513,7 @@ impl Bookings {
                 let c = &mut self.chains[i];
                 c.start = old + len;
                 c.joined.retain(|&j| j > c.start);
-                if c.closed_short() {
-                    c.join = false;
-                    c.front = predicted_front(&PACKETS, gap, c.start, Some(c.end - c.start), false).unwrap_or(c.front);
-                } else if !c.joined.is_empty() {
-                    c.join = false;
-                    let starts = std::iter::once(c.start).chain(c.joined.iter().copied());
-                    let ends = c.joined.iter().copied().chain(std::iter::once(c.end));
-                    let pieces = starts.zip(ends).filter_map(|(s, e)| predicted_front(&PACKETS, gap, s, Some(e - s), false)).max().unwrap_or(c.front);
-                    c.front = c.front.max(pieces);
-                }
+                c.left_without_head(gap);
             }
             _ => {
                 self.chains.remove(i);
