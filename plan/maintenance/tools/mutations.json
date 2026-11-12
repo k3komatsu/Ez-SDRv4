@@ -10639,8 +10639,8 @@
        "id": "P1193",
        "name": "a held owner claim defers streamer reopen to an idle turn (D9b-1a)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "let Some(claim) = streams.claim_owner(key) else { return false };",
-       "new": "let Some(claim) = streams.claim_owner(key) else { return true };",
+       "old": "let Some(claim) = streams.claim_owner(key) else { return false }; (claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured)",
+       "new": "let Some(claim) = streams.claim_owner(key) else { return true }; (claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured)",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_22_uncertain_reopen_waits_for_owner_claim_and_stops_on_stop_or_loss"
@@ -10779,8 +10779,8 @@
        "id": "P1209",
        "name": "a failed reopen finishes the in-flight burst record (D9b-1a fix 4)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "let cancelled = streams.stream_mut(key).book.end_open().is_some(); if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) { lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect(\"a record\")); }",
-       "new": "let cancelled = streams.stream_mut(key).book.end_open().is_some(); let _ = self.tracker.as_mut();",
+       "old": "if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) { lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect(\"a record\")); } streams.finished(key);",
+       "new": "let _ = self.tracker.as_mut(); streams.finished(key);",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
@@ -11049,8 +11049,8 @@
         "id": "P1303",
         "name": "Stop during a claimed reopen clears pending recovery without refusal (L2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "            } else {\n                self.chain.provider_stop();\n            }\n            streams.give_back(claim);",
-        "new": "            } else { }\n            streams.give_back(claim);",
+        "old": "Reopen::Interrupted => self.chain.provider_stop(), } streams.give_back(claim);",
+        "new": "Reopen::Interrupted => {} } streams.give_back(claim);",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_stop_and_loss_during_owner_recovery_release_the_claim"
@@ -11059,8 +11059,8 @@
         "id": "P1304",
         "name": "loss during a claimed reopen ends recovery without further device work (L2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "            } else if core.is_lost() {\n                self.chain.lose();\n            }",
-        "new": "            } else if core.is_lost() {}",
+        "old": "Reopen::Interrupted if core.is_lost() => self.chain.lose(),",
+        "new": "Reopen::Interrupted if core.is_lost() => {}",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_stop_and_loss_during_owner_recovery_release_the_claim"
@@ -11069,8 +11069,8 @@
         "id": "P1305",
         "name": "the TX owner returns its claim after interrupted recovery (L2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "            } else {\n                self.chain.provider_stop();\n            }\n            streams.give_back(claim);\n        }",
-        "new": "            } else {\n                self.chain.provider_stop();\n            }\n        }",
+        "old": "Reopen::Interrupted => self.chain.provider_stop(), } streams.give_back(claim); }",
+        "new": "Reopen::Interrupted => self.chain.provider_stop(), } }",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_stop_and_loss_during_owner_recovery_release_the_claim"
@@ -14042,9 +14042,9 @@
   {
     "id": "N47S4-13b",
     "name": "a refused burst is removed from its stream's Bookings, end included (P4, F9, C6)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "lock(&core.streams).stream_mut(key).book.drop_piece(held.k, held.record_len());",
-    "new": "lock(&core.streams).stream_mut(key).book.record = ezsdr_radio::staging::Bookings::unarmed();",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.record.drop_piece(k, len);",
+    "new": "self.record = Bookings::unarmed();",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_a_refused_burst_stays_counted_until_its_booked_end"
@@ -14143,8 +14143,8 @@
     "id": "N47S4-15b",
     "name": "the late policy decides the burst before the configure, not after it (S8)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "Values::Configure(generation) => return self.configure_turn(clock, held, generation),",
-    "new": "Values::Configure(generation) => { let Some(held) = self.dispatch_start(clock, held) else { return true }; return self.configure_turn(clock, held, generation); }",
+    "old": "Values::Configure(generation) => return self.configure_turn(clock, k, generation),",
+    "new": "Values::Configure(generation) => { let held = self.take_held(k).expect(\"the first key\"); let Some(held) = self.dispatch_start(clock, held) else { return true }; let k = held.k; self.hold(held); return self.configure_turn(clock, k, generation); }",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_25_a_slow_configure_makes_a_burst_late_by_its_policy"
@@ -14900,9 +14900,9 @@
   {
     "id": "N47S5-44",
     "name": "5d-U: a failed reopen that ends the repeat keeps the pending switch (the F8 cancellation is removed)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "streams.stream_mut(key).book.clock_ended();",
-    "new": "streams.stream_mut(key);",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.record.cancel_switch();",
+    "new": "let _ = &self.record;",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_22_f8_recovery_that_ends_the_repeat_cancels_the_pending_switch"
@@ -15062,8 +15062,8 @@
   {
     "id": "N47S5-89",
     "name": "5i (F11): a burst the configure turn refuses stays booked (the drop of its span in the refused branch is removed)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "lock(&core.streams).stream_mut(key).book.drop_piece(held.k, held.record_len());",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.record.drop_piece(k, len);",
     "new": "",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -16810,8 +16810,8 @@
   "id": "E2A2A-05",
   "name": "E2a-2a: a second send is issued while one is in flight",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "assert!(open.inflight.is_none(), \"a send in flight is issued again\");",
-  "new": "let _ = open.inflight.is_none();",
+  "old": "if let Some((_, flying)) = self.ops.inflight { panic!(\"an operation is in flight: a {} in flight is issued again\", flying.name().to_lowercase()); }",
+  "new": "",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "txbook_issue_twice_panics"
@@ -16820,8 +16820,8 @@
   "id": "E2A2A-06",
   "name": "E2a-2a: a send is completed twice",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "let send = self.open.as_mut().and_then(|open| open.inflight.take()).expect(\"no send in flight to complete\");",
-  "new": "let send = self.open.as_mut().and_then(|open| open.inflight.take()).unwrap_or(TxSend { count: 0, device_count: 0, ends: false });",
+  "old": "let (flying, op) = self.ops.inflight.unwrap_or_else(|| panic!(\"no operation in flight: no {} in flight to complete\", wanted.to_lowercase()));",
+  "new": "let (flying, op) = self.ops.inflight.unwrap_or((id, TxOp::Send(TxSend { count: 0, device_count: 0, ends: false })));",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "txbook_complete_without_issue_panics"
@@ -16840,8 +16840,8 @@
   "id": "E2A2A-08",
   "name": "E2a-2a: ending the open booking with no outcome also clears the playing repeat",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "pub fn end_open(&mut self) -> Option<P> { self.open.take().map(|open| open.booking) }",
-  "new": "pub fn end_open(&mut self) -> Option<P> { self.playing = None; self.open.take().map(|open| open.booking) }",
+  "old": "assert!(self.ops.inflight.is_none(), \"an open booking is ended with an operation in flight\"); self.open.take().map(|open| open.booking)",
+  "new": "assert!(self.ops.inflight.is_none(), \"an open booking is ended with an operation in flight\"); self.playing = None; self.open.take().map(|open| open.booking)",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "txbook_take_untake_and_end_open_keep_one_open_booking_and_change_no_record"
@@ -16870,7 +16870,7 @@
   "id": "E2A2A-M1",
   "name": "E2a-2a: the Mock does not complete its block, so the next block is issued with one in flight (MR-15)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "self.tx[k].book.complete(Outcome::Accepted(block));",
+  "old": "self.tx[k].book.complete(id, Outcome::Accepted(block));",
   "new": "",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
@@ -17050,7 +17050,7 @@
   "id": "E2A3-04",
   "name": "D3: any booking's issue starts the playing repeat, not only its own",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": ".filter(|playing| id == Some(playing.id)) { playing.started = true;",
+  "old": ".filter(|playing| booking == Some(playing.id)) { playing.started = true;",
   "new": ".filter(|_| true) { playing.started = true;",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
@@ -17973,5 +17973,223 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_16_a_uhd_control_panic_under_a_continuing_policy"
-  }
+  },
+ {
+  "id": "E2B-01",
+  "name": "E2b: the configure takes its booking out of the held ones (the book no longer holds the configuring booking)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "assert!(self.list.held.contains_key(&k), \"the booking to configure is held\"); self.start(TxOp::Configure { k, len })",
+  "new": "let _ = self.list.held.remove(&k); self.start(TxOp::Configure { k, len })",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_configure_keeps_its_booking_held"
+ },
+ {
+  "id": "E2B-02",
+  "name": "E2b: a configure counts as the repeat's first issue (UR-38)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.start(TxOp::Configure { k, len })",
+  "new": "{ if let Some(playing) = self.playing.as_mut() { playing.started = true; } self.start(TxOp::Configure { k, len }) }",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_configure_keeps_its_booking_held"
+ },
+ {
+  "id": "E2B-03",
+  "name": "E2b: a configure is issued while a send is in flight",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.start(TxOp::Configure { k, len })",
+  "new": "{ let id = OpId(self.ops.next); self.ops.next += 1; self.ops.inflight = Some((id, TxOp::Configure { k, len })); id }",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_issue_configure_with_a_send_in_flight_panics"
+ },
+ {
+  "id": "E2B-04",
+  "name": "E2b: a send is issued while a configure or a reopen is in flight (only a send in flight is checked)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "let op = self.start(TxOp::Send(send));",
+  "new": "let op = { if matches!(self.ops.inflight, Some((_, TxOp::Send(_)))) { panic!(\"a send in flight is issued again\"); } let id = OpId(self.ops.next); self.ops.next += 1; self.ops.inflight = Some((id, TxOp::Send(send))); id };",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_issue_with_a_configure_in_flight_panics"
+ },
+ {
+  "id": "E2B-05",
+  "name": "E2b: a configure that succeeded takes its booking out of the held ones",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "if configured { return None; }",
+  "new": "if configured { self.list.held.remove(&k); return None; }",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_configured_changes_nothing_and_refused_takes_the_booking_and_its_region"
+ },
+ {
+  "id": "E2B-06",
+  "name": "E2b: a refused configure leaves its booking held and its region booked",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "if configured { return None; }",
+  "new": "if true { return None; }",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_configured_changes_nothing_and_refused_takes_the_booking_and_its_region"
+ },
+ {
+  "id": "E2B-07",
+  "name": "E2b: a configure completes with the result of an operation of another kind",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "|op| if let TxOp::Configure { k, len } = op { Some((k, len)) } else { None }",
+  "new": "|op| if let TxOp::Configure { k, len } = op { Some((k, len)) } else { Some((0, None)) }",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_complete_configure_with_a_send_in_flight_panics"
+ },
+ {
+  "id": "E2B-08",
+  "name": "E2b: an interrupted reopen ends the open booking as a failed one does",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "if outcome != Reopen::Failed {",
+  "new": "if outcome == Reopen::Reopened {",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_reopen_that_succeeds_or_is_interrupted_changes_nothing"
+ },
+ {
+  "id": "E2B-09",
+  "name": "E2b: a failed reopen keeps the open booking",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "let open = self.open.take().map(|open| open.booking);",
+  "new": "let open = None;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_failed_reopen_ends_the_open_booking_and_the_pending_switch"
+ },
+ {
+  "id": "E2B-10",
+  "name": "E2b: the configure is issued before the stream claim is known, so a refused claim leaves it in flight",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let Some(claim) = streams.claim_owner(key) else { return false }; let book = &mut streams.stream_mut(key).book;",
+  "new": "let early = streams.stream_mut(key).book.issue_configure(k, None); let Some(claim) = streams.claim_owner(key) else { return false }; let book = &mut streams.stream_mut(key).book;",
+  "old2": "(claim, book.issue_configure(k, len), settings)",
+  "new2": "(claim, early, settings)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "e2b_c1_a_configure_waits_for_the_stream_claim"
+ },
+ {
+  "id": "E2B-11",
+  "name": "E2b: the reopen reads the loss before it takes the lock for its result, so a loss between them is lost",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let mut streams = lock(&core.streams); let outcome = if result.is_ok() { streams.record_configured(key, if core.is_lost() { None } else { configured });",
+  "new": "let lost = core.is_lost(); let mut streams = lock(&core.streams); let outcome = if result.is_ok() { streams.record_configured(key, if lost { None } else { configured });",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "e2b_c9a_a_loss_just_before_the_reopen_s_result_section_leaves_the_mark_cleared"
+ },
+ {
+  "id": "E2B-12",
+  "name": "E2b: a device burst starts without the check that its generation is configured",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "debug_assert!(!device_sob || open.booking.settings.generation().is_none_or(|wanted| configured == Some(wanted)) || self.core.is_lost(), \"a device burst starts only with the values of its generation configured (UR-26)\");",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "e2b_r1_a_first_send_of_a_generation_the_device_does_not_hold_panics_in_the_test_build"
+ },
+ {
+  "id": "E2B-13",
+  "name": "E2b: a configure that fails because the device was lost keeps its booking held",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "book.complete_configure(id, result.is_ok());",
+  "new": "book.complete_configure(id, result.is_ok() || core.is_lost());",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "e2b_c4_a_loss_around_the_configure"
+ },
+ {
+  "id": "E2B-14",
+  "name": "E2b: the configure reads the loss before it takes the lock for the mark, so a loss between them is lost",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let mut streams = lock(&core.streams); match &result { Ok(()) if !core.is_lost() => streams.record_configured(key, Some(generation)),",
+  "new": "let lost = core.is_lost(); let mut streams = lock(&core.streams); match &result { Ok(()) if !lost => streams.record_configured(key, Some(generation)),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "e2b_c9b_a_loss_just_before_the_configure_s_mark_section_leaves_the_mark_cleared"
+ },
+ {
+  "id": "E2B-15",
+  "name": "E2b: a completion is not checked against the id of the operation in flight",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "assert!(flying == id, \"not the operation in flight\");",
+  "new": "let _ = flying == id;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_completion_names_the_operation_in_flight"
+ },
+ {
+  "id": "E2B-16",
+  "name": "E2b: the refused configure is applied to the book in the mark section, before the claim is given back",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "core.probe(\"tx_configure_before_mark\", None);",
+  "new": "core.probe(\"tx_configure_before_mark\", None); let refused;",
+  "old2": "streams.give_back(claim); } let refused = lock(&core.streams).stream_mut(key).book.complete_configure(id, result.is_ok());",
+  "new2": "refused = streams.stream_mut(key).book.complete_configure(id, result.is_ok()); streams.give_back(claim); }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "e2b_c8_a_receipt_between_a_refused_configure_s_mark_and_its_drop_is_refused"
+ },
+ {
+  "id": "E2B-17",
+  "name": "E2b: every issue returns the same id (the counter is not advanced)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "let id = OpId(self.ops.next); self.ops.next += 1;",
+  "new": "let id = OpId(self.ops.next);",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_completion_names_the_operation_in_flight"
+ },
+ {
+  "id": "E2B-18",
+  "name": "E2b: an open booking is ended while an operation is in flight",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "assert!(self.ops.inflight.is_none(), \"an open booking is ended with an operation in flight\");",
+  "new": "let _ = self.ops.inflight.is_none();",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_end_open_with_an_operation_in_flight_panics"
+ },
+ {
+  "id": "E2B-19",
+  "name": "E2b: the failed reopen reads the loss before it takes the lock for its result",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let mut streams = lock(&core.streams); let outcome = if result.is_ok() {",
+  "new": "let lost = core.is_lost(); let mut streams = lock(&core.streams); let outcome = if result.is_ok() {",
+  "old2": "} else if !core.is_lost() && streams.stop.is_none() { Reopen::Failed }",
+  "new2": "} else if !lost && streams.stop.is_none() { Reopen::Failed }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "e2b_c9c_a_loss_just_before_a_failed_reopen_s_result_section_ends_no_clock"
+ },
+ {
+  "id": "E2B-20",
+  "name": "E2b: the reopen is issued before the stop, loss and claim checks, so a refused claim leaves it in flight",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let mut streams = lock(&core.streams); if streams.stop.is_some() || core.is_lost() {",
+  "new": "let mut streams = lock(&core.streams); let early = streams.stream_mut(key).book.issue_reopen(); if streams.stop.is_some() || core.is_lost() {",
+  "old2": "(claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured)",
+  "new2": "(claim, early, streams.stream(key).configured)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_uncertain_reopen_waits_for_owner_claim_and_stops_on_stop_or_loss"
+ },
+ {
+  "id": "E2B-21",
+  "name": "E2b: a booking is taken while an operation is in flight",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "assert!(self.ops.inflight.is_none(), \"a booking is taken with an operation in flight\");",
+  "new": "let _ = self.ops.inflight.is_none();",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_take_with_an_operation_in_flight_panics"
+ }
 ]

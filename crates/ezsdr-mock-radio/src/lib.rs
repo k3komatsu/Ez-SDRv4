@@ -1927,8 +1927,8 @@ impl MockRadio {
             progressed = true;
             // MR-15: the block is the device's whole result; the book advances the burst, and its last block ends it.
             let block = i64::from(len);
-            self.tx[k].book.issue(TxSend { count: block, device_count: block, ends });
-            self.tx[k].book.complete(Outcome::Accepted(block));
+            let id = self.tx[k].book.issue(TxSend { count: block, device_count: block, ends });
+            self.tx[k].book.complete(id, Outcome::Accepted(block));
             if ends {
                 self.tx[k].device.close();
             }

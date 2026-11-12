@@ -61,6 +61,7 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> Locked<'_, T> {
     let address = std::ptr::from_ref(m) as usize;
     #[cfg(test)]
     {
+        super::test_support::before_lock(address);
         super::test_support::note_lock(address);
         super::test_support::entered_lock(address);
     }

@@ -6,8 +6,8 @@ use ezsdr_kernel::event::ActionId;
 use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_radio::CancelReason;
 use ezsdr_radio::staging::{
-    Booked, Bookings, Outcome, Overlap, Playing, Read, Refusal, STOP_FRONT, Settle, Settled, Staging, Started, SwitchAccepted, SwitchOutcome, SwitchRefusal, TxBook, TxList, TxSend, Until,
-    closed_short_gap, ordinary_k, repeat_boundary, stop_bound, stop_fits,
+    Booked, Bookings, OpId, Outcome, Overlap, Playing, Read, Refusal, Reopen, STOP_FRONT, Settle, Settled, Staging, Started, SwitchAccepted, SwitchOutcome, SwitchRefusal, TxBook, TxList, TxSend,
+    Until, closed_short_gap, ordinary_k, repeat_boundary, stop_bound, stop_fits,
 };
 
 fn key(name: &str) -> Key {
@@ -1628,8 +1628,8 @@ fn txbook_halt_cancels_an_open_booking_that_issued_nothing_and_keeps_one_that_di
     for (case, sent) in [("nothing issued", false), ("a send completed", true)] {
         let mut book = open_book();
         if sent {
-            book.issue(TxSend { count: 10, device_count: 10, ends: false });
-            assert_eq!(book.complete(Outcome::Accepted(10)), Settle::Sent);
+            let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
+            assert_eq!(book.complete(id, Outcome::Accepted(10)), Settle::Sent);
         }
         book.list.held.insert(300, pl(9));
         book.list.halt(CancelReason::Stop);
@@ -1675,24 +1675,6 @@ fn txbook_dispatched_verdicts_equal_the_record_calls() {
     assert_eq!(book.record, manual, "drop");
 }
 
-#[test]
-fn txbook_clock_ended_cancels_the_pending_switch_and_configure_refused_drops_the_piece() {
-    let mut repeat = armed();
-    repeat.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    repeat.book(None);
-    repeat.switch(ActionId(2), 10, 0, true).unwrap();
-    let mut book = TxBook { record: repeat, ..new_book() };
-    book.clock_ended();
-    assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "W7: the pending switch is cancelled");
-    let mut book = new_book();
-    book.record.arm(GAP_1M);
-    book.record.accept(100, Some(10), 0, ON_TIME, UNHANDED).unwrap();
-    book.record.book(Some(110 * 200));
-    assert_eq!(book.record.accept(100, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking));
-    book.drop_piece(100, Some(10));
-    assert_eq!(book.record.accept(100, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "W6: the refused configure's region is gone");
-}
-
 /// A book whose record holds a repeat with a pending switch, `playing` set, and booking 7 open at sample 100.
 fn open_book() -> TxBook<Pl> {
     let mut record = armed();
@@ -1702,6 +1684,255 @@ fn open_book() -> TxBook<Pl> {
     let mut book = TxBook { record, playing: Some(PLAYING), ..new_book() };
     book.take(pl(7), 100);
     book
+}
+
+const SEND: TxSend = TxSend { count: 10, device_count: 10, ends: false };
+
+/// An open book (`open_book`) that also holds bookings 9 at sample 300 and 10 at sample 400.
+fn busy_book() -> TxBook<Pl> {
+    let mut book = open_book();
+    book.list.held.insert(300, pl(9));
+    book.list.held.insert(400, pl(10));
+    book
+}
+
+/// What a completion must leave alone: the record, the held bookings, the open booking and `playing`.
+type Shape = (Bookings, BTreeMap<i64, Pl>, Option<(Pl, i64, bool)>, Option<Playing>);
+
+fn shape(book: &TxBook<Pl>) -> Shape {
+    (book.record.clone(), book.list.held.clone(), book.open.as_ref().map(|open| (open.booking, open.next, open.first)), book.playing)
+}
+
+fn panic_message(f: impl FnOnce()) -> String {
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err("it panics");
+    error.downcast_ref::<String>().cloned().or_else(|| error.downcast_ref::<&str>().map(|text| text.to_string())).unwrap_or_default()
+}
+
+#[test]
+fn txbook_a_configure_keeps_its_booking_held() {
+    // E2b P1: the booking under configure stays in the book, and the issue changes nothing else: not `playing.started`, not the record.
+    let mut book = TxBook { playing: Some(Playing { started: false, ..PLAYING }), ..busy_book() };
+    book.list.book(pl(5));
+    let before = shape(&book);
+    book.issue_configure(300, Some(10));
+    assert_eq!(shape(&book), before);
+    assert!(book.list.unread() && matches!(book.list.read(), Some(Read::Booking(booking)) if booking == pl(5)), "the receipts wait unread");
+    let mut repeat = TxBook { playing: Some(Playing { started: false, ..PLAYING }), ..new_book() };
+    repeat.list.held.insert(300, Pl { n: 9, id: Some(ActionId(1)), switch: false });
+    repeat.issue_configure(300, None);
+    assert_eq!(repeat.playing.map(|playing| playing.started), Some(false), "a configure is not the repeat's first issue (UR-38)");
+}
+
+#[test]
+#[should_panic(expected = "an operation is in flight")]
+fn txbook_issue_with_a_configure_in_flight_panics() {
+    let mut book = busy_book();
+    book.issue_configure(300, Some(10));
+    book.issue(SEND);
+}
+
+#[test]
+#[should_panic(expected = "an operation is in flight")]
+fn txbook_issue_configure_with_a_send_in_flight_panics() {
+    let mut book = busy_book();
+    book.issue(SEND);
+    book.issue_configure(300, Some(10));
+}
+
+#[test]
+#[should_panic(expected = "an operation is in flight")]
+fn txbook_issue_reopen_with_a_configure_in_flight_panics() {
+    let mut book = busy_book();
+    book.issue_configure(300, Some(10));
+    book.issue_reopen();
+}
+
+#[test]
+#[should_panic(expected = "no operation in flight")]
+fn txbook_complete_configure_twice_panics() {
+    let mut book = busy_book();
+    let id = book.issue_configure(300, Some(10));
+    book.complete_configure(id, true);
+    book.complete_configure(id, true);
+}
+
+#[test]
+#[should_panic(expected = "not a Configure in flight")]
+fn txbook_complete_configure_with_a_send_in_flight_panics() {
+    let mut book = busy_book();
+    let id = book.issue(SEND);
+    book.complete_configure(id, true);
+}
+
+#[test]
+#[should_panic(expected = "not a Send in flight")]
+fn txbook_complete_with_a_configure_in_flight_panics() {
+    let mut book = busy_book();
+    let id = book.issue_configure(300, Some(10));
+    book.complete(id, Outcome::Accepted(10));
+}
+
+#[test]
+#[should_panic(expected = "not a Reopen in flight")]
+fn txbook_complete_reopen_with_a_configure_in_flight_panics() {
+    let mut book = busy_book();
+    let id = book.issue_configure(300, Some(10));
+    book.complete_reopen(id, Reopen::Reopened);
+}
+
+#[test]
+#[should_panic(expected = "in flight")]
+fn txbook_end_open_with_an_operation_in_flight_panics() {
+    let mut book = new_book();
+    book.take(pl(7), 100);
+    book.issue(SEND);
+    book.end_open();
+}
+
+#[test]
+#[should_panic(expected = "in flight")]
+fn txbook_take_with_an_operation_in_flight_panics() {
+    let mut book = new_book();
+    book.issue_reopen();
+    book.take(pl(7), 100);
+}
+
+#[test]
+fn txbook_a_completion_names_the_operation_in_flight() {
+    // E2b P7: per kind of operation, (i) a stale replay of a completed id is refused while another operation of the kind is in flight, and
+    // the book is as it was; (ii) an id this book never issued is refused; (iii) a duplicate completion is refused; (iv) ids are unique.
+    type Issue = fn(&mut TxBook<Pl>) -> OpId;
+    // `harmful` is the result that changes the book: a failed send, a refused configure, a failed reopen.
+    type Complete = fn(&mut TxBook<Pl>, OpId, bool);
+    let kinds: [(&str, Issue, Complete); 3] = [
+        (
+            "Send",
+            |book| book.issue(SEND),
+            |book, id, harmful| {
+                book.complete(id, if harmful { Outcome::Failed } else { Outcome::Accepted(10) });
+            },
+        ),
+        (
+            "Configure",
+            |book| book.issue_configure(300, Some(10)),
+            |book, id, harmful| {
+                book.complete_configure(id, !harmful);
+            },
+        ),
+        (
+            "Reopen",
+            |book| book.issue_reopen(),
+            |book, id, harmful| {
+                book.complete_reopen(id, if harmful { Reopen::Failed } else { Reopen::Reopened });
+            },
+        ),
+    ];
+    for (kind, issue, complete) in kinds {
+        let mut book = busy_book();
+        let a = issue(&mut book);
+        complete(&mut book, a, false);
+        let b = issue(&mut book);
+        assert_ne!(a, b, "{kind}: (iv) two issues, two ids");
+        let before = shape(&book);
+        let message = panic_message(|| complete(&mut book, a, true));
+        assert!(message.contains("not the operation in flight"), "{kind}: (i) {message}");
+        assert_eq!(shape(&book), before, "{kind}: (i) the stale replay changed the book");
+        complete(&mut book, b, false);
+        let c = issue(&mut book);
+        assert!(c != a && c != b, "{kind}: (iv) a third id");
+
+        let mut other = busy_book();
+        let first = issue(&mut other);
+        complete(&mut other, first, false);
+        let foreign = issue(&mut other);
+        let mut book = busy_book();
+        let a = issue(&mut book);
+        assert_ne!(a, foreign);
+        let message = panic_message(|| complete(&mut book, foreign, true));
+        assert!(message.contains("not the operation in flight"), "{kind}: (ii) {message}");
+        complete(&mut book, a, false);
+
+        let message = panic_message(|| complete(&mut book, a, false));
+        assert!(message.contains("no operation in flight"), "{kind}: (iii) {message}");
+    }
+}
+
+#[test]
+fn txbook_configured_changes_nothing_and_refused_takes_the_booking_and_its_region() {
+    // E2b P4: the configure of X (booked at 100, 10 samples). Configured: no change. Refused: the booking leaves `held`, and the record is
+    // `drop_piece` on a clone: the region is free again, wherever a Stop left the chain.
+    let base = || {
+        let mut book = new_book();
+        book.record.arm(GAP_1M);
+        book.record.accept(100, Some(10), 0, ON_TIME, UNHANDED).unwrap();
+        book.record.book(Some(110 * 200));
+        book.list.held.insert(100, pl(1));
+        book
+    };
+    let mut book = base();
+    let before = shape(&book);
+    let id = book.issue_configure(100, Some(10));
+    assert_eq!(book.complete_configure(id, true), None);
+    assert_eq!(shape(&book), before, "configured");
+
+    let mut book = base();
+    let mut manual = book.record.clone();
+    manual.drop_piece(100, Some(10));
+    let id = book.issue_configure(100, Some(10));
+    assert_eq!(book.complete_configure(id, false), Some(pl(1)));
+    assert!(book.list.held.is_empty());
+    assert_eq!(book.record, manual, "(a) the refused configure's region is gone");
+    assert_eq!(book.record.accept(100, Some(10), 0, ON_TIME, UNHANDED), Ok(()), "W6: the region is free");
+
+    for (case, stop_at, y_at) in [("(b) a Stop at or before X, Y after it", 100, Some(100 + STOP_FRONT)), ("(c) a Stop inside X", 105, None)] {
+        let mut book = base();
+        book.stop(reach(stop_at));
+        if let Some(y_at) = y_at {
+            book.record.accept(y_at, Some(10), 0, ON_TIME, UNHANDED).unwrap();
+            book.record.book(Some((y_at + 10) * 200));
+        }
+        let mut manual = book.record.clone();
+        manual.drop_piece(100, Some(10));
+        let id = book.issue_configure(100, Some(10));
+        book.complete_configure(id, false);
+        assert_eq!(book.record, manual, "{case}");
+        if let Some(y_at) = y_at {
+            assert_eq!(book.record.accept(y_at, Some(10), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}: Y's chain survives");
+        }
+    }
+}
+
+#[test]
+fn txbook_a_failed_reopen_ends_the_open_booking_and_the_pending_switch() {
+    // E2b P5 (RM-25, W7): `Failed` returns the open booking whatever `first` is, settles the pending switch cancelled and changes nothing
+    // else: `held` and `playing` stay for the executor's own sections.
+    for (case, sent) in [("first", false), ("not first", true)] {
+        let mut book = busy_book();
+        if sent {
+            let id = book.issue(SEND);
+            book.complete(id, Outcome::Accepted(10));
+        }
+        let mut manual = book.record.clone();
+        manual.cancel_switch();
+        let (held, playing) = (book.list.held.clone(), book.playing);
+        let id = book.issue_reopen();
+        assert_eq!(book.complete_reopen(id, Reopen::Failed), Some(pl(7)), "{case}");
+        assert!(book.open.is_none(), "{case}");
+        assert_eq!(book.record, manual, "{case}: the record is cancel_switch on a clone");
+        assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "{case}: W7");
+        assert_eq!((&book.list.held, book.playing), (&held, playing), "{case}");
+    }
+}
+
+#[test]
+fn txbook_a_reopen_that_succeeds_or_is_interrupted_changes_nothing() {
+    for outcome in [Reopen::Reopened, Reopen::Interrupted] {
+        let mut book = busy_book();
+        let before = shape(&book);
+        let id = book.issue_reopen();
+        assert_eq!(book.complete_reopen(id, outcome), None, "{outcome:?}");
+        assert_eq!(shape(&book), before, "{outcome:?}");
+    }
 }
 
 #[test]
@@ -1717,9 +1948,9 @@ fn txbook_issue_twice_panics() {
 fn txbook_complete_without_issue_panics() {
     // The second `complete` of one send is a `complete` with none issued.
     let mut book = open_book();
-    book.issue(TxSend { count: 10, device_count: 10, ends: false });
-    assert_eq!(book.complete(Outcome::Accepted(10)), Settle::Sent);
-    book.complete(Outcome::Accepted(10));
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    assert_eq!(book.complete(id, Outcome::Accepted(10)), Settle::Sent);
+    book.complete(id, Outcome::Accepted(10));
 }
 
 #[test]
@@ -1735,8 +1966,8 @@ fn txbook_outcomes_give_the_cursors_the_executor_gives_today() {
         ("the tail before it failed", send, Outcome::TailShort, Settle::Abandon { cursor: 100 }, Some((100, true))),
     ] {
         let mut book = open_book();
-        book.issue(send);
-        assert_eq!(book.complete(outcome), settle, "{case}");
+        let id = book.issue(send);
+        assert_eq!(book.complete(id, outcome), settle, "{case}");
         assert_eq!(book.open.as_ref().map(|open| (open.next, open.first)), next, "{case}");
         if next.is_some() {
             book.issue(send);
@@ -1753,7 +1984,8 @@ fn txbook_take_untake_and_end_open_keep_one_open_booking_and_change_no_record() 
     assert_eq!(book.list.held.get(&100), Some(&pl(7)), "the booking is held again at its first sample");
     let held = book.list.held.remove(&100).unwrap();
     book.take(held, 100);
-    book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    book.complete(id, Outcome::Accepted(10));
     assert_eq!(book.end_open(), Some(pl(7)));
     assert!(book.open.is_none() && book.end_open().is_none());
     assert_eq!((&book.record, book.playing), (&record, playing), "ending the open booking with no outcome changes no record");
@@ -1901,14 +2133,14 @@ fn txbook_issue_starts_the_playing_repeat_and_a_switch_s_own_payload() {
     let mut book = TxBook { record: repeat_at(0), ..new_book() };
     book.play(true, ActionId(1), 0, 10);
     book.take(Pl { n: 0, id: Some(ActionId(5)), switch: false }, 0);
-    book.issue(TxSend { count: 10, device_count: 10, ends: true });
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: true });
     assert_eq!(book.playing.map(|playing| playing.started), Some(false), "another booking's issue");
-    book.complete(Outcome::Accepted(10));
+    book.complete(id, Outcome::Accepted(10));
     assert_eq!(book.receive_switch(ActionId(2), 10, 0, 15, false, 0), Err(SwitchRefusal::NotStarted));
     book.take(Pl { n: 1, id: Some(ActionId(1)), switch: false }, 10);
-    book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
     assert_eq!(book.playing.map(|playing| playing.started), Some(true), "R's first issue");
-    assert_eq!(book.complete(Outcome::Accepted(10)), Settle::Sent);
+    assert_eq!(book.complete(id, Outcome::Accepted(10)), Settle::Sent);
     assert!(book.receive_switch(ActionId(2), 10, 0, 15, false, 0).is_ok());
     assert_eq!(book.playing.map(|playing| (playing.id, playing.started)), Some((ActionId(2), false)));
     book.advance(20);

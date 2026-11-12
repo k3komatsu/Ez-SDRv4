@@ -27,7 +27,7 @@
 | 3 | #92（uhd-control の panic で Run が終わらない） | 2 | 済（2026-11-12，記録 `reviews/n92-*`．uhd-control の panic も DEVICE_LOST〈owner〉，KL は足さない〈owner〉） |
 | 4 | #90（大きな capture が Manifest から落ちる） | 2 | 済（2026-11-12，記録 `reviews/n90-*`．hash は Kernel の `ContentHasher`〈owner 2026-11-11〉） |
 | 5 | #95＋#94（時刻の overflow） | 2 | 済（2026-11-12，記録 `reviews/n95-*`．時計に収まらない送信の時刻と Stop は両 Provider で受付の拒否） |
-| 6 | 49 の E2b（Configure と Reopen を操作に） | 2（worktree `Ez-SDRv4-e2b`） | 振る舞いは変えない．寿命の扱いを一つに．2026-11-12 に試験計画から始めた（OpenCode Opus 5.5 #medium） |
+| 6 | 49 の E2b（Configure と Reopen を操作に） | 2（worktree `Ez-SDRv4-e2b`） | 済（2026-11-12，記録 `reviews/e2b-*`．token は Send・Configure・Reopen の三つ〈owner〉．設定の途中の喪失で予約が消える件は #98） |
 | 7 | 49 の E3（区切りの判断を `ezsdr_radio` へ） | 1 | Phase 8 の主題（Mock と実機をそろえる）．文書監査の D2 もここで |
 | 8 | 49 の C2（KL-42：Stop の後の `applied`） | 1 | 記録が実際と違う |
 | 9 | #75（確かめていない T3 の flush で復旧を終える） | 1 | P2．#91 と同じ機構なので，試験の時刻の設計の答えの後 |

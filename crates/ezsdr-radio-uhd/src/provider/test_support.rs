@@ -196,11 +196,39 @@ pub(super) fn device_at(core: &Core, time: &ManualTimeAuthority, device: &FakeDe
     assert_eq!((core.now(), device.time_now().unwrap()), (ticks, ticks), "the Core's clock and the device's are not at the same instant");
 }
 
+/// A hook `on_next_lock` arms.
+type LockHook = Box<dyn FnOnce()>;
+
 thread_local! {
     static LOCKS: RefCell<Option<Vec<usize>>> = const { RefCell::new(None) };
     /// The line guards this thread holds, by the mutex's address (UR-25): what `LockSpy` and `assert_line_free` see,
     /// where a `try_lock` can only see some other thread holding the line.
     static LINE_HELD: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    /// A one-shot hook this thread runs on its next `core::lock` of one mutex, by its address, before taking it (`on_next_lock`).
+    static NEXT_LOCK: RefCell<Option<(usize, LockHook)>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` on this thread immediately before its next `core::lock` of `mutex`, once, with no guard of that call held: the point
+/// between the code before a section and the section's own acquisition, which no probe reaches. `f` may lock and arm again; what it
+/// arms fires on a later call.
+pub(super) fn on_next_lock<T>(mutex: &Mutex<T>, f: impl FnOnce() + 'static) {
+    NEXT_LOCK.with(|slot| *slot.borrow_mut() = Some((std::ptr::from_ref(mutex) as usize, Box::new(f))));
+}
+
+/// Whether a hook `on_next_lock` armed on this thread has not run yet.
+pub(super) fn next_lock_armed() -> bool {
+    NEXT_LOCK.with(|slot| slot.borrow().is_some())
+}
+
+/// `core::lock`'s check of the armed hook, before the acquisition.
+pub(super) fn before_lock(address: usize) {
+    let hook = NEXT_LOCK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(armed, _)| *armed == address) { slot.take().map(|(_, f)| f) } else { None }
+    });
+    if let Some(f) = hook {
+        f();
+    }
 }
 
 /// Starts recording the addresses of the line locks this thread takes (UR-25).

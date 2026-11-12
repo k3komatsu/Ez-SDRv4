@@ -15,7 +15,7 @@ use ezsdr_kernel::stream::{BlockFlags, BlockHeader, BurstOpen, BurstStep, BurstT
 use ezsdr_kernel::time::{Duration, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload};
-use ezsdr_radio::staging::{CLOSE_GAP, CLOSED_SHORT_MAX, Outcome, Read, STOP_FRONT, Settle, TxBook, TxSend};
+use ezsdr_radio::staging::{CLOSE_GAP, CLOSED_SHORT_MAX, OpId, Outcome, Read, Reopen, STOP_FRONT, Settle, TxBook, TxSend};
 use serde_json::json;
 
 use super::control::ColdConfig;
@@ -533,20 +533,19 @@ impl Tx {
         }
         if let Some(k) = self.held_first() {
             if k < window_cut {
-                let held = self.take_held(k).expect("the first key");
                 // Continuations have no timed SOB; a new device burst must still
                 // have its device lead after waiting in the owner's queue.
+                if !self.chain.continues_at(k) {
+                    match self.values_turn(clock, k) {
+                        Values::Start => {}
+                        Values::Configure(generation) => return self.configure_turn(clock, k, generation),
+                        Values::Wait => return false,
+                    }
+                }
+                let held = self.take_held(k).expect("the first key");
                 let held = if self.chain.continues_at(k) {
                     held
                 } else {
-                    match self.values_turn(clock, &held) {
-                        Values::Start => {}
-                        Values::Configure(generation) => return self.configure_turn(clock, held, generation),
-                        Values::Wait => {
-                            self.hold(held);
-                            return false;
-                        }
-                    }
                     let Some(held) = self.dispatch_start(clock, held) else { return true };
                     held
                 };
@@ -585,8 +584,8 @@ impl Tx {
 
     /// What the owner does before `held` starts, for its values (R4): nothing when the device holds its
     /// generation, a configure when the guard allows it, and otherwise the burst waits for the guard.
-    fn values_turn(&self, clock: Clock, held: &Held) -> Values {
-        let Some(wanted) = held.settings.generation() else { return Values::Start };
+    fn values_turn(&self, clock: Clock, k: i64) -> Values {
+        let Some(wanted) = self.with_held(|map| map.get(&k).and_then(|held| held.settings.generation())) else { return Values::Start };
         let mark = lock(&self.core.streams).stream(stream_key(Dir::Tx, self.k)).configured;
         if mark == Some(wanted) {
             return Values::Start;
@@ -607,15 +606,20 @@ impl Tx {
     /// burst, and the turn returns with the burst held. The next turn drains the commands that came meanwhile (a
     /// `Stop` cancels the burst) and decides the burst again. A refused configure refuses the burst (R5); the stream
     /// goes on, and the burst stays counted in its `Bookings` to its booked end.
-    fn configure_turn(&mut self, clock: Clock, held: Held, generation: u64) -> bool {
+    fn configure_turn(&mut self, clock: Clock, k: i64, generation: u64) -> bool {
         let core = self.core.clone();
         let key = stream_key(Dir::Tx, self.k);
-        let Some(claim) = lock(&core.streams).claim_owner(key) else {
-            self.hold(held);
-            return false;
+        let (claim, id, settings) = {
+            let mut streams = lock(&core.streams);
+            let Some(claim) = streams.claim_owner(key) else { return false };
+            let book = &mut streams.stream_mut(key).book;
+            let held = book.list.held.get(&k).expect("the first key");
+            let settings = held.settings.clone();
+            let len = held.record_len();
+            (claim, book.issue_configure(k, len), settings)
         };
         let rate = core.mcr as f64 / clock.n as f64;
-        let result = held.settings.configure_tx(&core, self.channels, self.k, rate);
+        let result = settings.configure_tx(&core, self.channels, self.k, rate);
         core.probe("tx_configure_before_mark", None);
         {
             let mut streams = lock(&core.streams);
@@ -626,12 +630,9 @@ impl Tx {
             }
             streams.give_back(claim);
         }
-        match result {
-            Ok(()) => self.hold(held),
-            Err(error) => {
-                lock(&core.streams).stream_mut(key).book.drop_piece(held.k, held.record_len());
-                core.device_failed(held.settings.action(), "tx_burst", &error);
-            }
+        let refused = lock(&core.streams).stream_mut(key).book.complete_configure(id, result.is_ok());
+        if let (Some(held), Err(error)) = (refused, result) {
+            core.device_failed(held.settings.action(), "tx_burst", &error);
         }
         true
     }
@@ -646,10 +647,15 @@ impl Tx {
         let min_open = MIN_OPEN_FIRST_SEND as i64;
         let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(min_open, TX_SEND_CAP);
         let mut streams = self.lock_for_send();
+        let configured = streams.stream(stream_key(Dir::Tx, self.k)).configured;
         let book = &mut streams.stream_mut(stream_key(Dir::Tx, self.k)).book;
         let open = book.open.as_ref().expect("a burst is open");
         let (start, first) = (open.booking.k, open.first);
         let device_sob = first && !self.chain.continues_at(start);
+        debug_assert!(
+            !device_sob || open.booking.settings.generation().is_none_or(|wanted| configured == Some(wanted)) || self.core.is_lost(),
+            "a device burst starts only with the values of its generation configured (UR-26)"
+        );
         let next = open.next;
         let len = open.booking.waveform_len as i64;
         let offset = if open.booking.repeat { (next - start).rem_euclid(len) } else { next - start };
@@ -686,7 +692,7 @@ impl Tx {
         let pad = if device_sob && device_eob { MIN_FIRST_SEND.saturating_sub(sending) } else { usize::from(device_eob && sending == 1) };
         let device_count = sending + pad;
         let (samples, burst_open) = (open.booking.samples.clone(), open.booking.open);
-        book.issue(TxSend { count, device_count: device_count as i64, ends: eob });
+        let op = book.issue(TxSend { count, device_count: device_count as i64, ends: eob });
         drop(streams);
         self.core.probe("tx_send_planned", None);
         let mut slices = [&[][..]; TX_CHANNELS_MAX];
@@ -714,7 +720,7 @@ impl Tx {
                     }
                 };
                 if !tail_sent {
-                    let Settle::Abandon { cursor } = self.complete_send(Outcome::TailShort) else { unreachable!("a failed tail abandons the burst") };
+                    let Settle::Abandon { cursor } = self.complete_send(op, Outcome::TailShort) else { unreachable!("a failed tail abandons the burst") };
                     return self.abandon(true, Some(cursor), true);
                 }
             }
@@ -736,7 +742,7 @@ impl Tx {
         // T1: every payload-bearing packet names its first sample, even inside a device burst.
         let at = Some(clock.instant(next));
         let result = if device_count > 0 { self.core.device.tx_send(self.k, &sent[..channels], at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };
-        let settle = self.complete_send(result.as_ref().map_or(Outcome::Failed, |accepted| Outcome::Accepted(*accepted as i64)));
+        let settle = self.complete_send(op, result.as_ref().map_or(Outcome::Failed, |accepted| Outcome::Accepted(*accepted as i64)));
         // Held only once the samples before it went out: after a send that failed or came
         // up short it would play straight after what the device took (Review P, NB-1).
         let tail = hold.then(|| {
@@ -836,8 +842,8 @@ impl Tx {
     }
 
     /// A send's device outcome, in its own section under the streams lock: the book settles it (UR-22).
-    fn complete_send(&self, outcome: Outcome) -> Settle {
-        self.lock_for_send().stream_mut(stream_key(Dir::Tx, self.k)).book.complete(outcome)
+    fn complete_send(&self, op: OpId, outcome: Outcome) -> Settle {
+        self.lock_for_send().stream_mut(stream_key(Dir::Tx, self.k)).book.complete(op, outcome)
     }
 
     fn record(&self, step: Result<BurstStep, ezsdr_kernel::stream::StreamError>) {
@@ -927,7 +933,7 @@ impl Tx {
     fn reopen_streamer(&mut self) -> bool {
         let core = self.core.clone();
         let key = stream_key(Dir::Tx, self.k);
-        let (claim, configured) = {
+        let (claim, id, configured) = {
             let mut streams = lock(&core.streams);
             if streams.stop.is_some() || core.is_lost() {
                 if core.is_lost() {
@@ -938,7 +944,7 @@ impl Tx {
                 return false;
             }
             let Some(claim) = streams.claim_owner(key) else { return false };
-            (claim, streams.stream(key).configured)
+            (claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured)
         };
         core.probe("tx_reopen_claimed", None);
         let result = core.reopen_tx_streamer(self.k, self.channels);
@@ -953,16 +959,25 @@ impl Tx {
         let mut open_cancelled = false;
         {
             let mut streams = lock(&core.streams);
-            if result.is_ok() {
+            let outcome = if result.is_ok() {
                 streams.record_configured(key, if core.is_lost() { None } else { configured });
+                Reopen::Reopened
             } else if !core.is_lost() && streams.stop.is_none() {
-                open_cancelled = self.halt_failed_reopen(&mut streams, key);
-                self.chain.reopen_failed();
-                halted = true;
-            } else if core.is_lost() {
-                self.chain.lose();
+                Reopen::Failed
             } else {
-                self.chain.provider_stop();
+                Reopen::Interrupted
+            };
+            let open = streams.stream_mut(key).book.complete_reopen(id, outcome);
+            match outcome {
+                Reopen::Reopened => {}
+                Reopen::Failed => {
+                    open_cancelled = open.is_some();
+                    self.halt_failed_reopen(&mut streams, key);
+                    self.chain.reopen_failed();
+                    halted = true;
+                }
+                Reopen::Interrupted if core.is_lost() => self.chain.lose(),
+                Reopen::Interrupted => self.chain.provider_stop(),
             }
             streams.give_back(claim);
         }
@@ -986,19 +1001,16 @@ impl Tx {
         true
     }
 
-    /// RM-25: a non-terminal reopen refusal ends the stream's clock: the open burst is cancelled and
-    /// the stream has no clock after it. True when a burst was open, which the caller reports once the lock is released (UR-25).
-    fn halt_failed_reopen(&mut self, streams: &mut Streams, key: StreamKey) -> bool {
-        let cancelled = streams.stream_mut(key).book.end_open().is_some();
+    /// RM-25: a non-terminal reopen refusal ends the stream's clock: the stream has no clock after it. The book has ended its open burst,
+    /// which the caller reports once the lock is released (UR-25).
+    fn halt_failed_reopen(&mut self, streams: &mut Streams, key: StreamKey) {
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
             lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
         }
-        streams.stream_mut(key).book.clock_ended();
         streams.finished(key);
         self.clock = None;
         self.cut = None;
         self.tracker = None;
-        cancelled
     }
 
     /// Always true: abandoning a burst at `cursor`, the first sample the device has nothing past, is work, which `send`'s callers return.
@@ -1382,6 +1394,7 @@ mod tests {
 
     mod e1;
     mod e2a;
+    mod e2b;
     mod o1;
 
     fn held(clock: &super::Clock, k: i64, len: usize, policy: LatePolicy) -> Held {

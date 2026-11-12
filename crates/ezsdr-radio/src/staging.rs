@@ -320,8 +320,8 @@ pub struct Playing {
     pub started: bool,
 }
 
-/// The booking the executor is transmitting (UR-21, UR-22, MR-15): the booking, the first sample it has not yet issued, whether its first
-/// send is still to come, and the one send issued and not yet completed.
+/// The booking the executor is transmitting (UR-21, UR-22, MR-15): the booking, the first sample it has not yet issued, and whether its
+/// first send is still to come.
 pub struct Open<P> {
     /// The booking.
     pub booking: P,
@@ -329,14 +329,42 @@ pub struct Open<P> {
     pub next: i64,
     /// No send of the booking has completed.
     pub first: bool,
-    inflight: Option<TxSend>,
 }
 
 impl<P> Open<P> {
-    /// A booking open at `next`, with no send in flight.
+    /// A booking open at `next`.
     pub fn new(booking: P, next: i64, first: bool) -> Open<P> {
-        Open { booking, next, first, inflight: None }
+        Open { booking, next, first }
     }
+}
+
+/// The identity of one operation issued on a [`TxBook`]; its completion names it. No two issues of one book share an id.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct OpId(u64);
+
+/// The one operation in flight on a transmit stream: a device call the executor makes with no lock held, and then completes.
+#[derive(Clone, Copy)]
+enum TxOp {
+    Send(TxSend),
+    Configure { k: i64, len: Option<i64> },
+    Reopen,
+}
+
+impl TxOp {
+    fn name(self) -> &'static str {
+        match self {
+            TxOp::Send(_) => "Send",
+            TxOp::Configure { .. } => "Configure",
+            TxOp::Reopen => "Reopen",
+        }
+    }
+}
+
+/// A [`TxBook`]'s operation slot: the id counter and the operation in flight.
+#[derive(Default)]
+pub struct Ops {
+    next: u64,
+    inflight: Option<(OpId, TxOp)>,
 }
 
 /// One planned send of the open booking (UR-22, UR-23), from its next sample: `count` samples of the booking, `device_count` the samples the
@@ -360,6 +388,17 @@ pub enum Outcome {
     Failed,
     /// The held tail the send continues from failed or came up short, so the send itself was not made.
     TailShort,
+}
+
+/// How a transmit streamer's reopen ended (UR-22, RM-25).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reopen {
+    /// The streamer was replaced.
+    Reopened,
+    /// The reopen failed with the device not lost and no `Provider::stop`: the stream's clock ends.
+    Failed,
+    /// A loss or `Provider::stop` ended the recovery.
+    Interrupted,
 }
 
 /// What the executor does after a send completed (UR-22).
@@ -390,6 +429,8 @@ pub struct TxBook<P> {
     pub playing: Option<Playing>,
     /// The booking the executor is transmitting. The executor writes it only through `take`, `untake`, `issue`, `complete` and `end_open`.
     pub open: Option<Open<P>>,
+    /// The one operation in flight (a send of the open booking, a configure of a held one, or a reopen), issued and completed by id.
+    pub ops: Ops,
     /// When the Provider's repeats count as started (UR-38).
     pub started_rule: Started,
 }
@@ -397,42 +438,64 @@ pub struct TxBook<P> {
 impl<P: Booked> TxBook<P> {
     /// An empty book of a Provider whose repeats start by `started_rule`.
     pub fn new(started_rule: Started) -> TxBook<P> {
-        TxBook { record: Bookings::unarmed(), list: TxList::default(), playing: None, open: None, started_rule }
+        TxBook { record: Bookings::unarmed(), list: TxList::default(), playing: None, open: None, ops: Ops::default(), started_rule }
     }
 
     /// The executor opens `booking` at its first sample `next`.
     pub fn take(&mut self, booking: P, next: i64) {
         debug_assert!(self.open.is_none(), "a booking is already open");
+        assert!(self.ops.inflight.is_none(), "a booking is taken with an operation in flight");
         self.open = Some(Open::new(booking, next, true));
     }
 
     /// The executor gives an open booking with nothing sent back to the held bookings, at its first sample.
     pub fn untake(&mut self) {
         let open = self.open.take().expect("a booking is open");
-        debug_assert!(open.first && open.inflight.is_none(), "only a booking with nothing sent goes back");
+        debug_assert!(open.first && self.ops.inflight.is_none(), "only a booking with nothing sent goes back");
         self.list.held.insert(open.next, open.booking);
     }
 
     /// The executor ends the open booking with no send outcome: the record is unchanged (RM-16: nothing handed is recalled).
     pub fn end_open(&mut self) -> Option<P> {
+        assert!(self.ops.inflight.is_none(), "an open booking is ended with an operation in flight");
         self.open.take().map(|open| open.booking)
     }
 
-    /// The executor issues `send` of the open booking; one send is in flight at a time. The playing repeat's first issue starts it (UR-38).
-    pub fn issue(&mut self, send: TxSend) {
-        let open = self.open.as_mut().expect("a booking is open");
-        assert!(open.inflight.is_none(), "a send in flight is issued again");
-        open.inflight = Some(send);
-        let id = open.booking.id();
-        if let Some(playing) = self.playing.as_mut().filter(|playing| id == Some(playing.id)) {
-            playing.started = true;
+    /// Puts `op` in flight and returns its id; one operation is in flight at a time.
+    fn start(&mut self, op: TxOp) -> OpId {
+        if let Some((_, flying)) = self.ops.inflight {
+            panic!("an operation is in flight: a {} in flight is issued again", flying.name().to_lowercase());
         }
+        let id = OpId(self.ops.next);
+        self.ops.next += 1;
+        self.ops.inflight = Some((id, op));
+        id
     }
 
-    /// The device's `outcome` of the send in flight: a whole send advances the open booking (and its last ends it); any other outcome
+    /// Takes the operation `id` out of flight, asserting before it changes anything that it is the one in flight and that `pick` accepts its kind
+    /// (`wanted`).
+    fn finish<R>(&mut self, id: OpId, wanted: &str, pick: impl FnOnce(TxOp) -> Option<R>) -> R {
+        let (flying, op) = self.ops.inflight.unwrap_or_else(|| panic!("no operation in flight: no {} in flight to complete", wanted.to_lowercase()));
+        assert!(flying == id, "not the operation in flight");
+        let picked = pick(op).unwrap_or_else(|| panic!("not a {wanted} in flight"));
+        self.ops.inflight = None;
+        picked
+    }
+
+    /// The executor issues `send` of the open booking; one operation is in flight at a time. The playing repeat's first issue starts it (UR-38).
+    pub fn issue(&mut self, send: TxSend) -> OpId {
+        let booking = self.open.as_ref().expect("a booking is open").booking.id();
+        let op = self.start(TxOp::Send(send));
+        if let Some(playing) = self.playing.as_mut().filter(|playing| booking == Some(playing.id)) {
+            playing.started = true;
+        }
+        op
+    }
+
+    /// The device's `outcome` of the send `id`: a whole send advances the open booking (and its last ends it); any other outcome
     /// abandons it at the cursor UR-22 gives: what the device took of a short send, all of a failed one, nothing past a failed tail.
-    pub fn complete(&mut self, outcome: Outcome) -> Settle {
-        let send = self.open.as_mut().and_then(|open| open.inflight.take()).expect("no send in flight to complete");
+    pub fn complete(&mut self, id: OpId, outcome: Outcome) -> Settle {
+        let send = self.finish(id, "Send", |op| if let TxOp::Send(send) = op { Some(send) } else { None });
         let open = self.open.as_mut().expect("a booking is open");
         let handed = match outcome {
             Outcome::Accepted(accepted) if accepted == send.device_count => {
@@ -450,6 +513,42 @@ impl<P: Booked> TxBook<P> {
         Settle::Abandon { cursor: open.next.saturating_add(handed) }
     }
 
+    /// The executor starts the configure of the held booking at `k` (`len` its record length, [`Bookings::drop_piece`]); it stays held.
+    /// No payload is issued until [`TxBook::complete_configure`].
+    pub fn issue_configure(&mut self, k: i64, len: Option<i64>) -> OpId {
+        assert!(self.list.held.contains_key(&k), "the booking to configure is held");
+        self.start(TxOp::Configure { k, len })
+    }
+
+    /// The device's result of the configure `id`. A refusal (`configured` false) takes the booking out of the held ones and its region out of
+    /// the record, which its value-rule end outlives (RM-15, C6); the executor reports it.
+    pub fn complete_configure(&mut self, id: OpId, configured: bool) -> Option<P> {
+        let (k, len) = self.finish(id, "Configure", |op| if let TxOp::Configure { k, len } = op { Some((k, len)) } else { None });
+        if configured {
+            return None;
+        }
+        let held = self.list.held.remove(&k).expect("the configured booking is held");
+        self.record.drop_piece(k, len);
+        Some(held)
+    }
+
+    /// The executor starts the reopen of the transmit streamer.
+    pub fn issue_reopen(&mut self) -> OpId {
+        self.start(TxOp::Reopen)
+    }
+
+    /// How the reopen `id` ended. Only a failure changes the book (RM-25): the open booking ends, whatever it has sent, and is returned for the
+    /// executor to report; the stream's clock ends, and with it the pending switch. The held bookings stay for the executor to take.
+    pub fn complete_reopen(&mut self, id: OpId, outcome: Reopen) -> Option<P> {
+        self.finish(id, "Reopen", |op| matches!(op, TxOp::Reopen).then_some(()));
+        if outcome != Reopen::Failed {
+            return None;
+        }
+        let open = self.open.take().map(|open| open.booking);
+        self.record.cancel_switch();
+        open
+    }
+
     /// The executor reads the list's oldest receipt: a halt cancels what [`TxBook::cancel_all`] takes.
     pub fn read(&mut self) -> Option<Read<P>> {
         Some(match self.list.read()? {
@@ -464,7 +563,7 @@ impl<P: Booked> TxBook<P> {
     /// RM-16 (#85): what a halt cancels: the held bookings, and the open one when it has issued nothing (`first`); one that has keeps
     /// what it handed, which nothing recalls.
     pub fn cancel_all(&mut self) -> BTreeMap<i64, P> {
-        debug_assert!(self.open.as_ref().is_none_or(|open| open.inflight.is_none()), "a halt is read with no send in flight");
+        debug_assert!(self.ops.inflight.is_none(), "a halt is read with no operation in flight");
         let mut cancelled = std::mem::take(&mut self.list.held);
         if let Some(open) = self.open.take_if(|open| open.first) {
             cancelled.insert(open.next, open.booking);
@@ -554,11 +653,6 @@ impl<P: Booked> TxBook<P> {
     /// RM-15 (C6): a booking refused at its dispatch or configure leaves the overlap rule.
     pub fn drop_piece(&mut self, start: i64, len: Option<i64>) {
         self.record.drop_piece(start, len);
-    }
-
-    /// RM-25: a failed reopen ends the stream's clock, and with it the pending switch.
-    pub fn clock_ended(&mut self) {
-        self.record.cancel_switch();
     }
 
     /// UR-23: the owner's close at sample `e`. `None` while a booking can still join; otherwise the closed chain's front.
