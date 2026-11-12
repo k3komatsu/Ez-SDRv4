@@ -13,6 +13,7 @@ use ezsdr_kernel::spec::{Key, Scalar, Value};
 use ezsdr_kernel::stream::LatePolicy;
 use ezsdr_kernel::time::TimePoint;
 
+use crate::x3xx::PACKETS;
 use crate::{CancelReason, Concrete, concrete};
 
 /// Why a receive value is not staged (RM-21). Each cause has its own text.
@@ -75,9 +76,6 @@ pub enum Overlap {
     Handed,
 }
 
-/// RM-15: the longest standalone head that is one closed device burst (its front is then its padded end plus [`closed_short_gap`]).
-pub const CLOSED_SHORT_MAX: i64 = 32;
-
 /// RM-15, UR-22: the samples past any closing send's exclusive end that the next device burst keeps (every close but a short head's), and
 /// the floor of [`closed_short_gap`].
 pub const CLOSE_GAP: i64 = 3;
@@ -127,7 +125,7 @@ impl Chain {
     /// A head of at most 32 samples before its first joined piece (RM-15). A repeat is never one (its end is `i64::MAX`). Pieces
     /// joined behind it do not lengthen it: the owner may have sent it as one closed device burst.
     fn short_head(&self) -> bool {
-        self.head_end().checked_sub(self.start).is_some_and(|len| len <= CLOSED_SHORT_MAX)
+        self.head_end().checked_sub(self.start).is_some_and(|len| len <= PACKETS.min_open_first_send)
     }
 
     /// The front a short head's region keeps at a Stop (RM-16): each piece of at most 32 samples that starts below `handed` fronts at its
@@ -135,7 +133,12 @@ impl Chain {
     fn own_fronts(&self, handed: i64, gap: Option<i64>) -> i64 {
         let starts = std::iter::once(self.start).chain(self.joined.iter().copied());
         let ends = self.joined.iter().copied().chain(std::iter::once(self.end));
-        starts.zip(ends).filter(|&(s, e)| s < handed && e.checked_sub(s).is_some_and(|len| len <= CLOSED_SHORT_MAX)).filter_map(|(s, e)| front(gap, s, Some(e - s), false)).max().unwrap_or(i64::MIN)
+        starts
+            .zip(ends)
+            .filter(|&(s, e)| s < handed && e.checked_sub(s).is_some_and(|len| len <= PACKETS.min_open_first_send))
+            .filter_map(|(s, e)| front(gap, s, Some(e - s), false))
+            .max()
+            .unwrap_or(i64::MIN)
     }
 
     /// A standalone short head: one closed device burst (RM-15), with no piece joined behind it.
@@ -773,7 +776,7 @@ impl Bookings {
                 chain.front = front;
                 chain.joined.push(start);
             }
-            None => self.chains.push(Chain { start, end, joined: Vec::new(), front, join: len.is_some_and(|len| len > CLOSED_SHORT_MAX) }),
+            None => self.chains.push(Chain { start, end, joined: Vec::new(), front, join: len.is_some_and(|len| len > PACKETS.min_open_first_send) }),
         }
         Ok(())
     }
@@ -1125,7 +1128,7 @@ impl Bookings {
 fn front(gap: Option<i64>, start: i64, len: Option<i64>, joined: bool) -> Option<i64> {
     match len {
         None => Some(i64::MAX),
-        Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),
+        Some(len) if joined || len > PACKETS.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),
         Some(len) => start.checked_add(len.max(4))?.checked_add(gap?),
     }
 }
@@ -1157,7 +1160,7 @@ pub fn stop_fits(at: i64, in_flight: i64, at_or_after: impl Fn(i64) -> Option<i6
 }
 
 /// RM-15 (note 47 stage 5 §1.3): the first sample a receipt at root tick `now` cannot yet be sure the owner has not handed: the
-/// owner hands only below `at_or_after(now + in_flight)` (`tx.rs:443-444`), so a booking that starts below it may be on the device.
+/// owner hands only below `at_or_after(now + in_flight)` (this function, in `Tx::step`), so a booking that starts below it may be on the device.
 pub fn handover_horizon(now: i64, in_flight: i64, at_or_after: impl Fn(i64) -> i64) -> i64 {
     at_or_after(now.saturating_add(in_flight))
 }

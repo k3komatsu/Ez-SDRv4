@@ -25,6 +25,7 @@ use ezsdr_kernel::stream::{
     BackPressure, BlockFlags, BlockHeader, BurstOpen, BurstRecord, BurstStep, BurstTracker, ChannelMask, DataLink, Direction, LateOutcome, LatePolicy, PublishOutcome, SampleBlock,
 };
 use ezsdr_kernel::time::{ClockRegistry, Duration, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimePoint};
+use ezsdr_radio::segment::{self, Extent, Pending, Waveform};
 use ezsdr_radio::staging::{
     Bookings, Outcome, Overlap, Playing, Read, Staging, SwitchRecord, SwitchRefusal, TxBook, TxSend, handover_horizon, is_switch, ordinary_k, stop_bound, stop_fits, stop_sample, write_settled,
 };
@@ -38,8 +39,6 @@ pub use profile::{BLOCK_LEN, Profile, ProfileKind};
 
 /// The reason a lost device gives for everything it cancels or refuses (MR-20).
 const DEVICE_LOST: &str = "MR-20: device lost";
-/// UR-22 `MIN_OPEN_FIRST_SEND`: a first send that leaves its device burst open carries this many samples (MR-25's hand-over threshold).
-const DEVICE_MIN_OPEN_FIRST_SEND: i64 = 32;
 
 fn module_ref() -> ModuleRef {
     ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"), version: Version::new(2, 0, 0) }
@@ -285,14 +284,10 @@ struct TxFront {
     sample: i64,
 }
 
-/// RM-15: an earlier-received burst contributes only when it starts before the hand-over
-/// horizon; a finite burst contributes no later than its exclusive end.
-fn handed_end(start: i64, end: Option<i64>, window_end: i64) -> Option<i64> {
-    (start < window_end).then(|| end.map_or(window_end, |end| end.min(window_end)))
-}
-
-fn handed_end_before(order: u64, before: u64, start: i64, end: Option<i64>, window_end: i64) -> Option<i64> {
-    if order < before { handed_end(start, end, window_end) } else { None }
+/// RM-15: the latest end the bookings received before receipt `before` contribute to the hand-over front: each as `segment::handed_end` counts it
+/// for the hand-over horizon `window_end`.
+fn handed_front(bookings: impl IntoIterator<Item = (u64, Pending)>, before: u64, window_end: i64) -> Option<i64> {
+    bookings.into_iter().filter(|(order, _)| *order < before).fold(None, |front, (_, pending)| merge_front(front, segment::handed_end(&x3xx::PACKETS, pending, window_end)))
 }
 
 fn merge_front(front: Option<i64>, candidate: Option<i64>) -> Option<i64> {
@@ -825,18 +820,9 @@ impl MockRadio {
             }
         }
         for k in 0..self.tx.len() {
-            if let (Some(open), Some(clock)) = (self.tx[k].book.open.as_ref(), self.tx_now(k)) {
-                let (handle, origin) = (&clock.handle, clock.origin);
-                let (start, len) = (open.booking.start, open.booking.len);
-                let block_end = open.next.saturating_add(i64::from(self.profile.block_len()));
-                let waveform_end = if open.booking.repeat { start.saturating_add(((open.next - start) / len + 1).saturating_mul(len)) } else { start.saturating_add(len) };
-                let held_cut = self.tx[k].book.list.held.keys().next().copied().unwrap_or(i64::MAX);
-                let cut = held_cut.min(self.tx_cut(k).unwrap_or(i64::MAX));
-                let stop = block_end.min(waveform_end).min(cut);
-                if stop > open.next {
-                    if let Some(tick) = time::v_after(origin, handle.root_ticks_per_tick(), stop - 1) {
-                        wake(tick);
-                    }
+            if let (Some(block), Some(clock)) = (self.tx_block(k, None), self.tx_now(k)) {
+                if let Some(tick) = time::v_after(clock.origin, clock.handle.root_ticks_per_tick(), block.next.saturating_add(block.wanted) - 1) {
+                    wake(tick);
                 }
             }
             if let Some(clock) = self.tx_now(k) {
@@ -1390,25 +1376,23 @@ impl MockRadio {
         Ok(stop_fits(now, self.tx_window()?, |t| time::k_at_or_after(origin, ratio, t), |k| time::v_of(origin, ratio, k)))
     }
 
+    /// MR-15: the next block of stream `k`'s open booking before `extra_cut` (a Stop's cut, which ends no Kernel burst): at most one block, cut at the
+    /// booking's wrap or end, the next held booking's start and the plan's cut.
+    fn tx_block(&self, k: usize, extra_cut: Option<i64>) -> Option<Extent> {
+        let open = self.tx[k].book.open.as_ref()?;
+        let waveform = Waveform { start: open.booking.start, len: open.booking.len, repeat: open.booking.repeat, tiled: false };
+        let held_cut = self.tx[k].book.list.held.keys().next().copied();
+        let hard_cut = self.tx_cut(k).into_iter().chain(extra_cut).min();
+        segment::extent(waveform, open.next, i64::from(self.profile.block_len()), held_cut, hard_cut)
+    }
+
     /// RM-15: the handed payload end of stream `k`'s clock (MR-25's payload cut): the latest end of the bursts whose first send fits the hand-over window.
     fn tx_handed_end(&self, k: usize, now: i64, before: u64) -> Result<Option<i64>, ModuleError> {
         let Some(clock) = self.tx_now(k) else { return Ok(None) };
-        let horizon = now.saturating_add(self.tx_window()?);
-        let window_end = time::k_at_or_after(clock.origin, clock.handle.root_ticks_per_tick(), horizon).unwrap_or(i64::MAX);
-        let mut payload = None;
-        // MR-25: a burst not yet started is handed over once its first send's samples fit the window (UR-22 MIN_OPEN_FIRST_SEND).
-        let mut include = |order: u64, start: i64, len: i64, repeat: bool, first: i64| {
-            let end = (!repeat).then_some(start.saturating_add(len));
-            let candidate = handed_end_before(order, before, start, end, window_end).filter(|_| start.saturating_add(first) <= window_end);
-            payload = merge_front(payload, candidate);
-        };
-        if let Some(open) = self.tx[k].book.open.as_ref() {
-            include(open.booking.order, open.booking.start, open.booking.len, open.booking.repeat, 1);
-        }
-        for held in self.tx[k].book.list.held.values() {
-            include(held.order, held.start, held.len, held.repeat, if held.repeat { DEVICE_MIN_OPEN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) });
-        }
-        Ok(payload)
+        let window_end = handover_horizon(now, self.tx_window()?, |t| time::k_at_or_after(clock.origin, clock.handle.root_ticks_per_tick(), t).unwrap_or(i64::MAX));
+        let pending = |booking: &HeldBurst, open: bool| (booking.order, Pending { start: booking.start, len: booking.len, repeat: booking.repeat, open });
+        let book = &self.tx[k].book;
+        Ok(handed_front(book.open.iter().map(|open| pending(&open.booking, true)).chain(book.list.held.values().map(|held| pending(held, false))), before, window_end))
     }
 
     /// RM-25, VH-2: the transmit clock of stream `k` ends at its origin when a stop is booked at
@@ -1851,15 +1835,8 @@ impl MockRadio {
             let Some((ratio, origin, domain)) = self.tx_now(k).map(|clock| (clock.handle.root_ticks_per_tick(), clock.origin, clock.domain)) else {
                 break;
             };
-            let (start, length, repeat) = (open.booking.start, open.booking.len, open.booking.repeat);
-            let mut stop = open.next.saturating_add(i64::from(self.profile.block_len()));
-            let repeat_end = if repeat { start.saturating_add(((open.next - start) / length + 1).saturating_mul(length)) } else { start.saturating_add(length) };
-            let held_cut = self.tx[k].book.list.held.keys().next().copied().unwrap_or(i64::MAX);
-            let cut = held_cut.min(self.tx_cut(k).unwrap_or(i64::MAX)).min(extra_cut.unwrap_or(i64::MAX));
-            stop = stop.min(repeat_end).min(cut);
-            if stop <= open.next {
-                break;
-            }
+            let Some(block) = self.tx_block(k, extra_cut) else { break };
+            let stop = block.next.saturating_add(block.wanted);
             let last = time::v_after(origin, ratio, stop - 1).ok_or_else(|| ModuleError::rejected("MR-15: transmit time overflow"))?;
             if last > until {
                 break;
@@ -1869,7 +1846,7 @@ impl MockRadio {
             let burst_open = open.booking.open;
             let len = u32::try_from(stop - next).map_err(|_| ModuleError::rejected("MR-15: transmit block length overflow"))?;
             let channels = self.effective_stream_channels(Direction::Tx, k) as u16;
-            let ends = (!repeat && stop >= start.saturating_add(length)) || held_cut == stop;
+            let ends = block.ends_waveform(block.wanted) || block.ends_at_held(block.wanted);
             let flags = (if first { BlockFlags::START_OF_BURST } else { BlockFlags::NONE }) | if ends { BlockFlags::END_OF_BURST } else { BlockFlags::NONE };
             let header = BlockHeader {
                 first_sample_time: TimePoint::new(domain, next),
@@ -2567,18 +2544,18 @@ mod cancellation_tests {
 
 #[cfg(test)]
 mod payload_cut_tests {
-    use super::{handed_end, handed_end_before, merge_front};
+    use super::handed_front;
+    use ezsdr_radio::segment::Pending;
 
     #[test]
     fn mr_17_handed_front_reduction_cases() {
-        for (start, end, window, expected) in [(11, None, 10, None), (10, None, 10, None), (9, None, 10, Some(10)), (4, Some(6), 10, Some(6)), (4, Some(12), 10, Some(10))] {
-            assert_eq!(handed_end(start, end, window), expected, "{start} {end:?} {window}");
-        }
-        assert_eq!(handed_end(9, Some(10), 20), Some(10));
-        let front = [(2, Some(9)), (4, None), (10, Some(20))].into_iter().fold(None, |front, (start, end)| merge_front(front, handed_end(start, end, 10)));
-        assert_eq!(front, Some(10));
-        assert_eq!(handed_end_before(4, 5, 9, None, 10), Some(10), "an earlier same-instant receipt counts");
-        assert_eq!(handed_end_before(5, 5, 9, None, 10), None, "the current receipt is excluded");
-        assert_eq!(handed_end_before(6, 5, 9, None, 10), None, "a later receipt is excluded");
+        let finite = |start, len| Pending { start, len, repeat: false, open: false };
+        let open_repeat = Pending { start: 9, len: 1, repeat: true, open: true };
+        assert_eq!(handed_front([(1, finite(0, 3)), (2, finite(0, 8))], 3, 10), Some(8), "the front is the greatest candidate");
+        assert_eq!(handed_front([(1, finite(0, 8)), (2, finite(0, 3))], 3, 10), Some(8), "whatever the order of the candidates");
+        assert_eq!(handed_front([(1, finite(0, 3)), (2, open_repeat)], 3, 10), Some(10), "a handed repeat reaches the horizon");
+        assert_eq!(handed_front([(4, open_repeat)], 5, 10), Some(10), "an earlier same-instant receipt counts");
+        assert_eq!(handed_front([(5, open_repeat)], 5, 10), None, "the current receipt is excluded");
+        assert_eq!(handed_front([(6, open_repeat), (1, finite(20, 5))], 5, 10), None, "a later receipt is excluded, and a burst past the horizon is not handed");
     }
 }

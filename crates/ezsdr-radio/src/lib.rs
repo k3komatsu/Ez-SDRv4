@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 pub mod channels;
 pub mod device;
 pub mod measurement;
+pub mod segment;
 pub mod staging;
 pub mod timeline;
 pub mod x3xx;

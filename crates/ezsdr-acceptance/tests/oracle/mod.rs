@@ -364,6 +364,45 @@ pub fn mock_cut(p: &Params, t: i64, bursts: &[MBurst], previous: Option<i64>) ->
     cut
 }
 
+/// A booking as it stands at a Stop (design note 49 E3a, table Q): the one literal both Providers' tests read, so that their two columns
+/// of expectations are about the same bookings. Its start is `offset` samples from the Stop sample `t_k` (`from_window_edge` false) or from
+/// the window's first sample `we` (true); `len` is `None` for a repeat; `started` when the booking's start is before the Stop.
+#[derive(Clone, Copy, Debug)]
+pub struct StopShape {
+    pub label: &'static str,
+    pub from_window_edge: bool,
+    pub offset: i64,
+    pub len: Option<i64>,
+    pub started: bool,
+}
+
+const fn shape(label: &'static str, from_window_edge: bool, offset: i64, len: Option<i64>, started: bool) -> StopShape {
+    StopShape { label, from_window_edge, offset, len, started }
+}
+
+/// Table Q's single-booking rows. Rows 4 and 6 are where the Providers' first-send rules differ in what they hand (UR-23 / MR-25); the
+/// rows with `started` are bursts the device already plays at the Stop. The long finite one is 30 000 samples: the oracle's ramps stay
+/// inside the full scale below 32 767.
+pub const STOP_SHAPES: [StopShape; 14] = [
+    shape("finite 1 at we-1", true, -1, Some(1), false),
+    shape("finite 1 at we", true, 0, Some(1), false),
+    shape("finite 20 at we-20", true, -20, Some(20), false),
+    shape("finite 20 at we-19", true, -19, Some(20), false),
+    shape("finite 32 at we-32", true, -32, Some(32), false),
+    shape("finite 32 at we-31", true, -31, Some(32), false),
+    shape("finite 33 at we-32", true, -32, Some(33), false),
+    shape("finite 33 at we-31", true, -31, Some(33), false),
+    shape("finite 100 inside the window", false, 1_000, Some(100), false),
+    shape("repeat at we-32", true, -32, None, false),
+    shape("repeat at we-31", true, -31, None, false),
+    shape("open repeat at t_k-5000", false, -5_000, None, true),
+    shape("open repeat at t_k-4010", false, -4_010, None, true),
+    shape("long finite at t_k-5000", false, -5_000, Some(30_000), true),
+];
+
+/// Table Q's joined pair (row 10, F3b): `(offset from we, len)` of A and of B, B booked at A's exact end.
+pub const JOINED_AT_A_STOP: [(i64, i64); 2] = [(-90, 40), (-50, 100)];
+
 /// The sample counts of what completed sends carried (a failed send, not counted) as `(start, n)` pairs, summed: the Kernel record's
 /// `samples` for an abandoned burst (UR-22; a withheld tail is counted with its buffer, which the caller includes in `n`).
 pub fn recorded(completed: &[(i64, i64)]) -> i64 {

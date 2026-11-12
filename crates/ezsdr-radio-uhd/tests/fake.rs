@@ -7979,6 +7979,78 @@ fn n47s5_one_sample_after_a_burst_refusal_rehearsal_on_the_fake() {
     }
 }
 
+// ------------------------------------------------ E3a-1: rehearsals of the bench bodies whose expectations the segmentation rules fix
+//
+// Each runs the bench's own body (`common::e3`, shared with `hardware.rs`) in a threaded Session on `fake(FakeConfig::default())`, whose clock
+// is the manual one the Session advances: the instants a body books are fixed by the device time at its submits, so no assertion here depends on
+// when a thread runs. They are counted as P4 rehearsals (note 51 §3) and are no mutation row's killer; the rules they rehearse are pinned by the
+// frozen-rig tests of `tx/tests/e3.rs`.
+
+/// `hw_s1_short_first_sends`: a burst of 1, 2, 3 or 4 samples is one padded device burst of four and the next burst starts clean. The fake
+/// refuses an undersized first packet (`device.rs` `MIN_FIRST_SEND`), so a send that is not padded shows as a device fault and a FAIL.
+#[test]
+fn s1_short_first_sends_rehearsal_on_the_fake() {
+    for samples in [1usize, 2, 3, 4] {
+        let dir = TempDir::new();
+        let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()), None);
+        let outcome = common::e3::short_first_case(run, samples);
+        println!("rehearsal S1 {samples} samples: {outcome:?}");
+        assert!(matches!(outcome, common::tone::Verdict::Pass(_)), "{samples} samples: {outcome:?}");
+    }
+}
+
+/// `hw_txp_b0_send_sizes`: a repeat's sends are the window's quarter (2 500 samples at 1 MS/s, 12 500 at 5 MS/s, typed here, not read from the
+/// Module), each timed send after the first the whole chunk, every closing send of two samples or more.
+#[test]
+fn txp_b0_send_sizes_rehearsal_on_the_fake() {
+    for (rate, chunk) in [(1e6, 2_500usize), (5e6, 12_500)] {
+        let dir = TempDir::new();
+        let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+        let profile = profile(&dir, json!({}), json!({}), true);
+        let initial = with_initial(rx0_tx0(&profile), &[("radio.tx.c0.gain_db", Scalar::try_from(0.0).unwrap()), ("radio.tx.s0.sample_rate_hz", Scalar::try_from(rate).unwrap())]);
+        let run = session_with(&profile, probe.clone(), &initial);
+        let outcome = common::e3::repeat_sizes_case(run, &probe, rate, chunk);
+        println!("rehearsal TXP B0 rate {rate}: {outcome:?}");
+        assert!(matches!(outcome, common::tone::Verdict::Pass(_)), "rate {rate}: {outcome:?}");
+    }
+}
+
+/// `hw_p70_one_sample_burst_then_timed_burst` on its production path, as far as the fake shows it (it shows no tone, so the bench's onset
+/// comparison is not rehearsed): a one-sample burst and the four-sample control are both one padded device burst of four, and the burst booked
+/// with it is sent at its own booked instant, a start of its own, the same distance after the first in both.
+#[test]
+fn p70_one_sample_burst_then_timed_burst_rehearsal_on_the_fake() {
+    let mut trials = Vec::new();
+    for samples in [1usize, 4] {
+        let dir = TempDir::new();
+        let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+        let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
+        let (sends, a_root, b_root) = common::e3::one_sample_pair(run, &probe, samples);
+        let timed: Vec<&Json> = sends.iter().filter(|row| row["at"].is_i64()).collect();
+        let a = timed.iter().find(|row| row["at"] == a_root).unwrap_or_else(|| panic!("{samples} samples: no send at A's instant {a_root}: {sends:?}"));
+        assert_eq!((a["sample_counts"][0].as_u64(), a["sob"].as_bool(), a["eob"].as_bool()), (Some(4), Some(true), Some(true)), "{samples} samples: A is one padded device burst of four");
+        let b = timed.iter().find(|row| row["at"] == b_root).unwrap_or_else(|| panic!("{samples} samples: no send at B's instant {b_root}: {sends:?}"));
+        assert_eq!(b["sob"].as_bool(), Some(true), "{samples} samples: B starts its own device burst");
+        trials.push((samples, b_root - a_root));
+    }
+    assert_eq!(trials[0].1, trials[1].1, "B is the same distance after A with a one-sample A and with the four-sample control: {trials:?}");
+}
+
+/// `hw_p72_timed_tx_chunks_are_timed_and_flushed`: every send of a 60 ms device burst carries its time (T1), every closing send has at least two
+/// samples (T2), the burst's last sample is the held tail closed by one send of two samples, and the flush is acknowledged (T3: the fake does
+/// acknowledge a flush, so the verdict is PASS; the acknowledgement is the device's behaviour, not a segmentation rule).
+#[test]
+fn p72_timed_tx_chunks_rehearsal_on_the_fake() {
+    let dir = TempDir::new();
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+    let (spec, inputs) = common::e3::timed_chunks_spec(1e9);
+    let manifest = captured(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), probe.clone(), inputs));
+    let trial = common::e3::timed_chunks_case(&probe, &manifest);
+    println!("rehearsal #72 1a: {:?}", trial.verdict);
+    assert!(matches!(trial.verdict, common::tone::Verdict::Pass(_)), "T1 (every send timed), T2 (closing sends of two samples or more) and T3: {:?}", trial.verdict);
+    assert_eq!(trial.closing, [json!([2])], "the held tail closes the burst with one send of two samples, not a direct close");
+}
+
 // ------------------------------------------------ #92: a uhd-control panic is a DEVICE_LOST (UR-16)
 
 /// A device whose `time_now` panics on uhd-control's thread once armed: the panic is put there by the test (UHD does not panic in `time_now`),

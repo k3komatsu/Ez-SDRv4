@@ -15,15 +15,17 @@ use ezsdr_kernel::stream::{BlockFlags, BlockHeader, BurstOpen, BurstStep, BurstT
 use ezsdr_kernel::time::{Duration, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload};
-use ezsdr_radio::staging::{CLOSE_GAP, CLOSED_SHORT_MAX, OpId, Outcome, Read, Reopen, STOP_FRONT, Settle, TxBook, TxSend};
+use ezsdr_radio::segment::{self, SEND_CAP_MAX, Waveform, plan_send, send_cap};
+use ezsdr_radio::staging::{CLOSE_GAP, OpId, Outcome, Read, Reopen, STOP_FRONT, Settle, TxBook, TxSend, handover_horizon};
 use serde_json::json;
 
 use super::control::ColdConfig;
 use super::core::{Clock, Core, Locked, Streams, lock, stream_key};
-use crate::device::{Dir, Iq, MIN_FIRST_SEND, MIN_OPEN_FIRST_SEND, TxCode, TxReport};
+use crate::device::{Dir, Iq, TxCode, TxReport};
 use crate::host::HostClock;
 use crate::profile::DEVICE_LEAD_NS;
 use ezsdr_radio::timeline::{Channels, StreamKey};
+use ezsdr_radio::x3xx::PACKETS;
 
 /// A burst uhd-control booked (UR-21).
 pub(crate) struct Held {
@@ -61,7 +63,7 @@ impl Held {
 
     pub(super) fn tile_repeat(&mut self) {
         let len = self.waveform_len;
-        let cap = TX_SEND_CAP as usize;
+        let cap = SEND_CAP_MAX as usize;
         if !self.repeat || len == 0 || len >= cap {
             return;
         }
@@ -245,8 +247,9 @@ pub(crate) struct Tx {
 
 const IDLE: Wall = Wall::from_micros(200);
 const SEND_TIMEOUT: Wall = Wall::from_secs(1);
-const TX_SEND_CAP: i64 = 20_000;
 const TX_CHANNELS_MAX: usize = 64;
+/// The most zero-padded samples of a closing first packet a channel carries (UR-22).
+const PAD_MAX: usize = PACKETS.min_first_send as usize;
 
 /// Whether the owner configures the values of generation `wanted` before a burst starts (R4, M1): the device
 /// holds another generation, no device burst is open, the device time is at or after the end of the owner's last
@@ -483,8 +486,7 @@ impl Tx {
             self.read_list();
             return true;
         };
-        let window = self.core.ticks(self.core.description.timing.tx_in_flight_ns);
-        let window_cut = clock.at_or_after(now.saturating_add(window));
+        let window_cut = handover_horizon(now, self.core.tx_in_flight(), |t| clock.at_or_after(t));
         let open = self.with_book(|book| book.open.as_ref().map(|open| (open.next, open.first, open.booking.k, open.booking.policy)));
         if open.is_none() && self.cut.is_some_and(|cut| now >= cut) {
             self.end_clock();
@@ -644,8 +646,7 @@ impl Tx {
         if self.chain.needs_reopen() {
             return false;
         }
-        let min_open = MIN_OPEN_FIRST_SEND as i64;
-        let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(min_open, TX_SEND_CAP);
+        let chunk = send_cap(self.core.tx_in_flight(), clock.n, &PACKETS);
         let mut streams = self.lock_for_send();
         let configured = streams.stream(stream_key(Dir::Tx, self.k)).configured;
         let book = &mut streams.stream_mut(stream_key(Dir::Tx, self.k)).book;
@@ -658,39 +659,25 @@ impl Tx {
         );
         let next = open.next;
         let len = open.booking.waveform_len as i64;
-        let offset = if open.booking.repeat { (next - start).rem_euclid(len) } else { next - start };
         let tiled = open.booking.repeat && open.booking.samples[0].len() > len as usize;
-        let mut wanted = if tiled { chunk } else { chunk.min(len - offset) };
-        if let Some(cut) = held_cut {
-            wanted = wanted.min(cut - next);
-        }
-        let avail = window_cut - next;
-        if avail < if device_sob { wanted.min(min_open) } else { wanted } {
+        let waveform = Waveform { start, len, repeat: open.booking.repeat, tiled };
+        let Some(extent) = segment::extent(waveform, next, chunk, held_cut, None) else {
+            debug_assert!(false, "a send has samples left before the next held start");
             return false;
-        }
-        let count = wanted.min(avail);
-        debug_assert!(count > 0, "the send is inside the in-flight window");
-        let ends_waveform = !open.booking.repeat && offset + count == len;
-        let ends_at_held = held_cut.is_some_and(|h| next + count == h);
-        // A first send of at most 32 samples is one closed device burst, whether it ends the waveform or reaches the next held burst (UR-22).
-        let short_first = device_sob && count <= min_open;
-        let eob = ends_waveform || ends_at_held;
+        };
+        let offset = extent.offset;
         // The Kernel's burst boundaries (`first`, `eob`) and the device's differ where one
         // burst continues the device burst of the one before (§11 F3).
         let continuing = first && !device_sob;
-        // A Kernel burst's end is the device burst's only once no burst can still be booked
-        // at its next sample (it is a device lead away): otherwise its last sample is held
-        // back, and `step` sends it with end-of-burst at that deadline, or without it ahead
-        // of a burst that continues the device burst there (Review N, B3; Review O, O-B1).
-        // A short first buffer is not held: its start goes with it.
-        let open_ended = clock.instant(next + count) - self.core.now() > self.core.device_lead();
-        let hold = eob && !ends_at_held && open_ended && !short_first;
-        // A short first send is closed here even where a booking follows at its end: that booking meets the padded front (UR-22).
-        let device_eob = eob && (!ends_at_held || short_first) && !hold;
-        let sending = (if hold { count - 1 } else { count }) as usize;
-        // A closing packet is padded with zeros (UR-22: a first send to four, a continuation to two).
-        let pad = if device_sob && device_eob { MIN_FIRST_SEND.saturating_sub(sending) } else { usize::from(device_eob && sending == 1) };
-        let device_count = sending + pad;
+        // A Kernel burst's end is the device burst's only once no burst can still be booked at its next sample (it is a device lead away):
+        // otherwise its last sample is held back, and `step` sends it with end-of-burst at that deadline, or without it ahead of a burst
+        // that continues the device burst there (Review N, B3; Review O, O-B1). A short first buffer is not held: its start goes with it.
+        let now = self.core.now();
+        let Some(plan) = plan_send(&PACKETS, &extent, device_sob, window_cut, now, self.core.device_lead(), |k| clock.instant(k)) else {
+            return false;
+        };
+        let (count, eob, hold, device_eob) = (plan.count, plan.eob, plan.hold, plan.device_eob);
+        let (sending, pad, device_count) = (plan.sending as usize, plan.pad as usize, plan.device_count as usize);
         let (samples, burst_open) = (open.booking.samples.clone(), open.booking.open);
         let op = book.issue(TxSend { count, device_count: device_count as i64, ends: eob });
         drop(streams);
@@ -725,7 +712,7 @@ impl Tx {
                 }
             }
         }
-        let mut padded = [[Iq::default(); MIN_FIRST_SEND]; TX_CHANNELS_MAX];
+        let mut padded = [[Iq::default(); PAD_MAX]; TX_CHANNELS_MAX];
         let mut sent = [&[][..]; TX_CHANNELS_MAX];
         if pad > 0 {
             for channel in 0..channels {
@@ -835,7 +822,7 @@ impl Tx {
             // UR-22: a closing send that is also the device burst's first send, of at most 32 padded samples, fronts at its padded end plus the
             // gap of the stream's rate; any other closing send at its end plus three. (A Kernel end the device burst outlives leaves it open
             // at the next sample.)
-            let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { self.short_gap(clock) } else { CLOSE_GAP };
+            let gap = if plan.closes_short { self.short_gap(clock) } else { CLOSE_GAP };
             self.chain.advance_front(clock.domain, next.saturating_add(pad as i64 + gap));
         }
         true
@@ -1395,6 +1382,7 @@ mod tests {
     mod e1;
     mod e2a;
     mod e2b;
+    mod e3;
     mod o1;
 
     fn held(clock: &super::Clock, k: i64, len: usize, policy: LatePolicy) -> Held {

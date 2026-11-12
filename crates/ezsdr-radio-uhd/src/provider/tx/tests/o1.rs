@@ -915,3 +915,106 @@ fn o1_uhd_t8_a_switch_whose_repeat_the_host_has_not_issued_is_refused_at_receipt
     r.check(&o::Slots::default(), 1_990, 20_000);
     assert!(lock(&r.rig.core.rec).switches.is_empty());
 }
+
+// ------------------------------------------------------------------------------------------------------------ E3a-1: table Q
+
+/// What a Stop at 20 ms leaves of a booking handed to the device, UHD's column of table Q (note 49 E3a plan §2, written from UR-23's
+/// first-send rule): the whole burst, a cut at a sample, or the booking cancelled (a note, no record, no sample).
+#[derive(Clone, Copy, Debug)]
+enum Handed {
+    Whole,
+    Cut(i64),
+    Cancelled,
+}
+
+/// The window's first sample `we` is 30 000 (the Stop sample `t_k` 20 000 plus the 10 000-sample window); every start below is read from
+/// `o::STOP_SHAPES`, the literal the Mock's `e3_mc1_…` reads too. A prefix the owner took is cut at its end: a first send of 32 samples
+/// waits for no continuation (a continuation needs all it wants). An open booking's first send is what the window holds at the first
+/// 1 ms turn that holds 32 samples of it (the first timed buffer takes what fits), 1 000 samples from 15 000 and 1 010 from 15 990; the
+/// 2 500-sample chunks follow, so its cursor at the Stop is the last chunk boundary the window admits, within one chunk of `we`.
+fn uhd_column(label: &str) -> Handed {
+    match label {
+        "finite 1 at we-1" | "finite 20 at we-20" | "finite 32 at we-32" | "finite 100 inside the window" => Handed::Whole,
+        "finite 1 at we" | "finite 20 at we-19" | "finite 32 at we-31" | "finite 33 at we-31" | "repeat at we-31" => Handed::Cancelled,
+        "finite 33 at we-32" | "repeat at we-32" => Handed::Cut(30_000),
+        "open repeat at t_k-5000" | "long finite at t_k-5000" => Handed::Cut(28_500),
+        "open repeat at t_k-4010" => Handed::Cut(29_500),
+        other => panic!("table Q has no UHD column for {other}"),
+    }
+}
+
+#[test]
+fn e3_u1_the_stop_by_burst_shape() {
+    // The Stop is received at 20 ms after the owner's last turn at that instant, so what was handed is what the window took by then and no
+    // thread decides it (`before_stop`'s shape). One rig per row of table Q; the booking is judged against the independent oracle (the
+    // emission by `Slots`, the cancellation by `unhanded_booking_at_a_stop`) and against the column above.
+    let (t_k, we) = (20_000, 30_000);
+    for shape in o::STOP_SHAPES {
+        let (len, repeat) = (shape.len.unwrap_or(1_000), shape.len.is_none());
+        let start = if shape.from_window_edge { we } else { t_k } + shape.offset;
+        let mut r = rig(&[(1, 100), (3, len as usize)], Vec::new());
+        r.book(1, 0, 10_000, false, LatePolicy::DropAndFlag);
+        r.book(2, 1, start, repeat, LatePolicy::DropAndFlag);
+        r.turns(0, 19);
+        r.at(20 * MS);
+        r.turn();
+        r.stop();
+        let (tk, bound) = r.p.stop_bound(20 * MS);
+        assert_eq!((tk, bound, r.p.clock.at_or_after(20 * MS + r.p.window)), (t_k, we + 5, we), "{}: the Stop's bound", shape.label);
+        r.turns(21, 60);
+        let label = shape.label;
+        let recs: Vec<(i64, i64, String)> = r.rows().iter().map(|row| (row["target"]["ticks"].as_i64().unwrap(), row["samples"].as_i64().unwrap(), row["end"].as_str().unwrap().to_owned())).collect();
+        let a = o::Seg::once(1, 10_000, 100);
+        let (column, mut slots) = (uhd_column(label), o::Slots { segs: vec![a], cut: None });
+        match column {
+            Handed::Whole => {
+                slots.segs.push(o::Seg::once(3, start, len));
+                r.check(&slots, 9_990, start + len + 100);
+                assert_eq!(recs, [(10_000, 100, "eob".to_owned()), (start, len, "eob".to_owned())], "{label}");
+                assert_eq!(r.cancellations(), 0, "{label}");
+            }
+            Handed::Cut(end) => {
+                let b = if repeat { o::Seg::repeating(3, start, 1_000, i64::MAX) } else { o::Seg::once(3, start, len) };
+                slots.segs.push(b.cuttable());
+                slots.cut = Some((tk, bound));
+                let cut = r.check(&slots, 9_990, end + 200).expect("the Stop cuts the booking");
+                assert_eq!(cut, end, "{label}: the cut");
+                assert_eq!(recs, [(10_000, 100, "eob".to_owned()), (start, end - start, "stop".to_owned())], "{label}");
+                assert_eq!(r.cancellations(), 0, "{label}");
+            }
+            Handed::Cancelled => {
+                let spec = o::unhanded_booking_at_a_stop();
+                assert_eq!(r.cancellations(), spec.notes, "{label}: {:?}", lock(&r.rig.core.rec).rejected);
+                assert_eq!(recs.iter().filter(|rec| rec.0 == start).count(), spec.records, "{label}: {recs:?}");
+                assert_eq!(r.heard(3, 0, 60_000), spec.samples, "{label}");
+            }
+        }
+        assert!(r.refusals().is_empty() && r.time_errors().is_empty(), "{label}: {:?}", r.events);
+    }
+}
+
+#[test]
+fn e3_u1b_a_booking_joined_to_a_handed_one_at_a_stop() {
+    // Table Q row 10 (F3b): A (40 samples) ends at `we - 50` and B (100) is booked at A's exact end. A's first send goes whole with the end
+    // of its Kernel burst (B is held at its end), B continues the device burst and needs all of its 100 samples: 50 remain in the window, so B
+    // is not handed. The Stop cancels it (a note, no record); A completes. The Mock hands B to `we` (its first send is 32): `e3_mc1_…`.
+    let we = 30_000;
+    let [(a_at, a_len), (b_at, b_len)] = o::JOINED_AT_A_STOP;
+    let (a_start, b_start) = (we + a_at, we + b_at);
+    assert_eq!(a_start + a_len, b_start, "B joins A at its end");
+    let mut r = rig(&[(1, 100), (2, a_len as usize), (3, b_len as usize)], Vec::new());
+    r.book(1, 0, 10_000, false, LatePolicy::DropAndFlag);
+    r.book(2, 1, a_start, false, LatePolicy::DropAndFlag);
+    r.book(3, 2, b_start, false, LatePolicy::DropAndFlag);
+    r.turns(0, 19);
+    r.at(20 * MS);
+    r.turn();
+    r.stop();
+    r.turns(21, 60);
+    let recs: Vec<(i64, i64, String)> = r.rows().iter().map(|row| (row["target"]["ticks"].as_i64().unwrap(), row["samples"].as_i64().unwrap(), row["end"].as_str().unwrap().to_owned())).collect();
+    assert_eq!(recs, [(10_000, 100, "eob".to_owned()), (a_start, a_len, "eob".to_owned())], "A completes, B has no record");
+    assert_eq!(r.cancellations(), o::unhanded_booking_at_a_stop().notes, "B is cancelled with one note: {:?}", lock(&r.rig.core.rec).rejected);
+    assert!(!r.heard(3, 0, 60_000), "no sample of B");
+    r.check(&o::Slots { segs: vec![o::Seg::once(1, 10_000, 100), o::Seg::once(2, a_start, a_len)], cut: None }, 9_990, b_start + 200);
+    assert!(r.refusals().is_empty() && r.time_errors().is_empty(), "{:?}", r.events);
+}

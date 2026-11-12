@@ -56,6 +56,21 @@ pub fn rates(master_clock_hz: u64) -> Vec<f64> {
     decimations().iter().rev().map(|n| master_clock_hz as f64 / *n as f64).collect()
 }
 
+/// UR-22's packet rules of an X3xx's transmit path: the samples per channel a device burst's first packet carries at least. Every decision
+/// that reads one of them takes the whole value ([`crate::segment`], [`crate::staging`]), so the first-send wait, the short-first-send bound
+/// and the short-gap choice cannot follow different numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PacketRules {
+    /// An open device burst's first packet carries at least this many samples (the bench, 2026-11-06: 28 or fewer underflowed at interpolation 80
+    /// and more, 30 or more never did). A burst of at most this many samples is one closed device burst.
+    pub min_open_first_send: i64,
+    /// A closed device burst's first packet carries at least this many samples; a shorter send is zero-padded to it (the bench, 2026-11-05).
+    pub min_first_send: i64,
+}
+
+/// The packet rules of the X3xx profile.
+pub const PACKETS: PacketRules = PacketRules { min_open_first_send: 32, min_first_send: 4 };
+
 /// The largest decimation a transmit stream may use: transmit rates start at 1 MS/s on a 200 MHz master clock (KL-40; the
 /// 2026-11-10 bench: at 0.4 MS/s and below a closed burst of at most four samples underflows itself, and at 0.25 MS/s and below a two-zero flush is not acknowledged).
 pub const TX_MAX_DECIMATION: u64 = 200;

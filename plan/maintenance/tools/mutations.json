@@ -6831,8 +6831,8 @@
   "id": "P628",
   "name": "uhd-tx takes its open-window bound from the Description (UR-21, D1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let window = self.core.ticks(self.core.description.timing.tx_in_flight_ns);\n",
-  "new": "        let window = self.core.ticks(10_000_000);\n",
+  "old": "handover_horizon(now, self.core.tx_in_flight(),",
+  "new": "handover_horizon(now, self.core.ticks(10_000_000),",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_tx_reads_in_flight_window_from_description"
@@ -6841,8 +6841,8 @@
   "id": "P629",
   "name": "MockRadio includes an earlier same-instant receipt in its conservative front (MR-17)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "    if order < before {",
-   "new": "    if order.saturating_add(1) < before {",
+   "old": ".filter(|(order, _)| *order < before)",
+   "new": ".filter(|(order, _)| order.saturating_add(1) < before)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "lib",
   "filter": "mr_17_handed_front_reduction_cases"
@@ -6851,32 +6851,12 @@
   "id": "P630",
   "name": "MockRadio counts a burst received before a later one (MR-17)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "    if order < before {",
-   "new": "    if false && order < before {",
+   "old": ".filter(|(order, _)| *order < before)",
+   "new": ".filter(|(order, _)| false && *order < before)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "lib",
   "filter": "mr_17_handed_front_reduction_cases"
- } ,
- {
-  "id": "P631",
-  "name": "a burst starting exactly at the hand-over horizon is excluded (RM-15)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "start < window_end",
-  "new": "start <= window_end",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "lib",
-  "filter": "mr_17_handed_front_reduction_cases"
- } ,
- {
-  "id": "P632",
-  "name": "a finite burst stops contributing at its end (RM-15)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "end.min(window_end)",
-  "new": "end.max(window_end)",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "lib",
-  "filter": "mr_17_handed_front_reduction_cases"
- } ,
+ }   ,
  {
   "id": "P633",
   "name": "the front reduction chooses the greatest candidate (RM-15)",
@@ -6886,23 +6866,13 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "lib",
   "filter": "mr_17_handed_front_reduction_cases"
- } ,
- {
-  "id": "P634",
-  "name": "a repeat has no finite waveform end for the front (RM-15)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "(!repeat).then_some(start.saturating_add(len))",
-  "new": "Some(start.saturating_add(len))",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_25_stop_hands_a_future_repeat_through_the_in_flight_window"
- } ,
+ }  ,
  {
   "id": "P635",
   "name": "a prior held burst contributes to MockRadio's front (MR-17)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "for held in self.tx[k].book.list.held.values() {",
-  "new": "for held in self.tx[k].book.list.held.values().filter(|_| false) {",
+  "old": "book.list.held.values().map(|held| pending(held, false))",
+  "new": "book.list.held.values().filter(|_| false).map(|held| pending(held, false))",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_25_stop_hands_a_future_repeat_through_the_in_flight_window"
@@ -6918,21 +6888,11 @@
   "filter": "rm_15_later_bound_combines_the_current_and_handed_front"
  } ,
  {
-  "id": "P637",
-  "name": "uhd-tx never hands a payload sample at or beyond the strict window edge (UR-23)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let count = wanted.min(avail);",
-  "new": "        let count = wanted.min(i64::MAX);",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_21_send_does_not_cross_the_in_flight_window"
- } ,
- {
   "id": "P638",
   "name": "the strict UHD window rounds up to the first sample at or after its edge (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let window_cut = clock.at_or_after(now.saturating_add(window));",
-  "new": "        let window_cut = (now.saturating_add(window) - clock.origin).div_euclid(clock.n);",
+  "old": "let window_cut = handover_horizon(now, self.core.tx_in_flight(), |t| clock.at_or_after(t));",
+  "new": "let window_cut = (now.saturating_add(self.core.tx_in_flight()) - clock.origin).div_euclid(clock.n);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_send_does_not_cross_the_in_flight_window"
@@ -6966,16 +6926,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
- } ,
- {
-  "id": "P643",
-  "name": "the finite burst's held last sample is sent only once at continuation (UR-23)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        let sending = (if hold { count - 1 } else { count }) as usize;",
-  "new": "        let sending = count as usize;",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_21_a_finite_burst_with_a_held_tail_keeps_its_front"
  } ,
  {
   "id": "P644",
@@ -7036,17 +6986,7 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20_x3xx_loss_cuts_transmit_at_its_instant"
- } ,
- {
-  "id": "P656",
-  "name": "a short first send that a booking follows is not closed at its end (UR-23, N3)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let device_eob = eob && (!ends_at_held || short_first) && !hold;",
-  "new": "let device_eob = eob && !ends_at_held && !hold;",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_23_a_short_first_send_closes_before_a_booking_at_its_end"
-  },
+ },
   {
    "id": "P657",
    "name": "an abandoned send's front is its padded end plus the gap, not its padded end (UR-22, UR-23)",
@@ -7501,16 +7441,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "measurement_timing_candidate_updates_every_surface_and_the_start_boundary"
-  },
-  {
-   "id": "P714",
-   "name": "TX chunks ignore the candidate in-flight window",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(min_open, TX_SEND_CAP);",
-   "new": "let chunk = self.core.block_len as i64;",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "measurement_candidate_in_flight_window_sets_the_tx_chunk_size"
   },
   {
    "id": "P715",
@@ -9965,96 +9895,6 @@
    "filter": "ur_23_p5_p6_the_success_is_counted_per_owner"
   },
   {
-   "id": "P1108",
-   "name": "uhd-tx hands a short buffer at a window edge it cannot fill (UR-23)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
-   "new": "if avail < if device_sob { 1 } else { wanted } {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_23_a_first_send_waits_for_32_window_samples"
-  },
-  {
-   "id": "P1109",
-   "name": "a buffer waits when the window takes exactly all of it (UR-23)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
-   "new": "if avail <= if device_sob { wanted.min(min_open) } else { wanted } {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_23_m1_a_repeat_stops_short_of_a_window_edge_it_cannot_fill"
-  },
-  {
-   "id": "P1110",
-   "name": "the wanted size ignores the waveform's end (UR-23)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "        let mut wanted = if tiled { chunk } else { chunk.min(len - offset) };",
-   "new": "        let mut wanted = chunk;",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_23_m2_the_last_part_of_a_burst_is_not_split_by_the_window"
-  },
-  {
-   "id": "P1111",
-   "name": "the wanted size ignores the next held burst's start (UR-23)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if let Some(cut) = held_cut {",
-   "new": "if let Some(cut) = None::<i64> {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_23_m4b_the_buffer_before_a_held_start_is_not_split"
-  },
-  {
-   "id": "P1112",
-   "name": "the wanted size ignores the next held burst's start in a repeat (UR-23)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if let Some(cut) = held_cut {",
-   "new": "if let Some(cut) = None::<i64> {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_23_txs_a_held_cut_splits_a_high_rate_repeat_at_the_target"
-  },
-  {
-   "id": "P1113",
-   "name": "the first timed buffer waits for a whole buffer too (UR-23)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
-   "new": "if avail < wanted {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_23_m5_the_first_timed_buffer_takes_what_fits"
-  },
-  {
-   "id": "P1114",
-   "name": "the first timed buffer is not cut to the window (UR-23)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        let count = wanted.min(avail);",
-   "new": "        let count = wanted;",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_23_m5_the_first_timed_buffer_takes_what_fits"
-  },
-  {
-   "id": "P1115",
-   "name": "a continuation's first buffer is exempt from the wait (UR-23)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
-   "new": "if avail < if device_sob { wanted.min(min_open) } else { 0 } {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_23_m4_a_continuation_waits_without_a_device_call"
-  },
-  {
-   "id": "P1116",
-   "name": "a waiting continuation is sent into the short window (UR-23)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {\n            return false;\n        }\n        let count = wanted.min(avail);",
-   "new": "let count = wanted.min(avail);",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_23_m9_a_waiting_continuation_leaves_the_held_tail_alone"
-  },
-  {
    "id": "P1117",
    "name": "a held burst opened for the first time reports a wait as work (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -10368,9 +10208,9 @@
   {
     "id": "P1159",
     "name": "TX sends use the proposed 20,000-sample cap",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "const TX_SEND_CAP: i64 = 20_000;",
-    "new": "const TX_SEND_CAP: i64 = 2_000;",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "pub const SEND_CAP_MAX: i64 = 20_000;",
+    "new": "pub const SEND_CAP_MAX: i64 = 2_000;",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_txs_tiles_a_short_repeat_across_original_wraps_at_high_rate"
@@ -10379,7 +10219,7 @@
     "id": "P1160",
     "name": "the quarter-window still limits the TX chunk",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(min_open, TX_SEND_CAP);",
+    "old": "let chunk = send_cap(self.core.tx_in_flight(), clock.n, &PACKETS);",
     "new": "let chunk = self.core.block_len as i64;",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -10391,16 +10231,6 @@
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
     "old": "let tiled_len = ((cap + 2 * len - 2) / len) * len;",
     "new": "let tiled_len = ((cap + len - 1) / len) * len;",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_txs_tiles_a_short_repeat_across_original_wraps_at_high_rate"
-   },
-   {
-    "id": "P1162",
-    "name": "tiled repeats may cross original-waveform wraps",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let mut wanted = if tiled { chunk } else { chunk.min(len - offset) };",
-    "new": "let mut wanted = chunk.min(len - offset);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_txs_tiles_a_short_repeat_across_original_wraps_at_high_rate"
@@ -10424,16 +10254,6 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_txs_grouped_short_repeats_keep_channel_phase_aligned"
-   },
-   {
-    "id": "P1165",
-    "name": "a payload is cut at the next held burst's start",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "wanted = wanted.min(cut - next);",
-    "new": "wanted = wanted;",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_txs_a_held_cut_splits_a_high_rate_repeat_at_the_target"
    },
    {
     "id": "P1167",
@@ -10464,16 +10284,6 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "fake",
       "filter": "ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played"
-     },
-     {
-      "id": "P1171",
-      "name": "a one-sample payload close gets its second sample (D9b-1a T2)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "usize::from(device_eob && sending == 1) };",
-      "new": "0 };",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "ur_23_a_one_sample_continuation_eob_is_padded_to_two"
      },
      {
       "id": "P1172",
@@ -13062,16 +12872,6 @@
       "filter": "ur_22_a_repeat_of_one_to_five_samples_tiles_its_first_send"
     },
     {
-      "id": "N48S1-07",
-      "name": "a first send's closing packet is not padded to four (UR-22, FS-2)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "let pad = if device_sob && device_eob { MIN_FIRST_SEND.saturating_sub(sending) } else",
-      "new": "let pad = if device_sob && device_eob { 0 } else",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "ur_23_a_one_sample_burst_restarts_after_its_padded_device_burst"
-    },
-    {
       "id": "N48S1-08",
       "name": "the restart after a padded close is one sample after its payload (UR-23, D9b-1a)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -13090,16 +12890,6 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_22_t3_flush_requires_each_channel_ack_and_device_loss_stays_distinct"
-    },
-        {
-      "id": "N48S1-12",
-      "name": "a four-sample first send is held back as three and one (UR-22, FS-1, N1)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "let hold = eob && !ends_at_held && open_ended && !short_first;",
-      "new": "let hold = eob && !ends_at_held && open_ended && !(device_sob && count == 1);",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "ur_23_a_four_sample_first_send_is_not_held"
     },
     {
       "id": "N48S1-13",
@@ -13120,16 +12910,6 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_23_a_wait_past_the_start_lead_follows_the_late_policy"
-    },
-    {
-      "id": "N48S1-15",
-      "name": "a continuation of fewer than four samples waits for the first-send minimum (UR-23, TBD-b4)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
-      "new": "if avail < if device_sob { wanted.min(min_open) } else { min_open } {",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "ur_23_a_continuation_of_two_samples_is_sent_at_once_with_no_minimum"
     },
         {
       "id": "N48S1-17",
@@ -13152,16 +12932,6 @@
       "filter": "ur_22_a_flush_underflows_are_recorded_as_the_flushs"
     },
     {
-      "id": "N48S1-23",
-      "name": "a first send that does not fit the window is handed over (MR-25, UR-23 D4)",
-      "file": "crates/ezsdr-mock-radio/src/lib.rs",
-      "old": ".filter(|_| start.saturating_add(first) <= window_end)",
-      "new": ".filter(|_| true)",
-      "crate": "ezsdr-mock-radio",
-      "test_bin": "mock_channel",
-      "filter": "mr_25_a_first_send_that_does_not_fit_the_window_is_not_handed_over"
-    },
-    {
       "id": "N48S1-24",
       "name": "a padded first send copies only channel 0's payload (UR-22 D6, grouped channels)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -13170,26 +12940,6 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_22_a_two_channel_one_sample_burst_is_padded_on_both_channels"
-    },
-    {
-      "id": "N48S1-25",
-      "name": "a held burst's first send is counted as one sample against the window (MR-25, UR-23 D4)",
-      "file": "crates/ezsdr-mock-radio/src/lib.rs",
-      "old": "held.len.min(DEVICE_MIN_OPEN_FIRST_SEND)",
-      "new": "held.len.min(1)",
-      "crate": "ezsdr-mock-radio",
-      "test_bin": "mock_channel",
-      "filter": "mr_25_a_first_send_that_does_not_fit_the_window_is_not_handed_over"
-    },
-    {
-      "id": "N48S1-29",
-      "name": "a held burst's first send is counted as its own length, not as four samples, when it is a repeat (UR-22, MR-25 D4)",
-      "file": "crates/ezsdr-mock-radio/src/lib.rs",
-      "old": "if held.repeat { DEVICE_MIN_OPEN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) }",
-      "new": "held.len.min(DEVICE_MIN_OPEN_FIRST_SEND)",
-      "crate": "ezsdr-mock-radio",
-      "test_bin": "mock_channel",
-      "filter": "mr_25_a_repeat_first_send_is_judged_at_32_samples"
     },
 {
     "id": "N-12",
@@ -13492,56 +13242,6 @@
     "filter": "a_rate_mismatch_never_passes"
   },
   {
-    "id": "N48S3-01",
-    "name": "first send threshold 32 -> 31",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
-    "new": "if avail < if device_sob { wanted.min(min_open - 1) } else { wanted } {",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_a_first_send_waits_for_32_window_samples"
-  },
-  {
-    "id": "N48S3-02",
-    "name": "first send threshold 32 -> 33",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
-    "new": "if avail < if device_sob { wanted.min(min_open + 1) } else { wanted } {",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_a_first_send_waits_for_32_window_samples"
-  },
-  {
-    "id": "N48S3-04",
-    "name": "first send not capped by the burst remainder",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let mut wanted = if tiled { chunk } else { chunk.min(len - offset) };",
-    "new": "let mut wanted = if tiled { chunk } else { chunk };",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_a_31_sample_burst_waits_for_all_31"
-  },
-  {
-    "id": "N48S3-07",
-    "name": "short first send boundary 32 -> 31 (hold and close)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let short_first = device_sob && count <= min_open;",
-    "new": "let short_first = device_sob && count < min_open;",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_a_burst_of_31_or_32_is_sent_whole_without_a_held_tail"
-  },
-  {
-    "id": "N48S3-08",
-    "name": "short first send boundary 32 -> 33 (hold and close)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let short_first = device_sob && count <= min_open;",
-    "new": "let short_first = device_sob && count <= min_open + 1;",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_a_33_sample_burst_sends_32_then_holds_one"
-  },
-  {
     "id": "N48S3-14",
     "name": "FakeDevice open-short ratio gate 80 -> 81",
     "file": "crates/ezsdr-radio-uhd/src/device.rs",
@@ -13621,29 +13321,6 @@
     "test_bin": "lib",
     "filter": "ur_33_an_open_short_burst_reports_one_underflow_per_channel"
   },
-    {
-    "id": "N48S3-17",
-    "name": "Mock repeat hand-over threshold 32 -> 4",
-    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "if held.repeat { DEVICE_MIN_OPEN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) }",
-    "new": "if held.repeat { 4 } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) }",
-    "crate": "ezsdr-mock-radio",
-    "test_bin": "mock_channel",
-    "filter": "mr_25_a_repeat_first_send_is_judged_at_32_samples"
-  },
-  
-  
-  
-  {
-    "id": "N48S3-21",
-    "name": "Mock hand-over threshold 32 -> 31 (non-repeat)",
-    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "held.len.min(DEVICE_MIN_OPEN_FIRST_SEND)",
-    "new": "held.len.min(DEVICE_MIN_OPEN_FIRST_SEND - 1)",
-    "crate": "ezsdr-mock-radio",
-    "test_bin": "mock_channel",
-    "filter": "mr_25_a_first_send_that_does_not_fit_the_window_is_not_handed_over"
-  },
   
   
   
@@ -13658,16 +13335,6 @@
     "test_bin": "lib",
     "filter": "ur_33_a_read_that_finds_the_short_burst_dry_is_its_one_underflow"
   },
-  {
-    "id": "N48S3-10",
-    "name": "a short first send never closes its device burst at a cut or its end",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let short_first = device_sob && count <= min_open;",
-    "new": "let short_first = false;",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_a_burst_at_a_closed_short_burst_s_end_is_late_at_dispatch"
-  },
   
   {
     "id": "N48S3-34",
@@ -13678,16 +13345,6 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_33_a_timed_open_burst_with_untimed_continuations_reports_once_per_channel"
-  },
-  {
-    "id": "N48S3-35",
-    "name": "the open first send's window wait is 4 samples again, the S1 minimum (S3 review 6)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
-    "new": "if avail < if device_sob { wanted.min(4) } else { wanted } {",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_a_burst_whose_window_first_takes_28_samples_plays_clean_to_its_end"
   },
   {
     "id": "N47S4-35",
@@ -14341,8 +13998,8 @@
     "id": "N47S5-04",
     "name": "5a: a held tail fronts at its end plus 1, not plus 4 (RM-15)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),",
-    "new": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT - 1),",
+    "old": "Some(len) if joined || len > PACKETS.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),",
+    "new": "Some(len) if joined || len > PACKETS.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT - 1),",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_held_tail_front_is_end_plus_four"
@@ -14918,16 +14575,6 @@
     "filter": "ur_21_metadata_is_empty_or_the_mark_only"
   },
   {
-    "id": "N47S5-52",
-    "name": "5d-U: a held cut at a switch's boundary sends end-of-burst where the switch continues the device burst (m9)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let device_eob = eob && (!ends_at_held || short_first) && !hold;",
-    "new": "let device_eob = eob && (!ends_at_held || short_first || open.booking.repeat) && !hold;",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_switch_cut_reuses_held_cut_path"
-  },
-  {
     "id": "N47S5-53",
     "name": "5d-U: a switch's new repeat keeps the period of the one it replaces (the playing record takes the old period)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
@@ -15421,8 +15068,8 @@
     "id": "N47S5-137",
     "name": "rev 29 (F50): a booking whose front overflows the clock panics (debug) instead of being refused: the checked front is replaced by a plain sum",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),",
-    "new": "Some(len) if joined || len > CLOSED_SHORT_MAX => Some(start + len + HELD_TAIL_FRONT),",
+    "old": "Some(len) if joined || len > PACKETS.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),",
+    "new": "Some(len) if joined || len > PACKETS.min_open_first_send => Some(start + len + HELD_TAIL_FRONT),",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_a_front_past_the_clock_is_refused_without_a_panic_or_a_change"
@@ -15990,8 +15637,8 @@
     "id": "N49B-02",
     "name": "5a (B1): a 32-sample closed head is not short (its front is its end plus four, not the gap)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) if joined || len > CLOSED_SHORT_MAX =>",
-    "new": "Some(len) if joined || len >= CLOSED_SHORT_MAX =>",
+    "old": "Some(len) if joined || len > PACKETS.min_open_first_send =>",
+    "new": "Some(len) if joined || len >= PACKETS.min_open_first_send =>",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_closed_burst_front_is_end_plus_gap"
@@ -16020,7 +15667,7 @@
     "id": "N49B-11",
     "name": "5a (B1): a closed short burst is up to 33 samples (the bound is one too wide)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "self.head_end().checked_sub(self.start).is_some_and(|len| len <= CLOSED_SHORT_MAX)",
+    "old": "self.head_end().checked_sub(self.start).is_some_and(|len| len <= PACKETS.min_open_first_send)",
     "new": "self.head_end().checked_sub(self.start).is_some_and(|len| len <= 33)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -16040,7 +15687,7 @@
     "id": "N49B-05",
     "name": "step F: the owner's short-burst discriminator is dropped, so a closed first send of at most 32 samples fronts at +3 (UR-22)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { self.short_gap(clock) } else { CLOSE_GAP };",
+    "old": "let gap = if plan.closes_short { self.short_gap(clock) } else { CLOSE_GAP };",
     "new": "let gap = CLOSE_GAP;",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -16085,16 +15732,6 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_33_the_short_guard_counts_the_device_burst_not_its_last_packet"
-  },
-  {
-    "id": "N49B-10",
-    "name": "step F: the owner's short-burst test ignores the SOB framing, so a continuation closing a 32-sample burst fronts at +g (UR-22, Q5)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { self.short_gap(clock) } else { CLOSE_GAP };",
-    "new": "let gap = if device_count as i64 <= CLOSED_SHORT_MAX { self.short_gap(clock) } else { CLOSE_GAP };",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_a_continuation_that_closes_a_burst_keeps_the_front_three_past_its_end"
   },
   {
     "id": "N49B-13",
@@ -16200,7 +15837,7 @@
     "id": "N49B-23",
     "name": "Sol fix round, item 1: a long piece behind a short head counts toward its own front at a Stop (RM-16)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "s < handed && e.checked_sub(s).is_some_and(|len| len <= CLOSED_SHORT_MAX)",
+    "old": "s < handed && e.checked_sub(s).is_some_and(|len| len <= PACKETS.min_open_first_send)",
     "new": "s < handed",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -16237,16 +15874,6 @@
     "filter": "o1_uhd_t1_short_and_long_heads_front_table"
   },
   {
-    "id": "O1-M2",
-    "name": "O1a: the repeat phase drifts one sample per wrap (RM-13; a send that starts after a wrap)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let offset = if open.booking.repeat { (next - start).rem_euclid(len) } else { next - start };",
-    "new": "let offset = if open.booking.repeat { (next - start - (next - start) / len).rem_euclid(len) } else { next - start };",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "o1_uhd_t3_a_repeat_keeps_its_phase"
-  },
-  {
     "id": "O1-M3a",
     "name": "O1a, E2a-3: the switch boundary is one grid point late (RM-37, UR-38; the boundary rule is shared since E2a-3 (D9), this row is the UHD's killer)",
     "file": "crates/ezsdr-radio/src/staging.rs",
@@ -16260,8 +15887,8 @@
     "id": "O1-M5",
     "name": "O1a: the owner's window is ten samples wider, so it hands payload past the Stop bound (RM-16)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let window_cut = clock.at_or_after(now.saturating_add(window));",
-    "new": "let window_cut = clock.at_or_after(now.saturating_add(window)) + 10;",
+    "old": "let window_cut = handover_horizon(now, self.core.tx_in_flight(), |t| clock.at_or_after(t));",
+    "new": "let window_cut = handover_horizon(now, self.core.tx_in_flight(), |t| clock.at_or_after(t)) + 10;",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "o1_uhd_t3b_a_stop_cannot_find_payload_past_its_bound"
@@ -18399,5 +18026,595 @@
   "crate": "ezsdr-server",
   "test_bin": "protocol",
   "filter": "ea_15_the_binary_exits_with_status_3_after_the_failstop_delay_when_it_cannot_finish"
+ },
+ {
+  "id": "E3A-P01",
+  "name": "E3a-2: send_cap: a quarter of the window becomes half",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "/ ticks_per_sample.max(1) / 4)",
+  "new": "/ ticks_per_sample.max(1) / 2)",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_s_send_cap"
+ },
+ {
+  "id": "E3A-P02",
+  "name": "E3a-2: send_cap: the lower clamp is one sample, not the first packet",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": ".clamp(rules.min_open_first_send, SEND_CAP_MAX)",
+  "new": ".clamp(1, SEND_CAP_MAX)",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_s_send_cap"
+ },
+ {
+  "id": "E3A-P03",
+  "name": "E3a-2: send_cap: the upper clamp is gone",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": ".clamp(rules.min_open_first_send, SEND_CAP_MAX)",
+  "new": ".max(rules.min_open_first_send)",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_s_send_cap"
+ },
+ {
+  "id": "E3A-P04",
+  "name": "E3a-2: extent: a send ignores the waveform's remainder",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "chunk.min(waveform.len - offset)",
+  "new": "chunk",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_e_extent"
+ },
+ {
+  "id": "E3A-P05",
+  "name": "E3a-2: extent: a tiled repeat is taken as an untiled one",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if waveform.tiled { chunk }",
+  "new": "if false { chunk }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_e_extent"
+ },
+ {
+  "id": "E3A-P06",
+  "name": "E3a-2: extent: a repeat's offset is not taken modulo its length",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "since.rem_euclid(waveform.len)",
+  "new": "since",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_e_extent"
+ },
+ {
+  "id": "E3A-P07",
+  "name": "E3a-2: extent: the held start is ignored",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "[held_cut, hard_cut].into_iter()",
+  "new": "[None, hard_cut].into_iter()",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_e_extent"
+ },
+ {
+  "id": "E3A-P08",
+  "name": "E3a-2: extent: no cut shortens the send",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "wanted.min(cut.saturating_sub(next))",
+  "new": "wanted",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_e_extent"
+ },
+ {
+  "id": "E3A-P09",
+  "name": "E3a-2: extent: a held start anywhere ends the Kernel burst at the send",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "self.held_cut == Some(self.next.saturating_add(count))",
+  "new": "self.held_cut.is_some()",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_e_extent"
+ },
+ {
+  "id": "E3A-P10",
+  "name": "E3a-2: extent: the hard cut is ignored",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "[held_cut, hard_cut].into_iter()",
+  "new": "[held_cut, None].into_iter()",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_e_extent"
+ },
+ {
+  "id": "E3A-P11",
+  "name": "E3a-2: extent: a repeat's wrap ends the Kernel burst",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "!self.repeat && self.offset + count == self.len",
+  "new": "self.offset + count == self.len",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_e_extent"
+ },
+ {
+  "id": "E3A-P12a",
+  "name": "E3a-2: plan_send: a device burst's first send waits for all it wants",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if device_sob { wanted.min(rules.min_open_first_send) }",
+  "new": "if device_sob { wanted }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_w_the_window_wait_and_count"
+ },
+ {
+  "id": "E3A-P12b",
+  "name": "E3a-2: plan_send: a device burst's first send waits for the minimum first packet, not the open one",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if device_sob { wanted.min(rules.min_open_first_send) }",
+  "new": "if device_sob { wanted.min(rules.min_first_send) }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_w_the_window_wait_and_count"
+ },
+ {
+  "id": "E3A-P12c",
+  "name": "E3a-2: plan_send: a device burst's first send waits for one sample",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if device_sob { wanted.min(rules.min_open_first_send) }",
+  "new": "if device_sob { wanted.min(1) }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_w_the_window_wait_and_count"
+ },
+ {
+  "id": "E3A-P12d",
+  "name": "E3a-2: plan_send: the window wait is gone",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if avail < if device_sob { wanted.min(rules.min_open_first_send) } else { wanted } {",
+  "new": "if false {",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_w_the_window_wait_and_count"
+ },
+ {
+  "id": "E3A-P13",
+  "name": "E3a-2: plan_send: the first-send wait is one sample short",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if device_sob { wanted.min(rules.min_open_first_send) }",
+  "new": "if device_sob { wanted.min(rules.min_open_first_send - 1) }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_w_the_window_wait_and_count"
+ },
+ {
+  "id": "E3A-P14",
+  "name": "E3a-2: plan_send: the first-send wait is one sample long",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if device_sob { wanted.min(rules.min_open_first_send) }",
+  "new": "if device_sob { wanted.min(rules.min_open_first_send + 1) }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_w_the_window_wait_and_count"
+ },
+ {
+  "id": "E3A-P15a",
+  "name": "E3a-2: plan_send: a continuation waits for the open first send, not for all it wants",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "} else { wanted } {",
+  "new": "} else { rules.min_open_first_send } {",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_w_the_window_wait_and_count"
+ },
+ {
+  "id": "E3A-P15b",
+  "name": "E3a-2: plan_send: a continuation does not wait",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "} else { wanted } {",
+  "new": "} else { 0 } {",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_w_the_window_wait_and_count"
+ },
+ {
+  "id": "E3A-P16",
+  "name": "E3a-2: plan_send: the window edge is inclusive on the wrong side",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if avail < if device_sob",
+  "new": "if avail <= if device_sob",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_w_the_window_wait_and_count"
+ },
+ {
+  "id": "E3A-P17",
+  "name": "E3a-2: plan_send: a send a lead away exactly is held",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": ".saturating_sub(now) > lead",
+  "new": ".saturating_sub(now) >= lead",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_o_the_hold_deadline"
+ },
+ {
+  "id": "E3A-P18",
+  "name": "E3a-2: plan_send: the hold deadline is measured the wrong way round",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "instant(extent.next.saturating_add(count)).saturating_sub(now) > lead",
+  "new": "now.saturating_sub(instant(extent.next.saturating_add(count))) > lead",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_o_the_hold_deadline"
+ },
+ {
+  "id": "E3A-P19",
+  "name": "E3a-2: plan_send: the send is not clipped to the window",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "let count = wanted.min(avail);",
+  "new": "let count = wanted;",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_w_the_window_wait_and_count"
+ },
+ {
+  "id": "E3A-P20",
+  "name": "E3a-2: plan_send: a first send of exactly the open first send is not short",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "device_sob && count <= rules.min_open_first_send",
+  "new": "device_sob && count < rules.min_open_first_send",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P21",
+  "name": "E3a-2: plan_send: a first send one sample past the open first send is short",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "device_sob && count <= rules.min_open_first_send",
+  "new": "device_sob && count <= rules.min_open_first_send + 1",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P22",
+  "name": "E3a-2: plan_send: no first send is short",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "device_sob && count <= rules.min_open_first_send",
+  "new": "false",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P23",
+  "name": "E3a-2: plan_send: only a one-sample first send is exempt from the hold",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "!short_first && instant",
+  "new": "!(device_sob && count == 1) && instant",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P24",
+  "name": "E3a-2: plan_send: a send that ends at a held start is held back",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "eob && !ends_at_held && !short_first",
+  "new": "eob && !short_first",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P25",
+  "name": "E3a-2: plan_send: a short first send at a held start does not close the device burst",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "(!ends_at_held || short_first)",
+  "new": "!ends_at_held",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P26",
+  "name": "E3a-2: plan_send: a send that ends at a held start closes the device burst",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "eob && (!ends_at_held || short_first) && !hold",
+  "new": "eob && !hold",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P27",
+  "name": "E3a-2: plan_send: the held sample is sent with the rest",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if hold { count - 1 } else { count }",
+  "new": "count",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P28",
+  "name": "E3a-2: plan_send: a closing first send is not padded",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if device_sob && device_eob { (rules.min_first_send - sending).max(0) }",
+  "new": "if false { 0 }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P29",
+  "name": "E3a-2: plan_send: a one-sample closing continuation is not padded",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "i64::from(device_eob && sending == 1)",
+  "new": "0",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P30",
+  "name": "E3a-2: plan_send: a short close keeps the long gap",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "device_eob && device_sob && device_count <= rules.min_open_first_send",
+  "new": "false",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P31",
+  "name": "E3a-2: plan_send: a continuation's close keeps the short gap",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "device_eob && device_sob && device_count <= rules.min_open_first_send",
+  "new": "device_eob && device_count <= rules.min_open_first_send",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_f_flags_and_padding"
+ },
+ {
+  "id": "E3A-P32",
+  "name": "E3a-2: handed_end: a first send that exactly fills the window is not handed",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "pending.start.saturating_add(first) <= window_end",
+  "new": "pending.start.saturating_add(first) < window_end",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_h_handed_end"
+ },
+ {
+  "id": "E3A-P33",
+  "name": "E3a-2: handed_end: a first send that does not fit is handed",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "(pending.start.saturating_add(first) <= window_end).then(",
+  "new": "(true).then(",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_h_handed_end"
+ },
+ {
+  "id": "E3A-P34",
+  "name": "E3a-2: handed_end: a held repeat's first send is its length",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "else if pending.repeat { rules.min_open_first_send }",
+  "new": "else if pending.repeat { pending.len.min(rules.min_open_first_send) }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_h_handed_end"
+ },
+ {
+  "id": "E3A-P35",
+  "name": "E3a-2: handed_end: a held repeat's first send is the minimum first packet",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "else if pending.repeat { rules.min_open_first_send }",
+  "new": "else if pending.repeat { rules.min_first_send }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_h_handed_end"
+ },
+ {
+  "id": "E3A-P36",
+  "name": "E3a-2: handed_end: a held finite burst's first send is one sample",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "pending.len.min(rules.min_open_first_send)",
+  "new": "pending.len.min(1)",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_h_handed_end"
+ },
+ {
+  "id": "E3A-P37",
+  "name": "E3a-2: handed_end: a held finite burst's first send is one sample short",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "pending.len.min(rules.min_open_first_send)",
+  "new": "pending.len.min(rules.min_open_first_send - 1)",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_h_handed_end"
+ },
+ {
+  "id": "E3A-P38",
+  "name": "E3a-2: handed_end: the open burst's first send is the open first send",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if pending.open { 1 }",
+  "new": "if pending.open { rules.min_open_first_send }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_h_handed_end"
+ },
+ {
+  "id": "E3A-P39",
+  "name": "E3a-2: handed_end: the open burst needs no sample of window",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if pending.open { 1 }",
+  "new": "if pending.open { 0 }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_h_handed_end"
+ },
+ {
+  "id": "E3A-P40",
+  "name": "E3a-2: handed_end: a repeat is given a finite end",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "if pending.repeat { window_end }",
+  "new": "if false { window_end }",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_h_handed_end"
+ },
+ {
+  "id": "E3A-P41",
+  "name": "E3a-2: handed_end: a finite burst counts to the window's edge, not to its own end",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "pending.start.saturating_add(pending.len).min(window_end)",
+  "new": "window_end",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "filter": "e3_p_h_handed_end"
+ },
+ {
+  "id": "E3A-U01",
+  "name": "E3a-3: send: the next held burst's start is not passed to extent, so a send crosses a switch boundary",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "segment::extent(waveform, next, chunk, held_cut, None)",
+  "new": "segment::extent(waveform, next, chunk, None, None)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_txs_a_held_cut_splits_a_high_rate_repeat_at_the_target"
+ },
+ {
+  "id": "E3A-U03",
+  "name": "E3a-3: send: the samples are sliced from one before the plan's offset",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let offset = extent.offset;",
+  "new": "let offset = extent.offset.saturating_sub(1);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "o1_uhd_t3_a_repeat_keeps_its_phase"
+ },
+ {
+  "id": "E3A-U04",
+  "name": "E3a-3: send: the held sample is sent with the rest (the plan's sending is not used)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "plan.sending as usize",
+  "new": "plan.count as usize",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_finite_burst_with_a_held_tail_keeps_its_front"
+ },
+ {
+  "id": "E3A-U05",
+  "name": "E3a-3: send: the device buffer is the payload without its padding (the plan's device_count is not used)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "plan.device_count as usize",
+  "new": "plan.sending as usize",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_a_padded_send_counts_payload_only"
+ },
+ {
+  "id": "E3A-U08",
+  "name": "E3a-3: send: plan_send is given rules whose open first send is 31, not x3xx::PACKETS",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "plan_send(&PACKETS,",
+  "new": "plan_send(&ezsdr_radio::x3xx::PacketRules { min_open_first_send: 31, min_first_send: 4 },",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_a_first_send_waits_for_32_window_samples"
+ },
+ {
+  "id": "E3A-U10",
+  "name": "E3a-3: send: plan_send is told the Kernel burst's start, not the device burst's, so a joined piece waits like a first send",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "plan_send(&PACKETS, &extent, device_sob,",
+  "new": "plan_send(&PACKETS, &extent, first,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_m4_a_continuation_waits_without_a_device_call"
+ },
+ {
+  "id": "E3A-M02",
+  "name": "E3a-4: the Mock's hand-over horizon is built from `now`, not `now + W` (MR-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "old": "handover_horizon(now, self.tx_window()?,",
+  "new": "handover_horizon(now, 0,",
+  "filter": "e3_mc1_the_stop_cut_by_burst_shape"
+ },
+ {
+  "id": "E3A-M04",
+  "name": "E3a-4: a Stop's cut is not passed to the block's extent, so the cut block runs on (MR-25, MR-15)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "old": ".chain(extra_cut).min()",
+  "new": ".chain(extra_cut.filter(|_| false)).min()",
+  "filter": "e3_mc4_blocks_by_shape"
+ },
+ {
+  "id": "E3A-M07",
+  "name": "E3a-4: the next held start is not passed to the block's extent, so a successor's boundary ends no Kernel burst (MR-15)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "old": "i64::from(self.profile.block_len()), held_cut, hard_cut)",
+  "new": "i64::from(self.profile.block_len()), None, hard_cut)",
+  "filter": "e3_mc4_blocks_by_shape"
+ },
+ {
+  "id": "E3A-M08",
+  "name": "E3a-4: the block's waveform is tiled, so a block crosses a repeat's wrap (MR-15)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "old": "repeat: open.booking.repeat, tiled: false",
+  "new": "repeat: open.booking.repeat, tiled: true",
+  "filter": "e3_mc4_blocks_by_shape"
+ },
+ {
+  "id": "E3A-M09",
+  "name": "E3a-4: the Mock's Stop model passes packet rules other than x3xx::PACKETS (MR-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "old": "segment::handed_end(&x3xx::PACKETS, pending, window_end)",
+  "new": "segment::handed_end(&x3xx::PacketRules { min_open_first_send: 4, ..x3xx::PACKETS }, pending, window_end)",
+  "filter": "mr_25_a_repeat_first_send_is_judged_at_32_samples"
+ },
+ {
+  "id": "E3A-M10",
+  "name": "E3a-4: the Mock's transmit wake is at the block's end sample, not at its last sample's instant (MR-14, MR-15)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "old": "block.next.saturating_add(block.wanted) - 1",
+  "new": "block.next.saturating_add(block.wanted)",
+  "filter": "e3_mc5_the_wake_follows_the_block"
+ },
+ {
+  "id": "E3A-M11",
+  "name": "E3a-4: a held booking is counted as the open one, with a first send of one sample (MR-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "old": "pending(held, false)",
+  "new": "pending(held, true)",
+  "filter": "mr_25_a_first_send_that_does_not_fit_the_window_is_not_handed_over"
+ },
+ {
+  "id": "E3A-M12",
+  "name": "E3a-4: a block that reaches its finite waveform's end does not end the burst (MR-15)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "old": "block.ends_waveform(block.wanted) ||",
+  "new": "false ||",
+  "filter": "e3_mc4_blocks_by_shape"
  }
 ]

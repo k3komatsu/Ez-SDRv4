@@ -1258,7 +1258,7 @@ fn async_codes(device: &dyn Device, wait: Wall) -> Vec<String> {
 }
 
 /// One raw trial (T2's raw side): a first burst of `samples` samples, sent as the Module sends a standalone head (one send with
-/// start and end of burst, zero-padded to `MIN_FIRST_SEND` when shorter, `tx.rs:684–703`), and a 100-sample burst `gap` samples
+/// start and end of burst, zero-padded to `MIN_FIRST_SEND` when shorter, `segment::plan_send`), and a 100-sample burst `gap` samples
 /// after the first's device end (`padded`, the exclusive end). `codes` are the async reports in order, `accepted` the two sends' counts.
 struct RawTrial {
     samples: usize,
@@ -1436,27 +1436,8 @@ fn hw_s1_short_first_sends() {
     let mut failures = Vec::new();
     for samples in [1usize, 2, 3, 4] {
         let dir = TempDir::new();
-        let mut run = tx_session(device.clone(), &dir);
-        let (short, _) = waveform_of(&[(0.4f32, 0.0f32); 4][..samples]);
-        let (long, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
-        let a = tx_at(&run, ms(40));
-        let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + 10_000);
-        assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&short)).unwrap()));
-        assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&long)).unwrap()));
-        wait(&mut run, ms(200));
-        let long_root = transmit_root(&run, &b);
-        let manifest = run.finish();
-        let acks: Vec<i64> =
-            section(&manifest, "async").as_array().into_iter().flatten().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] != true).filter_map(|row| row["tick"].as_i64()).collect();
-        let (before, after) = (acks.iter().filter(|tick| **tick < long_root).count(), acks.iter().filter(|tick| **tick >= long_root).count());
-        println!(
-            "S1 first send of {samples} samples: TIME_ERROR {:?}; TX_UNDERFLOW {}; async {}; bursts {}",
-            events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>(),
-            events_of(&manifest, "radio.TX_UNDERFLOW").len(),
-            section(&manifest, "async"),
-            section(&manifest, "bursts")
-        );
-        let outcome = iii::short_first_send_verdict(samples, iii::run_faults(&manifest), before, after);
+        let run = tx_session(device.clone(), &dir);
+        let outcome = e3::short_first_case(run, samples);
         print_verdict(&format!("S1 {samples}-sample first send (UR-22, #78)"), &outcome);
         if matches!(outcome, Verdict::Fail(_)) {
             failures.push(samples);
@@ -1887,24 +1868,8 @@ fn hw_txp_b0_send_sizes() {
             rx0_tx0(&profile),
             &[("radio.tx.c0.gain_db", ezsdr_kernel::spec::Scalar::try_from(0.0).unwrap()), ("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Scalar::try_from(rate).unwrap())],
         );
-        let mut run = session_with(&profile, probe.clone(), &initial);
-        past_t0(&mut run, ms(1));
-        past_tx_origin(&mut run);
-        let wave: Vec<_> = pn(31_000).into_iter().map(|(re, im)| (re * 0.7, im * 0.7)).collect();
-        assert!(wave.iter().all(|(re, im)| f64::from(*re).hypot(f64::from(*im)) <= 0.5), "bench RF safety");
-        let (bytes, _) = waveform_of(&wave);
-        let baseline = probe.count("tx_send");
-        assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &[]), Some(&bytes)).unwrap()));
-        wait(&mut run, ms(5_000));
-        let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
-        wait(&mut run, ms(200));
-        let manifest = run.finish();
-        let rows = tx_send_rows_since(&probe, baseline);
-        let sizes: Vec<usize> =
-            rows.iter().filter(|row| row["tx_flush"] != true && row["eob"] != true).filter_map(|row| row["sample_counts"][0].as_u64()).filter(|n| *n > 0).map(|n| n as usize).collect();
-        let closing: Vec<usize> = rows.iter().filter(|row| row["tx_flush"] != true && row["eob"] == true).filter_map(|row| row["sample_counts"][0].as_u64()).map(|n| n as usize).collect();
-        println!("B0 sizes rate {rate}: {} payload sends, sizes {sizes:?}; closing sends {closing:?}", sizes.len());
-        let outcome = iii::all_of(vec![iii::repeat_sizes_verdict(&sizes, &closing, chunk, 31_000), iii::faults_verdict(&[("repeat", iii::run_faults(&manifest), 0)])]);
+        let run = session_with(&profile, probe.clone(), &initial);
+        let outcome = e3::repeat_sizes_case(run, &probe, rate, chunk);
         verdict(&format!("TXP B0 rate {rate} (#78): sizes as the window allows, closing sends of two samples or more, no TIME_ERROR and no TX_UNDERFLOW"), outcome);
     }
 }
@@ -2724,13 +2689,6 @@ fn device_samples(blocks: &[(i64, Vec<ezsdr_radio_uhd::Iq>)]) -> Vec<(i64, ezsdr
     blocks.iter().flat_map(|(first, samples)| samples.iter().enumerate().map(move |(i, sample)| (first + i as i64 * 200, *sample))).collect()
 }
 
-/// T3's evidence in a Manifest: how many flushes were acknowledged (the async section), and the flushes refused.
-fn flush_evidence(manifest: &ezsdr_kernel::manifest::Manifest) -> (usize, Vec<Json>) {
-    let acked = section(manifest, "async").as_array().unwrap().iter().filter(|row| row["tx_flush"] == true && row["code"] == "BurstAck").count();
-    let refused = section(manifest, "rejected").as_array().unwrap().iter().filter(|row| row["call"] == "tx_flush").cloned().collect();
-    (acked, refused)
-}
-
 /// One trial of `hw_p70_…`: the tone's onset (root ticks, `None` when there is no tone) and the burst's booked instant.
 struct OneSample {
     onset: Option<i64>,
@@ -2776,22 +2734,10 @@ fn hw_p72_timed_tx_chunks_are_timed_and_flushed() {
     let device = usrp();
     let hz = pin_slot_a(&*device);
     let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    let (bytes, waveform) = waveform_of(&tone_wave(1e6, 60_000, 100e3));
-    let spec = with_burst(with_tx(receive_spec(1, 1e6, hz, Some(90_000)), 1e6), &waveform, false, "send_asap_and_flag", 10_000);
+    let (spec, inputs) = e3::timed_chunks_spec(hz);
     let dir = TempDir::new();
-    let inputs = std::collections::BTreeMap::from([(waveform.hash.clone(), bytes)]);
     let manifest = captured(spec_run(&spec, &bench_profile(&*probe, &dir, serde_json::json!({}), bench_envelope(&*probe), false), probe.clone(), inputs));
-    let sends = data_sends(&probe);
-    let payload = sends.iter().filter(|row| row["sample_counts"][0].as_u64().unwrap_or(0) > 0).count();
-    let untimed: Vec<&Json> = sends.iter().filter(|row| row["at"].is_null()).collect();
-    let closing: Vec<Json> = sends.iter().filter(|row| row["eob"] == true).map(|row| row["sample_counts"].clone()).collect();
-    let short: Vec<&Json> = sends.iter().filter(|row| row["eob"] == true && row["sample_counts"].as_array().is_some_and(|counts| counts.iter().any(|n| n.as_u64().unwrap_or(0) < 2))).collect();
-    let (acked, refused) = flush_evidence(&manifest);
-    let flushes = probe.rows().iter().filter(|row| row["call"] == "tx_send" && row["tx_flush"] == true).count();
-    println!("#72 1a: {payload} sends with samples; closing sends {closing:?}; flushes sent {flushes}, acknowledged {acked}, refused {refused:?}");
-    let faults = iii::faults_verdict(&[("60 ms device burst", iii::run_faults(&manifest), 0)]);
-    let sends = iii::TimedSends { refused: refused.len(), untimed: untimed.len(), short_closing: short.len(), payload_sends: payload, closing: closing.len(), flushes, acked };
-    let outcome = iii::timed_sends_verdict(faults, &sends);
+    let outcome = e3::timed_chunks_case(&probe, &manifest).verdict;
     verdict("#72 1a (T1, T2, T3 on the production path): every send is timed, closing sends have two samples, the flush is acknowledged", outcome);
 }
 
@@ -2807,7 +2753,7 @@ fn hw_p70_one_sample_burst_then_timed_burst() {
         let one = one_sample_trial(device.clone(), 1, late);
         let control = one_sample_trial(device.clone(), 4, late);
         for (case, trial) in [("one-sample", &one), ("four-sample control", &control)] {
-            let (acked, refused) = flush_evidence(&trial.manifest);
+            let (acked, refused) = e3::flush_evidence(&trial.manifest);
             println!(
                 "#70 {case}, {order}: onset {:?} samples from the booked instant; continuity gaps {}; TIME_ERROR {}; TX_UNDERFLOW {}; flushes acknowledged {acked}, refused {refused:?}",
                 trial.onset.map(|t| (t - trial.burst) as f64 / 200.0),

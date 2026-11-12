@@ -736,3 +736,343 @@ fn e1_mock_q10_a_booking_a_stop_and_a_booking_in_one_step() {
     assert_eq!(m.pairs(), [(20_000, 100)], "R plays from its start");
     m.check(&o::Slots { segs: vec![o::Seg::once(2, 20_000, 100)], cut: None }, 9_990, 20_100);
 }
+
+// ------------------------------------------------------------------------------------------------------------ E3a-1 (design note 49 E3a)
+
+/// The Mock's column of table Q: the payload samples the Kernel record of a booking holds after a Stop at `X + 20 000`, `None` when the
+/// booking is cancelled (MR-25: a note, no record, no sample). Written from MR-25 and read against the oracle's `mock_cut`, which computes
+/// the same cut independently; the UHD column of the same rows is `e3_u1_…` (`provider/tx/tests/o1.rs`).
+fn mock_column(label: &str) -> Option<i64> {
+    match label {
+        "finite 1 at we-1" => Some(1),
+        "finite 20 at we-20" => Some(20),
+        "finite 32 at we-32" | "finite 33 at we-32" | "repeat at we-32" => Some(32),
+        "finite 100 inside the window" => Some(100),
+        "open repeat at t_k-5000" | "long finite at t_k-5000" => Some(15_000),
+        "open repeat at t_k-4010" => Some(14_010),
+        "finite 1 at we" | "finite 20 at we-19" | "finite 32 at we-31" | "finite 33 at we-31" | "repeat at we-31" => None,
+        other => panic!("table Q has no Mock column for {other}"),
+    }
+}
+
+#[test]
+fn e3_mc1_the_stop_cut_by_burst_shape() {
+    // MR-25 (seq 3, 6): the Stop at X + 20 000 cuts at the later of its own sample and the payload handed within the window (a burst not yet
+    // started counts only when its first send, 32 samples or the whole burst if shorter, fits before the window's first sample `we`; a
+    // repeat's first send is 32, an open one's is one sample). Every row of `o::STOP_SHAPES` is read against the oracle's `mock_cut`, the
+    // literal column above, the radiated samples and the Kernel records.
+    let (tk, we) = (X + 20_000, X + 30_000);
+    for shape in o::STOP_SHAPES {
+        let (len, repeat) = (shape.len.unwrap_or(1_000), shape.len.is_none());
+        let start = if shape.from_window_edge { we } else { tk } + shape.offset;
+        let mut m = x3xx(&[(1, 100), (3, len as usize)]);
+        m.book(0, X + 10_000, false, LatePolicy::DropAndFlag);
+        m.book(1, start, repeat, LatePolicy::DropAndFlag);
+        m.go(X + 20_000);
+        let t = m.tick(X + 20_000);
+        m.stop();
+        m.go(X + 60_000);
+        let bursts = [o::MBurst { start: X + 10_000, len: Some(100), started: true, before_stop: true }, o::MBurst { start, len: shape.len, started: shape.started, before_stop: true }];
+        let cut = o::mock_cut(&m.p, t, &bursts, None);
+        let label = shape.label;
+        let recorded = mock_column(label);
+        let from_oracle = (cut > start).then(|| shape.len.map_or(cut, |l| (start + l).min(cut)) - start);
+        assert_eq!(from_oracle, recorded, "{label}: the oracle and the literal column agree (cut {cut}, we {we})");
+        let mut slots = o::Slots { segs: vec![o::Seg::once(1, X + 10_000, 100)], cut: None };
+        let mut pairs = vec![(X + 10_000, 100)];
+        if let Some(samples) = recorded {
+            slots.segs.push(match shape.len {
+                None => o::Seg::repeating(3, start, 1_000, cut),
+                Some(l) => o::Seg { end: (start + l).min(cut), ..o::Seg::once(3, start, l) },
+            });
+            pairs.push((start, samples as u64));
+        }
+        m.check(&slots, X + 9_990, cut.max(start) + 100);
+        assert_eq!(m.pairs(), pairs, "{label}");
+        assert_eq!(m.cancellations(), usize::from(recorded.is_none()), "{label}: an unhanded booking is cancelled with a note");
+        assert_eq!(m.all_refusals(), 0, "{label}");
+    }
+}
+
+#[test]
+fn e3_mc1b_a_booking_joined_to_a_handed_one_at_a_stop() {
+    // Table Q row 10 (F3b): A (40) ends at `we - 50` and B (100) joins it at its end. The Mock judges B as a fresh first send of 32, which fits,
+    // so the Stop hands B to `we`: 50 samples of it, its record ends at the Stop. UHD hands less (B continues A's device burst and needs all of
+    // its 100): `e3_u1b_…`.
+    let we = X + 30_000;
+    let [(a_at, a_len), (b_at, b_len)] = o::JOINED_AT_A_STOP;
+    let (a_start, b_start) = (we + a_at, we + b_at);
+    assert_eq!(a_start + a_len, b_start);
+    let mut m = x3xx(&[(1, 100), (2, a_len as usize), (3, b_len as usize)]);
+    m.book(0, X + 10_000, false, LatePolicy::DropAndFlag);
+    m.book(1, a_start, false, LatePolicy::DropAndFlag);
+    m.book(2, b_start, false, LatePolicy::DropAndFlag);
+    m.go(X + 20_000);
+    let t = m.tick(X + 20_000);
+    m.stop();
+    m.go(X + 60_000);
+    let bursts = [
+        o::MBurst { start: X + 10_000, len: Some(100), started: true, before_stop: true },
+        o::MBurst { start: a_start, len: Some(a_len), started: false, before_stop: true },
+        o::MBurst { start: b_start, len: Some(b_len), started: false, before_stop: true },
+    ];
+    let cut = o::mock_cut(&m.p, t, &bursts, None);
+    assert_eq!(cut, we, "B's first send of 32 fits, so the cut is the window's edge");
+    let slots = o::Slots { segs: vec![o::Seg::once(1, X + 10_000, 100), o::Seg::once(2, a_start, a_len), o::Seg { end: cut, ..o::Seg::once(3, b_start, b_len) }], cut: None };
+    m.check(&slots, X + 9_990, we + 100);
+    assert_eq!(m.pairs(), [(X + 10_000, 100), (a_start, 40), (b_start, 50)]);
+    assert_eq!((m.recs()[2].4, m.cancellations(), m.all_refusals()), (BurstEnd::Stop, 0, 0));
+}
+
+#[test]
+fn e3_mc1c_a_repeat_shorter_than_32_samples_has_a_first_send_of_32() {
+    // Table Q row 9 (F3a) as far as the Mock reaches it: R (20 samples a period) is held at `we - 20`. A repeat's first send is 32 samples
+    // whatever its period, so it does not fit before `we` and is not handed: the cut is the Stop sample, R is cancelled and no sample radiates
+    // (a finite burst of 20 at the same place is handed whole, row `finite 20 at we-20`). The row the plan names for this, a switch 20 samples
+    // after R's start, cannot be booked: the Mock refuses a switch while R is not playing (MR-16), as UHD does (KL-41), so no run reaches a
+    // repeat cut by a held start before 32 samples on either Provider; `e3_c4_…` pins the UHD owner's cut on a direct give.
+    let (tk, we) = (X + 20_000, X + 30_000);
+    let r_start = we - 20;
+    let mut m = x3xx(&[(1, 100), (2, 20), (3, 500)]);
+    m.book(0, X + 10_000, false, LatePolicy::DropAndFlag);
+    m.book(1, r_start, true, LatePolicy::DropAndFlag);
+    m.go(X + 17_990);
+    m.book_switch(2, X + 17_990);
+    assert_eq!(m.refusals(), ["MR-16: a repeat switch needs a playing repeat and no pending switch"], "the switch on the held repeat is refused at receipt");
+    m.go(X + 20_000);
+    let t = m.tick(X + 20_000);
+    m.stop();
+    m.go(X + 60_000);
+    let bursts = [o::MBurst { start: X + 10_000, len: Some(100), started: true, before_stop: true }, o::MBurst { start: r_start, len: None, started: false, before_stop: true }];
+    assert_eq!(o::mock_cut(&m.p, t, &bursts, None), tk, "nothing is handed: the cut is the Stop sample");
+    m.check(&o::Slots { segs: vec![o::Seg::once(1, X + 10_000, 100)], cut: None }, X + 9_990, we + 600);
+    assert_eq!(m.pairs(), [(X + 10_000, 100)], "R has no record");
+    assert_eq!(m.cancellations(), 1, "R is cancelled with one note");
+    assert!(m.switch_rows().is_empty(), "a refused switch writes no row");
+}
+
+#[test]
+fn e3_mc1d_a_booking_after_a_stop_is_not_counted_in_its_cut() {
+    // MR-25: only a burst received before the Stop contributes. An open repeat is cut at `we`; E, received after the Stop with its start at
+    // `we + 100`, is accepted and plays whole, and a second Stop 2 000 samples later, whose own sample is before the first cut, leaves it as it was (a
+    // retained cut is never retracted).
+    let (tk, we) = (X + 20_000, X + 30_000);
+    let s = X + 15_000;
+    let mut m = x3xx(&[(7, 1_000), (4, 100)]);
+    m.book(0, s, true, LatePolicy::DropAndFlag);
+    m.go(X + 20_000);
+    let t = m.tick(X + 20_000);
+    m.stop();
+    m.book(1, we + 100, false, LatePolicy::DropAndFlag);
+    m.go(tk + 2_000);
+    let t2 = m.tick(tk + 2_000);
+    m.stop();
+    m.go(X + 60_000);
+    let cut1 = o::mock_cut(&m.p, t, &[o::MBurst { start: s, len: None, started: true, before_stop: true }], None);
+    let cut2 = o::mock_cut(&m.p, t2, &[], Some(cut1));
+    assert_eq!((cut1, cut2), (we, we), "the second Stop's own sample is before the retained cut, which stands");
+    m.check(&o::Slots { segs: vec![o::Seg::repeating(7, s, 1_000, cut1), o::Seg::once(4, we + 100, 100)], cut: None }, s - 10, we + 300);
+    assert_eq!(m.pairs(), [(s, (cut1 - s) as u64), (we + 100, 100)]);
+    assert_eq!((m.cancellations(), m.all_refusals()), (0, 0));
+}
+
+#[test]
+fn e3_mc2_a_zero_window() {
+    // MR-25 on `ideal` (window 0, `we` = the Stop sample): a burst counts only if it starts before the Stop sample and its first send fits
+    // before it, so nothing is handed ahead and the cut is the Stop sample, whatever the shape: the open repeat radiates to the Stop sample, a
+    // held repeat and a held finite burst are cancelled, and a finite burst booked at the Stop sample itself is open when the Stop is read but
+    // has no sample before it, so it is cancelled too.
+    let cases: [(&str, i64, Option<i64>, bool); 4] = [
+        ("open repeat from 4000", 4_000, None, true),
+        ("held repeat at 7000", 7_000, None, false),
+        ("held finite 100 at 7000", 7_000, Some(100), false),
+        ("finite 100 at the Stop sample", 5_000, Some(100), true),
+    ];
+    for (label, start, len, started) in cases {
+        let mut m = ideal(&[(1, 1_000)]);
+        m.book(0, start, len.is_none(), LatePolicy::DropAndFlag);
+        m.go(5_000);
+        let t = m.tick(5_000);
+        m.stop();
+        m.go(9_000);
+        let cut = o::mock_cut(&m.p, t, &[o::MBurst { start, len, started, before_stop: true }], None);
+        assert_eq!(cut, 5_000, "{label}: the cut is the Stop sample");
+        let handed = label.starts_with("open");
+        let slots = if handed { o::Slots { segs: vec![o::Seg::repeating(1, start, 1_000, cut)], cut: None } } else { o::Slots::default() };
+        m.check(&slots, 3_990, 6_000);
+        assert_eq!(m.pairs(), if handed { vec![(start, (cut - start) as u64)] } else { vec![] }, "{label}");
+        assert_eq!(m.cancellations(), usize::from(!handed), "{label}");
+    }
+}
+
+#[test]
+fn e3_mc3_the_stop_sample_and_the_handed_payload() {
+    // MR-25's cut is the later of the Stop sample and the handed payload. (a) Nothing is handed (the booking's start is past the window's edge,
+    // and A completed long ago): the cut is the Stop sample, A's record is whole and the booking is cancelled. (b) A short open finite burst
+    // whose end is past the Stop sample: its end is the cut, so all 100 samples radiate and its record ends at its own end.
+    let (tk, we) = (X + 20_000, X + 30_000);
+    let mut m = x3xx(&[(1, 100), (2, 100)]);
+    m.book(0, X + 10_000, false, LatePolicy::DropAndFlag);
+    m.book(1, we + 500, false, LatePolicy::DropAndFlag);
+    m.go(X + 20_000);
+    let t = m.tick(X + 20_000);
+    m.stop();
+    m.go(X + 60_000);
+    let a = o::MBurst { start: X + 10_000, len: Some(100), started: true, before_stop: true };
+    assert_eq!(o::mock_cut(&m.p, t, &[a, o::MBurst { start: we + 500, len: Some(100), started: false, before_stop: true }], None), tk, "(a) the Stop sample");
+    m.check(&o::Slots { segs: vec![o::Seg::once(1, X + 10_000, 100)], cut: None }, X + 9_990, we + 700);
+    assert_eq!((m.pairs(), m.cancellations()), (vec![(X + 10_000, 100)], 1));
+    let mut m = x3xx(&[(2, 100)]);
+    let b_start = tk - 25;
+    m.book(0, b_start, false, LatePolicy::DropAndFlag);
+    m.go(X + 20_000);
+    let t = m.tick(X + 20_000);
+    m.stop();
+    m.go(X + 60_000);
+    let cut = o::mock_cut(&m.p, t, &[o::MBurst { start: b_start, len: Some(100), started: true, before_stop: true }], None);
+    assert_eq!(cut, tk + 75, "(b) the burst's own end, past the Stop sample");
+    m.check(&o::Slots { segs: vec![o::Seg::once(2, b_start, 100)], cut: None }, b_start - 10, cut + 100);
+    assert_eq!(m.recs().iter().map(|r| (r.0, r.1, end_of(r.4))).collect::<Vec<_>>(), [(b_start, 100, "eob")]);
+}
+
+/// One step of the Authority that emitted a transmit block: `(root tick, blocks emitted so far, burst records so far, the last record as
+/// (target, samples, blocks, end))`.
+type BlockRow = (i64, u64, usize, Option<(i64, u64, u32, &'static str)>);
+
+impl M {
+    fn tx_blocks(&self) -> u64 {
+        self.radio.section("stats")["tx_blocks"].as_u64().expect("the tx_blocks stat")
+    }
+
+    fn block_row(&self, tick: i64) -> BlockRow {
+        let records = records(&self.radio);
+        (tick, self.tx_blocks(), records.len(), records.last().map(|r| (r.target.ticks_in(r.target.domain()).unwrap(), r.samples, r.blocks, end_of(r.end))))
+    }
+
+    /// Steps the Mock to each wakeup the Authority schedules up to `until`, one at a time (the receive stream's wakeups too), and returns the
+    /// row of every step that emitted a transmit block.
+    fn block_rows(&mut self, until: i64) -> Vec<BlockRow> {
+        let mut rows = Vec::new();
+        while let Some(due) = self.world.auth.next_due() {
+            let due = due.ticks_in(ROOT).unwrap();
+            if due > until {
+                break;
+            }
+            let before = self.tx_blocks();
+            self.go_tick(due);
+            if self.tx_blocks() > before {
+                rows.push(self.block_row(due));
+            }
+        }
+        rows
+    }
+}
+
+/// The tick a block ending at sample `end` is due: the last instant of its last sample plus one tick (`v_after(end - 1)`), 1 000 root ticks a
+/// sample on the 1 GHz root at 1 MS/s.
+fn due_of(end: i64) -> i64 {
+    (end - 1) * 1_000 + 1
+}
+
+#[test]
+fn e3_mc4_blocks_by_shape() {
+    // MR-15: a transmit block is emitted when its last sample is past, and it ends at the first of the block length (2 000 samples), the
+    // waveform's end or a repeat's wrap, a held burst's start and a cut. One row for each emitting step of the Authority's own wakeups
+    // (`ideal`, so no window or lead blocks a booking); the first sample of a block is the previous one's end (the first, the booking's start),
+    // its length the difference, its SOB the first and its EOB the one at which a record appears. Typed literals, never read from the Mock.
+    assert_eq!(ezsdr_mock_radio::BLOCK_LEN, 2_000);
+    // (a) a finite burst of 5 000 from 100: 2 000, 2 000, then the 1 000 that end it (the record appears with the third).
+    let mut m = ideal(&[(1, 5_000)]);
+    m.book(0, 100, false, LatePolicy::DropAndFlag);
+    assert_eq!(
+        m.block_rows(8_000_000),
+        [(due_of(2_100), 1, 0, None), (due_of(4_100), 2, 0, None), (due_of(5_100), 3, 1, Some((100, 5_000, 3, "eob")))],
+        "(a) a finite burst: block ends 2 100, 4 100, 5 100"
+    );
+    // (b) a repeat of 3 000 from 100: a block stops at each wrap (3 100, 6 100) as well as at the block length, and no record appears.
+    let mut m = ideal(&[(2, 3_000)]);
+    m.book(0, 100, true, LatePolicy::DropAndFlag);
+    assert_eq!(
+        m.block_rows(9_000_000),
+        [(due_of(2_100), 1, 0, None), (due_of(3_100), 2, 0, None), (due_of(5_100), 3, 0, None), (due_of(6_100), 4, 0, None), (due_of(8_100), 5, 0, None)],
+        "(b) a repeat across its wrap: block ends 2 100, 3 100, 5 100, 6 100, 8 100"
+    );
+    // (c) a repeat of 5 400 from 100 and a switch received at sample 150, whose boundary is the repeat's second start 5 500: the old repeat's last
+    // block ends at the boundary with the end of burst (its record), and the successor (period 1 000) starts there with its own blocks.
+    let mut m = ideal(&[(3, 5_400), (4, 1_000)]);
+    m.book(0, 100, true, LatePolicy::DropAndFlag);
+    m.go(150);
+    m.book_switch(1, 150);
+    assert_eq!(o::switch_boundary(&m.p, 100, 5_400, m.tick(150), Some(150)), Some(5_500));
+    assert_eq!(
+        m.block_rows(8_000_000),
+        [
+            (due_of(2_100), 1, 0, None),
+            (due_of(4_100), 2, 0, None),
+            (due_of(5_500), 3, 1, Some((100, 5_400, 3, "eob"))),
+            (due_of(6_500), 4, 1, Some((100, 5_400, 3, "eob"))),
+            (due_of(7_500), 5, 1, Some((100, 5_400, 3, "eob"))),
+        ],
+        "(c) a repeat cut at a switch boundary: block ends 2 100, 4 100, 5 500 (END_OF_BURST), then the successor's 6 500, 7 500"
+    );
+    // (d) a Stop at sample 3 000 on the repeat of (b): the step that reads it emits the block up to the cut, with no end of burst, and the
+    // tracker's stop records the burst (end stop) with what was transmitted.
+    let mut m = ideal(&[(2, 3_000)]);
+    m.book(0, 100, true, LatePolicy::DropAndFlag);
+    let before = m.block_rows(2_999_999);
+    assert_eq!(before, [(due_of(2_100), 1, 0, None)], "(d) the block before the Stop");
+    m.go_tick(3_000_000);
+    m.stop();
+    assert_eq!(m.block_row(3_000_000), (3_000_000, 2, 1, Some((100, 2_900, 2, "stop"))), "(d) the Stop's cut block [2 100, 3 000) and the record");
+    // (e) the Run's end (`Provider::stop`, orderly) at the same instant cuts the same way.
+    let mut m = ideal(&[(2, 3_000)]);
+    m.book(0, 100, true, LatePolicy::DropAndFlag);
+    m.block_rows(2_999_999);
+    m.go_tick(3_000_000);
+    m.radio.mock.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
+    assert_eq!(m.block_row(3_000_000), (3_000_000, 2, 1, Some((100, 2_900, 2, "stop"))), "(e) the Run's end");
+    assert!(m.all_refusals() == 0 && m.radio.section("rejected").as_array().unwrap().is_empty(), "a mis-flagged block would be refused by the tracker or the device model (MR-24)");
+}
+
+/// One case of `e3_mc5_…`: its label, whether it repeats, the waveform's length, the receipt sample of a switch (if any), the booking's start, and
+/// the block ends whose deadlines are asserted.
+type Wake = (&'static str, bool, i64, Option<i64>, i64, &'static [i64]);
+
+#[test]
+fn e3_mc5_the_wake_follows_the_block() {
+    // MR-14: the Mock schedules its next wakeup at the instant its next transmit block is complete, `v_after(stop - 1)`: the last instant of the
+    // block's last sample plus one tick, where `stop` is the first of the block length, the waveform's end or a repeat's wrap, a held start and a
+    // cut. The Authority is asked, not the Mock: `next_due` is the scheduled deadline, the step one tick before it emits nothing and the step
+    // at it emits the block. The receive stream's wakeups sit at `v_after(1 999 + 2 000 j)`: the chosen block ends are never one of them, so the
+    // transmit wake is the minimum at each position (precondition: `next_due` equals the transmit deadline once every earlier wake has run).
+    // The wake for a held start (`v_floor` of its first sample) is a later tick than the block deadline before it, so it cannot stand in for
+    // that. A held start before the block's wrap or waveform end is not a reachable state (the record refuses a booking inside an open burst's
+    // span, and a switch's boundary is a wrap), so the cut at a held start in the wake equals the waveform end whenever it matters (INFERRED
+    // from the booking rules, not run): no test here can tell a wake that ignores the held start from one that reads it.
+    assert!(due_of(5_500) < 5_500 * 1_000, "the wake for the successor's start (the sample's own instant) is a later tick than the old repeat's last block");
+    let cases: [Wake; 3] = [
+        ("a finite burst of 5 000 from 100 (block length, waveform end)", false, 5_000, None, 100, &[2_100, 4_100, 5_100]),
+        ("a repeat of 3 000 from 100 (block length, a wrap)", true, 3_000, None, 100, &[2_100, 3_100, 5_100, 6_100]),
+        ("a repeat of 5 400 with a switch boundary at 5 500 (block length, the held start that is the wrap)", true, 5_400, Some(150), 100, &[2_100, 4_100, 5_500]),
+    ];
+    for (label, repeat, period, switch_at, start, ends) in cases {
+        let mut m = if switch_at.is_some() { ideal(&[(1, period as usize), (2, 1_000)]) } else { ideal(&[(1, period as usize)]) };
+        m.book(0, start, repeat, LatePolicy::DropAndFlag);
+        if let Some(at) = switch_at {
+            m.go(at);
+            m.book_switch(1, at);
+        }
+        let mut blocks = 0;
+        for end in ends.iter().copied() {
+            let deadline = due_of(end);
+            run_to(&m.world, &mut [&mut m.radio], deadline - 2);
+            let due = m.world.auth.next_due().expect("a wakeup").ticks_in(ROOT).unwrap();
+            assert_eq!(due, deadline, "{label}: the scheduled deadline of the block ending at {end}");
+            m.go_tick(deadline - 1);
+            assert_eq!(m.tx_blocks(), blocks, "{label}: nothing is emitted one tick before the deadline of the block ending at {end}");
+            m.go_tick(deadline);
+            blocks += 1;
+            assert_eq!(m.tx_blocks(), blocks, "{label}: the block ending at {end} is emitted at its deadline");
+        }
+    }
+}

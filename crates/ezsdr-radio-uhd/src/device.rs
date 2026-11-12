@@ -665,11 +665,8 @@ enum Burst {
 /// dropped at 1 and 2 MS/s (2026-11-05 bench, `plan/phase8/bench-results.md`, minimal UHD reproduction).
 pub const MIN_FIRST_SEND: usize = 4;
 
-/// The samples per channel an open device burst's first packet carries at least (UR-22): on the bench (2026-11-06) every open
-/// first packet of 28 or fewer samples underflowed at interpolation 80 or more, and none of 30 or more did.
-pub const MIN_OPEN_FIRST_SEND: usize = 32;
 /// The fake's own copy of UR-22's short-burst bound: the model states the bench's rule itself, not through the owner's or the record's
-/// `ezsdr_radio::staging::CLOSED_SHORT_MAX`, so a change to the shared constant fails these tests rather than being followed.
+/// `ezsdr_radio::x3xx::PACKETS`, so a change to the shared constant fails these tests rather than being followed.
 const SHORT_BURST_MAX: i64 = 32;
 /// The fake's own copy of UR-22's gaps (as for `SHORT_BURST_MAX`): past a longer closed burst the next timed SOB keeps three samples; past a
 /// short one it keeps `max(3, ceil(15 µs × rate))` samples. Stricter than the bench at interpolation 4 and up, never looser at the rates the Modules allow, 1 MS/s and up; at 0.4 MS/s and below the bench saw closed bursts of at most four samples underflow themselves, which no gap models (UR-33).

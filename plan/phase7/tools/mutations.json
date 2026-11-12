@@ -977,16 +977,6 @@
   "test_bin": "lib",
   "filter": "ur_25_a_silent_stream_past_its_cut_records_its_stop"
  },
- {
-  "id": "B03",
-  "name": "end-of-burst at the next burst's start: a timed start at the tick the burst ended (§11 F3)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let device_eob = eob && (!ends_at_held || short_first) && !hold;",
-  "new": "let device_eob = eob && !hold;",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_23_a_burst_at_e_while_the_held_sample_waits_continues_the_device_burst"
- },
   {
    "id": "B04",
   "name": "a preempted burst ended with end-of-burst before the burst at its next sample (§11 F3)",
@@ -1010,8 +1000,8 @@
  {
   "id": "B08",
   "name": "a Kernel burst's end is the device burst's at once again, as at bc0db98 (Review N, B3)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let hold = eob && !ends_at_held && open_ended && !short_first;",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "old": "let hold = eob && !ends_at_held && !short_first && instant(extent.next.saturating_add(count)).saturating_sub(now) > lead;",
   "new": "let hold = false;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -1120,9 +1110,9 @@
   {
    "id": "B21",
    "name": "a one-sample burst is sent timed rather than held to its deadline (D9b-1a fix 4)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "let hold = eob && !ends_at_held && open_ended && !short_first;",
-   "new": "let hold = eob && !ends_at_held && open_ended;",
+   "file": "crates/ezsdr-radio/src/segment.rs",
+   "old": "let hold = eob && !ends_at_held && !short_first && instant(extent.next.saturating_add(count)).saturating_sub(now) > lead;",
+   "new": "let hold = eob && !ends_at_held && instant(extent.next.saturating_add(count)).saturating_sub(now) > lead;",
    "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_one_sample_burst_booked_ahead_starts_at_its_time"

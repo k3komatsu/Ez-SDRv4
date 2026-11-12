@@ -28,7 +28,7 @@
 | 4 | #90（大きな capture が Manifest から落ちる） | 2 | 済（2026-11-12，記録 `reviews/n90-*`．hash は Kernel の `ContentHasher`〈owner 2026-11-11〉） |
 | 5 | #95＋#94（時刻の overflow） | 2 | 済（2026-11-12，記録 `reviews/n95-*`．時計に収まらない送信の時刻と Stop は両 Provider で受付の拒否） |
 | 6 | 49 の E2b（Configure と Reopen を操作に） | 2（worktree `Ez-SDRv4-e2b`） | 済（2026-11-12，記録 `reviews/e2b-*`．token は Send・Configure・Reopen の三つ〈owner〉．設定の途中の喪失で予約が消える件は #98） |
-| 7 | 49 の E3（区切りの判断を `ezsdr_radio` へ） | 1 | Phase 8 の主題（Mock と実機をそろえる）．文書監査の D2 もここで |
+| 7 | 49 の E3（区切りの判断を `ezsdr_radio` へ） | 1 | E3a は済（2026-11-12，記録 `reviews/e3a-*`．区切りの算術を `segment.rs` の純粋な関数に，UHD と Mock がそれを呼ぶ，振る舞いは変えない）．E3b（`TxChain` を book へ，記録の front も同じ算術に）が残る．文書監査の D2（受信の報告の値）は E3a の範囲の外で，E3b の計画で確かめる |
 | 8 | 49 の C2（KL-42：Stop の後の `applied`） | 1 | 記録が実際と違う |
 | 9 | #75（確かめていない T3 の flush で復旧を終える） | 1 | P2．#91 と同じ機構なので，試験の時刻の設計の答えの後 |
 | 10 | #67（Stop で uhd-rx が join の 1 s を越える） | 1 | streamer が漏れる．#56 の実機の後 |

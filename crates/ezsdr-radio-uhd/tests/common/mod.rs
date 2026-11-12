@@ -35,6 +35,7 @@ mod watchdog;
 pub use watchdog::infra::{creation_limit, infra, timing};
 pub use watchdog::watch;
 pub mod d9;
+pub mod e3;
 pub mod iii;
 pub mod measurement;
 pub mod n47;
