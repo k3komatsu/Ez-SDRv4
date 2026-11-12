@@ -950,6 +950,15 @@ impl MockRadio {
             }
         }
         let next = held.start;
+        // MR-42: a switch at the open repeat's next sample ends it there (UHD's `join_open` ends the booking too but keeps the device burst; the Mock closes it, MR-15).
+        if let Some(open) = self.tx[k].book.open.as_ref() {
+            debug_assert_eq!(open.next, next, "only a switch at the open booking's next sample meets it here");
+            if let Some(record) = self.tx[k].tracker.as_mut().and_then(BurstTracker::stop) {
+                self.record_burst(record);
+            }
+            self.tx[k].device.close();
+            self.tx[k].book.end_open(DeviceEnd::Keep);
+        }
         self.tx[k].book.take(held, next);
     }
 

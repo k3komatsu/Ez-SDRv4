@@ -19763,5 +19763,45 @@
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "c2_record_an_abandon_after_a_stop_keeps_its_footprint_whatever_the_waiting_switch_becomes"
+ },
+ {
+  "id": "N100-1",
+  "name": "#100: a switch at the open repeat's next sample does not end the repeat, and the held switch is taken beside it (MR-42)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "old": "if let Some(open) = self.tx[k].book.open.as_ref() { debug_assert_eq!(open.next, next, \"only a switch at the open booking's next sample meets it here\"); if let Some(record) = self.tx[k].tracker.as_mut().and_then(BurstTracker::stop) { self.record_burst(record); } self.tx[k].device.close(); self.tx[k].book.end_open(DeviceEnd::Keep); }",
+  "new": "",
+  "filter": "mr_16_a_switch_at_the_open_repeat_s_next_sample_replaces_it"
+ },
+ {
+  "id": "N100-2",
+  "name": "#100: a switch at the first sample of a held repeat does not replace it: the held repeat is kept and the switch is lost (MR-42)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "old": "self.tx[k].book.list.held.insert(held.start, held);",
+  "new": "self.tx[k].book.list.held.entry(held.start).or_insert(held);",
+  "filter": "mr_16_a_switch_at_the_open_repeat_s_next_sample_replaces_it"
+ },
+ {
+  "id": "N100-3",
+  "name": "#100: a switch at the open repeat's next sample leaves the device model open: the device rejects the new burst's start (MR-24, MR-42)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "old": "self.tx[k].device.close(); self.tx[k].book.end_open(DeviceEnd::Keep); } self.tx[k].book.take(held, next);",
+  "new": "self.tx[k].book.end_open(DeviceEnd::Keep); } self.tx[k].book.take(held, next);",
+  "filter": "mr_16_a_switch_at_the_open_repeat_s_next_sample_replaces_it"
+ },
+ {
+  "id": "N100-4",
+  "name": "#100: a switch at the open repeat's next sample leaves the tracker's burst open: the new start is a discontinuity (MR-15, MR-42)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "old": "if let Some(record) = self.tx[k].tracker.as_mut().and_then(BurstTracker::stop) { self.record_burst(record); } self.tx[k].device.close(); self.tx[k].book.end_open(DeviceEnd::Keep); } self.tx[k].book.take(held, next);",
+  "new": "self.tx[k].device.close(); self.tx[k].book.end_open(DeviceEnd::Keep); } self.tx[k].book.take(held, next);",
+  "filter": "mr_16_a_switch_at_the_open_repeat_s_next_sample_replaces_it"
  }
 ]

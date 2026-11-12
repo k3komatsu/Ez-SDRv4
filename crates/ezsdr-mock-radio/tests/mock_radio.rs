@@ -3476,3 +3476,36 @@ fn mr_06_a_transmit_rate_below_one_msps_is_rejected_on_x3xx() {
     let ideal = tx("ideal", 500_000.0);
     assert!(ideal.rejected.is_empty(), "{:?}", ideal.rejected);
 }
+
+/// RM-37, MR-16 (#100): a switch whose boundary is the open repeat's next sample replaces the repeat there, with no rejection: the repeat sent nothing yet
+/// (still held, or open at its first sample), or sent a block and the switch is received at the sample after it.
+#[test]
+fn mr_16_a_switch_at_the_open_repeat_s_next_sample_replaces_it() {
+    // (the step before the receipt, the boundary and the samples the replaced repeat sent): 2 000 is the repeat's first sample, 4 000 the next after one block.
+    for (step_ns, boundary, sent) in [(None, 2_000, 0), (Some(2_000_000), 2_000, 0), (Some(4_000_000), 4_000, 2_000)] {
+        let mut harness = tx_harness("ideal");
+        harness.arm_start(0).unwrap();
+        let domain = tx_domain(&harness);
+        harness.actions.push(tx_action(domain, 2_000, 2_000, true, LatePolicy::SendAsapAndFlag));
+        harness.step(0).unwrap();
+        if let Some(ns) = step_ns {
+            harness.step(ns).unwrap();
+        }
+        harness.actions.push(switch_action(domain, boundary, 1_000));
+        harness.step(boundary * 1_000).unwrap();
+        harness.step(20_000_000).unwrap();
+        harness.mock.stop(StopMode::Orderly).unwrap();
+        let case = format!("boundary {boundary}");
+        assert!(rejected_rows(&harness).is_empty(), "{case}: {:?}", rejected_rows(&harness));
+        let records = bursts(&harness);
+        // The replaced repeat's record only when it sent a block; the new repeat plays from the boundary to the Stop, whole wraps of 1 000 samples.
+        let new = ((boundary, 20_000 - boundary as u64, 20 - boundary as u32 / 1_000), "the new repeat");
+        let expected = if sent == 0 { vec![new] } else { vec![((2_000, sent, 1), "the replaced repeat"), new] };
+        // A replaced repeat that sent a block closes by `BurstTracker::stop` (MR-15), as UHD's join records it.
+        assert!(records.iter().all(|record| record.end == BurstEnd::Stop), "{case}: {records:?}");
+        let got: Vec<_> = records.iter().map(|record| (record.target.ticks_in(domain).unwrap(), record.samples, record.wraps)).collect();
+        assert_eq!(got, expected.iter().map(|(record, _)| *record).collect::<Vec<_>>(), "{case}: {records:?}");
+        let rows = switch_rows(&harness);
+        assert_eq!((rows.len(), rows[0]["boundary"].clone(), rows[0]["outcome"].clone()), (1, serde_json::json!(boundary), serde_json::json!("applied")), "{case}: {rows:?}");
+    }
+}
