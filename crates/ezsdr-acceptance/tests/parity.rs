@@ -321,6 +321,9 @@ use ezsdr_kernel::time::RelativeBudget;
 // ---------------------------------------------------------------- the UHD rig
 
 struct UhdRig {
+    /// First, so that it drops before the Authority: `DeviceAuthority::drop` waits in real time for `uhd-clock`, and a thread still registered (busy) would hold the clock that
+    /// `uhd-clock` may be asleep on (note 51 §4.2).
+    _driver: ezsdr_radio_uhd::host::Driver,
     radio: UhdRadio,
     device: Arc<FakeDevice>,
     clocks: Arc<ClockRegistry>,
@@ -331,7 +334,35 @@ struct UhdRig {
     events: Arc<EventCollector>,
     seen_events: Mutex<Vec<ezsdr_kernel::event::Event>>,
     rx_links: Vec<Arc<MemLink>>,
-    _authority: DeviceAuthority,
+    _authority: AuthorityGuard,
+}
+
+/// The Authority and, in the same field so that no pause between two field drops can reorder them, the probe a test may install: the probe reads what the Authority's drop left behind.
+struct AuthorityGuard {
+    authority: Option<DeviceAuthority>,
+    probe: Option<DropProbe>,
+}
+
+impl Drop for AuthorityGuard {
+    fn drop(&mut self) {
+        drop(self.authority.take());
+        if let Some(probe) = self.probe.take() {
+            probe.record();
+        }
+    }
+}
+
+/// What the probe saw once the Authority was gone: how many strong references to its time were left (`uhd-clock`'s upgraded `Arc`, if the Authority gave up on the thread), and the device clock then.
+struct DropProbe {
+    time: std::sync::Weak<dyn ezsdr_kernel::time::TimeAuthority>,
+    host: ezsdr_radio_uhd::HostClock,
+    seen: Arc<Mutex<Option<(usize, Wall)>>>,
+}
+
+impl DropProbe {
+    fn record(self) {
+        *self.seen.lock().unwrap() = Some((self.time.strong_count(), self.host.now()));
+    }
 }
 
 impl UhdRig {
@@ -351,6 +382,8 @@ impl UhdRig {
         ports: &[&str],
         inputs: BTreeMap<ContentHash, Arc<[u8]>>,
     ) -> Result<UhdRig, ezsdr_kernel::module_api::ModuleError> {
+        // `TxBlocks` is a permanent busy loop in `tx_send`: on the rig's manual clock it freezes the clock for good, and every wait of the rig would hang.
+        assert!(!config.faults.contains(&FakeFault::TxBlocks), "the rig refuses FakeFault::TxBlocks: it stops the manual clock for good");
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..config }));
         let clocks = Arc::new(ClockRegistry::new());
         let authority = DeviceAuthority::new(device.clone(), clocks.clone(), "internal", "internal", "type=fake").unwrap_or_else(|error| {
@@ -384,7 +417,22 @@ impl UhdRig {
         let mut radio = UhdRadio::from_binding(&uhd_binding(selector), device.clone())?;
         let constraints = with_rx0(&radio, constraints);
         let prepared = radio.prepare(&fragment(ezsdr_radio_uhd::module_ref(), &constraints), ctx)?;
-        Ok(UhdRig { radio, device, clocks, time, root, actions: queue, effective: prepared.effective, events, seen_events: Mutex::new(Vec::new()), rx_links, _authority: authority })
+        // Last, so that no error or unwind path above holds a live registration; the Authority's first read (5 s) and `prepare` stay outside it.
+        let driver = device.host().drive();
+        Ok(UhdRig {
+            _driver: driver,
+            radio,
+            device,
+            clocks,
+            time,
+            root,
+            actions: queue,
+            effective: prepared.effective,
+            events,
+            seen_events: Mutex::new(Vec::new()),
+            rx_links,
+            _authority: AuthorityGuard { authority: Some(authority), probe: None },
+        })
     }
 
     fn push(&self, action: Action) {
@@ -407,16 +455,18 @@ impl UhdRig {
         self.radio.start(Some(TimePoint::new(self.root, t0)))
     }
 
-    /// The device's host clock, which a non-participant waits on so the device's time
-    /// advances while its threads are idle (plan 30 §4.5).
+    /// A wait on the device's host clock: the rig's thread is a participant (`_driver`), so it is idle here and the device's time advances; between waits it is busy and the clock stands
+    /// (note 51 §4.2).
     fn settle(&mut self, wall: Wall) {
         self.device.host().sleep(wall);
     }
 
-    /// Advances the device's clock to `tick` (on the manual clock, as a non-participant),
-    /// letting its threads run on the way (plan 30 §4.5).
+    /// Advances the device's clock to `tick`, as an idle participant, letting its threads run on the way, then one microsecond more: the wait ends on an instant at which
+    /// uhd-control's poll may be due (its grid has the phase of `uhd_t0`), and M4 holds that instant until every participant due there has run. So an Action pushed after this
+    /// is received at the first poll strictly after max(`tick`, now), whatever order the threads woke in.
     fn wait_until(&mut self, tick: i64) {
         let _ = self.time.wait_until(TimePoint::new(self.root, tick));
+        self.device.host().sleep(Wall::from_micros(1));
     }
 
     fn declared(&self) -> Vec<(String, (u64, u64))> {
@@ -452,7 +502,12 @@ impl UhdRig {
     }
 
     fn wait_for_events(&self, what: &str, count: usize, reached: impl Fn(&ezsdr_kernel::event::Event) -> bool) {
-        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        self.wait_for_events_within(what, count, reached, Wall::from_secs(10));
+    }
+
+    /// The wait's bound is real time (the polls are clock waits, which a stopped clock never ends); its expiry is the host's, so it writes the marker (note 51 §6.2). `bound` is an argument only so that a fixture can expire it.
+    fn wait_for_events_within(&self, what: &str, count: usize, reached: impl Fn(&ezsdr_kernel::event::Event) -> bool, bound: Wall) {
+        let deadline = std::time::Instant::now() + bound;
         loop {
             let mut seen = self.seen_events.lock().unwrap();
             seen.extend(self.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)));
@@ -460,7 +515,10 @@ impl UhdRig {
                 return;
             }
             drop(seen);
-            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}: {:?}", self.device.calls());
+            if std::time::Instant::now() >= deadline {
+                infra::infra(&format!("the rig's wait for {what} did not end within {bound:?}"));
+                panic!("timed out waiting for {what}: {:?}", self.device.calls());
+            }
             self.device.host().sleep(Wall::from_millis(1));
         }
     }
@@ -2092,10 +2150,9 @@ fn s13_parity_b_refused_at_receipt_and_the_value_answers() {
 fn s15_parity_s4b_three_bookings_b_continues_a_and_c_plays_on_time() {
     // S4b (R4-5): A(40) at 20 ms is handed, C(10) is booked early at 100 samples past it, then B(10) joins A at 40 samples, received
     // before the join deadline (15.04 ms). B continues A with no end-of-burst between, and C plays on time on both Providers.
-    // The scenario needs the test thread to reach 6, 11 and 12 ms before the device does (the device clock runs in real time while its threads
-    // are idle), so the comparison is made only when the UHD received and played everything on time; under load a late booking is correctly
-    // dropped or refused and the scenario is not established (the test says so and returns). The property itself, with exact receipt instants, is
-    // pinned on the frozen rigs: `o1_uhd_t2c_a_booking_joined_at_a_heads_end_…` (UHD) and `o1_mock_t2c_…` (Mock), and the join deadline's
+    // The scenario needs the bookings received at 6, 11 and 12 ms: the rig's thread is a participant of the device clock, so the clock stands
+    // at each of those instants while the thread pushes (note 51 stage 1b), and a late or refused booking is a failure. The property itself, with exact receipt instants, is
+    // also pinned on the frozen rigs: `o1_uhd_t2c_a_booking_joined_at_a_heads_end_…` (UHD) and `o1_mock_t2c_…` (Mock), and the join deadline's
     // equality by `o1_uhd_t2_a_join_is_inclusive_at_its_deadline` and `o1_mock_t2_a_join_is_inclusive_at_its_deadline`.
     let mut pair = CancellationPair::new(
         selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
@@ -2120,10 +2177,7 @@ fn s15_parity_s4b_three_bookings_b_continues_a_and_c_plays_on_time() {
     let late = |events: &[Event]| {
         events.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR || (event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["kind"] == "tx_burst"))
     };
-    if late(&uhd_events) {
-        eprintln!("s4b: the test thread was late for the UHD's instants, so the scenario is not established here; the frozen rigs own it: {uhd_events:?}");
-        return;
-    }
+    assert!(!late(&uhd_events), "the UHD (its thread a participant of the device clock) receives and plays everything on time: {uhd_events:?}");
     assert!(!late(&mock_events), "the Mock (stepped by the test) is on time: {mock_events:?}");
     assert_eq!(overlap_refusals(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected")), 0, "the Mock refuses nothing");
     assert_eq!(overlap_refusals(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected")), 0, "UHD refuses nothing");
@@ -2400,12 +2454,12 @@ fn s15_parity_switch_starts_on_the_old_repeats_end() {
 fn s15_parity_provider_stop_cancels_a_pending_switch() {
     // S11, D58 (RM-37, UR-26, UR-38): a switch received at 22 ms is still pending when Provider::stop ends the Run at 23 ms, before its
     // boundary. Both Providers cancel it, and the new waveform is never sent: the old repeat is the only burst. The Mock is stepped, so
-    // its half always runs. The UHD receives the switch from the repeat's observed start with `at` a second later, so its boundary is far
-    // past the Stop unless the test thread is away for a second between the receipt and the Stop. A Stop whose bound (RM-16: the first
+    // its half always runs. The UHD receives the switch from the repeat's observed start with `at` a second later, so its boundary is a
+    // second past the Stop. A Stop whose bound (RM-16: the first
     // sample at or after the Stop's `at` plus the 10 ms in-flight window, plus five, which is what `Provider::stop` books and the oracle's
     // `stop_bound` computes) lies before the boundary cancels the switch; one whose bound lies after it applies the switch (correctly).
-    // So the UHD half is judged only when the boundary is more than 1 ms past that bound, the Stop's `at` read from the `stop` row of the
-    // Manifest's timing section, and is "not established" otherwise. The frozen rigs own the unconditional case:
+    // The rig's thread is a participant of the device clock, so the clock stands while it works (note 51 stage 1b) and the boundary is more than 1 ms past that
+    // bound, the Stop's `at` read from the `stop` row of the Manifest's timing section: the test asserts it. The frozen rigs also own the case:
     // `ur_23_provider_stop_and_loss_cancel_the_pending_switch` (UHD, tx.rs) and `mr_25_s11_loss_and_provider_stop_cancel_pending_switch`
     // (Mock, mock_radio.rs).
     let mut pair = CancellationPair::new(
@@ -2437,10 +2491,7 @@ fn s15_parity_provider_stop_cancels_a_pending_switch() {
         let stop_at = manifest_rows(&uhd, "ezsdr.radio.uhd.timing").into_iter().find(|row| row["what"] == "stop").expect("the stop row")["at"].as_i64().unwrap();
         let params = o1_params(&pair.uhd.clocks);
         let bound = params.clock.instant(params.stop_bound(stop_at).1);
-        if boundary <= bound + ms(1) {
-            eprintln!("s15 stop: the Stop's bound {bound} is not 1 ms before the switch's boundary {boundary} (the test thread was away), so the outcome is not established; the frozen rigs own it");
-            return;
-        }
+        assert!(boundary > bound + ms(1), "the Stop's bound {bound} is more than 1 ms before the switch's boundary {boundary}");
     }
     check("UHD", &uhd, "ezsdr.radio.uhd");
     let origin = manifest_rows(&uhd, "ezsdr.radio.uhd.bursts")[0]["target"]["ticks"].as_i64().unwrap();
@@ -2601,7 +2652,7 @@ fn s14_at(pair: &mut CancellationPair, token: u64, relative: i64, actions: (Acti
 
 /// S14 (R2–R4): transmit values on an empty stream decide alike on both Providers, by the kind of each refusal and its Action id.
 /// The bursts are 40 samples and each is booked at least the in-flight window after the one before (§5, P-6). The samples are not compared.
-/// S5's sample-exact boundary is not here: the UHD rig's device clock runs ahead of each submitted tick (up to about 1.2 ms), longer than a
+/// S5's sample-exact boundary is not here: a receipt on the UHD rig is the first uhd-control poll after the submitted tick (1 ms later, `POLL`), longer than a
 /// 40-sample burst, so the boundary is pinned per Provider (`ur_23_a_value_at_the_exclusive_end_of_a_burst_is_accepted`, `mr_16_a_transmit_value_at_the_exclusive_end_is_accepted`).
 #[test]
 fn s14_transmit_values_on_an_empty_stream_decide_the_same_on_both_providers() {
@@ -2652,8 +2703,8 @@ fn s14_transmit_values_on_an_empty_stream_decide_the_same_on_both_providers() {
 
 // ---------------------------------------------------------------- O1c: the spec oracle on both Providers, under any scheduling
 //
-// The paired rig's UHD owner runs on a thread against a manual clock, so the SCENARIO is established independently of scheduling and only
-// what no scheduling can move is asserted: bookings are SendAsapAndFlag (a late host moves a start, which the records report, it never drops
+// The paired rig's UHD owner runs on a thread against a manual clock and the rig's thread is a participant of it, so the SCENARIO is established independently of scheduling and only
+// what no scheduling can move is asserted: bookings are SendAsapAndFlag (the poll phase of uhd-control, up to 1 ms, moves a start, which the records report, it never drops
 // it), and a Stop or a switch is received only after the device is observed to have started the burst (`o1_wait_playing`: the wait's length
 // changes when the Stop is received, never what is asserted). The Mock is stepped by the test and keeps its planned instants. The waveform's
 // identity and phase against the burst's OBSERVED start (its record's `target`), the samples the device played against what the record
@@ -2705,7 +2756,7 @@ fn o1_records(instance: &ProviderInstance, namespace: &str) -> Vec<(i64, i64, i6
         .collect()
 }
 
-/// A transmit burst on stream 0 for both Providers at `relative` ms from T0 under SendAsapAndFlag (a late host moves its start, which its
+/// A transmit burst on stream 0 for both Providers at `relative` ms from T0 under SendAsapAndFlag (the poll phase of uhd-control moves its start, which its
 /// record reports; it is never dropped), repeating when `repeat`, as a switch when `switch`.
 fn o1_asap(pair: &CancellationPair, wave: &ezsdr_kernel::manifest::ArtifactRef, relative: i64, repeat: bool, switch: bool) -> (Action, Action) {
     let action = |clocks: &ClockRegistry, root: i64| Action::TxBurst {
@@ -2728,7 +2779,7 @@ fn o1_mock_at(pair: &mut CancellationPair, relative: i64, action: Action) {
 }
 
 /// The UHD receives `actions` in one receipt (they enter its queue under one lock, so uhd-control takes them with no device time between,
-/// whatever the test thread does) once its device clock is at `relative` ms from its T0 (or later, if a descheduled test thread let it pass).
+/// whatever the test thread does) once its device clock is at `relative` ms from its T0: the clock stands there while the rig's thread, a participant, works, so a receipt is the first uhd-control poll after that tick (`UhdRig::wait_until`).
 fn o1_uhd_at(pair: &mut CancellationPair, token: u64, relative: i64, actions: impl IntoIterator<Item = Action>) {
     pair.uhd.wait_until(pair.uhd_t0 + ms(relative));
     pair.uhd.actions.actions.lock().unwrap().extend(actions.into_iter().map(|action| (action, false)));
@@ -2911,4 +2962,231 @@ fn o1_parity_a_switched_repeat_changes_waveform_at_its_recorded_boundary_on_its_
     assert_eq!(mock_rows.len(), 2, "{mock_rows:?}");
     assert_eq!(mock_rows[0].1, mb - mock_rows[0].0, "the Mock's old repeat ends at the boundary");
     assert_eq!((mock_rows[1].0, mock_rows[1].1, mock_rows[1].2, mock_rows[1].3.as_str()), (mb, mock_cut - mb, (mock_cut - mb) / 400, "stop"), "the Mock's successor record");
+}
+
+// ---------------------------------------------------------------- the rig's driver (note 51 stage 1b)
+
+fn one_stream_rig(config: FakeConfig) -> UhdRig {
+    UhdRig::new(selector(&["0:A:ubx:0"], &["0:A:ubx:0"]), &[], config).unwrap()
+}
+
+/// The device clock does not move while the test thread works: the wall sleep is the stimulus, the clock's reading the observation.
+fn assert_stands_still(host: &ezsdr_radio_uhd::HostClock, what: &str) {
+    let at = host.now();
+    std::thread::sleep(Wall::from_millis(100));
+    assert_eq!(host.now(), at, "{what}: the device clock moved while the test thread worked");
+}
+
+#[test]
+fn uhd_rig_the_device_clock_stands_still_while_the_test_thread_works_after_each_wait() {
+    let mut rig = one_stream_rig(FakeConfig::default());
+    let host = rig.device.host();
+    assert_stands_still(&host, "built");
+    rig.settle(Wall::from_millis(5));
+    assert_stands_still(&host, "settle");
+    rig.arm().unwrap();
+    let now = rig.time.now(rig.root).unwrap().ticks_in(rig.root).unwrap();
+    rig.start(now + ms(2_001)).unwrap();
+    rig.wait_until(now + ms(5));
+    assert_stands_still(&host, "wait_until");
+    rig.push(timer_barrier(rig.root, now + ms(2_010), 1));
+    rig.wait_for_event("the barrier's refusal", |event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["kind"] == "set_timer");
+    assert_stands_still(&host, "wait_for_event");
+    let _ = rig.finish();
+    let gone = host.now();
+    std::thread::sleep(Wall::from_millis(20));
+    assert!(host.now() > gone, "the clock runs again once the rig is gone");
+}
+
+#[test]
+fn uhd_rig_settle_advances_the_device_clock_by_its_duration_and_wait_until_reaches_its_tick() {
+    let mut rig = one_stream_rig(FakeConfig::default());
+    let host = rig.device.host();
+    let before = host.now();
+    rig.settle(Wall::from_millis(7));
+    assert_eq!(host.now() - before, Wall::from_millis(7), "settle is the driver's own idle wait on the device clock");
+    let tick = rig.time.now(rig.root).unwrap().ticks_in(rig.root).unwrap() + ms(3);
+    rig.wait_until(tick);
+    let reached = rig.time.now(rig.root).unwrap().ticks_in(rig.root).unwrap();
+    // One microsecond past the tick: the rig lets every participant due at the tick run before it returns (receipts at the next poll).
+    assert!(reached >= tick + ROOT_HZ / 1_000_000 - 1 && reached < tick + ms(1), "wait_until returns just after its tick: {reached} for {tick}");
+}
+
+#[test]
+fn uhd_rig_an_action_pushed_after_wait_until_is_received_at_the_first_poll_after_its_tick() {
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    // uhd-control's poll grid has the phase of `uhd_t0`, so each of these ticks is an instant at which a poll is due: the receipt is the next one, every time, never the same instant. Without the wait's last microsecond the order of the two threads decides, and a run of 60 ticks shows it.
+    let ticks: Vec<i64> = (0..60).map(|k| 10 + 3 * k).collect();
+    for tick in &ticks {
+        pair.uhd.wait_until(pair.uhd_t0 + ms(*tick));
+        pair.uhd_barrier(*tick as u64);
+    }
+    let root = pair.uhd.root;
+    let receipts: Vec<i64> = pair
+        .uhd
+        .events()
+        .iter()
+        .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["kind"] == "set_timer")
+        .map(|event| event.time.ticks_in(root).unwrap())
+        .collect();
+    // A receipt's tick is the Authority's extrapolation of the host clock: the nanosecond of the poll converted to root ticks, which rounds by one tick.
+    let expected: Vec<i64> = ticks.iter().map(|tick| pair.uhd_t0 + ms(tick + 1)).collect();
+    assert_eq!(receipts.len(), expected.len(), "every barrier was refused once: {receipts:?}");
+    for ((receipt, expected), tick) in receipts.iter().zip(&expected).zip(&ticks) {
+        assert!(receipt.abs_diff(*expected) <= 1, "the barrier at {tick} ms is received at the poll one millisecond after it: {receipt} for {expected}");
+    }
+}
+
+#[test]
+fn uhd_rig_a_booking_after_the_test_thread_was_away_is_received_inside_its_window() {
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    let single = pair.single.clone();
+    submit(&mut pair, 201, 91, |pair| {
+        std::thread::sleep(Wall::from_millis(200));
+        vec![short_booking(pair, &single, 0, 100, 0)]
+    });
+    pair.uhd.wait_until(pair.uhd_t0 + ms(140));
+    pair.mock.step(pair.t0 + ms(140));
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    assert_eq!(late_drops(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected"), &mock_events), (0, Vec::new()), "nothing is late on the Mock");
+    assert_eq!(late_drops(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected"), &uhd_events), (0, Vec::new()), "nothing is late on UHD, however long the test thread was away");
+    assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), 1, "the booking played");
+}
+
+#[test]
+fn uhd_rig_two_rigs_on_one_thread_move_only_the_clock_the_thread_waits_on() {
+    let mut a = one_stream_rig(FakeConfig::default());
+    let mut b = one_stream_rig(FakeConfig::default());
+    let (host_a, host_b) = (a.device.host(), b.device.host());
+    let (a0, b0) = (host_a.now(), host_b.now());
+    a.settle(Wall::from_millis(7));
+    assert_eq!(host_a.now() - a0, Wall::from_millis(7), "A moved by the wait on A");
+    assert_eq!(host_b.now(), b0, "B stood still while the thread waited on A");
+    let a1 = host_a.now();
+    b.settle(Wall::from_millis(5));
+    assert_eq!(host_b.now() - b0, Wall::from_millis(5), "B moved by the wait on B");
+    assert_eq!(host_a.now(), a1, "A stood still while the thread waited on B");
+}
+
+/// When the unreachable fault of the drop tests starts, in device time: so late that the constructor, which runs before the thread drives the clock, cannot reach it unless the host
+/// stalled for that long (the rig then writes the marker).
+const FAULT_AT: Wall = Wall::from_secs(2);
+
+/// A rig whose uhd-clock sleeps inside its read of an unreachable device: from `FAULT_AT` `time_now` is a 100 ms clock sleep, and uhd-clock holds an upgraded `Arc` of the
+/// Authority's time for the read. The test thread is a busy driver, so the clock stands still and the state holds until the next wait. `idle`, the count with no extra `Arc`,
+/// is taken before the fault, from the smaller of two readings one clock millisecond apart: uhd-clock holds the `Arc` across a read only while busy at an instant, and the clock does
+/// not advance while it is. The state is told from a transient (uhd-clock busy at its deadline) by two readings above `idle` one clock millisecond apart.
+fn rig_with_uhd_clock_asleep_inside_its_read() -> UhdRig {
+    let mut rig = one_stream_rig(FakeConfig { faults: vec![FakeFault::Unreachable(FAULT_AT)], ..FakeConfig::default() });
+    let host = rig.device.host();
+    let before_the_fault = |when: &str| {
+        if host.now() >= FAULT_AT {
+            infra::infra(&format!("the rig's device time reached the fault ({FAULT_AT:?}) {when}: the host stalled"));
+            panic!("the device time reached the fault {when}");
+        }
+    };
+    before_the_fault("before its first reading");
+    let first = Arc::strong_count(&rig.time);
+    rig.settle(Wall::from_millis(1));
+    before_the_fault("before its second reading");
+    let idle = first.min(Arc::strong_count(&rig.time));
+    rig.settle(FAULT_AT - host.now());
+    let mut above = 0;
+    for _ in 0..600 {
+        rig.settle(Wall::from_millis(1));
+        above = if Arc::strong_count(&rig.time) > idle { above + 1 } else { 0 };
+        if above == 2 {
+            return rig;
+        }
+    }
+    panic!("uhd-clock never slept inside its read of the unreachable device")
+}
+
+/// What the rig's drop left, read by the probe: set it, read the device clock, drop the rig (or let `rig` unwind), then `assert_joined`.
+fn install_probe(rig: &mut UhdRig) -> Arc<Mutex<Option<(usize, Wall)>>> {
+    let seen = Arc::new(Mutex::new(None));
+    rig._authority.probe = Some(DropProbe { time: Arc::downgrade(&rig.time), host: rig.device.host(), seen: seen.clone() });
+    seen
+}
+
+/// The ordering fact: with the driver dropped first, the clock runs while the Authority drops, uhd-clock's read ends and nothing is left. If the Authority dropped while the driver
+/// still held the clock, the read could not end and the clock stood still across the drop (`before` is the clock just before it). The one other way to be left with a reference is a
+/// host that did not run uhd-clock for longer than a read lasts in device time while the clock ran: that is the marker, not a verdict.
+fn assert_joined(seen: &Mutex<Option<(usize, Wall)>>, before: Wall, what: &str) {
+    let (left, after) = seen.lock().unwrap().expect("the probe did not run");
+    if left == 0 {
+        return;
+    }
+    let advanced = after.saturating_sub(before);
+    // One reference left while the clock moved is uhd-clock starved past the join window (a host stall); a driver that held the clock
+    // leaves the clock where it was (N51B-03), and a probe that reads before the Authority drops sees two references (N51B-09).
+    if left == 1 && advanced > Wall::ZERO {
+        infra::infra(&format!("{what}: uhd-clock was not joined although the device clock advanced {advanced:?} across the drop"));
+    }
+    panic!("{what}: {left} reference(s) to the Authority's time were left and the device clock advanced {advanced:?} across the drop: the Authority dropped while the driver still held the clock");
+}
+
+#[test]
+fn uhd_rig_dropped_joins_uhd_clock_even_asleep_inside_its_read() {
+    let mut rig = rig_with_uhd_clock_asleep_inside_its_read();
+    let seen = install_probe(&mut rig);
+    let before = rig.device.host().now();
+    drop(rig);
+    assert_joined(&seen, before, "dropped");
+}
+
+#[test]
+fn uhd_rig_unwound_joins_uhd_clock_even_asleep_inside_its_read() {
+    let probe = Mutex::new(None);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut rig = rig_with_uhd_clock_asleep_inside_its_read();
+        let seen = install_probe(&mut rig);
+        *probe.lock().unwrap() = Some((seen, rig.device.host().now()));
+        panic!("the test body fails");
+    }));
+    assert!(result.is_err());
+    let (seen, before) = probe.into_inner().unwrap().unwrap();
+    assert_joined(&seen, before, "unwound");
+}
+
+#[test]
+fn uhd_rig_refuses_a_fault_that_stops_the_manual_clock_for_good() {
+    let refused = std::panic::catch_unwind(|| UhdRig::new(selector(&["0:A:ubx:0"], &["0:A:ubx:0"]), &[], FakeConfig { faults: vec![FakeFault::TxBlocks], ..FakeConfig::default() }));
+    let text = refused.err().and_then(|payload| payload.downcast_ref::<String>().cloned().or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))).expect("the constructor panics");
+    assert!(text.contains("TxBlocks"), "{text}");
+}
+
+#[test]
+fn uhd_rig_wait_for_events_writes_the_infra_marker_when_its_bound_expires() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "uhd_rig_fixture_wait_for_events_expires", "--test-threads=1", "--nocapture"])
+        .env("EZSDR_RIG_FIXTURE", "wait_for_events_expires")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "the fixture fails: {stderr}");
+    assert!(stderr.contains("EZSDR-INFRA: uhd_rig_fixture_wait_for_events_expires: the rig's wait for an event that never comes"), "{stderr}");
+}
+
+/// Run by the test above in a child process; a no-op otherwise.
+#[test]
+fn uhd_rig_fixture_wait_for_events_expires() {
+    if std::env::var("EZSDR_RIG_FIXTURE").is_ok_and(|name| name == "wait_for_events_expires") {
+        one_stream_rig(FakeConfig::default()).wait_for_events_within("an event that never comes", 1, |_| false, Wall::from_millis(50));
+    }
 }

@@ -56,8 +56,13 @@ instead of hanging the suite, after writing an `EZSDR-INFRA:` marker line straig
 (`common/infra.rs`: libtest's capture would lose a printed line to the abort); a watchdog that
 cannot start fails its test at once. The same marker is written, once, before the one panic of a
 Run or rig that ends at its creation on a real-time bound (`session_with`, `spec_run`, the parity
-rig's constructor), and `EZSDR-TIMING:` names a test that a serial re-run may pass. The mutation
-runner reads both from the output (`mutate.py`'s docstring): a marker makes a row `ERROR` unless
+rig's constructor and its `wait_for_events`), and `EZSDR-TIMING:` names a test that a serial re-run
+may pass. The parity rig's thread is a participant of its device clock (`HostClock::drive`, held
+for the rig's life), so a delay of the test thread does not move a receipt: between its waits the
+clock stands. `UhdRig::wait_until` ends with a one-microsecond wait, so that every participant due at
+the tick (uhd-control's 1 ms poll has the phase of the Run's `uhd_t0`) has run before the test thread
+pushes: an Action pushed after it is received at the first poll strictly after max(the tick, now),
+never at the tick itself (`uhd_rig_an_action_pushed_after_wait_until_…`). The mutation runner reads both from the output (`mutate.py`'s docstring): a marker makes a row `ERROR` unless
 the row declares `"kill": "bound"`. `infra_fixtures/` holds the tests `mutate.py --e2e` runs to
 pin that; they return at once unless `EZSDR_INFRA_FIXTURE` names them. The real clock stays where a real host deadline
 is the point: the Authority's own diagnostics, `ur_07_now_is_monotonic_across_a_reanchor` (a diagnostic, since the guard is

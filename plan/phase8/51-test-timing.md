@@ -102,7 +102,7 @@ A が後でできなくすること：登録していない別スレッドから
 契約：
 
 1. 直結の rig（手動の時計）では，device の時刻は rig の進める呼び出し（`wait_until`，`settle`，`wait_for_events`，`finish`）の中でだけ進む。
-2. 「T まで進めてから操作する」と書いてよい。操作は T から owner の poll 1 回（1 ms：`control.rs:250`）以内に受け取られる（上限はコードで VERIFIED，実行ごとに同じ tick かは INFERRED）。
+2. 「T まで進めてから操作する」と書いてよい。操作は T の後の最初の owner の poll（1 ms：`control.rs:250`）で受け取られる（段 1b の後：`UhdRig::wait_until` は時計の待ちの後に 1 µs だけ時計の上で待ち，T に来る参加者を先に走らせるので，実行ごとに同じ tick。`reviews/n51-1b-dispositions.md`）。
 3. 駆動役は owner の進みを時計の待ち以外で待ってはいけない。待つと時計が止まり，**毎回**実時間の上限で落ちる。その失敗は marker を持つ（§6）。
 4. 駆動 rig が示すのは「受け取りの時刻を決めたときの規則」で，「host が間に合う」ことではない。わざと遅れたいときは `rig.settle(d)` と書く。
 5. Run の rig と実機では 1〜2 は成り立たない。窓に依存する判定は書かない（R0 だけ残す）か，P7 の証人で囲う（§5）。
@@ -533,3 +533,8 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 - Q17（owner 了承，2026-11-12）：Kernel の action log の `LogEntry.time` は `submit` の入口で打たれる（`pipeline.rs:939`）ので受け取りの下限であり，「遅い」は示せるが「間に合った」は示せない．Q17 はそのまま（安全側）．`submit` の中で遅れた capture は FAIL のまま残る．段階 2c で capture の記録した最初のサンプルを証人に使えるかを調べ，使えれば置き換える．
 - Q16 の文言：「判定できた」は「流し直しで時刻の印が出なかった」の意味．わざと遅く受け取らせる case は印を case ごとに出さない（段階 M と 2c）．
 - 表の食い違い 2〜7 は各段の実装の細部（2a：fixture 4b は target つきの Spec `stop`，`protocol.rs` の `ea_15` の入口．2c：`receipts` は `control.rs:491` の 1 回の読みから書く，R2 の窓の端 `J(e)` も試験側の literal に．M：fixture 3 は実時間の fake に長い `apply_delay` をまず試す）．
+
+### 段 1b の後（2026-11-12，記録 `reviews/n51-1b-dispositions.md`）
+- 受け取りの時刻：駆動役を登録すると，`wait_until` は owner の poll の格子の上で終わり，試験のスレッドと uhd-control のどちらが先かで受け取りが T か T＋1 poll になった（`s14_…` の S3 が負荷の下で落ちた）．`wait_until` の最後に 1 µs の時計の待ちを足し，受け取りは T の後の最初の poll に決まる（上の契約 2）．S3 の値は 71 ms のまま．
+- §1.3 の probe 1b の行と §7.1：#96 が預けた 14 本は，遅延の注入で `submit`（13 本）と `s14`（`s14_…` だけ）で落ちる．`CancellationPair::new` の後の注入では 0 本だった．#96 の記録の「15 本」は 14 本（15 本目の `s1_parity_payload_cut_separate_from_padding` は #96 が手順で直した）．
+- §4.2 の field の順：Authority の drop の時に uhd-clock が時計の待ちの中にいる時だけ順が見える．`UhdRig` の field は `_driver`（最初），`_authority`（Authority と drop の probe を一つの `AuthorityGuard` に）の順．「Authority の後に登録する」は観測できない（行はない）．

@@ -18616,5 +18616,108 @@
   "old": "block.ends_waveform(block.wanted) ||",
   "new": "false ||",
   "filter": "e3_mc4_blocks_by_shape"
+ },
+ {
+  "id": "N51B-01",
+  "name": "the rig does not register its thread on the device's clock (note 51 stage 1b): the test thread is a non-participant and the clock runs while it works",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "let driver = device.host().drive();",
+  "new": "let driver = ezsdr_radio_uhd::HostClock::real().drive();",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_the_device_clock_stands_still"
+ },
+ {
+  "id": "N51B-02",
+  "name": "the rig's device clock is the real one, so drive() registers nothing and a wait is not exact",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "clock: ezsdr_radio_uhd::ClockMode::Manual,",
+  "new": "clock: ezsdr_radio_uhd::ClockMode::Real,",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_settle_advances"
+ },
+ {
+  "id": "N51B-03",
+  "name": "the rig's driver drops after the Authority, so the clock stands across the Authority's drop: uhd-clock's read cannot end, the thread is detached and a reference to the Authority's time is left",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "_driver: ezsdr_radio_uhd::host::Driver,",
+  "new": "",
+  "old2": "_authority: AuthorityGuard, }",
+  "new2": "_authority: AuthorityGuard, _driver: ezsdr_radio_uhd::host::Driver, }",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "joins_uhd_clock_even_asleep_inside_its_read"
+ },
+ {
+  "id": "N51B-04",
+  "name": "the rig accepts FakeFault::TxBlocks, which stops the manual clock for good",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "assert!(!config.faults.contains(&FakeFault::TxBlocks), \"the rig refuses FakeFault::TxBlocks: it stops the manual clock for good\");",
+  "new": "",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_refuses_a_fault"
+ },
+ {
+  "id": "N51B-05",
+  "name": "the rig's wait for events expires with no infra marker, so a runner counts the host's bound as a kill",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "infra::infra(&format!(\"the rig's wait for {what} did not end within {bound:?}\"));",
+  "new": "",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_wait_for_events_writes"
+ },
+ {
+  "id": "N51B-06",
+  "name": "the rig's settle sleeps in wall time, so its driver stays busy and the clock does not move",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "self.device.host().sleep(wall);",
+  "new": "std::thread::sleep(wall);",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_settle_advances"
+ },
+ {
+  "id": "N51B-07",
+  "name": "the rig's wait_until does not wait on the device clock",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "let _ = self.time.wait_until(TimePoint::new(self.root, tick));",
+  "new": "let _ = tick;",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_settle_advances"
+ },
+ {
+  "id": "N51B-08",
+  "name": "the rig's event poll sleeps in wall time, so its driver stays busy, the clock stands and the events never come: only the 10 s real bound ends it, with its marker",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "panic!(\"timed out waiting for {what}: {:?}\", self.device.calls()); } self.device.host().sleep(Wall::from_millis(1));",
+  "new": "panic!(\"timed out waiting for {what}: {:?}\", self.device.calls()); } std::thread::sleep(Wall::from_millis(1));",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_the_device_clock_stands_still",
+  "kill": "bound"
+ },
+ {
+  "id": "N51B-09",
+  "name": "the rig's probe reads the Authority's time before the Authority is dropped, so it sees uhd-clock's reference",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "drop(self.authority.take());",
+  "new": "",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "joins_uhd_clock_even_asleep_inside_its_read"
+ },
+ {
+  "id": "N51B-10",
+  "name": "the rig's wait_until ends on the tick's instant, so an Action pushed after it may be received at that instant, before the poll due there has run",
+  "file": "crates/ezsdr-acceptance/tests/parity.rs",
+  "old": "self.device.host().sleep(Wall::from_micros(1));",
+  "new": "",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "uhd_rig_settle_advances"
  }
 ]
