@@ -46,7 +46,15 @@ fn e2a_lock_reentry_of_one_mutex_panics() {
         }));
         let _ = done.send(reentered.err().and_then(|panic| panic.downcast_ref::<&str>().map(|text| text.to_string())));
     });
-    let message = panicked.recv_timeout(Wall::from_secs(10)).expect("the re-entry did not panic");
+    // A missing check deadlocks the worker: only the bound sees it, so it is a declared bound kill (note 51 §6.3).
+    let message = match panicked.recv_timeout(Wall::from_secs(10)) {
+        Ok(message) => message,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            crate::provider::test_support::infra("the re-entry did not panic within 10 s");
+            panic!("the re-entry did not panic: Timeout")
+        }
+        Err(disconnected) => panic!("the re-entry's thread ended without a report: {disconnected:?}"),
+    };
     assert!(message.is_some_and(|text| text.contains("re-entered")), "the re-entry's panic names it");
 }
 

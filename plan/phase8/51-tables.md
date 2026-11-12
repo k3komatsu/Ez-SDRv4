@@ -3,7 +3,7 @@
 | Item | Content |
 |---|---|
 | Status | Stage 0 of [51-test-timing.md](51-test-timing.md): documents only, no code. Brief: `~/.cache/ezsdr-fixes/2026-11-12-n51s0/brief.md`. Note 51 is not edited; where the code disagrees it is listed in §1. |
-| Tree | `main` at `093343d` (`git status` clean at the start). Line numbers are of that tree. `main` has since moved to `9c84502` (#92: `fake.rs` lines after about `:1630` are +2 there, for example `:2237` is `:2239`); stage 1 onward re-greps. |
+| Tree | `main` at `093343d` (`git status` clean at the start). Line numbers are of that tree. `main` has since moved to `9c84502` (#92: `fake.rs` lines after about `:1630` are +2 there, for example `:2237` is `:2239`); stage 1 onward re-greps. Stage 1d recounted §2.5 on `bfd59d3` (17 sites, not 15; its lines are those after 1d). |
 | Revision | 2026-11-12, after the Opus re-check (`~/.cache/ezsdr-fixes/2026-11-12-n51s0/recheck.md`, PASS WITH CHANGES) and the fix brief `brief-fix.md`: C2 (row N47S4-41), C3 (the Kernel `device_paced` rows, §6.4), C4 (counts), C5 (W16), C6 (J317/J318), C7 (N47S5-177), the line numbers, Q15's other hardware sinks, the item 3 additions (§1 "Later stages need", §3.2, §5). Each changed place says "(re-check Cn)". |
 | Method | `grep`/reads of the sources named in each row; a throw-away static scan (Python, outside the repository) for call graphs, test names and mutation-row matching. Nothing was built or run. |
 | Scope read | `crates/ezsdr-radio-uhd/tests/{fake.rs, common/**}`, `crates/ezsdr-acceptance/tests/{uhd.rs, parity.rs}`, `crates/ezsdr-server/tests/{protocol.rs, support}`, the UHD Provider/Authority/host/device sources for waits, the Kernel's `coordinator/*`, `run.rs`, `event.rs` for bounds, `plan/*/tools/mutations.json`, `mutate.py`, `gate.py` (the parts cited). |
@@ -20,7 +20,7 @@
 | … where a late L causes a fault in an in-window Action (§5.3) | **10** tests | V |
 | `uhd.rs` | 16: R0 15, R1 (test-side read) 1 | V |
 | `protocol.rs` | 73: 18 FakeDevice tests (13 R0 · 1 R0 with real-time polling · 4 no Run) + 55 without FakeDevice | V |
-| W table (§2) | 11 rig-level sites + 6 per-test sites (+ 15 `drop(frozen)` + the fault table) | V/I |
+| W table (§2) | 11 rig-level sites + 6 per-test sites (+ 17 `drop(frozen)` + the fault table) | V/I |
 | Bound list (§4) | 8 Kernel + 5 Provider/Authority + 14 test-side = 27 bounds | V |
 | Timing-INCONCLUSIVE list (§5) | 10 timing rows (+ 4 adjacent) | V |
 | Mutation rows to look at (§6) | 139 `fake` rows (3 retarget · 3 `bound` candidates · 29 S2 sites; re-check C7 moved N47S5-177 from retarget to KEEP, so 4 became 3; C2 changed the N47S4-41 move, not its class) + 14 `protocol` + 32 `lib` candidates + **52 Kernel `device_paced` rows (§6.4: 11 `bound`, 1 candidate)** | V (`fake`, `device_paced` filters), I (`lib`) |
@@ -58,7 +58,7 @@ The re-check (all 8 points VERIFIED) classified each point; the class is added i
 * **RS-8a deadline of the UHD Provider** (§6.1, §7.2 stage 0): none declared. `Ops` (`coordinator/ending.rs:252`) does not override `CleanupOps::deadline_millis`; the only overrider in the tree is the Kernel's test double (`ezsdr-kernel/tests/support/doubles.rs:1090`). Every cleanup step of every UHD Run is cut at 5 000 ms (`run.rs:538-545`).
 * **Background cuts** (§6.2 "INFERRED"): none besides lease expiry on the data thread (`paced.rs:70-72`), which never fires here because every creator passes an attached lease (§4.1 K7). V.
 * **Generation sites** (§5.4, §8): 12 outside `session_with` — re-grepped, same 12: `uhd.rs:51, :66, :264`; `common/mod.rs:460, :785`; `measurement.rs:1904, :2628`; `measurement/multichannel.rs:791`; `fake.rs:221, :535, :3786, :6749`. `measurements.rs` and `x3xx.rs` create no Run (no `connect(`/`start_spec_run(` hit). V.
-* **`drop(frozen)` sites** (§4.4): 15, types 4 N / 3 G / 5 W1 / 2 W2 / 1 H, each confirmed by reading what follows the release (§2.5). V.
+* **`drop(frozen)` sites** (§4.4): 17 after stage 1d's recount (the first count, 15, missed one G and one W2), types 4 N / 4 G / 5 W1 / 3 W2 / 1 H, each confirmed by reading what follows the release (§2.5). V.
 * **The `now()` failing list** (§5.2): `ur_21_s18` and `ur_23_a_burst_after_a_stop` and `ur_29_a_loss_found_by_the_shutdown…` are R1-tx with the on-time requirement outside their subject (§3.2); `ur_25_a_first_burst_with_the_connect_values_makes_no_apply` is *not* in that list and cannot be: its "the burst is sent" assert is satisfied by the open-time four-zero flush (`uhd.rs:370` shows the same `tx_send 0 n=4 at=- sob=true eob=true`; `common/mod.rs:637-640`), so a dropped burst still passes. A weak assertion, not a timing dependency.
 
 
@@ -110,31 +110,33 @@ A fault changes the driving thread's waits only if it blocks in real time. `Fake
 | `fake.rs:5427, :5445` (Direct) | `Overflow(40 ms)`, `TxReport(40 ms, Underflow)` | W8/W9 | keep |
 | `fake.rs:5607` (Direct) | `WrongRate{nth:1}` | none | keep |
 | `fake.rs:303, :825, :978, :1013, :1165, :1575, :1637, :1684, :1696, :1749, :1891, :2385-2539, :2770, :3278, :3607, :3811, :4688, :5102, :5114, :6940` | assorted (Run rigs or raw/Authority tests) | not a stage-1 rig; Run rigs → §3, Authority/raw → outside stage 1 | n/a |
-| `src/provider/{tx.rs:1711, :1744, :1773, :4345, :4411, :4536, :4609, :4645, :5576, :6476; core.rs:1749, :1769, :1905; rx.rs:847, :1964, :2064, :2113, :2139, :2354, :2562; rx/differential.rs:850, :867; mod.rs:976}`, `authority.rs:792, :805`, `device.rs:2298, :2497` | assorted | unit tests on `Frozen`/`device_at`/`rig_with`; waits are the 15 `drop(frozen)` sites of §2.5, or none | per §2.5 |
+| `src/provider/{tx.rs:1711, :1744, :1773, :4345, :4411, :4536, :4609, :4645, :5576, :6476; core.rs:1749, :1769, :1905; rx.rs:847, :1964, :2064, :2113, :2139, :2354, :2562; rx/differential.rs:850, :867; mod.rs:976}`, `authority.rs:792, :805`, `device.rs:2298, :2497` | assorted | unit tests on `Frozen`/`device_at`/`rig_with`; waits are the 17 `drop(frozen)` sites of §2.5, or none | per §2.5 |
 
-### 2.5 Crate-internal `drop(frozen)` sites (15; re-grepped on `093343d`: `grep -rn "drop(frozen)\|drop(_frozen)" crates/ezsdr-radio-uhd/src`)
+### 2.5 Crate-internal `drop(frozen)` sites (17; recounted in stage 1d on `bfd59d3`, lines as after 1d: `grep -rnE "drop\((_?frozen|rig\._frozen)\)|handed_over\(" crates/ezsdr-radio-uhd/src`; the first count, 15, on `093343d` used `drop(frozen)\|drop(_frozen)` and missed the spelling `drop(rig._frozen)` and `tx/tests/e2b.rs`, new since E2b)
 
-The shape is note 51 §4.4's. What I read after each release:
+The shape is note 51 §4.4's. What I read after each release (G and W2 sites are guarded by `test_support::handed_over(frozen, &clock)`, i.e. `clock.drive()` before the release, since stage 1d):
 
 | # | Site | After the release | Type | A requires | Ev |
 |---|---|---|---|---|---|
 | 1 | `provider/tx/tests/o1.rs:755` | assertions only | N | keep | V |
-| 2 | `provider/tx.rs:4530` | `drop` at the loop end after assertions | N | keep | V |
-| 3 | `provider/tx.rs:4597` | `drop` at the end of the test | N | keep | V |
+| 2 | `provider/tx.rs:4396` | `drop` at the loop end after assertions | N | keep | V |
+| 3 | `provider/tx.rs:4463` | `drop` at the end of the test | N | keep | V |
 | 4 | `provider/rx.rs:1000` | `assert!`s on `spy`/`rx`/`core` after `rx.try_end()` | N | keep | V |
-| 5 | `provider/tx.rs:6693` (`ur_22_a_reopen_keeps_the_mark_and_a_loss_clears_it`) | the test thread runs `lock(&core.streams).record_configured`, `tx.chain.mark_reopen_needed()`, `tx.pass()` itself | G | guard (`drive()`) | V |
-| 6 | `provider/tx.rs:6708` (`ur_22_a_loss_during_the_reopen_clears_the_mark_the_reopen_read`) | `tx.pass()` on the test thread | G | guard | V |
-| 7 | `provider/tx.rs:6730` (`ur_28_a_value_during_an_underflow_recovery…`) | `assert!(tx.pass())`, then `let _frozen = Frozen::of(&device)` again | G | guard (holds the clock again after) | V |
-| 8 | `provider/tx.rs:6086` (`txp_owners`) | owners are participants (`host.spawn`); the test thread polls `spy.recs()` with `std::thread::sleep(1 ms)` under a 10 s `Instant` deadline (`:6087-6093`), then `txp_join` | W1 | keep (a guard would make the sleep "busy" and stop the clock the owners need: hang) | V |
-| 9 | `provider/tx.rs:6193` (`ur_23_m8b…`) | `snapshots.recv_timeout(10 s)` on a channel the participant owner fills | W1 | keep | V |
-| 10 | `provider/tx.rs:6226` (`ur_23_m6…`) | `woken_rx.recv_timeout(10 s)` then `host.now()`, later a 10 s `Instant` poll with `std::thread::sleep(1 ms)` (`:6238-6247`) | W1 | keep | V |
-| 11 | `provider/rx.rs:901` | `gate.wait()` then `finished.recv_timeout(10 s)` | W1 | keep | V |
-| 12 | `provider/rx.rs:946` | `first_turn.recv_timeout(10 s)`, `second_turn.recv_timeout(10 s)` | W1 | keep | V |
-| 13 | `provider/tx.rs:6676` (`ur_22_a_provider_stop_during_the_configure…`) | spawns a participant that `host.sleep(150 ms)` then `tx.shutdown()` on the test thread (its 100 ms ack window is a clock wait, `tx.rs:1316-1325`) and `driver.join()` | W2 | guard only if the helper thread and `join` go (`std::thread::JoinHandle::join` is a non-clock wait); try in 1d | V (shape) / I (outcome) |
-| 14 | `provider/tx/tests/e1.rs:88` (`shutdown`) | same pattern as 13 | W2 | as 13 | V |
-| 15 | `provider/test_support.rs:182` (`released`) | `drop(frozen)` hands the clock to a spawned participant, then `result.recv()` / `worker.join()` | H | keep (it *is* the helper) | V |
+| 5 | `provider/tx.rs:6555` (`ur_22_a_reopen_keeps_the_mark_and_a_loss_clears_it`) | the test thread runs `lock(&core.streams).record_configured`, `tx.chain.mark_reopen_needed()`, `tx.pass()` itself | G | guard (`drive()`) | V |
+| 6 | `provider/tx.rs:6570` (`ur_22_a_loss_during_the_reopen_clears_the_mark_the_reopen_read`) | `tx.pass()` on the test thread | G | guard | V |
+| 7 | `provider/tx.rs:6593` (`ur_28_a_value_during_an_underflow_recovery…`) | `assert!(tx.pass())`; the thread keeps the clock to the end of the test (no second `Frozen`) | G | guard | V |
+| 8 | `provider/tx.rs:7003` (`ur_22_f8_recovery_that_ends_the_repeat_cancels_the_pending_switch`, `drop(rig._frozen)`) | `mark_reopen_needed()`, `rig.tx.pass()` on the test thread | G | guard | V |
+| 9 | `provider/tx.rs:5952` (`txp_owners`) | owners are participants (`host.spawn`); the test thread polls `spy.recs()` with `std::thread::sleep(1 ms)` under a 10 s `Instant` deadline, then `txp_join` | W1 | keep (a guard would make the sleep "busy" and stop the clock the owners need: hang) | V |
+| 10 | `provider/tx.rs:6059` (`ur_23_m8b…`) | `snapshots.recv_timeout(10 s)` on a channel the participant owner fills | W1 | keep (the guard hangs: V, 1d's probe) | V |
+| 11 | `provider/tx.rs:6092` (`ur_23_m6…`) | `woken_rx.recv_timeout(10 s)` then `host.now()`, later a 10 s `Instant` poll with `std::thread::sleep(1 ms)` | W1 | keep | V |
+| 12 | `provider/rx.rs:901` | `gate.wait()` then `finished.recv_timeout(10 s)` | W1 | keep | V |
+| 13 | `provider/rx.rs:946` | `first_turn.recv_timeout(10 s)`, `second_turn.recv_timeout(10 s)` | W1 | keep | V |
+| 14 | `provider/tx.rs:6542` (`ur_22_a_provider_stop_during_the_configure…`) | was: a participant that `host.sleep(150 ms)`, `tx.shutdown()` on the test thread (its 100 ms ack window is a clock wait) and `driver.join()` | W2 | rewritten in 1d: the helper thread and `join` go, `handed_over`, `tx.shutdown()` | V |
+| 15 | `provider/tx/tests/e1.rs:88` (`shutdown`, `drop(_frozen)`) | same pattern as 14 | W2 | as 14 | V |
+| 16 | `provider/tx/tests/e2b.rs:88` (`shutdown_owner`) | same pattern as 14 (a copy of `e1::shutdown`) | W2 | as 14 | V |
+| 17 | `provider/test_support.rs:182` (`released`) | `drop(frozen)` hands the clock to a spawned participant, then `result.recv()` / `worker.join()` | H | keep (it *is* the helper) | V |
 
-No contradiction with §4.4: counts per type 4 N / 3 G / 5 W1 / 2 W2 / 1 H = 15.
+No contradiction with §4.4: counts per type 4 N / 4 G / 5 W1 / 3 W2 / 1 H = 17.
 
 ### 2.6 Rigs outside stage 1 where the driving thread waits (not part of A; listed so stage 1 does not forget them)
 
@@ -342,7 +344,7 @@ Background cuts: a search of `ending::request(` in `kernel/coordinator/*.rs` (`g
 | T10 | raw-group deadline | `measurement.rs:777-808` (`RawGroup::with_limit`, real `Instant`+injected skew), `fake.rs:725, :845-849, :1060, :1171` | 60 s … 3 600 s | the measurement code | a "limit reached" group row, not a failure | n/a | V |
 | T11 | raw-probe loops | `d9.rs:164, :179, :194, :241` (3 s); `raw.rs:66, :146`; `probe_device.rs:85-94` (`wait_for_rx_start_and_sample`), `:172`, `:230` | 1-3 s | raw rigs | `None`/short result | n/a | V |
 | T12 | server test helpers | `ezsdr-server/tests/support/mod.rs:7-23` (`BOUND` 10 s; `eventually`, `within`), `protocol.rs:2029` (`set_read_timeout(BOUND)`), `:2083` (`sleep(100 ms)`, "not for the verdict") | 10 s | server tests | assertion / read error | the single `server.handle` fn (2a) — and `serve`/the binary entries (§1) | V |
-| T13 | crate-internal `recv_timeout`/`Instant` deadlines | `src/provider/tx.rs:1558, :1581, :3635, :3640, :4835-4838, :6087-6092, :6196, :6228, :6238-6245`; `rx.rs:908, :949, :957, :1070, :1076, :1386, :1417-1418, :1426, :1476, :1487, :2379`; `core.rs:1692-1693, :2061, :2099, :2103`; `control.rs:1371, :1495-1497`; `mod.rs:1185` | 1-10 s | unit tests | `expect`/`assert!` messages | stage 4 (the 15 `drop(frozen)` sites and the ~75 `Frozen` uses); none is a Run | V (lines from grep) |
+| T13 | crate-internal `recv_timeout`/`Instant` deadlines | `src/provider/tx.rs:1558, :1581, :3635, :3640, :4835-4838, :6087-6092, :6196, :6228, :6238-6245`; `rx.rs:908, :949, :957, :1070, :1076, :1386, :1417-1418, :1426, :1476, :1487, :2379`; `core.rs:1692-1693, :2061, :2099, :2103`; `control.rs:1371, :1495-1497`; `mod.rs:1185` | 1-10 s | unit tests | `expect`/`assert!` messages | stage 4 (the 10 `drop(frozen)` sites left after 1d and the ~75 `Frozen` uses); none is a Run | V (lines from grep) |
 | T14 | `mutate.py` timeouts | `plan/maintenance/tools/mutate.py:75` (`BUILD_TIMEOUT = 900`, `TEST_TIMEOUT = 180`), `:146-148` (`returncode != 0` → `killed`; `TimeoutExpired` → `killed (timeout)`) | 900 s / 180 s | the runner | a `killed` row | M (§6.3 of note 51) | V |
 
 ### 4.4 Confirmation: what turns into a marker, and what cannot

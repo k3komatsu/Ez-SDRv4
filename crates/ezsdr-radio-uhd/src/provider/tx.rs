@@ -1292,7 +1292,7 @@ mod tests {
     use super::{Held, TX_CHANNELS_MAX, Tail, Tx, TxCmd};
     use crate::device::{Device, Dir, FakeConfig, FakeDevice, FakeFault, Iq, Settings, TxCode, TxReport};
     use crate::provider::core::{Clock, Core, Holder, lock, stream_key};
-    use crate::provider::test_support::{Frozen, device_at};
+    use crate::provider::test_support::{Frozen, device_at, handed_over};
     use ezsdr_kernel::id::ClockDomainId;
     use ezsdr_radio::staging::{DeviceChain, Recovery};
     use ezsdr_radio::timeline::Channels;
@@ -6539,12 +6539,8 @@ mod tests {
             let claim = streams.claim_owner(key).expect("the configure's claim is released");
             streams.give_back(claim);
         }
-        drop(frozen);
-        let host = core.device.host();
-        let driver_host = host.clone();
-        let driver = host.spawn("tx-shutdown-deadline", move || driver_host.sleep(Wall::from_millis(150))).expect("a manual-clock participant");
+        let _driver = handed_over(frozen, &core.device.host());
         tx.shutdown();
-        driver.join().unwrap();
         assert!(!traffic(&device, 2).iter().any(|call| call.starts_with("tx_send ")), "no payload after Provider::stop: {:?}", traffic(&device, 2));
         assert!(held_keys(&tx).is_empty(), "the burst is cancelled");
         let reasons: Vec<_> = lock(&core.rec).rejected.iter().map(|row| row["reason"].clone()).collect();
@@ -6556,7 +6552,7 @@ mod tests {
         // F5: a reopen of the streamer keeps the values the device holds; a loss clears the mark.
         let (core, device, _time, mut tx, frozen, _events, _to_tx) = owner(1);
         let key = stream_key(Dir::Tx, 0);
-        drop(frozen);
+        let _driver = handed_over(frozen, &device.host());
         lock(&core.streams).record_configured(key, Some(1));
         tx.chain().mark_reopen_needed();
         assert!(tx.pass(), "the reopen runs");
@@ -6571,7 +6567,7 @@ mod tests {
         // F5, the reopen's own race: the device is lost after the reopen returned Ok and before its mark is written back.
         let (core, device, _time, mut tx, frozen, _events, _to_tx) = owner(1);
         let key = stream_key(Dir::Tx, 0);
-        drop(frozen);
+        let _driver = handed_over(frozen, &device.host());
         lock(&core.streams).record_configured(key, Some(1));
         tx.chain().mark_reopen_needed();
         let lost = core.clone();
@@ -6592,10 +6588,13 @@ mod tests {
         turns(&core, &time, &device, &mut tx, 1, 15, 1);
         assert!(applies.lock().unwrap().is_empty(), "no configure during the recovery: {:?}", traffic(&device, 1));
         let before = device.calls().len();
-        // The reopen needs the device's clock to run, so the frozen participant goes first.
-        drop(frozen);
+        // The reopen needs the device's clock to run: the test thread takes the clock from the frozen participant and holds it from then on. It is
+        // slow before the reopen on purpose: no device time passes while it is not waiting on the clock (note 51 §4.4).
+        let _driver = handed_over(frozen, &device.host());
+        let held = device.host().now();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(device.host().now(), held, "the clock ran while the test thread, which holds it, was slow");
         assert!(tx.pass(), "the reopen runs first");
-        let _frozen = Frozen::of(&device);
         turns(&core, &time, &device, &mut tx, 16, 35, 1);
         let calls = device.calls();
         let apply = calls.iter().skip(before).position(|call| call.starts_with("apply tx")).map(|index| index + before).expect("the value is applied after the reopen");
@@ -7001,7 +7000,7 @@ mod tests {
         run(&mut rig, 0, 3);
         book_switch(&mut rig, 2, 3_000, 1);
         run(&mut rig, 3, 3);
-        drop(rig._frozen);
+        let _driver = handed_over(rig._frozen, &rig.device.host());
         rig.tx.chain().mark_reopen_needed();
         assert!(rig.tx.pass(), "the reopen runs");
         assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled");

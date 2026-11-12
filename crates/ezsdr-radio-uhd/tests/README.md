@@ -86,7 +86,9 @@ follows the Authority's drop, with no 50 ms bound: the drop's promptness is pinn
 `ur_07_dropping_the_authority_ends_uhd_clock_while_the_manual_clock_is_stopped` in
 `src/authority.rs`. No short wall interval decides a functional property: where one needs the
 device's clock to stand still — the Authority's wakes, its drop, its `host.monotonic` waits —
-a participant holds the clock until the test releases it after its checks, and
+a participant holds the clock until the test releases it after its checks (a unit test that
+then runs the owner's code on its own thread takes the clock with `test_support::handed_over`,
+which registers that thread before the release), and
 `ur_24_the_device_queue_order_is_the_effective_order` builds its late command on the
 controlled clock of `src/provider/control.rs`. The only short wall verdicts left are the
 medians of the real-clock latency diagnostics `ur_07_schedule_wakes_a_waiting_next_wakeup` and

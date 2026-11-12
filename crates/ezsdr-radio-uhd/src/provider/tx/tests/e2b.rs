@@ -9,7 +9,7 @@
 
 use super::e1::{MS, at, notes, stop_receipt};
 use super::*;
-use crate::provider::test_support::{next_lock_armed, on_next_lock, probe, released};
+use crate::provider::test_support::{handed_over, next_lock_armed, on_next_lock, probe, released};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -85,12 +85,8 @@ fn check(what: &str, actual: Value, expected: &str) {
 
 /// `Tx::shutdown` with the device's clock released for its 100 ms acknowledgement window, as `e1::shutdown` makes it.
 fn shutdown_owner(core: &Core, tx: &mut Tx, frozen: Frozen) {
-    drop(frozen);
-    let host = core.device.host();
-    let clock_host = host.clone();
-    let driver = host.spawn("tx-shutdown-deadline", move || clock_host.sleep(Wall::from_millis(150))).expect("a manual-clock participant");
+    let _driver = handed_over(frozen, &core.device.host());
     tx.shutdown();
-    driver.join().unwrap();
 }
 
 /// The owner's turns at the current device time, as the run loop makes them.

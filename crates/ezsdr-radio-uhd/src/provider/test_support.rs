@@ -12,7 +12,7 @@ use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthori
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration as Wall;
 
@@ -135,7 +135,7 @@ pub(super) fn target_of(node: &ResourceId) -> Target {
 
 /// A device's host clock held still while this lives (M3): a participant of its own that stays
 /// busy, so that a test reads the device's settings at an instant of its own and no real time
-/// moves them. On a manual clock alone; the drop gives the clock back.
+/// moves them. On a manual clock alone; the drop gives the clock back ([`handed_over`] gives it to the calling thread).
 pub(super) struct Frozen {
     release: Option<Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -183,6 +183,15 @@ pub(super) fn released<T: Send + 'static>(frozen: Frozen, clock: &HostClock, wor
     let held = result.recv().expect("the released work ended without a result");
     let _ = worker.join();
     held
+}
+
+/// The device's clock handed from `frozen` to the calling thread: the thread is a participant first, so the clock never runs between the two (M1, M3),
+/// and then runs only while the thread waits on it (a reopen's flush, shutdown's acknowledgement window). For a test that runs the owner's code on
+/// its own thread, where a delay of the test thread cannot let device time pass (note 51 §4.4).
+pub(super) fn handed_over(frozen: Frozen, clock: &HostClock) -> crate::host::Driver {
+    let driver = clock.drive();
+    drop(frozen);
+    driver
 }
 
 /// The device's clock moved to `ticks`, with its queue's commands due by then applied, and
@@ -1115,5 +1124,43 @@ impl Device for TxSpy {
             Some((refusal, only)) if only.as_ref().is_none_or(|name| *name == me) => Err(refusal),
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handed_over_holds_the_clock_while_the_test_thread_is_slow() {
+        let clock = HostClock::manual();
+        let driver = handed_over(Frozen::on(clock.clone()), &clock);
+        let held = clock.now();
+        std::thread::sleep(Wall::from_millis(100));
+        assert_eq!(clock.now(), held, "the clock ran while the thread that holds it did not wait on it");
+        drop(driver);
+    }
+
+    #[test]
+    fn handed_over_leaves_no_instant_between_the_frozen_and_the_driver_for_the_clock_to_run() {
+        let clock = HostClock::manual();
+        let frozen = Frozen::on(clock.clone());
+        let (reached, at_the_lock) = channel();
+        let (release, released) = channel();
+        let handing = clock.clone();
+        let worker = std::thread::spawn(move || {
+            crate::host::pause_next_state_lock(reached, released);
+            drop(handed_over(frozen, &handing));
+        });
+        let reached = at_the_lock.recv_timeout(Wall::from_secs(10));
+        if reached == Err(RecvTimeoutError::Timeout) {
+            infra("the hand-over did not reach the clock's lock within 10 s");
+        }
+        reached.expect("the hand-over reached the clock's lock");
+        let held = clock.now();
+        std::thread::sleep(Wall::from_millis(50));
+        assert_eq!(clock.now(), held, "the clock ran between the release of the frozen participant and the driver's registration");
+        release.send(()).unwrap();
+        worker.join().unwrap();
     }
 }

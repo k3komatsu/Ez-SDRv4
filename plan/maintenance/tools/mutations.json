@@ -16491,7 +16491,8 @@
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "e2a_lock_reentry_of_one_mutex_panics"
+  "filter": "e2a_lock_reentry_of_one_mutex_panics",
+  "kill": "bound"
  },
  {
   "id": "E2A2A-M1",
@@ -19332,5 +19333,35 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "direct_rig_an_action_is_not_received_at_the_instant_it_was_pushed"
+ },
+ {
+  "id": "N51D-01",
+  "name": "the hand-over registers the test thread on no clock (note 51 stage 1d): the clock runs while the thread that holds it does not wait on it",
+  "file": "crates/ezsdr-radio-uhd/src/provider/test_support.rs",
+  "old": "let driver = clock.drive();",
+  "new": "let driver = HostClock::real().drive();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "handed_over_holds_the_clock_while_the_test_thread_is_slow"
+ },
+ {
+  "id": "N51D-02",
+  "name": "the hand-over releases the frozen participant before the thread is a participant (note 51 stage 1d): the clock can run between the two",
+  "file": "crates/ezsdr-radio-uhd/src/provider/test_support.rs",
+  "old": "let driver = clock.drive(); drop(frozen); driver",
+  "new": "drop(frozen); let driver = clock.drive(); driver",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "handed_over_leaves_no_instant_between_the_frozen_and_the_driver_for_the_clock_to_run"
+ },
+ {
+  "id": "N51D-03",
+  "name": "the reopen test releases the frozen participant without handing the clock to its own thread (note 51 stage 1d): the clock runs while the thread is slow",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let _driver = handed_over(frozen, &device.host()); let held = device.host().now();",
+  "new": "drop(frozen); let held = device.host().now();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_28_a_value_during_an_underflow_recovery_is_applied_after_the_recovery"
  }
 ]

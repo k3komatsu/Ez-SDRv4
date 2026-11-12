@@ -85,12 +85,8 @@ fn rig_at(origin: i64, waves: Vec<Vec<Iq>>) -> SwitchRig {
 /// `Tx::shutdown`, with the manual clock released so that its 100 ms acknowledgement window can pass; returns the Core and the events.
 pub(super) fn shutdown(rig: SwitchRig) -> (Arc<Core>, Arc<EventCollector>) {
     let SwitchRig { core, events, mut tx, _frozen, .. } = rig;
-    drop(_frozen);
-    let host = core.device.host();
-    let clock_host = host.clone();
-    let driver = host.spawn("tx-shutdown-deadline", move || clock_host.sleep(Wall::from_millis(150))).expect("a manual-clock participant");
+    let _driver = crate::provider::test_support::handed_over(_frozen, &core.device.host());
     tx.shutdown();
-    driver.join().unwrap();
     (core, events)
 }
 
