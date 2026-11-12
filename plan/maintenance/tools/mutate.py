@@ -303,7 +303,7 @@ def run_one(scratch, env, mutation):
 
 
 # The end-to-end cases (note 51 §6.4): fixture, extra environment, whether the row declares `"kill": "bound"`,
-# the outcome the runner must draw, and what else the output must show (counts, and `has`: patterns that must match). `{state}` is a directory made for the run.
+# the outcome the runner must draw, and what else the output must show (counts, `has`: patterns that must match, `lacks`: patterns that must not). `{state}` is a directory made for the run.
 E2E = [
     {"id": "1-assert-failure", "fixture": "assert_failure", "env": {}, "bound": False, "expect": "killed", "markers": 0},
     {"id": "2-stopped-clock", "fixture": "stopped_clock", "env": {"EZSDR_TEST_WATCHDOG_SECS": "1"}, "bound": False, "expect": "ERROR", "markers": 1, "signal": True},
@@ -312,6 +312,16 @@ E2E = [
      "has": [r"EZSDR-INFRA: [^\n]*KC-12a", r"test result: FAILED"]},
     {"id": "3b-creation-limit-spec", "fixture": "creation_limit_spec", "env": {}, "bound": False, "expect": "ERROR", "markers": 1, "panics": 1,
      "has": [r"EZSDR-INFRA: [^\n]*KC-12a", r"test result: FAILED"]},
+    {"id": "4-submit-limit", "fixture": "submit_limit", "env": {}, "bound": False, "expect": "ERROR", "markers": 1, "panics": 1,
+     "has": [r"EZSDR-INFRA: [^\n]*a submit met KC-21a", r"test result: FAILED"], "lacks": [r"FIXTURE-4-AFTER"]},
+    {"id": "4b-agenda-limit", "fixture": "agenda_limit", "env": {}, "bound": False, "expect": "ERROR", "markers": 1, "panics": 1,
+     "has": [r"EZSDR-INFRA: [^\n]*an advance met KC-21a", r"test result: FAILED"], "lacks": [r"FIXTURE-4B-AFTER"]},
+    {"id": "6-cleanup-limit", "fixture": "cleanup_limit", "env": {}, "bound": False, "expect": "ERROR", "markers": 1, "panics": 1,
+     "has": [r"EZSDR-INFRA: [^\n]*the Run met RS-8a", r"test result: FAILED"], "lacks": [r"no section"]},
+    {"id": "7-declared-end-cleanup-limit", "fixture": "declared_end_cleanup_limit", "env": {}, "bound": False, "expect": "ERROR", "markers": 1, "panics": 1,
+     "has": [r"EZSDR-INFRA: [^\n]*a wait met RS-8a", r"test result: FAILED"], "lacks": [r"no section"]},
+    {"id": "8-join-at-finish", "fixture": "join_at_finish", "env": {}, "bound": False, "expect": "ERROR", "markers": 1, "panics": 1,
+     "has": [r"EZSDR-INFRA: [^\n]*the Run met join", r"test result: FAILED"], "lacks": [r"cannot be finished inside"]},
     {"id": "5-abort-without-marker", "fixture": "abort_without_marker", "env": {}, "bound": False, "expect": "ERROR", "markers": 0, "signal": True},
     {"id": "5-abort-without-marker-bound", "fixture": "abort_without_marker", "env": {}, "bound": True, "expect": "ERROR", "markers": 0, "signal": True},
     {"id": "T1-timing-always", "fixture": "timing_always", "env": {}, "bound": False, "expect": "ERROR", "reruns": RERUNS},
@@ -319,14 +329,21 @@ E2E = [
 ]
 
 
+def e2e_seen(case, ran, outcome, reruns):
+    """What an e2e case checks in a run's output: the outcome, the counts it names, every `has` pattern present and no `lacks` pattern."""
+    seen = {"markers": ran.output.count(INFRA), "panics": ran.output.count("panicked at"), "signal": SIGNAL in ran.output, "reruns": reruns}
+    seen["has"] = [pattern for pattern in case.get("has", []) if re.search(pattern, ran.output)]
+    seen["lacks"] = [pattern for pattern in case.get("lacks", []) if re.search(pattern, ran.output)]
+    ok = outcome == case["expect"] and all(seen[k] == case[k] for k in seen if k in case and k not in ("has", "lacks")) and seen["has"] == case.get("has", []) and not seen["lacks"]
+    return seen, ok
+
+
 def e2e_case(scratch, env, case, state):
     mutation = {"crate": "ezsdr-radio-uhd", "test_bin": "fake", "filter": f"infra_fixture_{case['fixture']}"}
     env = dict(env, EZSDR_INFRA_FIXTURE=case["fixture"], **{k: v.format(state=state) for k, v in case["env"].items()})
     ran = cargo_test(scratch, env, mutation)
     outcome, reruns, _ = judge(ran, case["bound"], exact_rerun(scratch, env))
-    seen = {"markers": ran.output.count(INFRA), "panics": ran.output.count("panicked at"), "signal": SIGNAL in ran.output, "reruns": reruns}
-    seen["has"] = [pattern for pattern in case.get("has", []) if re.search(pattern, ran.output)]
-    ok = outcome == case["expect"] and all(seen[k] == case[k] for k in seen if k in case and k != "has") and seen["has"] == case.get("has", [])
+    seen, ok = e2e_seen(case, ran, outcome, reruns)
     return {"id": case["id"], "bound": case["bound"], "outcome": outcome, "expected": case["expect"], "seen": seen, "ok": ok}
 
 
@@ -435,6 +452,11 @@ def self_test():
     assert row_outcome(tricky) == ("M01", "ERROR") and row_outcome("M01 the row's name: killed") is None, "self-test: a result is read from the fixed field only"
     assert row_outcome(row_line("M01", "killed, but recorded as equivalent", False, 0)) == ("M01", "killed, but recorded as equivalent"), "self-test: the outcome text is the whole field"
     assert run_one(".", {}, {"kill": "unbound"})[0].startswith("NOT FOUND"), "self-test: an unknown kill value is refused"
+    shown = Ran(101, marker + "thread 'a' panicked at x\n" + failed)
+    cell = {"expect": "ERROR", "markers": 1, "panics": 1, "has": [r"EZSDR-INFRA: [^\n]*bound", r"test result: FAILED"]}
+    assert e2e_seen(cell, shown, "ERROR", 0)[1] and e2e_seen(dict(cell, lacks=[r"never printed"]), shown, "ERROR", 0)[1], "self-test: an e2e case passes when its `lacks` patterns are absent"
+    assert not e2e_seen(dict(cell, lacks=[r"test a \.\.\. FAILED"]), shown, "ERROR", 0)[1], "self-test: an e2e case fails when a `lacks` pattern is present"
+    assert not e2e_seen(dict(cell, has=[r"never printed"]), shown, "ERROR", 0)[1] and not e2e_seen(cell, shown, "killed", 0)[1] and not e2e_seen(dict(cell, markers=0), shown, "ERROR", 0)[1], "self-test: `has`, the outcome and the counts still decide"
     fixtures = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "crates", "ezsdr-radio-uhd", "tests", "infra_fixtures", "mod.rs"), encoding="utf-8").read()
     assert all(f"fn infra_fixture_{case['fixture']}()" in fixtures for case in E2E), "self-test: every e2e case names a fixture test"
     print("mutate.py self-test: ok")

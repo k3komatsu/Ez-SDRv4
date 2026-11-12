@@ -915,7 +915,8 @@
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_25_a_receive_session_follows_its_recorded_plan"
+  "filter": "ur_25_a_receive_session_follows_its_recorded_plan",
+  "kill": "bound"
  },
   {
   "id": "R24",

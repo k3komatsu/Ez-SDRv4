@@ -10,11 +10,14 @@ mod support;
 #[path = "../../ezsdr-radio-uhd/tests/common/watchdog.rs"]
 mod watchdog;
 
+// The Run a UHD test drives (note 51 §6.2): names a real-time bound at the call that met it. `run.rs` takes `creation_limit` and `infra` from this root.
+#[path = "../../ezsdr-radio-uhd/tests/common/run.rs"]
+mod run;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ezsdr_acceptance::{experiments, rig};
-use ezsdr_kernel::coordinator::{self, RunHandle};
 use ezsdr_kernel::event::EventKind;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ResourceId;
@@ -25,8 +28,10 @@ use ezsdr_kernel::spec::{Ident, Key, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::BurstRecord;
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio_uhd::{Device, FakeConfig, FakeDevice};
+use run::{Declared, Expect, Run};
 use serde_json::{Value as Json, json};
 use support::{T0, artifact, finish_at, modules, output, resource, root, section, spec_run};
+use watchdog::infra::{creation_limit, infra, rig_delay};
 
 /// Root ticks per millisecond: the X310's 200 MHz master clock (UR-7).
 const MS: i64 = 200_000;
@@ -46,31 +51,31 @@ fn envelope() -> Json {
     json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 999_000_000.0, "hi_hz": 1_001_000_000.0 }], "max_gain_db": 0.0, "tx_enabled": [true] } })
 }
 
-fn uhd_spec_run(temp: &rig::TempDir, spec: &Json, inputs: BTreeMap<ContentHash, Vec<u8>>) -> RunHandle {
+fn uhd_spec_run(temp: &rig::TempDir, spec: &Json, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Run {
     let profile = rig::uhd_profile(&temp.0, false, envelope());
-    coordinator::start_spec_run(spec, &profile, rig::assemble_on(&profile, inputs, fake())).expect("Spec Run starts")
+    Run::start_spec(spec, &profile, rig::assemble_on(&profile, inputs, fake()), Declared::default()).expect("Spec Run starts")
 }
 
-fn uhd_session(temp: &rig::TempDir) -> RunHandle {
+fn uhd_session(temp: &rig::TempDir) -> Run {
     uhd_session_asking(temp, support::rx0)
 }
 
 /// A Session that receives and transmits on c0, both asked for at `connect` (RS-12).
-fn uhd_loopback_session(temp: &rig::TempDir) -> RunHandle {
+fn uhd_loopback_session(temp: &rig::TempDir) -> Run {
     uhd_session_asking(temp, support::rx0_tx0)
 }
 
-fn uhd_session_asking(temp: &rig::TempDir, asking: fn(&ezsdr_kernel::coordinator::Assembly) -> ezsdr_kernel::session::InitialRequests) -> RunHandle {
+fn uhd_session_asking(temp: &rig::TempDir, asking: fn(&ezsdr_kernel::coordinator::Assembly) -> ezsdr_kernel::session::InitialRequests) -> Run {
     let profile = rig::uhd_profile(&temp.0, true, envelope());
     let assembly = rig::assemble_on(&profile, BTreeMap::new(), fake());
-    let mut run = coordinator::connect(&profile, &asking(&assembly), assembly, Lease::attached()).expect("Session connects");
+    let mut run = Run::connect(&profile, &asking(&assembly), assembly, Lease::attached(), Declared::default()).expect("Session connects");
     let t0 = run.start_instant().expect("a start instant");
     run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + MS)).unwrap();
     run
 }
 
 /// Runs a Spec Run for `ms` after T0, in the device's time, and finishes it.
-fn finish_after(mut run: RunHandle, ms: i64) -> Manifest {
+fn finish_after(mut run: Run, ms: i64) -> Manifest {
     let t0 = run.start_instant().expect("a start instant");
     let _ = run.run_until_end(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms * MS));
     run.finish()
@@ -81,7 +86,7 @@ fn written() -> EventKind {
 }
 
 /// Waits up to three seconds of the device's time for the next capture the Session writes.
-fn wait_capture(run: &mut RunHandle, from: usize) {
+fn wait_capture(run: &mut Run, from: usize) {
     let now = run.now();
     let found = run.wait_for(&[written()], from, TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + 3_000 * MS)).unwrap();
     assert!(found.is_some(), "no capture was written");
@@ -101,7 +106,7 @@ fn set(key: &str, value: Value) -> SessionAction {
     SessionAction::SetParameter { target: resource("radio"), key: Key::parse(key).unwrap(), value }
 }
 
-fn admitted(run: &mut RunHandle, action: SessionAction, waveform: Option<&[u8]>) {
+fn admitted(run: &mut Run, action: SessionAction, waveform: Option<&[u8]>) {
     let entry = run.submit(action, waveform).unwrap();
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
 }
@@ -184,7 +189,7 @@ fn uhd_59_a_scheduled_burst_is_recorded() {
 fn uhd_59_a_value_outside_the_rf_envelope_is_refused_at_connect_and_at_runtime() {
     // Note 47 stage 4: the envelope is checked on the initial values and on a transmit value during the Run (RM-19, RM-21, RM-27: `cold`). The
     // receive form is the next test.
-    let (_, refused) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0)), ("radio.tx.c0.frequency_hz", num(2.4e9))], envelope(), 10);
+    let (_, refused) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0)), ("radio.tx.c0.frequency_hz", num(2.4e9))], envelope(), 10, refused());
     assert!(
         matches!(refused.state(), ezsdr_kernel::run::RunState::CleanedUp { termination: ezsdr_kernel::run::Termination::Failed { reason, .. } } if reason.contains("radio.rf_envelope")),
         "{:?}",
@@ -207,7 +212,7 @@ fn uhd_59_a_receive_antenna_outside_the_rf_envelope_is_refused_on_a_stopped_stre
     // dispatched, so the device is not touched (RM-19, RM-21); one inside it is staged.
     let mut envelope = envelope();
     envelope["radio.rf_envelope"]["antenna_ports"] = json!(["RX2"]);
-    let (device, mut run) = session_on(&[("radio.rx.c0.stream", Scalar::Int(0))], envelope, 10);
+    let (device, mut run) = session_on(&[("radio.rx.c0.stream", Scalar::Int(0))], envelope, 10, Declared::default());
     admitted(&mut run, SessionAction::Stop { target: Some(resource("radio/rx/s0")) }, None);
     let calls = device.calls().len();
     let entry = run.submit(set("radio.rx.c0.antenna", Value::from("TX/RX")), None).unwrap();
@@ -247,12 +252,12 @@ fn uhd_57_the_session_loopback_captures_what_it_transmits() {
 
 /// A Session on a FakeDevice the test keeps, asking `requests` of the radio at `connect`, advanced
 /// `ms` past T0; the device's call trace and the Run.
-fn session_on(requests: &[(&str, Scalar)], envelope: Json, ms: i64) -> (Arc<FakeDevice>, RunHandle) {
-    session_with_layout(requests, envelope, ms, None)
+fn session_on(requests: &[(&str, Scalar)], envelope: Json, ms: i64, declared: Declared) -> (Arc<FakeDevice>, Run) {
+    session_with_layout(requests, envelope, ms, None, declared)
 }
 
 /// As [`session_on`], the radio's `rx` and `tx` lists replaced by `layout` when given.
-fn session_with_layout(requests: &[(&str, Scalar)], envelope: Json, ms: i64, layout: Option<(Json, Json)>) -> (Arc<FakeDevice>, RunHandle) {
+fn session_with_layout(requests: &[(&str, Scalar)], envelope: Json, ms: i64, layout: Option<(Json, Json)>, declared: Declared) -> (Arc<FakeDevice>, Run) {
     let temp = rig::TempDir::new("uhd-initial");
     let mut profile = rig::uhd_profile(&temp.0, true, envelope);
     if let Some((rx, tx)) = layout {
@@ -261,13 +266,18 @@ fn session_with_layout(requests: &[(&str, Scalar)], envelope: Json, ms: i64, lay
     }
     let device = fake_device();
     let assembly = rig::assemble_on(&profile, BTreeMap::new(), device.clone());
-    let mut run = coordinator::connect(&profile, &support::asking("radio", requests), assembly, Lease::attached()).expect("the Session's entry is valid");
+    let mut run = Run::connect(&profile, &support::asking("radio", requests), assembly, Lease::attached(), declared).expect("the Session's entry is valid");
     if matches!(run.state(), ezsdr_kernel::run::RunState::Running {}) {
         let t0 = run.start_instant().expect("a start instant");
         run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms * MS)).unwrap();
     }
     drop(temp);
     (device, run)
+}
+
+/// A Session its test expects refused at `connect` (RM-31, RM-33, RM-19).
+fn refused() -> Declared {
+    Declared { end: Some(Expect::Refused), ..Declared::default() }
 }
 
 fn first(calls: &[String], prefix: &str) -> usize {
@@ -282,7 +292,7 @@ fn num(x: f64) -> Scalar {
 fn uhd_59_a_default_session_configures_and_opens_nothing() {
     // RM-30: no stream, so no streamer is opened and no front end configured, and the recorder
     // linked to `rx0` hears nothing; the Session still connects.
-    let (device, run) = session_on(&[], envelope(), 100);
+    let (device, run) = session_on(&[], envelope(), 100, Declared::default());
     assert!(matches!(run.state(), ezsdr_kernel::run::RunState::Running {}), "{:?}", run.state());
     let calls = device.calls();
     for prefix in ["apply rx", "apply tx", "rx_open", "tx_open", "rx_start", "tx_send"] {
@@ -310,7 +320,7 @@ fn uhd_59_initial_values_are_applied_before_the_streamers_open() {
     ];
     // The transmit channel is in a stream, so a receive antenna on TX/RX would break RM-31: ask RX2.
     let requests: Vec<_> = requests.into_iter().map(|(key, value)| if key == "radio.rx.c0.antenna" { (key, Scalar::from("RX2")) } else { (key, value) }).collect();
-    let (device, mut run) = session_on(&requests, envelope, 5);
+    let (device, mut run) = session_on(&requests, envelope, 5, Declared::default());
     assert!(matches!(run.state(), ezsdr_kernel::run::RunState::Running {}), "{:?}", run.state());
     let calls = device.calls();
     let (apply_rx, apply_tx) = (first(&calls, "apply rx 0 rate=2000000 freq=1000500000 gain=10 antenna=RX2"), first(&calls, "apply tx 0 rate=2000000 freq=1000500000 gain=5"));
@@ -341,7 +351,7 @@ fn uhd_59_a_named_selector_calls_the_device_as_the_unnamed_one() {
         ("radio.tx.c0.gain_db", num(5.0)),
     ];
     let run = |layout: (Json, Json)| {
-        let (device, run) = session_with_layout(&requests, envelope.clone(), 5, Some(layout));
+        let (device, run) = session_with_layout(&requests, envelope.clone(), 5, Some(layout), Declared::default());
         assert!(matches!(run.state(), ezsdr_kernel::run::RunState::Running {}), "{:?}", run.state());
         let manifest = run.finish();
         // `rx_start`'s argument is a device time read from the wall clock; the call itself is compared.
@@ -362,7 +372,7 @@ fn uhd_59_a_named_selector_calls_the_device_as_the_unnamed_one() {
 fn uhd_59_membership_alone_sends_nothing() {
     // A transmit channel in a stream is configured and its streamer opened, and no waveform sample
     // is sent while nothing is repeated or transmitted (RM-30).
-    let (device, run) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0))], envelope(), 50);
+    let (device, run) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0))], envelope(), 50, Declared::default());
     let calls = device.calls();
     assert!(first(&calls, "apply tx 0") < first(&calls, "tx_open"), "{calls:?}");
     // The only send is the four-zero burst a streamer's opening makes to clear stale header state (UR-22).
@@ -376,7 +386,7 @@ fn uhd_59_membership_alone_sends_nothing() {
 fn uhd_59_a_refused_initial_request_configures_nothing() {
     // RM-31 judged at Validate: a transmit channel in a stream with its board's receive antenna on
     // TX/RX; no device call follows, as on the Mock (`v58_connect_refuses_what_the_layout_cannot_carry_at_validate`).
-    let (device, run) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0)), ("radio.rx.c0.stream", Scalar::Int(0)), ("radio.rx.c0.antenna", Scalar::from("TX/RX"))], envelope(), 5);
+    let (device, run) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0)), ("radio.rx.c0.stream", Scalar::Int(0)), ("radio.rx.c0.antenna", Scalar::from("TX/RX"))], envelope(), 5, refused());
     assert!(matches!(run.state(), ezsdr_kernel::run::RunState::CleanedUp { .. }), "{:?}", run.state());
     let manifest = run.finish();
     assert!(matches!(manifest.termination.reason, ezsdr_kernel::run::Termination::Failed { stage: ezsdr_kernel::run::Stage::Validate, .. }), "{:?}", manifest.termination.reason);
@@ -392,7 +402,7 @@ fn uhd_59_the_rf_envelope_judges_an_assigned_transmit_channel_at_validate() {
     // RM-33: a transmit channel asked for at connect is judged on its band and its enable like any
     // other. The check does not look at receive bands, so the case is a transmit channel.
     let refused = |requests: &[(&str, Scalar)], envelope: Json, what: &str| {
-        let (device, run) = session_on(requests, envelope, 5);
+        let (device, run) = session_on(requests, envelope, 5, refused());
         let manifest = run.finish();
         assert!(matches!(manifest.termination.reason, ezsdr_kernel::run::Termination::Failed { stage: ezsdr_kernel::run::Stage::Validate, .. }), "{what}: {:?}", manifest.termination.reason);
         assert!(manifest.admission.violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope"), "{what}: {:?}", manifest.admission.violations);
@@ -406,7 +416,7 @@ fn uhd_59_the_rf_envelope_judges_an_assigned_transmit_channel_at_validate() {
     let disabled = json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 999_000_000.0, "hi_hz": 1_001_000_000.0 }], "max_gain_db": 0.0, "tx_enabled": [false] } });
     refused(&[("radio.tx.c0.stream", Scalar::Int(0))], disabled, "transmit not enabled");
     // The same request inside the band and enabled connects.
-    let (_, run) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0))], band, 5);
+    let (_, run) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0))], band, 5, Declared::default());
     assert!(matches!(run.state(), ezsdr_kernel::run::RunState::Running {}), "{:?}", run.state());
     let _ = run.finish();
 }

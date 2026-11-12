@@ -12,7 +12,7 @@ use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, Binding, BindingProfile};
 use ezsdr_kernel::contract::ContractRegistry;
-use ezsdr_kernel::coordinator::{Assembly, RunHandle, RunHandleError, connect, start_spec_run};
+use ezsdr_kernel::coordinator::{Assembly, RunHandleError};
 use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventKind, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ResourceId, RunId};
@@ -32,7 +32,7 @@ use serde_json::{Value as Json, json};
 // ------------------------------------------------ the per-test wall watchdog (R05)
 
 mod watchdog;
-pub use watchdog::infra::{creation_limit, infra, timing};
+pub use watchdog::infra::{creation_limit, infra, rig_delay, timing};
 pub use watchdog::watch;
 pub mod d9;
 pub mod e3;
@@ -44,7 +44,9 @@ pub mod observations;
 pub mod probe_device;
 pub mod raw;
 pub mod rig;
+pub mod run;
 pub mod tone;
+pub use run::{Declared, Expect, Run, capture_markers};
 
 // ---------------------------------------------------------------- fixtures
 
@@ -472,10 +474,10 @@ pub fn fake_real(config: FakeConfig) -> Arc<FakeDevice> {
     Arc::new(FakeDevice::new(config))
 }
 
-/// The Spec's Run, which must have started: a Run that ended at creation is classified by [`creation_end`], and any other end panics. A
-/// caller that expects the Run to end uses [`spec_run_ended`], one that handles both [`start_spec`].
-pub fn spec_run(spec: &Json, profile: &Json, device: Arc<dyn Device>, inputs: BTreeMap<ContentHash, Vec<u8>>) -> RunHandle {
-    start_spec(spec, profile, device, inputs).unwrap_or_else(|ended| panic!("the Spec's Run ended at creation: {:?}", ended.termination.reason))
+/// The Spec's Run, which must have started: a Run that ended at creation is judged by [`Run`] (a real-time bound is an `EZSDR-INFRA` marker
+/// and one panic, any other end a panic). A caller that expects the Run to end uses [`spec_run_ended`], one that handles both [`start_spec`].
+pub fn spec_run(spec: &Json, profile: &Json, device: Arc<dyn Device>, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Run {
+    Run::start_spec(spec, profile, assembly(profile, device, inputs, |r| r), Declared::default()).unwrap()
 }
 
 /// The Manifest of a Spec's Run that the test expects to end at creation (a refusal at `arm`, say), after the same classification of a
@@ -483,30 +485,21 @@ pub fn spec_run(spec: &Json, profile: &Json, device: Arc<dyn Device>, inputs: BT
 pub fn spec_run_ended(spec: &Json, profile: &Json, device: Arc<dyn Device>, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Manifest {
     match start_spec(spec, profile, device, inputs) {
         Err(ended) => *ended,
-        Ok(run) => panic!("expected the Run to end at creation: {:?}", run.state()),
+        Ok(run) => {
+            let state = run.state();
+            // The test fails here, so the Run it did not expect to start is torn down without #67's join judging it: that marker would make the
+            // failure read as a bound that expired.
+            drop(run.rx_join_issue_67().finish());
+            panic!("expected the Run to end at creation: {state:?}");
+        }
     }
 }
 
-/// The Spec's Run, or the Manifest of one that ended at creation, which `finish` consumed. A real-time bound that ended it is an
-/// `EZSDR-INFRA` marker and one panic ([`creation_end`]), not a return.
-pub fn start_spec(spec: &Json, profile: &Json, device: Arc<dyn Device>, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Result<RunHandle, Box<Manifest>> {
-    let run = start_spec_run(spec, profile, assembly(profile, device, inputs, |r| r)).unwrap();
-    if matches!(run.state(), RunState::CleanedUp { .. }) { Err(Box::new(creation_end(run, "the Spec's Run"))) } else { Ok(run) }
-}
-
-/// The Manifest of a Run that ended before the test had it. It tells a real-time bound (an `EZSDR-INFRA` marker and one panic, note 51
-/// §6.2) from a failure the code under test caused, which is returned for the caller to assert on.
-fn creation_end(run: RunHandle, what: &str) -> Manifest {
-    let manifest = run.finish();
-    let reason = failure(&manifest);
-    let timed_out = manifest.termination.cleanup_failures.iter().any(|step| step.timed_out);
-    let notes: Vec<String> = manifest.section(&usrp(), "ezsdr.radio.uhd.rejected").and_then(Json::as_array).into_iter().flatten().filter_map(|row| row["reason"].as_str().map(str::to_owned)).collect();
-    if let Some(limit) = creation_limit(&reason, timed_out, &notes.iter().map(String::as_str).collect::<Vec<_>>()) {
-        let ended = format!("{what} ended at creation on {limit}: {:?}, cleanup failures {:?}", manifest.termination.reason, manifest.termination.cleanup_failures);
-        infra(&ended);
-        panic!("{ended}");
-    }
-    manifest
+/// The Spec's Run, or the Manifest of one that was refused at creation, which `finish` took. A real-time bound that ended it is an
+/// `EZSDR-INFRA` marker and one panic ([`Run`]), not a return.
+pub fn start_spec(spec: &Json, profile: &Json, device: Arc<dyn Device>, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Result<Run, Box<Manifest>> {
+    let run = Run::start_spec(spec, profile, assembly(profile, device, inputs, |r| r), Declared { end: Some(Expect::Refused), ..Default::default() }).unwrap();
+    if matches!(run.state(), RunState::CleanedUp { .. }) { Err(Box::new(run.finish())) } else { Ok(run) }
 }
 
 /// RM-30: no channel is in a stream unless a Session asks. The request that puts receive channel
@@ -535,48 +528,44 @@ pub fn tx_only(_profile: &Json) -> InitialRequests {
     BTreeMap::from([(Ident::parse("radio").unwrap(), BTreeMap::from([(Key::parse("radio.tx.c0.stream").unwrap(), Scalar::from(0))]))])
 }
 
-pub fn session(profile: &Json, device: Arc<dyn Device>) -> RunHandle {
+pub fn session(profile: &Json, device: Arc<dyn Device>) -> Run {
     session_with(profile, device, &rx0(profile))
 }
 
-pub fn session_with(profile: &Json, device: Arc<dyn Device>, initial: &InitialRequests) -> RunHandle {
+pub fn session_with(profile: &Json, device: Arc<dyn Device>, initial: &InitialRequests) -> Run {
     session_on(profile, initial, assembly(profile, device, BTreeMap::new(), |r| r))
 }
 
 /// A Session on a prepared Assembly.
-pub fn session_on(profile: &Json, initial: &InitialRequests, assembly: Assembly) -> RunHandle {
-    let run = connect(profile, initial, assembly, Lease::attached()).unwrap();
-    if let state @ RunState::CleanedUp { .. } = run.state() {
-        creation_end(run, "the Session");
-        panic!("{state:?}");
-    }
+pub fn session_on(profile: &Json, initial: &InitialRequests, assembly: Assembly) -> Run {
+    let run = Run::connect(profile, initial, assembly, Lease::attached(), Declared::default()).unwrap();
     assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
     run
 }
 
-pub fn running(run: &RunHandle) {
+pub fn running(run: &Run) {
     assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
 }
 
-pub fn after(run: &RunHandle, ticks: i64) -> TimePoint {
+pub fn after(run: &Run, ticks: i64) -> TimePoint {
     let now = run.now();
     TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + ticks)
 }
 
 /// Advances past T0, so that a Session's streams run (UR-15's start-up).
-pub fn past_t0(run: &mut RunHandle, extra: i64) {
+pub fn past_t0(run: &mut Run, extra: i64) {
     let t0 = run.start_instant().unwrap();
     run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + extra)).unwrap();
 }
 
 /// Advances past the origin of the transmit clock the Session's transmit channel registered
 /// (RM-25; spec 22, VH-4), so that a burst sent then is on time.
-pub fn past_tx_origin(run: &mut RunHandle) {
+pub fn past_tx_origin(run: &mut Run) {
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.path() == "usrp/tx/s0" && r.ended_at.is_none()).expect("a transmit clock");
     let _ = run.advance_to(TimePoint::new(clock.origin.domain(), clock.origin.ticks_in(clock.root).unwrap() + ms(1)));
 }
 
-pub fn wait(run: &mut RunHandle, ticks: i64) {
+pub fn wait(run: &mut Run, ticks: i64) {
     let to = after(run, ticks);
     let _ = run.advance_to(to);
 }
@@ -637,7 +626,7 @@ pub fn read_capture(artifact: &ArtifactRef, channels: usize) -> Vec<Vec<(f32, f3
 }
 
 /// Runs a Spec until its capture is written, then finishes it.
-pub fn captured(mut run: RunHandle) -> Manifest {
+pub fn captured(mut run: Run) -> Manifest {
     let horizon = after(&run, ms(10_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     run.finish()
@@ -802,6 +791,48 @@ pub fn diagnose(what: &str, samples: &[(f32, f32)], wave: &[(f32, f32)]) {
     );
 }
 
+/// One rate of `hw_perf_rx_rates`, which records how its Run ended instead of asserting it: the Run is declared `Expect::Any`, so an end that is not
+/// a real-time bound is reported in the returned line and a bound still fails the trial. The bench's line is the one `fake.rs` rehearses.
+pub fn perf_rx_rate_trial(device: Arc<dyn Device>, rate: f64) -> String {
+    let dir = TempDir::new();
+    let doc = bench_profile(&*device, &dir, json!({}), json!({}), false);
+    let declared = Declared { end: Some(Expect::Any), ..Default::default() };
+    let mut run = Run::start_spec(&receive_spec(1, rate, bench_hz(&*device), None), &doc, assembly(&doc, device, BTreeMap::new(), |r| r), declared).unwrap();
+    let horizon = after_ticks(&run, ms(5_000));
+    let result = run.advance_to(horizon);
+    let manifest = run.finish();
+    format!(
+        "B8 rate {} Msps: {result:?}; termination {:?}; overflows {}; stats {}",
+        rate / 1e6,
+        manifest.termination.reason,
+        events_of(&manifest, "radio.RX_OVERFLOW").len(),
+        section(&manifest, "stats")
+    )
+}
+
+/// One lead of `hw_b8_leads`: a burst `lead_us` from its receipt, with the device's late reports counted. A measurement, so its Run is declared
+/// `Expect::Any` (an end is reported, not asserted); a real-time bound still fails it. The lines it reports.
+pub fn b8_lead_trial(device: Arc<dyn Device>, lead_us: i64) -> Vec<String> {
+    let dir = TempDir::new();
+    let envelope = bench_envelope(&*device);
+    let profile = bench_profile(&*device, &dir, json!({}), envelope, true);
+    let mut run = session_with(&profile, device, &rx0_tx0(&profile)).expecting(Expect::Any);
+    past_t0(&mut run, ms(1));
+    past_tx_origin(&mut run);
+    let (bytes, _) = waveform_of(&pn(100));
+    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
+    let at = TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead_us * 200 - clock.origin.ticks_in(clock.root).unwrap()).div_euclid(200) + 1);
+    let _ = run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(&bytes));
+    wait(&mut run, ms(100));
+    let manifest = run.finish();
+    vec![
+        format!("B8 lead {lead_us} µs: termination {:?}", manifest.termination.reason),
+        format!("B8 lead {lead_us} µs: TIME_ERROR {:?}", events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>()),
+        format!("B8 lead {lead_us} µs: timing {}", section(&manifest, "timing")),
+        format!("B8 lead {lead_us} µs: bursts {}", section(&manifest, "bursts")),
+    ]
+}
+
 /// B3: `experiments::receive(1, 1e6, f, Some(10_000))` at the bench frequency `f` under the bench profile.
 pub fn rehearse_receive_at_t0(device: Arc<dyn Device>) -> Manifest {
     let dir = TempDir::new();
@@ -840,7 +871,7 @@ pub fn rehearse_overflow(device: Arc<dyn Device>, after: Wall, stall: Wall) -> M
     let dir = TempDir::new();
     let doc = bench_profile(&*device, &dir, json!({}), json!({}), false);
     let spec = receive_spec(1, 10e6, bench_hz(&*device), Some(30_000_000));
-    let mut run = start_spec_run(&spec, &doc, assembly(&doc, device, BTreeMap::new(), |r| r.with_rx_stall(after, stall))).unwrap();
+    let mut run = Run::start_spec(&spec, &doc, assembly(&doc, device, BTreeMap::new(), |r| r.with_rx_stall(after, stall)), Declared::default()).unwrap();
     let horizon = after_ticks(&run, ms(2_000) + ms((after + stall).as_millis() as i64 + 500));
     let _ = run.advance_to(horizon);
     let manifest = run.finish();
@@ -972,13 +1003,13 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     manifest
 }
 
-pub fn after_ticks(run: &RunHandle, ticks: i64) -> TimePoint {
+pub fn after_ticks(run: &Run, ticks: i64) -> TimePoint {
     let now = run.now();
     TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + ticks)
 }
 
 /// The transmit sample `lead` root ticks from now, on the running transmit clock.
-pub fn tx_at(run: &RunHandle, lead: i64) -> TimePoint {
+pub fn tx_at(run: &Run, lead: i64) -> TimePoint {
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
     let n = clock.root_ticks_per_tick.num() as i64;
     TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead - clock.origin.ticks_in(clock.root).unwrap() + n - 1).div_euclid(n))

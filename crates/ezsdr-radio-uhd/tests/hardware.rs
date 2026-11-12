@@ -186,22 +186,9 @@ fn hw_b8_leads() {
     // A measurement, not a pass/fail step: bursts at leads from their receipt, with the
     // device's late reports counted (the device lead, the delivery allowance).
     for lead_us in [10_000, 5_000, 3_000, 2_000, 1_500, 1_000, 500] {
-        let dir = TempDir::new();
-        let device = usrp();
-        let envelope = bench_envelope(&*device);
-        let profile = bench_profile(&*device, &dir, serde_json::json!({}), envelope, true);
-        let mut run = session_with(&profile, device, &rx0_tx0(&profile));
-        past_t0(&mut run, ms(1));
-        past_tx_origin(&mut run);
-        let (bytes, _) = waveform_of(&pn(100));
-        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
-        let at = TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead_us * 200 - clock.origin.ticks_in(clock.root).unwrap()).div_euclid(200) + 1);
-        let _ = run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(&bytes));
-        wait(&mut run, ms(100));
-        let manifest = run.finish();
-        println!("B8 lead {lead_us} µs: TIME_ERROR {:?}", events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>());
-        println!("B8 lead {lead_us} µs: timing {}", section(&manifest, "timing"));
-        println!("B8 lead {lead_us} µs: bursts {}", section(&manifest, "bursts"));
+        for line in b8_lead_trial(usrp(), lead_us) {
+            println!("{line}");
+        }
     }
 }
 
@@ -213,7 +200,8 @@ fn hw_b9_unplug() {
     // point is printed, to set against the instant the host's NIC lost its carrier.
     let dir = TempDir::new();
     let device = usrp();
-    let mut run = spec_run(&receive_spec(1, 1e6, bench_hz(&*device), None), &bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), false), device, Default::default());
+    let mut run = spec_run(&receive_spec(1, 1e6, bench_hz(&*device), None), &bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), false), device, Default::default())
+        .expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
     println!("B9: unplug the cable now (receive Run; up to 300 s); started at UTC {:.3}", utc_now());
     let ended = until_not_running(&mut run, 300);
     let manifest = run.finish();
@@ -230,7 +218,7 @@ fn hw_b9_unplug_transmit_only() {
     // with nothing sent (bench.md B9's second case): only uhd-clock's and the idle time
     // reads touch the device (UR-29's 500 ms read).
     let dir = TempDir::new();
-    let mut run = tx_only_session(usrp(), &dir);
+    let mut run = tx_only_session(usrp(), &dir).expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
     println!("B9: unplug the cable now (transmit-only Session; up to 300 s); started at UTC {:.3}", utc_now());
     let ended = until_not_running(&mut run, 300);
     let manifest = run.finish();
@@ -249,7 +237,8 @@ fn hw_b9_unplug_and_reopen() {
     // it, and then the process exits, which should not abort.
     let dir = TempDir::new();
     let device = usrp();
-    let mut run = spec_run(&receive_spec(1, 1e6, bench_hz(&*device), None), &bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), false), device, Default::default());
+    let mut run = spec_run(&receive_spec(1, 1e6, bench_hz(&*device), None), &bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), false), device, Default::default())
+        .expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
     println!("B9: unplug the cable now (receive Run; up to 300 s); started at UTC {:.3}", utc_now());
     let ended = until_not_running(&mut run, 300);
     let manifest = run.finish();
@@ -291,7 +280,7 @@ fn utc_now() -> f64 {
 
 /// Advances `run` a second at a time until it is no longer running or `limit_s` pass;
 /// says which, with the host's UTC then.
-fn until_not_running(run: &mut ezsdr_kernel::coordinator::RunHandle, limit_s: u64) -> String {
+fn until_not_running(run: &mut Run, limit_s: u64) -> String {
     let deadline = Instant::now() + Wall::from_secs(limit_s);
     while Instant::now() < deadline {
         let step = run.advance_to(after(run, ms(1_000)));
@@ -573,7 +562,7 @@ fn hw_b8_raw_in_flight_window() {
 // ---------------------------------------------------------------- B8 through the Module
 
 /// A Session that asked for transmit c0 only at connect: no receive stream is ever in the Run.
-fn tx_only_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinator::RunHandle {
+fn tx_only_session(device: Arc<dyn Device>, dir: &TempDir) -> Run {
     let envelope = bench_envelope(&*device);
     let profile = bench_profile(&*device, dir, serde_json::json!({}), envelope, true);
     let mut run = session_with(&profile, device, &tx_only(&profile));
@@ -582,12 +571,12 @@ fn tx_only_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coor
     run
 }
 
-fn tx_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinator::RunHandle {
+fn tx_session(device: Arc<dyn Device>, dir: &TempDir) -> Run {
     tx_session_at(device, dir, None)
 }
 
 /// A transmit Session whose transmit sample rate is asked at connect (`None`: the profile's own rate).
-fn tx_session_at(device: Arc<dyn Device>, dir: &TempDir, rate: Option<f64>) -> ezsdr_kernel::coordinator::RunHandle {
+fn tx_session_at(device: Arc<dyn Device>, dir: &TempDir, rate: Option<f64>) -> Run {
     let envelope = bench_envelope(&*device);
     let profile = bench_profile(&*device, dir, serde_json::json!({}), envelope, true);
     n47s5::transmit_run(&profile, device, rate)
@@ -1089,23 +1078,7 @@ fn hw_perf_rx_rates() {
     // The receive rate the bench sustains through the Module (Phase 8's PerformanceEnvelope):
     // 3 s at each rate, no capture written.
     for rate in [10e6, 20e6, 25e6, 40e6, 50e6, 100e6, 200e6] {
-        let dir = TempDir::new();
-        let device = usrp();
-        let doc = bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), false);
-        let (result, manifest) = match start_spec(&receive_spec(1, rate, bench_hz(&*device), None), &doc, device, Default::default()) {
-            Err(ended) => (Err(ezsdr_kernel::coordinator::RunHandleError::Ended { termination: ended.termination.reason.clone() }), *ended),
-            Ok(mut run) => {
-                let horizon = after_ticks(&run, ms(5_000));
-                (run.advance_to(horizon), run.finish())
-            }
-        };
-        println!(
-            "B8 rate {} Msps: {result:?}; termination {:?}; overflows {}; stats {}",
-            rate / 1e6,
-            manifest.termination.reason,
-            events_of(&manifest, "radio.RX_OVERFLOW").len(),
-            section(&manifest, "stats")
-        );
+        println!("{}", perf_rx_rate_trial(usrp(), rate));
     }
 }
 

@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use ezsdr_kernel::coordinator::RunHandle;
 use ezsdr_kernel::event::ActionId;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::session::{LogEntry, Outcome};
@@ -48,13 +47,13 @@ pub fn ns_ticks(ns: i64) -> i64 {
 }
 
 /// The current instant on the root clock.
-pub fn now_root(run: &RunHandle) -> i64 {
+pub fn now_root(run: &Run) -> i64 {
     let now = run.now();
     now.ticks_in(now.domain()).unwrap()
 }
 
 /// The running transmit clock's origin (root ticks) and root ticks a sample.
-pub fn tx_origin_per(run: &RunHandle) -> (i64, i64) {
+pub fn tx_origin_per(run: &Run) -> (i64, i64) {
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
     (clock.origin.ticks_in(clock.root).unwrap(), clock.root_ticks_per_tick.num() as i64)
 }
@@ -147,7 +146,7 @@ pub fn burst_acks(manifest: &Manifest) -> usize {
 }
 
 /// The Session of a transmit trial: `profile` with its transmit sample rate asked at connect (note 47 stage 2), or the profile's own rate.
-pub fn transmit_run(profile: &Json, device: Arc<dyn Device>, rate: Option<f64>) -> RunHandle {
+pub fn transmit_run(profile: &Json, device: Arc<dyn Device>, rate: Option<f64>) -> Run {
     let initial = match rate {
         Some(rate) => with_initial(rx0_tx0(profile), &[("radio.tx.s0.sample_rate_hz", Scalar::try_from(rate).unwrap())]),
         None => rx0_tx0(profile),
@@ -171,7 +170,7 @@ pub struct FrontTrial {
     pub burst: i64,
 }
 
-pub fn front_trial(mut run: RunHandle, samples: usize, rate: f64) -> FrontTrial {
+pub fn front_trial(mut run: Run, samples: usize, rate: f64) -> FrontTrial {
     let per_ms = (rate / 1e3).round() as usize;
     let (calibration, _) = waveform_of(&tone_wave(rate, 2 * per_ms, 100e3));
     let (head, _) = waveform_of(&vec![(0.4f32, 0.0f32); samples]);
@@ -215,7 +214,7 @@ pub struct LongCloseTrial {
 /// The samples of the long burst of [`long_close_trial`].
 pub const LONG_CLOSE_SAMPLES: usize = 20_000;
 
-pub fn long_close_trial(mut run: RunHandle, probe: &ProbeDevice, rate: f64) -> LongCloseTrial {
+pub fn long_close_trial(mut run: Run, probe: &ProbeDevice, rate: f64) -> LongCloseTrial {
     let (first, _) = waveform_of(&tone_wave(rate, LONG_CLOSE_SAMPLES, 100e3));
     let (second, _) = waveform_of(&tone_wave(rate, (rate / 1e3).round() as usize, 100e3));
     let a = tx_at(&run, ms(40));
@@ -261,7 +260,7 @@ pub struct SwitchEvidence {
 
 /// The first repeat is timed 15 ms after the capture starts (S5): the capture covers the first burst's target − 2 ms, so the loop's
 /// delay is measured in every trial. The switch follows 20 ms later (untimed, or timed at 40 ms).
-pub fn repeat_switch_trial(mut run: RunHandle, probe: Arc<ProbeDevice>, timed: bool) -> SwitchEvidence {
+pub fn repeat_switch_trial(mut run: Run, probe: Arc<ProbeDevice>, timed: bool) -> SwitchEvidence {
     let (first, _) = waveform_of(&tone_wave(1e6, 1_100, 100e3));
     let (second, _) = waveform_of(&tone_wave(1e6, 1_100, 200e3));
     let capture_at = after_ticks(&run, ms(1));
@@ -331,7 +330,7 @@ pub fn rx_clock(manifest: &Manifest) -> (i64, i64) {
 }
 
 /// The root tick of a transmit instant on the running transmit clock.
-pub fn transmit_root(run: &RunHandle, at: &TimePoint) -> i64 {
+pub fn transmit_root(run: &Run, at: &TimePoint) -> i64 {
     let (origin, per) = tx_origin_per(run);
     origin + at.ticks_in(at.domain()).unwrap() * per
 }
@@ -342,7 +341,7 @@ pub fn data_sends(probe: &ProbeDevice) -> Vec<Json> {
 }
 
 /// T5 (1): an untimed repeat, stopped, then an untimed repeat again. The second is admitted and its tone is heard, with no fault.
-pub fn untimed_repeat_outcome(mut run: RunHandle) -> Verdict {
+pub fn untimed_repeat_outcome(mut run: Run) -> Verdict {
     let (first, _) = waveform_of(&tone_wave(1e6, 1_100, 100e3));
     let (second, _) = waveform_of(&tone_wave(1e6, 1_100, 200e3));
     let capture_at = after_ticks(&run, ms(1));
@@ -368,7 +367,7 @@ pub fn untimed_repeat_outcome(mut run: RunHandle) -> Verdict {
 
 /// T5 (2): an untimed 1 000-sample burst booked while a timed 30 000-sample one plays. It is placed after the timed one (the record's
 /// front, `head_front`), admitted, and its tone is at its applied target (S7), against the loop delay of the timed burst (S5).
-pub fn untimed_burst_outcome(mut run: RunHandle) -> Verdict {
+pub fn untimed_burst_outcome(mut run: Run) -> Verdict {
     let (timed, _) = waveform_of(&tone_wave(1e6, 30_000, 100e3));
     let (untimed, _) = waveform_of(&tone_wave(1e6, 1_000, 200e3));
     let (origin, per) = tx_origin_per(&run);
@@ -398,7 +397,7 @@ pub fn untimed_burst_outcome(mut run: RunHandle) -> Verdict {
 /// `offset` after A's start (30 001 to 30 003 are A's end + 1 to + 3, refused at receipt by the Provider, RM-15: the front after a held-tail
 /// close is the payload end plus four; 30 004 plays on time). `late_booking`
 /// books it after A's last buffer went out (8 ms before A's end).
-pub fn one_sample_after_a_burst(mut run: RunHandle, offset: i64, late_booking: bool) -> Verdict {
+pub fn one_sample_after_a_burst(mut run: Run, offset: i64, late_booking: bool) -> Verdict {
     wait(&mut run, ms(1));
     let a = tx_at(&run, ms(40));
     let (first, _) = waveform_of(&pn(30_000));
@@ -445,7 +444,7 @@ pub struct HeldTrial {
     _dir: TempDir,
 }
 
-pub fn held_tail_trial(mut run: RunHandle, probe: Arc<ProbeDevice>, dir: TempDir, c_offset: i64, after_join: Option<i64>) -> HeldTrial {
+pub fn held_tail_trial(mut run: Run, probe: Arc<ProbeDevice>, dir: TempDir, c_offset: i64, after_join: Option<i64>) -> HeldTrial {
     let (a_wave, _) = waveform_of(&tone_wave(1e6, 30_000, 200e3));
     let (c_wave, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
     let (origin, per) = tx_origin_per(&run);
@@ -520,7 +519,7 @@ pub struct StopTrial {
 }
 
 /// The repeat is timed 15 ms after the capture starts (S5, as `repeat_switch_trial`), and the Stop follows 30 ms after its submission.
-pub fn stop_next_trial(mut run: RunHandle, probe: Arc<ProbeDevice>, dir: TempDir) -> StopTrial {
+pub fn stop_next_trial(mut run: Run, probe: Arc<ProbeDevice>, dir: TempDir) -> StopTrial {
     let (repeat, _) = waveform_of(&tone_wave(1e6, 1_100, 100e3));
     let (next, _) = waveform_of(&tone_wave(1e6, 1_000, 200e3));
     let capture_at = after_ticks(&run, ms(1));
@@ -580,7 +579,7 @@ pub struct StopEnd {
     _dir: TempDir,
 }
 
-pub fn stop_end_trial(mut run: RunHandle, dir: TempDir) -> StopEnd {
+pub fn stop_end_trial(mut run: Run, dir: TempDir) -> StopEnd {
     let (bytes, _) = waveform_of(&tone_wave(1e6, 1_000, 100e3));
     let at = after_ticks(&run, ms(5));
     assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(100_000))]), None).unwrap()));

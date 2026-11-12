@@ -55,8 +55,8 @@ process with the test's name once `EZSDR_TEST_WATCHDOG_SECS` (default 120 s) pas
 instead of hanging the suite, after writing an `EZSDR-INFRA:` marker line straight to stderr
 (`common/infra.rs`: libtest's capture would lose a printed line to the abort); a watchdog that
 cannot start fails its test at once. The same marker is written, once, before the one panic of a
-Run or rig that ends at its creation or in a wait on a real-time bound (`session_with`, `spec_run`, the parity
-rig's constructor and its `wait_for_events`, the `Direct` rig's Authority and its `until`), and `EZSDR-TIMING:` names a test that a serial re-run
+rig that ends in a wait on a real-time bound (the parity rig's constructor and its `wait_for_events`, the `Direct` rig's Authority and its
+`until`) and of a Run that meets one (the Run wrapper, below), and `EZSDR-TIMING:` names a test that a serial re-run
 may pass. Each driving rig's thread is a participant of its device clock (`HostClock::drive`, held
 for the rig's life; the guard drops before the Authority, so the clock runs while `uhd-clock` is joined), so a delay of the test thread does not move a receipt: between its waits the
 clock stands. Two rules make a receipt a function of the poll grid alone (`common/rig.rs`; note 51 stage 1c): a wait that ends on an instant the
@@ -95,6 +95,31 @@ medians of the real-clock latency diagnostics `ur_07_schedule_wakes_a_waiting_ne
 `ur_07_cancel_wakes_a_waiting_next_wakeup`, whose wakes are pinned on a held clock by unit
 tests; the remaining wall bounds, of seconds, only guard that something ends (a stop past an
 intentionally wedged thread, a shutdown, a Run).
+
+**The Run wrapper** (`common/run.rs`; note 51 stage 2a). Every Run a test drives on a FakeDevice is a `Run`, never a raw `RunHandle`: it
+is created with `Run::connect` / `Run::start_spec` (`ezsdr-acceptance`'s `uhd.rs` includes the same file with `#[path]`), and the scan in
+`crates/ezsdr-acceptance/tests/governance.rs` fails any reference to `connect` / `start_spec_run` (a call, an import, a function value) or a `RunHandle` outside `run.rs`, a time read
+(`thread::sleep`, `Instant::now`, `.elapsed()`, `recv_timeout(`, `.time_now(`, `.host()`) inside a `#[test]` fn that is not on its per-fn
+allow list (a helper fn may read time; the scan sees tokens, not time sources reached through a helper), `Expect::Any` outside its three
+named loops, and a `.handle(` in `protocol.rs` outside `fn handle`. The wrapper checks how the Run ended at its creation, when `submit`,
+`advance_to`, `wait_for` or `run_until_end` returns, at `finish`, and at `Drop`. **A read-only call (`state`, `now`, `events`, ...) checks
+nothing**: the Run reaches `CleanedUp` only inside a call that settles it, so a bound that cuts in the background (a Policy end's
+`stop_early` on the data thread) shows at the next of those calls, at `finish` or at `Drop`. A real-time bound (KC-12a, KC-21a, a cleanup
+step cut at RS-8a, a Provider join that timed out) writes the `EZSDR-INFRA:` marker once and then panics once, so a late assertion cannot
+hide it; an end the test did not declare is a panic with no marker (a failure the code under test caused). A test declares what it
+expects: `Expect::Refused` (refused at validate, prepare or arm), `Expect::Policy("<event>")` (ended by that Policy event) or, for a named
+bench loop that only records how its Run ended, `Expect::Any`; none of them exempts a bound. `join_is_subject()` exempts the Provider join
+and nothing else, for a test whose subject is the join; `rx_join_issue_67()` exempts the join of a `uhd-rx-*` thread and nothing else, for
+a test that finishes a receive Run before its origin (issue #67), and goes with the fix. A Run a checked call found ended is kept as its
+Manifest, and answers from it (`Err(Ended)`, `state`, `events`, `finish`). A Run dropped without `finish()` is finished and judged like
+`finish`; while the thread is unwinding it only writes the marker of a bound and never panics again (a second panic aborts). A bound is
+read from the primary end and from every later end the Kernel kept in `termination.also`. A test that provokes a bound on purpose wraps the call
+in `capture_markers(&["join"], ...)` naming that bound, because the marker of a passing test would read as a bound that expired; the marker of
+any other bound is still written, and a test that expects no bound captures nothing.
+`EZSDR_RIG_DELAY_MS` (milliseconds; unset means no delay) with `EZSDR_RIG_DELAY_AT` (a comma list of `now`, `advance`, `submit`, `server`,
+or `all`) makes the calling thread sleep after the wrapper's `now`/`start_instant`, `submit` and waiting calls, and after `protocol.rs`'s
+`handle`, as a descheduled test thread would; it is a diagnostic for finding tests whose verdict depends on the test thread's timing, it
+gates and kills nothing, and no gate or bench run sets it.
 
 Before the B3/B4/B6/B7 waveform/index assertions and the single-burst assertion,
 `require_stream_timing` checks measured stream events and expired-timeline

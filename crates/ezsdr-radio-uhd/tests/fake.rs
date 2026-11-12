@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, Binding};
-use ezsdr_kernel::coordinator::{RunHandle, RunHandleError, start_spec_run};
+use ezsdr_kernel::coordinator::RunHandleError;
 use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventKind, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ResourceId, RunId};
@@ -220,9 +220,8 @@ fn ur_06_the_provider_refuses_another_root() {
     for (clock_source, time_source) in [("internal", "internal"), ("internal", "external"), ("external", "external")] {
         let dir = TempDir::new();
         let profile = profile(&dir, json!({ "authority_args": "addr=10.0.0.9", "clock_source": clock_source, "time_source": time_source }), json!({}), false);
-        let run = start_spec_run(&receive_spec(1, 1e6, 1e9, None), &profile, assembly(&profile, fake(FakeConfig::default()), BTreeMap::new(), |r| r)).unwrap();
-        assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare, .. } }), "{clock_source} {time_source}");
-        let manifest = run.finish();
+        let manifest = spec_run_ended(&receive_spec(1, 1e6, 1e9, None), &profile, fake(FakeConfig::default()), BTreeMap::new());
+        assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Prepare, .. }), "{clock_source} {time_source}");
         assert!(failure(&manifest).contains("UR-6: the primary root is not this device's"), "{clock_source} {time_source}: {}", failure(&manifest));
     }
 }
@@ -534,7 +533,7 @@ fn measurement_candidate_propagates_all_timing_fields_to_the_run_manifest() {
     let dir = TempDir::new();
     let doc = profile(&dir, json!({}), json!({}), false);
     let device = fake(FakeConfig::default());
-    let run = start_spec_run(&receive_spec(1, 1e6, 1e9, Some(100)), &doc, assembly(&doc, device, BTreeMap::new(), |radio| radio.with_measurement_timing(candidate))).unwrap();
+    let run = Run::start_spec(&receive_spec(1, 1e6, 1e9, Some(100)), &doc, assembly(&doc, device, BTreeMap::new(), |radio| radio.with_measurement_timing(candidate)), Declared::default()).unwrap();
     let manifest = captured(run);
     let timing = &section(&manifest, "envelope")["timing"];
     for (field, value) in [
@@ -1684,7 +1683,8 @@ fn ur_13_arm_cases() {
     let manifest = spec_run_ended(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), unlocked, BTreeMap::new());
     assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Arm, .. }));
     assert!(failure(&manifest).contains("UR-13: the external reference is not locked"));
-    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), fake(FakeConfig::default()), BTreeMap::new());
+    // #67: the receive segment is begun ahead of its origin, and the Run is finished before T0.
+    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), fake(FakeConfig::default()), BTreeMap::new()).rx_join_issue_67();
     running(&run);
     let _ = run.finish();
 }
@@ -1727,7 +1727,7 @@ fn assert_marked_lost_before_closed(device: &FakeDevice) {
 fn ur_16_a_panicking_thread_is_a_lost_device() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::RxPanic(Wall::from_millis(2_200))], ..FakeConfig::default() });
-    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
+    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new()).expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
@@ -1741,7 +1741,7 @@ fn wedged(dir: &TempDir) -> (Manifest, Arc<FakeDevice>, Wall) {
     let device = fake_real(FakeConfig { faults: vec![FakeFault::TxBlocks], ..FakeConfig::default() });
     let (bytes, waveform) = waveform_of(&tone(1_000));
     let spec = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, true, "send_asap_and_flag", 1_000);
-    let mut run = spec_run(&spec, &profile(dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    let mut run = spec_run(&spec, &profile(dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)])).join_is_subject();
     running(&run);
     past_t0(&mut run, ms(300));
     let begun = Instant::now();
@@ -1847,7 +1847,7 @@ fn bounded<T: Send + 'static>(what: &str, bound: Wall, f: impl FnOnce() -> T + S
     }
 }
 
-fn tx_session(config: FakeConfig) -> (RunHandle, Arc<FakeDevice>, TempDir) {
+fn tx_session(config: FakeConfig) -> (Run, Arc<FakeDevice>, TempDir) {
     let dir = TempDir::new();
     let device = fake(config);
     let profile = profile(&dir, json!({}), json!({}), true);
@@ -1858,7 +1858,7 @@ fn tx_session(config: FakeConfig) -> (RunHandle, Arc<FakeDevice>, TempDir) {
 }
 
 /// The same transmit Session on any `Device` (a test wrapper, plan 30 §7).
-fn tx_session_on(device: Arc<dyn Device>) -> (RunHandle, TempDir) {
+fn tx_session_on(device: Arc<dyn Device>) -> (Run, TempDir) {
     let dir = TempDir::new();
     let profile = profile(&dir, json!({}), json!({}), true);
     let mut run = session_with(&profile, device, &rx0_tx0(&profile));
@@ -1869,25 +1869,25 @@ fn tx_session_on(device: Arc<dyn Device>) -> (RunHandle, TempDir) {
 
 /// A Spec Run advanced to `ticks` after T0, then finished. The Run's clock is the device's,
 /// which may already be past a `now()`-relative horizon before T0 (plan 30 §4.4).
-fn finish_spec(mut run: RunHandle, ticks: i64) -> Manifest {
+fn finish_spec(mut run: Run, ticks: i64) -> Manifest {
     let t0 = run.start_instant().expect("a Spec Run starts");
     let _ = run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ticks));
     run.finish()
 }
 
 /// The transmit sample `lead` root ticks from now, on the running transmit clock.
-fn tx_at(run: &RunHandle, lead: i64) -> TimePoint {
+fn tx_at(run: &Run, lead: i64) -> TimePoint {
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap() && r.ended_at.is_none()).unwrap();
     let n = clock.root_ticks_per_tick.num() as i64;
     TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead - clock.origin.ticks_in(clock.root).unwrap() + n - 1).div_euclid(n))
 }
 
-fn send_at(run: &mut RunHandle, verb_name: &str, at: Option<TimePoint>, samples: &[(f32, f32)]) -> ezsdr_kernel::session::LogEntry {
+fn send_at(run: &mut Run, verb_name: &str, at: Option<TimePoint>, samples: &[(f32, f32)]) -> ezsdr_kernel::session::LogEntry {
     let (bytes, _) = waveform_of(samples);
     run.submit(verb(verb_name, resource("radio/tx/s0"), at, &[]), Some(&bytes)).unwrap()
 }
 
-fn send(run: &mut RunHandle, verb_name: &str, lead: Option<i64>, samples: &[(f32, f32)]) -> ezsdr_kernel::session::LogEntry {
+fn send(run: &mut Run, verb_name: &str, lead: Option<i64>, samples: &[(f32, f32)]) -> ezsdr_kernel::session::LogEntry {
     let at = lead.map(|lead| tx_at(run, lead));
     send_at(run, verb_name, at, samples)
 }
@@ -1934,13 +1934,13 @@ fn ur_21_a_refused_configure_refuses_its_burst_through_the_kernel() {
     const REFUSED: f64 = 2.0e9;
     const CORRECTED: f64 = 3.0e9;
     let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::TxApplyRefused(0, REFUSED)], ..FakeConfig::default() });
-    let tx_clocks = |run: &RunHandle| run.sample_clocks().into_iter().filter(|record| record.stream.path() == "usrp/tx/s0").map(|record| record.domain).collect::<Vec<_>>();
+    let tx_clocks = |run: &Run| run.sample_clocks().into_iter().filter(|record| record.stream.path() == "usrp/tx/s0").map(|record| record.domain).collect::<Vec<_>>();
     let clocks = tx_clocks(&run);
     let action_of = |entry: &ezsdr_kernel::session::LogEntry| match &entry.outcome {
         Outcome::Admitted { dispatched, .. } => dispatched[0].0,
         other => panic!("not admitted: {other:?}"),
     };
-    let value = |run: &mut RunHandle, frequency: f64| run.submit(set("radio.tx.c0.frequency_hz", Value::num(frequency).unwrap()), None).unwrap();
+    let value = |run: &mut Run, frequency: f64| run.submit(set("radio.tx.c0.frequency_hz", Value::num(frequency).unwrap()), None).unwrap();
     assert!(admitted(&value(&mut run, REFUSED)));
     // The first burst is 10 ms long and starts 10 ms ahead; the window of its booking is 10 ms to 20 ms after the submit.
     let at = tx_at(&run, ms(10));
@@ -2428,7 +2428,8 @@ fn ur_26_cleanup_is_idempotent() {
 fn ur_27_a_lost_reference_is_clock_lost() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::Unlocked(Wall::from_millis(2_300))], ..FakeConfig::default() });
-    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), device, BTreeMap::new());
+    let mut run =
+        spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), device, BTreeMap::new()).expecting(Expect::Policy("radio.CLOCK_LOST"));
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
@@ -2463,7 +2464,8 @@ fn ur_28_a_failed_report_read_is_not_an_empty_one() {
     assert!(events_of(&manifest, EventKind::DEVICE_LOST).is_empty());
 
     // One that reports the device gone is UR-29's loss, though every other call succeeds.
-    let (mut run, _, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::TxAsyncFails(Wall::from_millis(2_100), true)], ..FakeConfig::default() });
+    let (run, _, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::TxAsyncFails(Wall::from_millis(2_100), true)], ..FakeConfig::default() });
+    let mut run = run.expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
@@ -2491,7 +2493,7 @@ fn ur_28_the_device_reports_a_late_burst() {
 fn ur_29_a_lost_device_aborts_the_run() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::Lost(Wall::from_millis(2_200))], ..FakeConfig::default() });
-    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
+    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new()).expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
@@ -2504,7 +2506,7 @@ fn ur_29_a_lost_device_aborts_the_run() {
 fn ur_29_a_silent_stream_is_a_lost_device() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::Silence(Wall::from_millis(2_100))], ..FakeConfig::default() });
-    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
+    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new()).expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
     // The property is about device time: the Run must end long before its 8 s horizon, not
     // after 7 s of wall time, which a lagging manual clock would break (plan 30 §4.4). The
     // device's own clock measures it; the wall bound is only a watchdog.
@@ -2534,7 +2536,7 @@ fn ur_29_a_dead_link_that_fails_without_lost_is_a_lost_device() {
     doc["bindings"]["rec"].as_object_mut().unwrap().remove("feed");
     doc.as_object_mut().unwrap().remove("placements");
     doc["bindings"].as_object_mut().unwrap().remove("rec");
-    let mut run = session(&doc, device.clone());
+    let mut run = session(&doc, device.clone()).expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
     past_t0(&mut run, ms(1));
     let result = run.run_until_end(after(&run, ms(6_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
@@ -2586,7 +2588,7 @@ fn ur_29_a_lost_device_is_found_while_idle() {
     doc["bindings"]["rec"].as_object_mut().unwrap().remove("feed");
     doc.as_object_mut().unwrap().remove("placements");
     doc["bindings"].as_object_mut().unwrap().remove("rec");
-    let mut run = session(&doc, device.clone());
+    let mut run = session(&doc, device.clone()).expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
     past_t0(&mut run, ms(1));
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
@@ -3828,7 +3830,7 @@ fn ur_34_the_receive_stall_fires_after_its_device_clock_interval() {
     let spec = receive_spec(1, 1e6, bench_hz(&*device), Some(30_000_000));
     let runner = device.clone();
     let manifest = bounded("the stalled receive", Wall::from_secs(60), move || {
-        let mut run = start_spec_run(&spec, &doc, assembly(&doc, runner, BTreeMap::new(), |r| r.with_rx_stall(Wall::from_millis(500), Wall::from_millis(300)))).unwrap();
+        let mut run = Run::start_spec(&spec, &doc, assembly(&doc, runner, BTreeMap::new(), |r| r.with_rx_stall(Wall::from_millis(500), Wall::from_millis(300))), Declared::default()).unwrap();
         let _ = run.advance_to(after_ticks(&run, ms(2_000) + ms(1_800)));
         run.finish()
     });
@@ -3855,7 +3857,7 @@ fn ur_16_a_panicking_thread_ends_a_two_stream_run_with_its_message() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::RxPanic(Wall::from_millis(2_200))], ..FakeConfig::default() });
     let spec = with_tx(receive_spec(1, 1e6, 1e9, None), 1e6);
-    let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new());
+    let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new()).expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
     let result = run.run_until_end(after(&run, ms(5_000)));
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
     let manifest = run.finish();
@@ -4117,7 +4119,8 @@ fn ur_26_the_sending_threads_join_before_the_receiving_ones() {
     // transmit thread first. The real clock keeps uhd-control running while the two held
     // threads would otherwise freeze the manual one (UR-2, plan 30 §4.4).
     let device = Arc::new(Gated::new(FakeConfig::default()));
-    let (mut run, _dir) = tx_session_on(device.clone());
+    let (run, _dir) = tx_session_on(device.clone());
+    let mut run = run.join_is_subject();
     let entry = send(&mut run, "start_repeat", None, &tone(500));
     assert!(admitted(&entry), "{entry:?}");
     wait(&mut run, ms(40));
@@ -4872,7 +4875,8 @@ fn ur_13_arm_compares_the_rate_set_after_the_streamer_opens() {
     let dir = TempDir::new();
     let inner = fake(FakeConfig { rates_before_open: true, serial: "ur13-arm-reads".to_owned(), ..FakeConfig::default() });
     let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: None, tx: None, failing: None });
-    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    // #67: the receive segment is begun ahead of its origin, and the Run is finished before T0.
+    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new()).rx_join_issue_67();
     running(&run);
     let log = inner.calls();
     let position = |call: &str| log.iter().position(|c| c == call).unwrap_or_else(|| panic!("{call} missing in {log:?}"));
@@ -4954,7 +4958,8 @@ fn ur_13_arm_takes_the_rate_set_in_any_order() {
     let mut reversed: Vec<(f64, f64, f64)> = ezsdr_radio::x3xx::rates(200_000_000).into_iter().rev().map(|rate| (rate, rate, 0.0)).collect();
     reversed.dedup();
     let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: Some(reversed), tx: None, failing: None });
-    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    // #67: the receive segment is begun ahead of its origin, and the Run is finished before T0.
+    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new()).rx_join_issue_67();
     running(&run);
     let manifest = run.finish();
     assert_eq!(section(&manifest, "device")["rates_checked"], json!({ "rx": true, "tx": false }));
@@ -4970,7 +4975,8 @@ fn ur_13_a_transmit_stream_is_compared_with_the_whole_device_grid() {
     let mut reversed: Vec<(f64, f64, f64)> = ezsdr_radio::x3xx::rates(200_000_000).into_iter().rev().map(|rate| (rate, rate, 0.0)).collect();
     reversed.dedup();
     let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: None, tx: Some(reversed), failing: None });
-    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    // #67: the receive segment is begun ahead of its origin, and the Run is finished before T0.
+    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new()).rx_join_issue_67();
     running(&run);
     assert_eq!(section(&run.finish(), "device")["rates_checked"], json!({ "rx": true, "tx": true }));
 
@@ -6805,8 +6811,10 @@ fn the_candidate_ceiling_admits_what_the_profiles_link_limit_refuses() {
     assert!(matches!(refused.termination.reason, Termination::Failed { stage: Stage::Validate, .. }), "the profile's own limit refuses it: {:?}", refused.termination.reason);
     let raised = ezsdr_radio::x3xx::performance(10);
     let candidate = ezsdr_radio::PerformanceEnvelope { rx_bytes_per_s: 1_250_000_000, tx_bytes_per_s: 1_250_000_000, wire_bytes_per_sample: raised.wire_bytes_per_sample };
-    let admitted = start_spec_run(&spec, &doc, assembly(&doc, device, BTreeMap::new(), |radio| radio.with_measurement_performance(candidate))).unwrap();
+    // #67: the receive segment is begun ahead of its origin, and the Run is finished before T0.
+    let admitted = Run::start_spec(&spec, &doc, assembly(&doc, device, BTreeMap::new(), |radio| radio.with_measurement_performance(candidate)), Declared::default()).unwrap().rx_join_issue_67();
     assert!(admitted.start_instant().is_some(), "the candidate ceiling admits it: {:?}", admitted.state());
+    admitted.finish();
 }
 
 #[test]
@@ -8268,6 +8276,24 @@ fn panicking_control_device(config: FakeConfig) -> (Arc<PanicsInControl>, Arc<st
     (Arc::new(PanicsInControl { inner: fake(config), armed: armed.clone() }), armed)
 }
 
+/// The Assembly of a Session whose uhd-control panics in `book`, holding the line, once the returned flag is set: a submit that waits for it
+/// ends the Run by `DEVICE_LOST`.
+fn panicking_book_assembly(profile: &Json, device: Arc<FakeDevice>) -> (ezsdr_kernel::coordinator::Assembly, Arc<std::sync::atomic::AtomicBool>) {
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook = armed.clone();
+    let assembly = common::assembly_with_authority(
+        profile,
+        device,
+        BTreeMap::new(),
+        |r| r,
+        move |authority| {
+            let time = Arc::new(PanickingTime { inner: ezsdr_kernel::module_api::Authority::time(&authority), armed: hook });
+            Box::new(PanicsInBook { inner: authority, time })
+        },
+    );
+    (assembly, armed)
+}
+
 /// What a Run that lost its device to a uhd-control panic (UR-16) shows, whichever way it ended: one fatal `DEVICE_LOST` with the panic's message,
 /// the panic in `rejected`, nothing that did not join, the device marked lost before it was closed, the plan once (UR-30), and every stream's clock
 /// ended (a transmit clock that no Stop cut stays open after a loss of the device itself, so the check is of the receive ones).
@@ -8304,7 +8330,8 @@ fn ur_16_a_uhd_control_panic_ends_the_run_with_a_lost_device() {
         let (tested, armed) = panicking_control_device(FakeConfig { faults, ..FakeConfig::default() });
         let (inner, probe) = (tested.inner.clone(), tested.inner.clone());
         let manifest = bounded("a Run whose uhd-control panics", Wall::from_secs(30), move || {
-            let (mut run, _dir) = tx_session_on(tested);
+            let (run, _dir) = tx_session_on(tested);
+            let mut run = run.expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
             let _ = send(&mut run, "start_repeat", Some(ms(8)), &tone(100));
             // The repeat is playing once the device has its first experiment send (not arm's four-zero flush).
             while tx_experiment_sends(&probe, "tx_send").is_empty() {
@@ -8340,7 +8367,8 @@ fn ur_16_a_uhd_control_panic_with_no_stream_sending_ends_the_run() {
     let (device, armed) = panicking_control_device(FakeConfig::default());
     let inner = device.inner.clone();
     let manifest = bounded("an idle Run whose uhd-control panics", Wall::from_secs(30), move || {
-        let (mut run, _dir) = tx_session_on(device);
+        let (run, _dir) = tx_session_on(device);
+        let mut run = run.expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
         armed.store(true, std::sync::atomic::Ordering::SeqCst);
         let result = run.run_until_end(after(&run, ms(5_000)));
         assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
@@ -8359,22 +8387,11 @@ fn ur_16_a_uhd_control_panic_while_a_submit_waits_ends_it_with_the_loss() {
     let dir = TempDir::new();
     let device = fake(FakeConfig::default());
     let profile = profile(&dir, json!({}), json!({}), true);
-    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let hook = armed.clone();
-    let assembly = common::assembly_with_authority(
-        &profile,
-        device.clone(),
-        BTreeMap::new(),
-        |r| r,
-        move |authority| {
-            let time = Arc::new(PanickingTime { inner: ezsdr_kernel::module_api::Authority::time(&authority), armed: hook });
-            Box::new(PanicsInBook { inner: authority, time })
-        },
-    );
+    let (assembly, armed) = panicking_book_assembly(&profile, device.clone());
     let manifest = bounded("a submit that waits on a panicking uhd-control", Wall::from_secs(30), {
         let device = device.clone();
         move || {
-            let mut run = session_on(&profile, &rx0_tx0(&profile), assembly);
+            let mut run = session_on(&profile, &rx0_tx0(&profile), assembly).expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
             past_t0(&mut run, ms(1));
             past_tx_origin(&mut run);
             let _keep = device;
@@ -8669,4 +8686,225 @@ fn direct_rig_unwound_joins_uhd_clock_even_asleep_inside_its_read() {
     assert!(result.is_err());
     let (seen, before) = probe.into_inner().unwrap().unwrap();
     assert_joined(&seen, before, "unwound");
+}
+
+// ---------------------------------------------------------------- the Run wrapper (note 51 stage 2a)
+
+/// The panic message of a caught panic.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload.downcast_ref::<String>().cloned().or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned())).unwrap_or_default()
+}
+
+/// A transmit Session whose uhd-control panics at its next device check once the flag is set: its Run then ends by `DEVICE_LOST`, a Policy end
+/// that nothing declared.
+fn doomed_session() -> (Run, Arc<std::sync::atomic::AtomicBool>, TempDir) {
+    let (device, armed) = panicking_control_device(FakeConfig::default());
+    let (run, dir) = tx_session_on(device);
+    (run, armed, dir)
+}
+
+/// `call` ends `run` with an end nobody declared: the call itself panics with `ended unexpectedly` (the caller owns the Run outside the closure,
+/// so a later `Drop` cannot be what panics), and the Run still hands out its Manifest without a second panic. The test expects no bound and so
+/// captures no marker: one that a bound writes anyway reaches the output, and the message assertion fails beside it.
+fn assert_the_call_that_ends_an_undeclared_run_panics(mut run: Run, call: impl FnOnce(&mut Run)) {
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(&mut run)));
+    let message = panic_text(&*caught.expect_err("the call that returned the end panicked"));
+    assert!(message.contains("ended unexpectedly"), "{message}");
+    assert_the_loss_ended_it(&run.finish());
+}
+
+#[test]
+fn run_a_policy_end_is_judged_by_submit() {
+    let dir = TempDir::new();
+    let profile = profile(&dir, json!({}), json!({}), true);
+    let (assembly, armed) = panicking_book_assembly(&profile, fake(FakeConfig::default()));
+    let mut run = session_on(&profile, &rx0_tx0(&profile), assembly);
+    past_t0(&mut run, ms(1));
+    past_tx_origin(&mut run);
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_the_call_that_ends_an_undeclared_run_panics(run, |run| {
+        let _ = run.submit(SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
+    });
+}
+
+#[test]
+fn run_a_policy_end_is_judged_by_advance_to() {
+    let (run, armed, _dir) = doomed_session();
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_the_call_that_ends_an_undeclared_run_panics(run, |run| {
+        let _ = run.advance_to(after(run, ms(5_000)));
+    });
+}
+
+#[test]
+fn run_a_policy_end_is_judged_by_wait_for() {
+    let (run, armed, _dir) = doomed_session();
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_the_call_that_ends_an_undeclared_run_panics(run, |run| {
+        let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, after(run, ms(5_000)));
+    });
+}
+
+#[test]
+fn run_a_policy_end_is_judged_by_run_until_end() {
+    let (run, armed, _dir) = doomed_session();
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_the_call_that_ends_an_undeclared_run_panics(run, |run| {
+        let _ = run.run_until_end(after(run, ms(5_000)));
+    });
+}
+
+/// A real-clock Run whose transmit thread is blocked in a device call (`TxBlocks`), and whose uhd-control panics once the flag is set: the loss is
+/// the declared Policy end, and the Provider's join of the blocked thread is the bound that cuts. As `wedged`, it gives the transmit thread 300 ms
+/// of real time after T0 to enter its first timed send.
+fn wedged_run_that_loses_its_device(dir: &TempDir) -> Run {
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let inner = fake_real(FakeConfig { faults: vec![FakeFault::TxBlocks], ..FakeConfig::default() });
+    let device = Arc::new(PanicsInControl { inner, armed: armed.clone() });
+    let (bytes, waveform) = waveform_of(&tone(1_000));
+    let spec = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, true, "send_asap_and_flag", 1_000);
+    let mut run = spec_run(&spec, &profile(dir, json!({}), json!({}), false), device, BTreeMap::from([(waveform.hash.clone(), bytes)])).expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
+    past_t0(&mut run, ms(300));
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    run
+}
+
+/// `call` ends a declared Run whose cleanup meets a bound: exactly one marker, written by the call, and one panic naming the bound.
+fn assert_the_call_that_meets_a_bound_marks_it(call: impl FnOnce(&mut Run)) {
+    let dir = TempDir::new();
+    let mut run = wedged_run_that_loses_its_device(&dir);
+    let (caught, markers) = capture_markers(&["join"], || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(&mut run))));
+    let message = panic_text(&*caught.expect_err("the call that returned the end panicked"));
+    assert!(message.contains("met join"), "{message}");
+    assert_eq!(markers.len(), 1, "{markers:?}");
+    assert_the_loss_ended_it(&run.finish());
+}
+
+#[test]
+fn run_a_bound_is_marked_by_advance_to() {
+    assert_the_call_that_meets_a_bound_marks_it(|run| {
+        let _ = run.advance_to(after(run, ms(5_000)));
+    });
+}
+
+#[test]
+fn run_a_bound_is_marked_by_wait_for() {
+    assert_the_call_that_meets_a_bound_marks_it(|run| {
+        let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, after(run, ms(5_000)));
+    });
+}
+
+#[test]
+fn run_a_bound_is_marked_by_run_until_end() {
+    assert_the_call_that_meets_a_bound_marks_it(|run| {
+        let _ = run.run_until_end(after(run, ms(5_000)));
+    });
+}
+
+#[test]
+fn run_a_declared_end_answers_after_the_end() {
+    let dir = TempDir::new();
+    let device = fake(FakeConfig { faults: vec![FakeFault::Unlocked(Wall::from_millis(2_300))], ..FakeConfig::default() });
+    let profile = profile(&dir, json!({ "clock_source": "external" }), json!({}), false);
+    let mut run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile, device.clone(), BTreeMap::new()).expecting(Expect::Policy("radio.CLOCK_LOST"));
+    let Err(RunHandleError::Ended { termination }) = run.run_until_end(after(&run, ms(5_000))) else { panic!("the Run did not end") };
+    assert_eq!(termination, Termination::Stopped { cause: StopCause::Policy { event: kind("radio.CLOCK_LOST") } });
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: ref ended } if *ended == termination), "{:?}", run.state());
+    let horizon = after(&run, ms(1_000));
+    assert!(matches!(run.submit(SessionAction::Stop { target: None }, None), Err(RunHandleError::Ended { termination: ref ended }) if *ended == termination));
+    assert!(matches!(run.advance_to(horizon), Err(RunHandleError::Ended { termination: ref ended }) if *ended == termination));
+    assert!(matches!(run.wait_for(&[kind("radio.CLOCK_LOST")], 0, horizon), Err(RunHandleError::Ended { termination: ref ended }) if *ended == termination));
+    assert!(matches!(run.run_until_end(horizon), Err(RunHandleError::Ended { termination: ref ended }) if *ended == termination));
+    let (delivered, skipped) = (run.events(0), run.events(1));
+    let manifest = run.finish();
+    assert_eq!(delivered, manifest.events.delivered);
+    assert!(delivered.len() == 1 && skipped.is_empty(), "{delivered:?} {skipped:?}");
+    assert_eq!(manifest.termination.reason, termination);
+    assert_eq!(calls(&device, "close_streams").len(), 1, "the Run was finished once");
+}
+
+/// Keeps a `Gated` device open past the end of a test whose Run is dropped while the gate is closed.
+struct Release(Arc<Gated>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// A transmit Session whose receive and transmit threads are held inside a device call: its Run cannot be stopped within the Provider's join.
+fn held_session(device: &Arc<Gated>) -> (Run, TempDir) {
+    let (mut run, dir) = tx_session_on(device.clone());
+    let entry = send(&mut run, "start_repeat", None, &tone(500));
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(40));
+    device.hold();
+    device.entered(&["rx_recv", "tx_"]);
+    (run, dir)
+}
+
+#[test]
+fn run_a_dropped_live_run_is_judged() {
+    let device = Arc::new(Gated::new(FakeConfig::default()));
+    let _release = Release(device.clone());
+    let (caught, markers) = capture_markers(&["join"], || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (_run, _dir) = held_session(&device);
+        }))
+    });
+    let message = panic_text(&*caught.expect_err("the dropped Run panicked"));
+    assert!(message.contains("met join"), "{message}");
+    assert_eq!(markers.len(), 1, "{markers:?}");
+}
+
+#[test]
+fn run_unwinding_marks_a_bound_and_never_panics_again() {
+    // A Run alive while the test panics is finished by its `Drop`: a healthy one ends quietly, one that meets a bound writes the marker, and
+    // neither panics again (a second panic while unwinding aborts the whole test binary).
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (_run, _device, _dir) = tx_session(FakeConfig::default());
+        panic!("boom");
+    }));
+    assert_eq!(panic_text(&*caught.expect_err("the test's own panic")), "boom");
+    let device = Arc::new(Gated::new(FakeConfig::default()));
+    let _release = Release(device.clone());
+    let (caught, markers) = capture_markers(&["join"], || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (_run, _dir) = held_session(&device);
+            panic!("boom");
+        }))
+    });
+    assert_eq!(panic_text(&*caught.expect_err("the test's own panic")), "boom", "the message is not masked");
+    assert_eq!(markers.len(), 1, "the bound is marked while unwinding: {markers:?}");
+}
+
+// `Expect::Any` is the bench loops' declaration: `perf_rx_rate_trial` and `b8_lead_trial` are the bodies of `hw_perf_rx_rates` and `hw_b8_leads`.
+
+#[test]
+fn run_any_a_perf_trial_reports_a_lost_device_and_the_next_trial_goes_on() {
+    let lost = fake(FakeConfig { faults: vec![FakeFault::Lost(Wall::from_millis(2_200))], ..FakeConfig::default() });
+    let line = perf_rx_rate_trial(lost, 1e6);
+    assert!(line.contains("Err(Ended") && line.contains("DEVICE_LOST"), "{line}");
+    let line = perf_rx_rate_trial(fake(FakeConfig::default()), 1e6);
+    assert!(line.contains("Ok(())") && line.contains("Client"), "{line}");
+}
+
+#[test]
+fn run_any_a_lead_trial_reports_a_lost_device_and_the_next_trial_goes_on() {
+    let lost = fake(FakeConfig { faults: vec![FakeFault::Lost(Wall::from_millis(2_050))], ..FakeConfig::default() });
+    let lines = b8_lead_trial(lost, 5_000);
+    assert!(lines[0].contains("DEVICE_LOST"), "{lines:?}");
+    let lines = b8_lead_trial(fake(FakeConfig::default()), 5_000);
+    assert!(lines[0].contains("Client"), "{lines:?}");
+}
+
+#[test]
+fn run_any_a_perf_trial_still_fails_on_a_bound() {
+    let device = Arc::new(Gated::new(FakeConfig::default()));
+    let _release = Release(device.clone());
+    device.hold();
+    let (caught, markers) = capture_markers(&["join"], || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| perf_rx_rate_trial(device.clone(), 1e6))));
+    let message = panic_text(&*caught.expect_err("the trial panicked"));
+    assert!(message.contains("met join"), "{message}");
+    assert_eq!(markers.len(), 1, "{markers:?}");
 }

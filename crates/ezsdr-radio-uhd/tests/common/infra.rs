@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use std::io::Write;
+use std::sync::OnceLock;
 
 fn write_line(line: String) {
     let _ = std::io::stderr().write_all(line.as_bytes());
@@ -64,6 +65,27 @@ pub fn creation_limit(reason: &str, cleanup_timed_out: bool, rejected: &[&str]) 
     }
 }
 
+/// The diagnostic delay (note 51 stage 2a; it gates nothing and no test depends on it): when `EZSDR_RIG_DELAY_MS` is set, the calling thread sleeps
+/// that long at each point `EZSDR_RIG_DELAY_AT` names (a comma list of `now`, `advance`, `submit`, `server`, or `all`), right after a call returns,
+/// as a test thread that was descheduled there would. The wrapper `Run` calls it after its methods return, `protocol.rs` after the server's
+/// reply. Both variables are read once; unset on every gate and bench run.
+pub fn rig_delay(point: &str) {
+    static SETTING: OnceLock<(String, String)> = OnceLock::new();
+    let (ms, at) = SETTING.get_or_init(|| (std::env::var("EZSDR_RIG_DELAY_MS").unwrap_or_default(), std::env::var("EZSDR_RIG_DELAY_AT").unwrap_or_default()));
+    if let Some(delay) = rig_delay_for(ms, at, point) {
+        std::thread::sleep(delay);
+    }
+}
+
+/// `ms` and `at` are the two variables' values, `""` when unset: the delay when `point` is in the comma list `at` (or it is `all`).
+fn rig_delay_for(ms: &str, at: &str, point: &str) -> Option<std::time::Duration> {
+    if ms.is_empty() {
+        return None;
+    }
+    let ms: u64 = ms.trim().parse().unwrap_or_else(|_| panic!("EZSDR_RIG_DELAY_MS is not a number of milliseconds: {ms:?}"));
+    at.split(',').map(str::trim).any(|name| name == point || name == "all").then(|| std::time::Duration::from_millis(ms))
+}
+
 #[test]
 fn a_marker_is_one_line_naming_the_test_and_the_serial_re_run() {
     assert_eq!(timing_line("p", "b", "m::t", "late\nagain"), "EZSDR-TIMING: p b m::t: late again (serial re-run: cargo test -p p --test b -- --exact --test-threads=1 m::t)\n");
@@ -78,4 +100,26 @@ fn the_creation_limits_are_told_apart_by_reason_prefix_timed_out_and_the_join_no
     assert_eq!(creation_limit("UR-12: refused", false, &["x", join[0]]), Some("join"));
     assert_eq!(creation_limit("UR-12: refused", false, &["KC-12a: not at the start"]), None);
     assert_eq!(creation_limit("the KC-12a: later in the text", false, &[]), None);
+}
+
+#[test]
+fn rig_delay_names_its_points_and_reads_nothing_from_the_environment() {
+    let ms = |n| Some(std::time::Duration::from_millis(n));
+    assert_eq!(rig_delay_for("20", "server", "server"), ms(20), "the point `server` selects the reply-return delay");
+    assert_eq!(rig_delay_for("20", "now,advance", "server"), None, "the other points do not");
+    assert_eq!(rig_delay_for("20", "server", "now"), None);
+    assert_eq!(rig_delay_for("20", "server", "advance"), None);
+    assert_eq!(rig_delay_for("20", "all", "server"), ms(20));
+    assert_eq!(rig_delay_for("20", "now, server", "server"), ms(20), "a comma list, blanks around a name ignored");
+    assert_eq!(rig_delay_for("20", "now,advance", "advance"), ms(20), "each point a Run's methods use");
+    assert_eq!(rig_delay_for("20", "submit", "submit"), ms(20));
+    assert_eq!(rig_delay_for("20", "submit", "advance"), None);
+    assert_eq!(rig_delay_for("", "all", "server"), None, "unset: no delay");
+    assert_eq!(rig_delay_for("20", "", "server"), None, "no point named: no delay");
+}
+
+#[test]
+#[should_panic(expected = "is not a number of milliseconds")]
+fn rig_delay_refuses_a_milliseconds_value_that_is_not_a_number() {
+    let _ = rig_delay_for("fast", "all", "server");
 }

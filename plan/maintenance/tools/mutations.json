@@ -3187,7 +3187,8 @@
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_33_a_shutdown_with_a_report_read_that_fails_at_once_still_joins_uhd_tx"
+  "filter": "ur_33_a_shutdown_with_a_report_read_that_fails_at_once_still_joins_uhd_tx",
+  "kill": "bound"
  },
  {
   "id": "J318",
@@ -3197,7 +3198,8 @@
   "new": "        while self.host.now() < until {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_29_a_loss_found_by_the_shutdown_s_report_read_ends_its_ack_window"
+  "filter": "ur_29_a_loss_found_by_the_shutdown_s_report_read_ends_its_ack_window",
+  "kill": "bound"
  },
  {
   "id": "J319",
@@ -8698,7 +8700,8 @@
    "new": "if false { return None; }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "rejected_runs_are_admission_rejections_not_group_failures"
+   "filter": "rejected_runs_are_admission_rejections_not_group_failures",
+   "kill": "bound"
   },
   {
    "id": "P881",
@@ -17480,7 +17483,7 @@
    "new": "if reported != \"uhd-control\" {\n                        core_.device_lost(\"a Provider thread panicked\");\n                    }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_16_a_uhd_control_panic"
+   "filter": "ur_16_a_uhd_control_panic_ends_the_run_with_a_lost_device"
   },
   {
    "id": "N92-2",
@@ -19843,5 +19846,426 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "n98_a_lost_configure_keeps_its_booking_as_a_held_one_is_kept"
+ },
+ {
+  "id": "N51-2A-01",
+  "name": "a declared join subject exempts every bound, not only the join (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": ".filter(|limit| !(declared.join_is_subject && *limit == \"join\"))",
+  "new": ".filter(|_| !declared.join_is_subject)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_judge_end_a_subject_exempts_only_join"
+ },
+ {
+  "id": "N51-2A-02",
+  "name": "the #67 declaration exempts the join of every Provider thread, not only the receive ones (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "declared.rx_join_issue_67 && thread.starts_with(\"uhd-rx-\")",
+  "new": "declared.rx_join_issue_67",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_judge_end_issue_67_exempts_the_join_of_a_receive_thread_only"
+ },
+ {
+  "id": "N51-2A-03",
+  "name": "the #67 exemption applies without its declaration: a receive join before T0 passes undeclared (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "declared.rx_join_issue_67 && thread.starts_with(\"uhd-rx-\")",
+  "new": "thread.starts_with(\"uhd-rx-\")",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_judge_end_a_join_is_a_bound_unless_it_is_the_subject"
+ },
+ {
+  "id": "N51-2A-04",
+  "name": "the #67 declaration also hides a cleanup step abandoned on its deadline (RS-8a) (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "creation_limit(\"\", timed_out, &reasons)",
+  "new": "creation_limit(\"\", timed_out && !declared.rx_join_issue_67, &reasons)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_judge_end_issue_67_exempts_no_other_bound"
+ },
+ {
+  "id": "N51-2A-05",
+  "name": "a Refused declaration accepts a failure at the Run stage (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "Stage::Validate | Stage::Prepare | Stage::Arm",
+  "new": "_",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_judge_end_refused_is_validate_prepare_arm_only"
+ },
+ {
+  "id": "N51-2A-06",
+  "name": "a Policy declaration accepts a Policy end on any event (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "*event == EventKind::parse(kind).unwrap()",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_judge_end_policy_names_its_event"
+ },
+ {
+  "id": "N51-2A-07",
+  "name": "an Any declaration lets a real-time bound pass (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "if let Some(limit) = limit {",
+  "new": "if let Some(limit) = limit.filter(|_| declared.end != Some(Expect::Any)) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_judge_end_any_is_not_a_bound_pass"
+ },
+ {
+  "id": "N51-2A-08",
+  "name": "`submit` does not check the end it returned (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "self.check(\"a submit\");",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_a_policy_end_is_judged_by_submit"
+ },
+ {
+  "id": "N51-2A-09",
+  "name": "`advance_to` does not check the end it returned (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "self.check(\"an advance\");",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_a_policy_end_is_judged_by_advance_to"
+ },
+ {
+  "id": "N51-2A-10",
+  "name": "`wait_for` does not check the end it returned (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": ".wait_for(kinds, from, horizon); self.check(\"a wait\");",
+  "new": ".wait_for(kinds, from, horizon);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_a_policy_end_is_judged_by_wait_for"
+ },
+ {
+  "id": "N51-2A-11",
+  "name": "`run_until_end` does not check the end it returned (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": ".run_until_end(horizon); self.check(\"a wait\");",
+  "new": ".run_until_end(horizon);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_a_policy_end_is_judged_by_run_until_end"
+ },
+ {
+  "id": "N51-2A-12",
+  "name": "an ended Run answers a call with another termination than its own (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "Err(RunHandleError::Ended { termination: ended.manifest.termination.reason.clone() })",
+  "new": "Err(RunHandleError::Ended { termination: Termination::Completed {} })",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_a_declared_end_answers_after_the_end"
+ },
+ {
+  "id": "N51-2A-13",
+  "name": "an ended Run's `events` ignores where the caller read up to (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "ended.manifest.events.delivered.iter().skip(from).cloned().collect()",
+  "new": "ended.manifest.events.delivered.iter().cloned().collect()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_a_declared_end_answers_after_the_end"
+ },
+ {
+  "id": "N51-2A-14",
+  "name": "a dropped live Run is finished but not judged (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "self.judge(&manifest, \"the dropped Run\");",
+  "new": "drop(manifest);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_a_dropped_live_run_is_judged"
+ },
+ {
+  "id": "N51-2A-15",
+  "name": "a Run dropped while the thread unwinds is not finished by the wrapper, so its bound goes unmarked (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "catch_unwind(AssertUnwindSafe(|| handle.finish())).ok()",
+  "new": "None",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_unwinding_marks_a_bound_and_never_panics_again"
+ },
+ {
+  "id": "N51-2A-16",
+  "name": "a verdict panics while the thread is already unwinding (a second panic aborts the process) (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "!panicking && *judged != Judged::Fine",
+  "new": "*judged != Judged::Fine",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_effects_a_bound_is_marked_and_panics_unless_the_thread_is_unwinding"
+ },
+ {
+  "id": "N51-2A-17",
+  "name": "a bound is judged but its marker is not written (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "mark(limit, &message);",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_a_bound_is_marked_by_advance_to"
+ },
+ {
+  "id": "N51-2A-18",
+  "name": "the B8 lead trial's Run is not declared `Any`, so a lost device panics it (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+  "old": ".expecting(Expect::Any)",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_any_a_lead_trial_reports_a_lost_device_and_the_next_trial_goes_on"
+ },
+ {
+  "id": "N51-2A-19",
+  "name": "the receive-rate trial's Run is not declared `Any`, so a lost device panics it (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+  "old": "Declared { end: Some(Expect::Any), ..Default::default() }",
+  "new": "Declared::default()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_any_a_perf_trial_reports_a_lost_device_and_the_next_trial_goes_on"
+ },
+ {
+  "id": "N51-2A-20",
+  "name": "`start_spec` does not declare a refusal at creation, so a refused Spec panics instead of being returned (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+  "old": "Declared { end: Some(Expect::Refused), ..Default::default() }",
+  "new": "Declared::default()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_15_start_cases"
+ },
+ {
+  "id": "N51-2A-21",
+  "name": "a uhd-control panic is recorded but is not a lost device, so a submit that waits on it meets KC-21a: N92-1's mutant, whose kill in this test is the 5 s budget (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "core_.device_lost(\"a Provider thread panicked\");",
+  "new": "if reported != \"uhd-control\" {\n                        core_.device_lost(\"a Provider thread panicked\");\n                    }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_16_a_uhd_control_panic_while_a_submit_waits_ends_it_with_the_loss",
+  "kill": "bound"
+ },
+ {
+  "id": "N51-2A-22",
+  "name": "the delay's point list ignores `all`, so `all` does not select the server reply (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/infra.rs",
+  "old": "name == point || name == \"all\"",
+  "new": "name == point",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "rig_delay_names_its_points_and_reads_nothing_from_the_environment"
+ },
+ {
+  "id": "N51-2A-23",
+  "name": "the delay's point list selects every point, so `now` and `advance` delay the server reply (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/infra.rs",
+  "old": "name == point || name == \"all\"",
+  "new": "true",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "rig_delay_names_its_points_and_reads_nothing_from_the_environment"
+ },
+ {
+  "id": "N51-2A-24",
+  "name": "an unset delay is parsed as a number (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/infra.rs",
+  "old": "if ms.is_empty() {\n        return None;\n    }",
+  "new": "",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "rig_delay_names_its_points_and_reads_nothing_from_the_environment"
+ },
+ {
+  "id": "N51-2A-25",
+  "name": "a Session its test expects refused declares no end, so the refusal is an undeclared end of the Run (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/uhd.rs",
+  "old": "Declared { end: Some(Expect::Refused), ..Declared::default() }",
+  "new": "Declared::default()",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "uhd",
+  "filter": "uhd_59_a_refused_initial_request_configures_nothing"
+ },
+ {
+  "id": "N51-2A-26",
+  "name": "a raw `connect(` is not forbidden, so a test that creates a Session without the wrapper passes the scan (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "text == \"connect\" || text == \"start_spec_run\"",
+  "new": "text == \"start_spec_run\"",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_finds_a_raw_run_creation_however_it_is_written"
+ },
+ {
+  "id": "N51-2A-27",
+  "name": "only a call of `connect` / `start_spec_run` is raw, so a function value (`let create = coordinator::connect;`) is a free way round the scan (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "!(i >= 1 && toks[i - 1].text == \"fn\")",
+  "new": "!(i >= 1 && toks[i - 1].text == \"fn\") && at_pattern(&toks, i + 1, &[\"(\"])",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_finds_a_raw_run_creation_however_it_is_written"
+ },
+ {
+  "id": "N51-2A-28",
+  "name": "the wrapper's own `Run::connect(` is not told from a raw one, so the scan refuses the constructor every test uses (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "i >= 3 && at_pattern(&toks, i - 3, &[\"Run\", \":\", \":\"])",
+  "new": "false",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_allows_the_wrapper_and_what_only_looks_like_a_raw_call"
+ },
+ {
+  "id": "N51-2A-29",
+  "name": "`RunHandleError` counts as the raw handle, so the scan refuses the error type the wrapper returns (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "if text == \"RunHandle\" {",
+  "new": "if text.starts_with(\"RunHandle\") {",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_allows_the_wrapper_and_what_only_looks_like_a_raw_call"
+ },
+ {
+  "id": "N51-2A-30",
+  "name": "`run.rs` is scanned like any test file, so the one file that calls `connect` trips its own scan (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "&& path != RUN_FILE",
+  "new": "",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_allows_the_wrapper_and_what_only_looks_like_a_raw_call"
+ },
+ {
+  "id": "N51-2A-31",
+  "name": "a comment is read as code, so a doc line that names `connect(` trips the scan (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "if c[i] == '/' && at(i + 1) == Some('/') {",
+  "new": "if false {",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_allows_the_wrapper_and_what_only_looks_like_a_raw_call"
+ },
+ {
+  "id": "N51-2A-32",
+  "name": "the `#[test]` attribute is not recognised, so no fn counts as a test and no test that reads time is found (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "\"#\" if at_pattern(&toks, i, &[\"#\", \"[\", \"test\", \"]\"]) => pending_test = true,",
+  "new": "\"#\" if false => pending_test = true,",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_reads_time_only_in_test_fns_and_lets_the_listed_ones_pass"
+ },
+ {
+  "id": "N51-2A-33",
+  "name": "every fn counts as a test, so a helper that reads time trips the scan (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "std::mem::take(&mut pending_test)",
+  "new": "true",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_reads_time_only_in_test_fns_and_lets_the_listed_ones_pass"
+ },
+ {
+  "id": "N51-2A-34",
+  "name": "a `;` inside a fn header ends it, so a test with an array type in its signature escapes the time rule (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "\";\" if nest == 0 => pending_fn = None,",
+  "new": "\";\" => pending_fn = None,",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_reads_time_only_in_test_fns_and_lets_the_listed_ones_pass"
+ },
+ {
+  "id": "N51-2A-35",
+  "name": "the time allow-list matches by file only, so any test of a listed file may read time (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": ".any(|(file, name, _)| *file == path && *name == in_fn)",
+  "new": ".any(|(file, _, _)| *file == path)",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_reads_time_only_in_test_fns_and_lets_the_listed_ones_pass"
+ },
+ {
+  "id": "N51-2A-36",
+  "name": "the time rule skips `tests/common/**`, so a test fn written there may read time (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "|| path.starts_with(\"crates/ezsdr-radio-uhd/tests/common/\")",
+  "new": "",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_reads_time_only_in_test_fns_and_lets_the_listed_ones_pass"
+ },
+ {
+  "id": "N51-2A-37",
+  "name": "the acceptance file-level exempt list is ignored, so the Mock-Run files trip the scan (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "!ACCEPTANCE_EXEMPT.contains(&rest)",
+  "new": "true",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_covers_the_files_it_names_and_skips_the_others"
+ },
+ {
+  "id": "N51-2A-38",
+  "name": "`Expect::Any` allow-list matches by file only, so any fn of a listed file may declare it (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": ".any(|(file, name)| *file == path && *name == in_fn)",
+  "new": ".any(|(file, _)| *file == path)",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_allows_expect_any_in_its_named_loops_only"
+ },
+ {
+  "id": "N51-2A-39",
+  "name": "`.handle(` is allowed in any fn, so a test of `protocol.rs` bypasses the door that carries the delay (note 51 stage 2a)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "&& in_fn != \"handle\"",
+  "new": "",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "run_scan_the_diagnostic_door_is_the_only_handle_call"
+ },
+ {
+  "id": "N51-2A-40",
+  "name": "a bound in `termination.also` is not read, so a Policy end that was declared hides the KC-21a that cut after it (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "std::iter::once(termination).chain(&section.also)",
+  "new": "std::iter::once(termination)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_judge_end_a_bound_in_also_is_named_whatever_the_primary_end_declares"
+ },
+ {
+  "id": "N51-2A-41",
+  "name": "only the first later end in `also` is read for a bound (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "chain(&section.also)",
+  "new": "chain(section.also.first())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_judge_end_a_bound_in_also_is_named_whatever_the_primary_end_declares"
+ },
+ {
+  "id": "N51-2A-42",
+  "name": "a capture keeps the marker of every bound, so an unexpected one is hidden behind the test's own assertion (note 51 stage 2a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "expected.contains(&limit)",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_capture_keeps_only_the_markers_of_the_bounds_it_expects"
  }
 ]

@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ezsdr_kernel::coordinator::RunHandle;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::time::TimePoint;
@@ -23,7 +22,7 @@ use super::*;
 
 /// `hw_s1_short_first_sends` for one case: a burst of `samples` samples (1 to 4) at 40 ms, then a 10 000-sample burst 10 000 samples later, in
 /// the transmit Session `run`. The verdict is `iii::short_first_send_verdict`.
-pub fn short_first_case(mut run: RunHandle, samples: usize) -> Verdict {
+pub fn short_first_case(mut run: Run, samples: usize) -> Verdict {
     let (short, _) = waveform_of(&[(0.4f32, 0.0f32); 4][..samples]);
     let (long, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
     let a = tx_at(&run, ms(40));
@@ -48,7 +47,7 @@ pub fn short_first_case(mut run: RunHandle, samples: usize) -> Verdict {
 
 /// `hw_txp_b0_send_sizes` for one rate: a 31 000-sample repeat in the transmit Session `run` (whose profile asked the rate and gain 0 dB at
 /// connect), repeating for 5 s and stopped. The verdict is `iii::repeat_sizes_verdict` with the `chunk` the window allows, and the faults.
-pub fn repeat_sizes_case(mut run: RunHandle, probe: &Arc<ProbeDevice>, rate: f64, chunk: usize) -> Verdict {
+pub fn repeat_sizes_case(mut run: Run, probe: &Arc<ProbeDevice>, rate: f64, chunk: usize) -> Verdict {
     past_t0(&mut run, ms(1));
     past_tx_origin(&mut run);
     let wave: Vec<_> = pn(31_000).into_iter().map(|(re, im)| (re * 0.7, im * 0.7)).collect();
@@ -105,7 +104,7 @@ pub fn timed_chunks_case(probe: &ProbeDevice, manifest: &Manifest) -> TimedChunk
 /// A trial of `hw_p70_one_sample_burst_then_timed_burst` as far as the fake shows it: `samples` samples at 40 ms, a 10 000-sample burst 5 000
 /// samples after it, booked with it. Returns the device sends in order and the root ticks of the two booked instants (the bench's capture and
 /// onset read the tone, which the fake does not show).
-pub fn one_sample_pair(mut run: RunHandle, probe: &ProbeDevice, samples: usize) -> (Vec<Json>, i64, i64) {
+pub fn one_sample_pair(mut run: Run, probe: &ProbeDevice, samples: usize) -> (Vec<Json>, i64, i64) {
     let (first, _) = waveform_of(&[(0.4f32, 0.0f32); 4][..samples]);
     let (tone, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
     let a = tx_at(&run, ms(40));

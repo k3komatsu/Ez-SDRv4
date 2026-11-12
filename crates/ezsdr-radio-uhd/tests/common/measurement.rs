@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as Wall, Instant};
 
+use super::{Declared, Expect, Run};
 use ezsdr_kernel::binding::{Binding, BindingProfile};
-use ezsdr_kernel::coordinator::RunHandle;
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
 use ezsdr_kernel::run::{Lease, RunState};
@@ -1893,15 +1893,15 @@ fn candidate_timing(field: &str, value: u64) -> Result<ezsdr_radio::TimingEnvelo
     Ok(timing)
 }
 
-fn candidate_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope) -> Result<(RunHandle, super::TempDir), String> {
+fn candidate_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope) -> Result<(Run, super::TempDir), String> {
     candidate_session_asking(device, timing, super::rx0)
 }
 
 /// A Session that asks for what `asking` names at `connect` (RM-30: no channel is in a stream unless asked).
-fn candidate_session_asking(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope, asking: fn(&Json) -> ezsdr_kernel::session::InitialRequests) -> Result<(RunHandle, super::TempDir), String> {
+fn candidate_session_asking(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope, asking: fn(&Json) -> ezsdr_kernel::session::InitialRequests) -> Result<(Run, super::TempDir), String> {
     let dir = super::TempDir::new();
     let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), super::bench_envelope(&*device), true);
-    let run = ezsdr_kernel::coordinator::connect(&doc, &asking(&doc), super::assembly(&doc, device, Default::default(), |radio| radio.with_measurement_timing(timing)), Lease::attached())
+    let run = Run::connect(&doc, &asking(&doc), super::assembly(&doc, device, Default::default(), |radio| radio.with_measurement_timing(timing)), Lease::attached(), Declared::default())
         .map_err(|error| error.to_string())?;
     Ok((run, dir))
 }
@@ -1911,14 +1911,14 @@ fn ticks_for_ns(ns: u64, master_clock_hz: u64) -> Result<i64, String> {
     i64::try_from(ticks).map_err(|_| "device-tick conversion overflow".to_owned())
 }
 
-fn root_now(run: &RunHandle) -> Result<(ClockDomainId, i64), String> {
+fn root_now(run: &Run) -> Result<(ClockDomainId, i64), String> {
     let now = run.now();
     let domain = now.domain();
     Ok((domain, now.ticks_in(domain).map_err(|error| error.to_string())?))
 }
 
 /// Why a Spec Run that validate or prepare refused has no T0: its termination. `None` for a Run that started.
-fn rejected_run_reason(run: &RunHandle) -> Option<String> {
+fn rejected_run_reason(run: &Run) -> Option<String> {
     if run.start_instant().is_some() {
         return None;
     }
@@ -1929,14 +1929,14 @@ fn rejected_run_reason(run: &RunHandle) -> Option<String> {
 }
 
 /// [`rejected_run_reason`] for [`super::start_spec`]'s result: a Run that ended at creation is its termination.
-fn rejected_start_reason(started: &Result<RunHandle, Box<Manifest>>) -> Option<String> {
+fn rejected_start_reason(started: &Result<Run, Box<Manifest>>) -> Option<String> {
     match started {
         Ok(run) => rejected_run_reason(run),
         Err(ended) => Some(format!("{:?}", ended.termination.reason)),
     }
 }
 
-fn stream_clock(run: &RunHandle, direction: Direction) -> Result<SampleClockRecord, String> {
+fn stream_clock(run: &Run, direction: Direction) -> Result<SampleClockRecord, String> {
     let suffix = match direction {
         Direction::Rx => "usrp/rx/s0",
         Direction::Tx => "usrp/tx/s0",
@@ -1967,7 +1967,7 @@ fn sample_root_tick(clock: &SampleClockRecord, sample_tick: i64) -> Result<i64, 
     i64::try_from(i128::from(origin) + scaled / den).map_err(|_| "sample root tick overflow".to_owned())
 }
 
-fn sample_target(run: &RunHandle, direction: Direction, lead_ns: u64, device: &dyn Device) -> Result<(TimePoint, i64), String> {
+fn sample_target(run: &Run, direction: Direction, lead_ns: u64, device: &dyn Device) -> Result<(TimePoint, i64), String> {
     let clock = stream_clock(run, direction)?;
     let (root, now) = root_now(run)?;
     if root != clock.root {
@@ -1982,17 +1982,17 @@ fn effective_lead_ns(target_root: i64, receipt_time: TimePoint, root: ClockDomai
     Ok((receipt_tick, lead_ns))
 }
 
-fn advance_root(run: &mut RunHandle, root: ClockDomainId, tick: i64) -> Result<(), String> {
+fn advance_root(run: &mut Run, root: ClockDomainId, tick: i64) -> Result<(), String> {
     run.advance_to(TimePoint::new(root, tick)).map_err(|error| error.to_string())
 }
 
 /// Advances to the transmit clock a Session asked for at connect, so a burst sent then is on time.
-fn await_tx(run: &mut RunHandle) {
+fn await_tx(run: &mut Run) {
     super::past_t0(run, super::ms(1));
     super::past_tx_origin(run);
 }
 
-fn start_repeat(run: &mut RunHandle, bytes: &[u8]) -> Result<(), String> {
+fn start_repeat(run: &mut Run, bytes: &[u8]) -> Result<(), String> {
     let entry = run.submit(super::verb("start_repeat", super::resource("radio/tx/s0"), None, &[]), Some(bytes)).map_err(|error| error.to_string())?;
     if !super::admitted(&entry) {
         return Err(format!("repeat was not admitted: {:?}", entry.outcome));
@@ -2000,7 +2000,7 @@ fn start_repeat(run: &mut RunHandle, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn tx_trial(run: &mut RunHandle, device: &dyn Device, bytes: &[u8], samples: u64, lead_ns: u64, interval_ns: u64) -> Result<(TrialPlan, i64), String> {
+fn tx_trial(run: &mut Run, device: &dyn Device, bytes: &[u8], samples: u64, lead_ns: u64, interval_ns: u64) -> Result<(TrialPlan, i64), String> {
     let (target, target_root) = sample_target(run, Direction::Tx, lead_ns, device)?;
     let entry = run.submit(super::verb("send", super::resource("radio/tx/s0"), Some(target), &[]), Some(bytes)).map_err(|error| error.to_string())?;
     let clock = stream_clock(run, Direction::Tx)?;
@@ -2135,7 +2135,7 @@ const DEVICE_WAIT_MS: i64 = 2_000;
 /// Advances the Run one millisecond of device time at a time until `done` answers true, or until `limit_ms` of device time has
 /// passed since the call (an absolute deadline, fixed at the start), or once the Run has ended (`advance_to` would fail and time
 /// would stop); whether `done` did. A host that runs the device's threads late delays the answer, not the bound (#83, plan 30 §4.5).
-fn advance_until(run: &mut RunHandle, limit_ms: i64, mut done: impl FnMut(&RunHandle) -> bool) -> bool {
+fn advance_until(run: &mut Run, limit_ms: i64, mut done: impl FnMut(&Run) -> bool) -> bool {
     let deadline = super::after(run, super::ms(limit_ms));
     let domain = deadline.domain();
     let end = deadline.ticks_in(domain).unwrap();
@@ -2152,7 +2152,7 @@ fn advance_until(run: &mut RunHandle, limit_ms: i64, mut done: impl FnMut(&RunHa
 
 /// One restart: a stream-scoped `Stop`, the condition's values (when `set_values`), then an untimed `start_rx`; waits
 /// until the start's first sample or the device time bound, then for the SampleClock the Module registered for the restart.
-fn restart_trial(run: &mut RunHandle, probe: &super::probe_device::ProbeDevice, lead_ns: u64, values: Option<(f64, f64)>) -> Result<RxStartTrial, String> {
+fn restart_trial(run: &mut Run, probe: &super::probe_device::ProbeDevice, lead_ns: u64, values: Option<(f64, f64)>) -> Result<RxStartTrial, String> {
     let stop = run.submit(SessionAction::Stop { target: Some(super::resource("radio/rx/s0")) }, None).map_err(|error| error.to_string())?;
     if !super::admitted(&stop) {
         return Err(format!("the receive Stop was not admitted: {:?}", stop.outcome));
@@ -2213,9 +2213,9 @@ fn configure_lead_left(manifest: &Manifest, before: Option<i64>, origin: Option<
 /// The companion group's Session: the profile's default asking plus `COMPANION_RATE_HZ` for the transmit stream at
 /// connect, and the rate the clock then reads back; a profile that cannot express the rate runs the companion at its
 /// default and says so.
-fn companion_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope) -> Result<(RunHandle, super::TempDir, u64), String> {
+fn companion_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope) -> Result<(Run, super::TempDir, u64), String> {
     let default_rate = 1_000_000;
-    let read_back = |run: &RunHandle| stream_clock(run, Direction::Tx).ok().map(|clock| clock.nominal_rate.num() / clock.nominal_rate.den());
+    let read_back = |run: &Run| stream_clock(run, Direction::Tx).ok().map(|clock| clock.nominal_rate.num() / clock.nominal_rate.den());
     match candidate_session_asking(device.clone(), timing, asking_with_companion_rate) {
         Ok((run, dir)) => {
             let rate = read_back(&run).unwrap_or(default_rate);
@@ -2372,7 +2372,7 @@ fn rx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companio
 }
 
 /// Submits a capture of `samples` at `target` on the output `rec`; whether the Session admitted it.
-fn capture_action(run: &mut RunHandle, target: TimePoint, samples: i64) -> Result<bool, String> {
+fn capture_action(run: &mut Run, target: TimePoint, samples: i64) -> Result<bool, String> {
     let entry =
         run.submit(super::verb("capture", super::output("rec"), Some(target), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(samples))]), None).map_err(|error| error.to_string())?;
     Ok(super::admitted(&entry))
@@ -2633,7 +2633,8 @@ fn overflow_manifest(device: Arc<dyn Device>, rate_hz: u64, after_ms: u64, stall
         spec = tx_at_channel_zero_frequency(super::with_burst(super::with_tx(spec, COMPANION_RATE_HZ as f64), &waveform, true, "send_asap_and_flag", 0), &*device);
         inputs.insert(waveform.hash.clone(), bytes);
     }
-    let mut run = super::start_spec_run(&spec, &doc, super::assembly(&doc, device.clone(), inputs, |radio| radio.with_rx_stall(Wall::from_millis(after_ms), Wall::from_millis(stall_ms))))
+    let declared = Declared { end: Some(Expect::Refused), ..Default::default() };
+    let mut run = Run::start_spec(&spec, &doc, super::assembly(&doc, device.clone(), inputs, |radio| radio.with_rx_stall(Wall::from_millis(after_ms), Wall::from_millis(stall_ms))), declared)
         .map_err(|error| error.to_string())?;
     if let Some(reason) = rejected_run_reason(&run) {
         return Ok((run.finish(), Some(reason)));

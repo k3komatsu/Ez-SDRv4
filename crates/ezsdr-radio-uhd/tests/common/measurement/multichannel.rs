@@ -788,7 +788,8 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
     let inputs = BTreeMap::from([(waveform.hash.clone(), waveform_bytes)]);
     let nics_before = nic_counters(&plan.nics);
     let assembly = common::assembly(&doc, device.clone(), inputs, |radio| radio.with_measurement_performance(performance));
-    let mut run = common::start_spec_run(&spec, &doc, assembly).map_err(|error| error.to_string())?;
+    // Observation-only: a throughput stage records a Policy end (`run_ended_early`) or a refusal; bounds still fail (note 51 §6, stage 2a).
+    let mut run = Run::start_spec(&spec, &doc, assembly, Declared { end: Some(Expect::Any), ..Default::default() }).map_err(|error| error.to_string())?;
     let streams_json = |streams: &[StreamPlan]| streams.iter().map(|stream| json!({ "channels": stream.channels, "rate_hz": stream.rate_hz })).collect::<Vec<_>>();
     let head = json!({ "family": stage.family, "rx_streams": streams_json(&stage.rx), "tx_streams": streams_json(&stage.tx),
         "duration_secs": plan.throughput_seconds, "admission_ceiling_bytes_per_s": performance.rx_bytes_per_s });
