@@ -503,7 +503,8 @@ impl Tx {
     /// The configure turn (R4, M2): the burst's values go to the device on the owner's claim, outside any device
     /// burst, and the turn returns with the burst held. The next turn drains the commands that came meanwhile (a
     /// `Stop` cancels the burst) and decides the burst again. A refused configure refuses the burst (R5); the stream
-    /// goes on, and the burst stays counted in its `Bookings` to its booked end.
+    /// goes on, and the burst stays counted in its `Bookings` to its booked end. A configure that returns `lost: true` refuses
+    /// nothing: the burst stays held with its footprint and the loss's shutdown cancels it, like any held burst (UR-26).
     fn configure_turn(&mut self, clock: Clock, k: i64, generation: u64) -> bool {
         let core = self.core.clone();
         let key = stream_key(Dir::Tx, self.k);
@@ -528,9 +529,11 @@ impl Tx {
             }
             streams.give_back(claim);
         }
-        let refused = lock(&core.streams).stream_mut(key).book.complete_configure(id, result.is_ok());
-        if let (Some(held), Err(error)) = (refused, result) {
-            core.device_failed(held.settings.action(), "tx_burst", &error);
+        let refused = lock(&core.streams).stream_mut(key).book.complete_configure(id, !matches!(&result, Err(error) if !error.lost));
+        match (refused, result) {
+            (Some(held), Err(error)) => core.device_failed(held.settings.action(), "tx_burst", &error),
+            (None, Err(error)) => core.device_failed(None, "tx_burst", &error),
+            _ => {}
         }
         true
     }

@@ -13810,8 +13810,8 @@
     "id": "N47S4-14",
     "name": "a refused configure loses the device, which halts the stream (R5)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "core.device_failed(held.settings.action(), \"tx_burst\", &error);",
-    "new": "core.device_lost(&error.message);",
+    "old": "core.device_failed(held.settings.action(), \"tx_burst\", &error)",
+    "new": "core.device_lost(&error.message)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_a_refused_configure_refuses_the_burst_and_the_fixed_value_plays_on_the_same_clock"
@@ -13958,8 +13958,8 @@
   "id": "N47S4-56",
   "name": "a refused transmit configure reports its burst without the burst's Action id (R5, S7 through the Kernel)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "core.device_failed(held.settings.action(), \"tx_burst\", &error);",
-  "new": "core.device_failed(None, \"tx_burst\", &error);",
+  "old": "core.device_failed(held.settings.action(), \"tx_burst\", &error)",
+  "new": "core.device_failed(None, \"tx_burst\", &error)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_21_a_refused_configure_refuses_its_burst_through_the_kernel"
@@ -17696,10 +17696,10 @@
  },
  {
   "id": "E2B-13",
-  "name": "E2b: a configure that fails because the device was lost keeps its booking held",
+  "name": "E2b, #98: a configure that returns lost: true keeps its booking held (a lost configure is told to the book as refused)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "book.complete_configure(id, result.is_ok());",
-  "new": "book.complete_configure(id, result.is_ok() || core.is_lost());",
+  "old": "!matches!(&result, Err(error) if !error.lost)",
+  "new": "result.is_ok()",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "e2b_c4_a_loss_around_the_configure"
@@ -17730,8 +17730,8 @@
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
   "old": "core.probe(\"tx_configure_before_mark\", None);",
   "new": "core.probe(\"tx_configure_before_mark\", None); let refused;",
-  "old2": "streams.give_back(claim); } let refused = lock(&core.streams).stream_mut(key).book.complete_configure(id, result.is_ok());",
-  "new2": "refused = streams.stream_mut(key).book.complete_configure(id, result.is_ok()); streams.give_back(claim); }",
+  "old2": "streams.give_back(claim); } let refused = lock(&core.streams).stream_mut(key).book.complete_configure(id, !matches!(&result, Err(error) if !error.lost));",
+  "new2": "refused = streams.stream_mut(key).book.complete_configure(id, !matches!(&result, Err(error) if !error.lost)); streams.give_back(claim); }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "e2b_c8_a_receipt_between_a_refused_configure_s_mark_and_its_drop_is_refused"
@@ -19803,5 +19803,45 @@
   "old": "if let Some(record) = self.tx[k].tracker.as_mut().and_then(BurstTracker::stop) { self.record_burst(record); } self.tx[k].device.close(); self.tx[k].book.end_open(DeviceEnd::Keep); } self.tx[k].book.take(held, next);",
   "new": "self.tx[k].device.close(); self.tx[k].book.end_open(DeviceEnd::Keep); } self.tx[k].book.take(held, next);",
   "filter": "mr_16_a_switch_at_the_open_repeat_s_next_sample_replaces_it"
+ },
+ {
+  "id": "N98-01",
+  "name": "#98: a lost configure is told apart from a refusal by the core's loss at the result, not by the configure's own error: a loss landing during an ordinary refusal keeps the booking (the refusal and the shutdown note both)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "!matches!(&result, Err(error) if !error.lost)",
+  "new": "result.is_ok() || core.is_lost()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "n98_a_loss_landing_during_a_refusal_leaves_the_refusal"
+ },
+ {
+  "id": "N98-03",
+  "name": "#98: no configure refuses its booking, a refusal included (R5)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "!matches!(&result, Err(error) if !error.lost)",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_refused_configure_refuses_the_burst_and_the_fixed_value_plays_on_the_same_clock"
+ },
+ {
+  "id": "N98-04",
+  "name": "#98: a device-reported loss in the configure is never published (the kept booking has no DEVICE_LOST)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "(None, Err(error)) => core.device_failed(None, \"tx_burst\", &error),",
+  "new": "(None, Err(_)) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "n98_a_lost_configure_keeps_its_booking_as_a_held_one_is_kept"
+ },
+ {
+  "id": "N98-05",
+  "name": "#98: a lost configure keeps its booking but drops its footprint",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "(None, Err(error)) => core.device_failed(None, \"tx_burst\", &error),",
+  "new": "(None, Err(error)) => { lock(&core.streams).stream_mut(key).book.record.drop_piece(k, Some(4)); core.device_failed(None, \"tx_burst\", &error) }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "n98_a_lost_configure_keeps_its_booking_as_a_held_one_is_kept"
  }
 ]

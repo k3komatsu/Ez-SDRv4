@@ -328,9 +328,9 @@ fn e2b_c4_a_loss_around_the_configure() {
         let read = read_events(&events, &mut log);
         assert!(refusals_in(&read).is_empty(), "{case}: {read:?}");
         assert_eq!(read.iter().filter(|event| event["kind"] == EventKind::DEVICE_LOST).count(), 1, "{case}: {read:?}");
+        assert_eq!(held_keys(&tx), [20_000], "{case}: the booking stays held");
         shutdown_owner(&core, &mut tx, frozen);
-        let expected_notes: &[&str] = if case == "C4(ii)" { &[] } else { &["UR-26: cancelled by Provider::stop"] };
-        assert_eq!(notes(&core), expected_notes, "{case}");
+        assert_eq!(notes(&core), ["UR-26: cancelled by Provider::stop"], "{case}");
         let expected = match case {
             "C4(i)" => C4_I,
             "C4(ii)" => C4_II,
@@ -338,6 +338,126 @@ fn e2b_c4_a_loss_around_the_configure() {
         };
         check(case, snapshot(&core, &device, &events, log), expected);
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Loss {
+    AtTheMark,
+    InTheConfigure,
+    TheDeviceSaysLost,
+}
+
+/// X (20 000, 4 samples, F2) booked through uhd-control, its configure cut by a loss as `how` says, with a Stop received during the configure
+/// when `stop`; what is left: the record, the held keys after the turns, every event read, the notes after `Provider::stop`, and how many
+/// channel applies the configure attempted (the `apply` probe sees each one before the loss check).
+fn lost_run(how: Loss, stop: bool) -> (ezsdr_radio::staging::Bookings, Vec<i64>, Vec<Value>, Vec<String>, usize) {
+    let wrap =
+        move |device: Arc<FakeDevice>| -> Arc<dyn Device> { if how == Loss::TheDeviceSaysLost { Arc::new(crate::provider::test_support::ApplyFails::lost(device, Dir::Tx, Some(0))) } else { device } };
+    let mut rig = control_rig_with(vec![vec![OLD; 4]], Vec::new(), wrap);
+    book_frequency(&mut rig.control, &rig.core, 1, F2);
+    book_burst_on(&mut rig.control, &rig.core, 2, 0, rig.clock, 20_000, &rig.waves[0], false, LatePolicy::DropAndFlag);
+    at(&rig, 15 * MS);
+    let SwitchRig { core, device, events, control, mut tx, _frozen, .. } = rig;
+    let (weak, fired, attempts) = (Arc::downgrade(&core), AtomicBool::new(false), Arc::new(AtomicUsize::new(0)));
+    let counted = attempts.clone();
+    let loss = move || {
+        let Some(core) = weak.upgrade() else { return };
+        if fired.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if stop {
+            full_stop(&core);
+        }
+        if how != Loss::TheDeviceSaysLost {
+            core.device_lost("test: lost");
+        }
+    };
+    if how == Loss::AtTheMark {
+        probe(&core, "tx_configure_before_mark", move |_| loss());
+        probe(&core, "apply", move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+    } else {
+        probe(&core, "apply", move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            loss();
+        });
+    }
+    drain_tx(&mut tx);
+    assert!(tx.step(), "the configure turn");
+    turn(&mut tx);
+    assert!(core.is_lost());
+    let record = lock(&core.streams).stream(key0()).book.record.clone();
+    let held = held_keys(&tx);
+    let mut log = Vec::new();
+    let mut read = read_events(&events, &mut log);
+    shutdown_owner(&core, &mut tx, _frozen);
+    read.extend(read_events(&events, &mut log));
+    assert!(!sent(&device), "{:?}", device.calls());
+    assert_eq!(held_keys(&tx), Vec::<i64>::new());
+    drop(control);
+    (record, held, read, notes(&core), attempts.load(Ordering::SeqCst))
+}
+
+#[test]
+fn n98_a_lost_configure_keeps_its_booking_as_a_held_one_is_kept() {
+    for stop in [false, true] {
+        let reason = if stop { "UR-26: cancelled by Stop" } else { "UR-26: cancelled by Provider::stop" };
+        let (held_record, held, read, notes, configures) = lost_run(Loss::AtTheMark, stop);
+        let held_keys_expected: Vec<i64> = if stop { Vec::new() } else { vec![20_000] };
+        assert_eq!((&held, &notes, configures), (&held_keys_expected, &vec![reason.to_owned()], 1), "stop={stop}: the baseline");
+        assert!(refusals_in(&read).is_empty());
+        for how in [Loss::InTheConfigure, Loss::TheDeviceSaysLost] {
+            let (record, held, read, notes, configures) = lost_run(how, stop);
+            assert_eq!(held, held_keys_expected, "{how:?} stop={stop}: held until the halt is read");
+            assert_eq!(notes, [reason], "{how:?} stop={stop}");
+            assert_eq!(configures, 1, "{how:?} stop={stop}: the configure is not tried again");
+            assert!(refusals_in(&read).is_empty(), "{how:?} stop={stop}: {read:?}");
+            assert_eq!(read.iter().filter(|event| event["kind"] == EventKind::DEVICE_LOST).count(), 1, "{how:?} stop={stop}: {read:?}");
+            assert_eq!(record, held_record, "{how:?} stop={stop}: the footprint of a held booking");
+        }
+    }
+}
+
+#[test]
+fn n98_a_loss_in_the_first_bookings_configure_gives_both_held_bookings_the_note() {
+    let (core, device, time, mut tx, frozen, events, _to_tx) = owner(1);
+    let clock = tx.clock.expect("a clock");
+    let (weak, applies) = (Arc::downgrade(&core), AtomicUsize::new(0));
+    probe(&core, "apply", move |_| {
+        if let (0, Some(core)) = (applies.fetch_add(1, Ordering::SeqCst), weak.upgrade()) {
+            core.device_lost("test: lost in the first configure");
+        }
+    });
+    give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F2, 1));
+    give(&mut tx, valued(&clock, 40_000, 4, 2, 2, F3, 1));
+    turns(&core, &time, &device, &mut tx, 1, 30, 1);
+    assert!(core.is_lost());
+    assert_eq!(held_keys(&tx), [20_000, 40_000]);
+    let mut log = Vec::new();
+    let read = read_events(&events, &mut log);
+    assert!(refusals_in(&read).is_empty(), "{read:?}");
+    shutdown_owner(&core, &mut tx, frozen);
+    assert_eq!(notes(&core), ["UR-26: cancelled by Provider::stop", "UR-26: cancelled by Provider::stop"]);
+    assert_eq!(device.calls().iter().filter(|call| call.starts_with("apply tx 0 rate=- ")).count(), 0, "{:?}", device.calls());
+    assert!(!sent(&device));
+}
+
+#[test]
+fn n98_a_loss_landing_during_a_refusal_leaves_the_refusal() {
+    let (core, device, time, mut tx, frozen, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
+    let clock = tx.clock.expect("a clock");
+    arm_loss_at(&core, "tx_configure_before_mark");
+    give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F2, 1));
+    turns(&core, &time, &device, &mut tx, 1, 15, 1);
+    assert!(core.is_lost());
+    assert!(held_keys(&tx).is_empty());
+    let mut log = Vec::new();
+    let read = read_events(&events, &mut log);
+    assert_eq!(refusals_in(&read).iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [json!(1)], "{read:?}");
+    assert_eq!(read.iter().filter(|event| event["kind"] == EventKind::DEVICE_LOST).count(), 1, "{read:?}");
+    shutdown_owner(&core, &mut tx, frozen);
+    assert!(notes(&core).is_empty(), "{:?}", lock(&core.rec).rejected);
 }
 
 #[test]
@@ -825,7 +945,9 @@ const C4_II: &str = r#"{
 "events": [
   {"kind":"ezsdr.DEVICE_LOST","payload":{"message":"test: lost between the configure's channels"}}
 ],
-"rejected": [],
+"rejected": [
+  {"kind":"tx_burst","reason":"UR-26: cancelled by Provider::stop"}
+],
 "stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
 "switches": [],
 "timing": [
@@ -1047,3 +1169,37 @@ const C9_C: &str = r#"{
   {"at":0,"message":"test: lost before the result's section","what":"device_lost"}
 ]
 }"#;
+
+#[test]
+fn n98_a_provider_stop_before_a_lost_configure_completes_cancels_the_booking_once() {
+    let (core, device, time, mut tx, frozen, events, to_tx) = owner(1);
+    let clock = tx.clock.expect("a clock");
+    let (weak, fired) = (Arc::downgrade(&core), AtomicBool::new(false));
+    probe(&core, "apply", move |_| {
+        let Some(stopper) = weak.upgrade() else { return };
+        if !fired.swap(true, Ordering::SeqCst) {
+            let at = stopper.now();
+            let mut streams = lock(&stopper.streams);
+            streams.stop = Some((at, StopMode::Orderly));
+            streams.end(&stopper, at, false, false);
+            stopper.release_streams(streams);
+            to_tx.send(TxCmd::Shutdown).unwrap();
+            stopper.device_lost("test: lost after Provider::stop");
+        }
+    });
+    give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F2, 1));
+    device_at(&core, &time, &device, 15 * MS);
+    assert!(tx.step(), "the configure turn");
+    assert!(matches!(tx.cmds.try_recv(), Ok(TxCmd::Shutdown)), "Provider::stop came during the configure");
+    assert_eq!(lock(&core.streams).holder(key0()), Holder::Free, "the configure's claim is back");
+    assert_eq!(mark(&core), None);
+    assert_eq!(held_keys(&tx), [20_000]);
+    shutdown_owner(&core, &mut tx, frozen);
+    let mut log = Vec::new();
+    let read = read_events(&events, &mut log);
+    assert!(refusals_in(&read).is_empty(), "{read:?}");
+    assert_eq!(read.iter().filter(|event| event["kind"] == EventKind::DEVICE_LOST).count(), 1, "{read:?}");
+    assert_eq!(notes(&core), ["UR-26: cancelled by Provider::stop"], "cancelled once: {:?}", lock(&core.rec).rejected);
+    assert_eq!(held_keys(&tx), Vec::<i64>::new());
+    assert!(!sent(&device), "{:?}", device.calls());
+}
