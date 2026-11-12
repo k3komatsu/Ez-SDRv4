@@ -3,11 +3,12 @@
 use std::collections::BTreeMap;
 
 use ezsdr_kernel::event::ActionId;
+use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_radio::CancelReason;
 use ezsdr_radio::staging::{
-    Booked, Bookings, OpId, Outcome, Overlap, Playing, Read, Refusal, Reopen, STOP_FRONT, Settle, Settled, Staging, Started, SwitchAccepted, SwitchOutcome, SwitchRefusal, TxBook, TxList, TxSend,
-    Until, closed_short_gap, ordinary_k, repeat_boundary, stop_bound, stop_fits,
+    Booked, Bookings, DeviceChain, DeviceEnd, DeviceSend, OpId, Outcome, Overlap, Playing, Read, Recovery, Refusal, Reopen, STOP_FRONT, Settle, Settled, Staging, Started, SwitchAccepted,
+    SwitchOutcome, SwitchRefusal, TxBook, TxList, TxSend, Until, closed_short_gap, ordinary_k, repeat_boundary, stop_bound, stop_fits,
 };
 
 fn key(name: &str) -> Key {
@@ -1629,7 +1630,7 @@ fn txbook_halt_cancels_an_open_booking_that_issued_nothing_and_keeps_one_that_di
         let mut book = open_book();
         if sent {
             let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
-            assert_eq!(book.complete(id, Outcome::Accepted(10)), Settle::Sent);
+            assert_eq!(book.complete(id, Outcome::Accepted(10), None), Settle::Sent);
         }
         book.list.held.insert(300, pl(9));
         book.list.halt(CancelReason::Stop);
@@ -1769,7 +1770,7 @@ fn txbook_complete_configure_with_a_send_in_flight_panics() {
 fn txbook_complete_with_a_configure_in_flight_panics() {
     let mut book = busy_book();
     let id = book.issue_configure(300, Some(10));
-    book.complete(id, Outcome::Accepted(10));
+    book.complete(id, Outcome::Accepted(10), None);
 }
 
 #[test]
@@ -1777,7 +1778,7 @@ fn txbook_complete_with_a_configure_in_flight_panics() {
 fn txbook_complete_reopen_with_a_configure_in_flight_panics() {
     let mut book = busy_book();
     let id = book.issue_configure(300, Some(10));
-    book.complete_reopen(id, Reopen::Reopened);
+    book.complete_reopen(id, Reopen::Reopened { front: None });
 }
 
 #[test]
@@ -1786,7 +1787,7 @@ fn txbook_end_open_with_an_operation_in_flight_panics() {
     let mut book = new_book();
     book.take(pl(7), 100);
     book.issue(SEND);
-    book.end_open();
+    book.end_open(DeviceEnd::Keep);
 }
 
 #[test]
@@ -1809,7 +1810,7 @@ fn txbook_a_completion_names_the_operation_in_flight() {
             "Send",
             |book| book.issue(SEND),
             |book, id, harmful| {
-                book.complete(id, if harmful { Outcome::Failed } else { Outcome::Accepted(10) });
+                book.complete(id, if harmful { Outcome::Failed } else { Outcome::Accepted(10) }, None);
             },
         ),
         (
@@ -1823,7 +1824,7 @@ fn txbook_a_completion_names_the_operation_in_flight() {
             "Reopen",
             |book| book.issue_reopen(),
             |book, id, harmful| {
-                book.complete_reopen(id, if harmful { Reopen::Failed } else { Reopen::Reopened });
+                book.complete_reopen(id, if harmful { Reopen::Failed } else { Reopen::Reopened { front: None } });
             },
         ),
     ];
@@ -1910,7 +1911,7 @@ fn txbook_a_failed_reopen_ends_the_open_booking_and_the_pending_switch() {
         let mut book = busy_book();
         if sent {
             let id = book.issue(SEND);
-            book.complete(id, Outcome::Accepted(10));
+            book.complete(id, Outcome::Accepted(10), None);
         }
         let mut manual = book.record.clone();
         manual.cancel_switch();
@@ -1926,7 +1927,7 @@ fn txbook_a_failed_reopen_ends_the_open_booking_and_the_pending_switch() {
 
 #[test]
 fn txbook_a_reopen_that_succeeds_or_is_interrupted_changes_nothing() {
-    for outcome in [Reopen::Reopened, Reopen::Interrupted] {
+    for outcome in [Reopen::Reopened { front: None }, Reopen::Interrupted { lost: false }] {
         let mut book = busy_book();
         let before = shape(&book);
         let id = book.issue_reopen();
@@ -1949,8 +1950,8 @@ fn txbook_complete_without_issue_panics() {
     // The second `complete` of one send is a `complete` with none issued.
     let mut book = open_book();
     let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
-    assert_eq!(book.complete(id, Outcome::Accepted(10)), Settle::Sent);
-    book.complete(id, Outcome::Accepted(10));
+    assert_eq!(book.complete(id, Outcome::Accepted(10), None), Settle::Sent);
+    book.complete(id, Outcome::Accepted(10), None);
 }
 
 #[test]
@@ -1967,7 +1968,7 @@ fn txbook_outcomes_give_the_cursors_the_executor_gives_today() {
     ] {
         let mut book = open_book();
         let id = book.issue(send);
-        assert_eq!(book.complete(id, outcome), settle, "{case}");
+        assert_eq!(book.complete(id, outcome, None), settle, "{case}");
         assert_eq!(book.open.as_ref().map(|open| (open.next, open.first)), next, "{case}");
         if next.is_some() {
             book.issue(send);
@@ -1985,9 +1986,9 @@ fn txbook_take_untake_and_end_open_keep_one_open_booking_and_change_no_record() 
     let held = book.list.held.remove(&100).unwrap();
     book.take(held, 100);
     let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
-    book.complete(id, Outcome::Accepted(10));
-    assert_eq!(book.end_open(), Some(pl(7)));
-    assert!(book.open.is_none() && book.end_open().is_none());
+    book.complete(id, Outcome::Accepted(10), None);
+    assert_eq!(book.end_open(DeviceEnd::Keep), Some(pl(7)));
+    assert!(book.open.is_none() && book.end_open(DeviceEnd::Keep).is_none());
     assert_eq!((&book.record, book.playing), (&record, playing), "ending the open booking with no outcome changes no record");
     assert!(settled(&mut book.record).is_empty(), "and settles no switch");
     book.take(pl(8), 200);
@@ -2135,19 +2136,272 @@ fn txbook_issue_starts_the_playing_repeat_and_a_switch_s_own_payload() {
     book.take(Pl { n: 0, id: Some(ActionId(5)), switch: false }, 0);
     let id = book.issue(TxSend { count: 10, device_count: 10, ends: true });
     assert_eq!(book.playing.map(|playing| playing.started), Some(false), "another booking's issue");
-    book.complete(id, Outcome::Accepted(10));
+    book.complete(id, Outcome::Accepted(10), None);
     assert_eq!(book.receive_switch(ActionId(2), 10, 0, 15, false, 0), Err(SwitchRefusal::NotStarted));
     book.take(Pl { n: 1, id: Some(ActionId(1)), switch: false }, 10);
     let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
     assert_eq!(book.playing.map(|playing| playing.started), Some(true), "R's first issue");
-    assert_eq!(book.complete(id, Outcome::Accepted(10)), Settle::Sent);
+    assert_eq!(book.complete(id, Outcome::Accepted(10), None), Settle::Sent);
     assert!(book.receive_switch(ActionId(2), 10, 0, 15, false, 0).is_ok());
     assert_eq!(book.playing.map(|playing| (playing.id, playing.started)), Some((ActionId(2), false)));
     book.advance(20);
     assert_eq!(book.receive_switch(ActionId(3), 10, 0, 35, false, 21), Err(SwitchRefusal::NotStarted), "S applied in the record, not issued");
-    book.end_open();
+    book.end_open(DeviceEnd::Keep);
     book.take(switch_pl(2, 2), 20);
     book.issue(TxSend { count: 10, device_count: 10, ends: false });
     assert_eq!(book.playing.map(|playing| (playing.id, playing.started)), Some((ActionId(2), true)), "S's own first issue");
     assert!(book.receive_switch(ActionId(3), 10, 0, 35, false, 21).is_ok());
+}
+
+// DeviceChain (note 49 stage E3b): the device burst the executor has open, its safe front and its recovery, one state with its transitions.
+
+const CLOCK_A: ClockDomainId = ClockDomainId::UTC;
+const CLOCK_B: ClockDomainId = ClockDomainId::HOST_MONOTONIC;
+
+/// The held tail's payload stands for the UHD Module's `Tail`.
+type Chain = DeviceChain<u8>;
+
+fn panics(f: impl FnOnce()) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err()
+}
+
+#[test]
+fn e3b_b1_device_chain_open_continue_close() {
+    let mut chain = Chain::default();
+    assert_eq!((chain.next(), chain.first(), chain.tail(), chain.front(), chain.recovery()), (None, None, None, None, Recovery::Clean));
+    assert!(!chain.burst_is_open() && !chain.continues_at(0));
+    assert!(panics(|| Chain::default().continue_device_burst(5, None)), "a continuation needs an open device burst");
+
+    chain.open_device_burst(1_000, 20, None);
+    assert_eq!((chain.next(), chain.first(), chain.tail()), (Some(20), Some(1_000), None));
+    assert!(chain.burst_is_open() && chain.continues_at(20) && !chain.continues_at(19) && !chain.continues_at(21));
+    assert!(
+        panics(|| {
+            let mut again = chain;
+            again.open_device_burst(2_000, 30, None)
+        }),
+        "a device burst opens only from closed"
+    );
+
+    chain.continue_device_burst(40, Some(7));
+    assert_eq!((chain.next(), chain.first(), chain.tail()), (Some(40), Some(1_000), Some(7)), "a continuation keeps the first sample and replaces the next sample and the tail");
+    chain.continue_device_burst(60, None);
+    assert_eq!((chain.next(), chain.first(), chain.tail()), (Some(60), Some(1_000), None), "a continuation without a tail drops the held one");
+
+    chain.advance_front(CLOCK_A, 50);
+    chain.close_device_burst();
+    assert_eq!((chain.next(), chain.first(), chain.tail(), chain.burst_is_open()), (None, None, None, false));
+    assert_eq!(chain.front(), Some((CLOCK_A, 50)), "the front is independent of the open device burst");
+    chain.open_device_burst(3_000, 90, Some(1));
+    assert_eq!((chain.first(), chain.next(), chain.tail()), (Some(3_000), Some(90), Some(1)), "it opens again after a close");
+}
+
+#[test]
+fn e3b_b2_underflowed_boundary() {
+    let mut chain = Chain::default();
+    assert!(!chain.underflowed(None) && !chain.underflowed(Some(5_000)), "no device burst is open: nothing underflows");
+    chain.open_device_burst(1_000, 20, None);
+    assert!(!chain.underflowed(Some(999)), "a tick before the first sample is the device burst before's (#93)");
+    assert!(chain.underflowed(Some(1_000)), "a tick at the first sample reaches it");
+    assert!(chain.underflowed(Some(1_001)));
+    assert!(chain.underflowed(None), "a report with no tick reaches the open device burst");
+    chain.close_device_burst();
+    assert!(!chain.underflowed(Some(1_001)) && !chain.underflowed(None));
+}
+
+#[test]
+fn e3b_b3_front_domains() {
+    let mut chain = Chain::default();
+    assert_eq!(chain.front(), None);
+    chain.advance_front(CLOCK_A, 50);
+    assert_eq!(chain.front(), Some((CLOCK_A, 50)), "the first front is stored");
+    chain.advance_front(CLOCK_A, 45);
+    assert_eq!(chain.front(), Some((CLOCK_A, 50)), "a front of the same domain never regresses");
+    chain.advance_front(CLOCK_A, 60);
+    assert_eq!(chain.front(), Some((CLOCK_A, 60)), "and it advances");
+    chain.advance_front(CLOCK_B, 3);
+    assert_eq!(chain.front(), Some((CLOCK_B, 3)), "a front of a new domain replaces the stored one even when lower");
+    chain.advance_front(CLOCK_A, 2);
+    assert_eq!(chain.front(), Some((CLOCK_A, 2)), "and back");
+}
+
+#[test]
+fn e3b_b4_recovery_transitions() {
+    let mut chain = Chain::default();
+    assert!(!chain.needs_reopen());
+    chain.mark_reopen_needed();
+    assert_eq!(chain.recovery(), Recovery::ReopenNeeded);
+    assert!(chain.needs_reopen());
+
+    chain.open_device_burst(0, 90, Some(1));
+    chain.reopen_succeeded();
+    assert_eq!(chain.recovery(), Recovery::Clean);
+    assert_eq!((chain.next(), chain.tail()), (Some(90), Some(1)), "a reopen that succeeded keeps the device burst");
+
+    chain.mark_reopen_needed();
+    chain.reopen_failed();
+    assert_eq!(chain.recovery(), Recovery::Clean);
+    assert!(chain.next().is_none() && chain.tail().is_none(), "a reopen that failed ends the device burst");
+
+    chain.open_device_burst(0, 95, Some(2));
+    chain.mark_reopen_needed();
+    chain.provider_stop();
+    assert_eq!(chain.recovery(), Recovery::Clean, "Provider::stop ends pending reopen work");
+    assert_eq!((chain.next(), chain.tail()), (Some(95), Some(2)), "and leaves the device burst");
+
+    chain.mark_reopen_needed();
+    chain.advance_front(CLOCK_A, 7);
+    chain.lose();
+    assert_eq!(chain.recovery(), Recovery::Clean);
+    assert!(chain.next().is_none() && chain.tail().is_none(), "a loss ends the device burst and the recovery");
+    assert_eq!(chain.front(), Some((CLOCK_A, 7)), "and leaves the front");
+}
+
+#[test]
+fn e3b_b7_cursor_is_the_open_booking_s_next_sample_else_the_device_burst_s() {
+    let book = |open: Option<i64>, device: Option<i64>| {
+        let mut book = TxBook::<Pl, u8>::new(Started::AtFirstIssue);
+        if let Some(next) = open {
+            book.take(pl(1), next);
+        }
+        if let Some(next) = device {
+            book.device.open_device_burst(0, next, None);
+        }
+        book.cursor()
+    };
+    assert_eq!(book(None, None), None);
+    assert_eq!(book(Some(100), None), Some(100));
+    assert_eq!(book(None, Some(40)), Some(40), "the held-tail wait: a device burst is open and no booking");
+    assert_eq!(book(Some(100), Some(40)), Some(100), "the open booking's next sample wins");
+}
+
+type ChainLine = (Option<i64>, Option<i64>, Option<u8>, Option<(ClockDomainId, i64)>, Recovery);
+
+/// The chain as the tests below compare it: the device burst's first and next samples and tail, the front and the recovery.
+fn chain_line(chain: &Chain) -> ChainLine {
+    (chain.first(), chain.next(), chain.tail(), chain.front(), chain.recovery())
+}
+
+/// A book with a booking open at sample 100, over a device burst that is open (first 1_000, next 100, tail 3) or closed, with the front 50 in `CLOCK_A`.
+fn device_book(device_open: bool) -> TxBook<Pl, u8> {
+    let mut book = TxBook::<Pl, u8>::new(Started::AtFirstIssue);
+    book.take(pl(1), 100);
+    if device_open {
+        book.device.open_device_burst(1_000, 100, Some(3));
+    }
+    book.device.advance_front(CLOCK_A, 50);
+    book
+}
+
+fn send_of(device: Option<DeviceSend<u8>>, send: TxSend, outcome: Outcome, device_open: bool) -> (Settle, TxBook<Pl, u8>) {
+    let mut book = device_book(device_open);
+    let id = book.issue(send);
+    let settle = book.complete(id, outcome, device);
+    (settle, book)
+}
+
+#[test]
+fn e3b_b5_complete_applies_the_device_effect() {
+    let whole = TxSend { count: 10, device_count: 10, ends: false };
+    let effect = |sob, eob, tail, front| DeviceSend { sob, eob, first: 777, next: 110, tail, front };
+    let front = Some((CLOCK_A, 90));
+    let line = |book: &TxBook<Pl, u8>| chain_line(&book.device);
+
+    // A whole send starts the device burst at its own first tick, continues the open one (its first tick kept) or ends it; the tail it holds
+    // replaces the old one, and only an ending send moves the front.
+    for (case, device_open, effect, expected) in [
+        ("start, tail held", false, effect(true, false, Some(1), None), (Some(777), Some(110), Some(1), Some((CLOCK_A, 50)), Recovery::Clean)),
+        ("start, no tail", false, effect(true, false, None, None), (Some(777), Some(110), None, Some((CLOCK_A, 50)), Recovery::Clean)),
+        ("continue, tail replaced", true, effect(false, false, Some(2), None), (Some(1_000), Some(110), Some(2), Some((CLOCK_A, 50)), Recovery::Clean)),
+        ("continue, tail dropped", true, effect(false, false, None, None), (Some(1_000), Some(110), None, Some((CLOCK_A, 50)), Recovery::Clean)),
+        ("end of a continued device burst", true, effect(false, true, None, front), (None, None, None, Some((CLOCK_A, 90)), Recovery::Clean)),
+        ("a short burst, start and end together", false, effect(true, true, None, front), (None, None, None, Some((CLOCK_A, 90)), Recovery::Clean)),
+        ("an ending send with no front", true, effect(false, true, None, None), (None, None, None, Some((CLOCK_A, 50)), Recovery::Clean)),
+        ("a front that does not advance", true, effect(false, true, None, Some((CLOCK_A, 40))), (None, None, None, Some((CLOCK_A, 50)), Recovery::Clean)),
+    ] {
+        let (settle, book) = send_of(Some(effect), whole, Outcome::Accepted(10), device_open);
+        assert_eq!(settle, Settle::Sent, "{case}");
+        assert_eq!(line(&book), expected, "{case}");
+        assert_eq!(book.open.as_ref().map(|open| (open.next, open.first)), Some((110, false)), "{case}: the booking advances with it");
+    }
+
+    // The booking's last send ends it, with the same effect.
+    let (settle, book) = send_of(Some(effect(false, true, None, front)), TxSend { ends: true, ..whole }, Outcome::Accepted(10), true);
+    assert_eq!((settle, book.open.is_none(), line(&book)), (Settle::Sent, true, (None, None, None, Some((CLOCK_A, 90)), Recovery::Clean)));
+
+    // A Provider that does not drive the chain passes none.
+    let (_, book) = send_of(None, whole, Outcome::Accepted(10), true);
+    assert_eq!(line(&book), (Some(1_000), Some(100), Some(3), Some((CLOCK_A, 50)), Recovery::Clean));
+
+    // A send that came up short, failed, or whose held tail failed leaves the chain as it was: the abandon that follows ends it.
+    for (case, outcome) in [("short", Outcome::Accepted(4)), ("failed", Outcome::Failed), ("the tail before it failed", Outcome::TailShort)] {
+        for device_open in [false, true] {
+            let before = line(&device_book(device_open));
+            let (settle, book) = send_of(Some(effect(false, true, Some(9), front)), whole, outcome, device_open);
+            assert!(matches!(settle, Settle::Abandon { .. }), "{case}");
+            assert_eq!(line(&book), before, "{case}, device burst open {device_open}");
+        }
+    }
+}
+
+#[test]
+fn e3b_b6_end_open_applies_the_device_end() {
+    let line = |book: &TxBook<Pl, u8>| chain_line(&book.device);
+    let sent = DeviceEnd::Sent { domain: CLOCK_A, front: 90 };
+    for (case, end, expected) in [
+        ("kept", DeviceEnd::Keep, (Some(1_000), Some(100), Some(3), Some((CLOCK_A, 50)), Recovery::ReopenNeeded)),
+        ("continued by a held booking", DeviceEnd::Continue { next: 140 }, (Some(1_000), Some(140), Some(3), Some((CLOCK_A, 50)), Recovery::ReopenNeeded)),
+        ("closed with nothing sent", DeviceEnd::Closed, (None, None, None, Some((CLOCK_A, 50)), Recovery::ReopenNeeded)),
+        ("closed by a close the device took", sent, (None, None, None, Some((CLOCK_A, 90)), Recovery::ReopenNeeded)),
+        ("closed by a close that did not complete", DeviceEnd::Uncertain, (None, None, None, Some((CLOCK_A, 50)), Recovery::ReopenNeeded)),
+        ("lost", DeviceEnd::Lost, (None, None, None, Some((CLOCK_A, 50)), Recovery::Clean)),
+    ] {
+        let mut book = device_book(true);
+        book.device.mark_reopen_needed();
+        assert_eq!(book.end_open(end), Some(pl(1)), "{case}");
+        assert!(book.open.is_none(), "{case}");
+        assert_eq!(line(&book), expected, "{case}");
+    }
+
+    // An uncertain close marks the recovery on a clean chain; a loss clears a pending one; a front never regresses.
+    let mut book = device_book(true);
+    book.end_open(DeviceEnd::Uncertain);
+    assert_eq!((book.device.recovery(), book.device.burst_is_open()), (Recovery::ReopenNeeded, false));
+    let mut book = device_book(true);
+    book.end_open(DeviceEnd::Sent { domain: CLOCK_A, front: 40 });
+    assert_eq!(book.device.front(), Some((CLOCK_A, 50)));
+
+    // With no open booking (the held-tail wait) the device burst still ends, and the book says there was no booking to end.
+    let mut book = device_book(true);
+    book.end_open(DeviceEnd::Keep);
+    assert_eq!(book.end_open(sent), None);
+    assert_eq!(line(&book), (None, None, None, Some((CLOCK_A, 90)), Recovery::Clean));
+
+    // An operation in flight refuses the end before the chain changes.
+    let mut book = device_book(true);
+    book.issue(SEND);
+    let before = line(&book);
+    assert!(panics(|| {
+        book.end_open(DeviceEnd::Closed);
+    }));
+    assert_eq!(line(&book), before);
+}
+
+#[test]
+fn e3b_b6_complete_reopen_applies_the_device_effect() {
+    let line = |book: &TxBook<Pl, u8>| chain_line(&book.device);
+    for (case, outcome, open_ends, expected) in [
+        ("reopened with the flush's front", Reopen::Reopened { front: Some((CLOCK_A, 90)) }, false, (Some(1_000), Some(100), Some(3), Some((CLOCK_A, 90)), Recovery::Clean)),
+        ("reopened, the flush not acknowledged", Reopen::Reopened { front: None }, false, (Some(1_000), Some(100), Some(3), Some((CLOCK_A, 50)), Recovery::Clean)),
+        ("interrupted by Provider::stop", Reopen::Interrupted { lost: false }, false, (Some(1_000), Some(100), Some(3), Some((CLOCK_A, 50)), Recovery::Clean)),
+        ("interrupted by a loss", Reopen::Interrupted { lost: true }, false, (None, None, None, Some((CLOCK_A, 50)), Recovery::Clean)),
+        ("failed", Reopen::Failed, true, (None, None, None, Some((CLOCK_A, 50)), Recovery::Clean)),
+    ] {
+        let mut book = device_book(true);
+        book.device.mark_reopen_needed();
+        let id = book.issue_reopen();
+        assert_eq!(book.complete_reopen(id, outcome), open_ends.then(|| pl(1)), "{case}");
+        assert_eq!(book.open.is_none(), open_ends, "{case}");
+        assert_eq!(line(&book), expected, "{case}");
+    }
 }

@@ -6011,8 +6011,8 @@
    "id": "P509",
    "name": "a transmit cold switch discards its held last sample (UR-23, RM-34)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                if self.close_device_burst(tail, cursor, clock) {",
-   "new": "                if self.close_device_burst(None, cursor, clock) {",
+   "old": "end = self.close_device_burst(tail, cursor, clock, CLOSE_GAP);",
+   "new": "end = self.close_device_burst(None, cursor, clock, CLOSE_GAP);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played"
@@ -6901,8 +6901,8 @@
    "id": "P640",
    "name": "uhd-tx's two-zero close fronts at close_start + 2, not close_start + 5 (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP));",
-    "new": "self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
+    "old": "end = self.close_device_burst(tail, cursor, clock, CLOSE_GAP);",
+    "new": "end = self.close_device_burst(tail, cursor, clock, 0);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
@@ -6911,8 +6911,8 @@
     "id": "P641",
     "name": "an empty Stop EOB needs the gap after its two closing samples (UR-23)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP));",
-    "new": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP - 1));",
+    "old": "end = self.close_device_burst(tail, cursor, clock, CLOSE_GAP);",
+    "new": "end = self.close_device_burst(tail, cursor, clock, CLOSE_GAP - 1);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
@@ -6921,8 +6921,8 @@
    "id": "P642",
    "name": "Stop retains the UHD cursor as a front for a later burst (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP));",
-    "new": "self.chain.advance_front(clock.domain, close_start);",
+    "old": "front: close_front(first, CLOSE_SAMPLES, gap)",
+    "new": "front: first",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
@@ -6991,8 +6991,8 @@
    "id": "P657",
    "name": "an abandoned send's front is its padded end plus the gap, not its padded end (UR-22, UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "cursor.saturating_add(2).saturating_add(self.short_gap(clock))",
-    "new": "cursor.saturating_add(2)",
+    "old": "end = self.close_device_burst(None, cursor, clock, self.short_gap(clock));",
+    "new": "end = self.close_device_burst(None, cursor, clock, 0);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
@@ -7022,8 +7022,8 @@
       "id": "P663",
   "name": "a short send advances recovery by the samples accepted (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "let result = self.abandon(was_open || accepted > 0, Some(cursor), !device_eob);",
-      "new": "let result = self.abandon(was_open || accepted > 0, Some(next), !device_eob);",
+      "old": "let result = self.abandon(was_open || accepted > 0, Some(cursor), device_eob);",
+      "new": "let result = self.abandon(was_open || accepted > 0, Some(next), device_eob);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
@@ -7032,8 +7032,8 @@
       "id": "P664",
   "name": "a failed send conservatively advances recovery by the attempted samples (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "let result = self.abandon(true, Some(cursor), !device_eob);",
-      "new": "let result = self.abandon(true, Some(next), !device_eob);",
+      "old": "let result = self.abandon(true, Some(cursor), device_eob);",
+      "new": "let result = self.abandon(true, Some(next), device_eob);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
@@ -7052,8 +7052,8 @@
       "id": "P666",
   "name": "a failed continuation-tail send does not advance past B's cursor (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "return self.abandon(true, Some(cursor), true);",
-      "new": "return self.abandon(true, Some(cursor.saturating_add(1)), true);",
+      "old": "return self.abandon(true, Some(cursor), false);",
+      "new": "return self.abandon(true, Some(cursor.saturating_add(1)), false);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_a_continuation_tail_is_counted_at_recovery"
@@ -7424,8 +7424,8 @@
    "id": "P710",
    "name": "the measurement admission lead replaces the independent UHD device lead",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "    fn dispatch_start(&mut self, clock: Clock, mut held: Held) -> Option<Held> {\n        let lead = self.core.device_lead();",
-   "new": "    fn dispatch_start(&mut self, clock: Clock, mut held: Held) -> Option<Held> {\n        let lead = self.core.ticks(self.core.description.timing.min_timed_command_lead_ns);",
+   "old": "    fn dispatch_start(&mut self, clock: Clock, mut held: Held, front: Option<(ClockDomainId, i64)>) -> Option<Held> {\n        let lead = self.core.device_lead();",
+   "new": "    fn dispatch_start(&mut self, clock: Clock, mut held: Held, front: Option<(ClockDomainId, i64)>) -> Option<Held> {\n        let lead = self.core.ticks(self.core.description.timing.min_timed_command_lead_ns);",
    "old2": "policy.decide(&self.core.clocks, TimePoint::new(clock.domain, k), TimePoint::new(clock.domain, now), Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS))",
    "new2": "policy.decide(&self.core.clocks, TimePoint::new(clock.domain, k), TimePoint::new(clock.domain, now), Duration::new(ClockDomainId::HOST_MONOTONIC, self.core.description.timing.min_timed_command_lead_ns))",
    "crate": "ezsdr-radio-uhd",
@@ -10269,8 +10269,8 @@
       "id": "P1168",
      "name": "a partial tiled send is abandoned without replaying its suffix",
      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "let result = self.abandon(was_open || accepted > 0, Some(cursor), !device_eob);",
-      "new": "let result = self.abandon(was_open || accepted > 0, Some(next), !device_eob);",
+      "old": "let result = self.abandon(was_open || accepted > 0, Some(cursor), device_eob);",
+      "new": "let result = self.abandon(was_open || accepted > 0, Some(next), device_eob);",
      "crate": "ezsdr-radio-uhd",
      "test_bin": "lib",
      "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
@@ -10289,8 +10289,8 @@
       "id": "P1172",
       "name": "an uncertain EOB close is recovered before later timed data (D9b-1a T2/T3)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "        if self.chain.needs_reopen() {\n            return self.reopen_streamer();\n        }",
-       "new": "        if false && self.chain.needs_reopen() {\n            return self.reopen_streamer();\n        }",
+       "old": "if streams.stream(key).book.device.needs_reopen() { return self.reopen_streamer(streams); }",
+       "new": "if false && streams.stream(key).book.device.needs_reopen() { return self.reopen_streamer(streams); }",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_22_a_failed_eob_close_recovers_with_flush_before_the_next_timed_burst"
@@ -10379,8 +10379,8 @@
        "id": "P1186",
         "name": "a held-tail EOB rejects the sample before its safe start (UR-23)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP));",
-       "new": "self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
+       "old": "end = self.close_device_burst(tail, cursor, clock, CLOSE_GAP);",
+       "new": "end = self.close_device_burst(tail, cursor, clock, 0);",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played"
@@ -10459,8 +10459,8 @@
        "id": "P1194",
        "name": "Stop or device loss ends an uncertain streamer reopen (D9b-1a)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "            if streams.stop.is_some() || core.is_lost() {\n                if core.is_lost() { self.chain.lose(); } else { self.chain.provider_stop(); }\n                return false;\n            }",
-       "new": "            if streams.stop.is_some() || core.is_lost() {\n                return false;\n            }",
+       "old": "if streams.stop.is_some() || core.is_lost() {\n                let device = &mut streams.stream_mut(key).book.device;\n                if core.is_lost() { device.lose(); } else { device.provider_stop(); }\n                return false;\n            }",
+       "new": "if streams.stop.is_some() || core.is_lost() {\n                return false;\n            }",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_22_uncertain_reopen_waits_for_owner_claim_and_stops_on_stop_or_loss"
@@ -10499,7 +10499,7 @@
         "id": "P1198",
         "name": "payload waits while TX streamer recovery is pending (D9b-1a fix 2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "if self.chain.needs_reopen() { return false; }",
+        "old": "if book.device.needs_reopen() { return false; }",
         "new": "if false { return false; }",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
@@ -10510,7 +10510,7 @@
         "name": "ordinary TX Stop preserves pending recovery (D9b-1a fix 2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
         "old": "self.end_open(true); let reason = match cancel_reason {",
-        "new": "self.end_open(true); self.chain.provider_stop(); let reason = match cancel_reason {",
+        "new": "self.end_open(true); self.with_device(DeviceChain::provider_stop); let reason = match cancel_reason {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_tx_stop_preserves_recovery_for_later_bursts"
@@ -10808,29 +10808,29 @@
       {
         "id": "P1296",
         "name": "closing the device burst clears its cursor and tail (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "    fn close_device_burst(&mut self) { self.burst = DeviceBurst::Closed; }",
-        "new": "    fn close_device_burst(&mut self) {}",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "tx_chain_device_burst_open_matrix"
+        "file": "crates/ezsdr-radio/src/staging.rs",
+        "old": "pub fn close_device_burst(&mut self) { self.burst = DeviceBurst::Closed; }",
+        "new": "pub fn close_device_burst(&mut self) {}",
+        "crate": "ezsdr-radio",
+        "test_bin": "staging",
+        "filter": "e3b_b1_device_chain_open_continue_close"
       },
       {
         "id": "P1297",
         "name": "same-domain safe fronts never regress (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "        let sample = self.front.filter(|(old_domain, _)| *old_domain == domain).map_or(sample, |(_, old)| old.max(sample));",
-        "new": "        let sample = sample;",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "tx_chain_device_burst_open_matrix"
+        "file": "crates/ezsdr-radio/src/staging.rs",
+        "old": "let sample = self.front.filter(|(old_domain, _)| *old_domain == domain).map_or(sample, |(_, old)| old.max(sample));",
+        "new": "let sample = sample;",
+        "crate": "ezsdr-radio",
+        "test_bin": "staging",
+        "filter": "e3b_b3_front_domains"
       },
       {
         "id": "P1298",
         "name": "successful non-lost reopen ends recovery even when T3 is unacknowledged (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "        if result.is_ok() { self.chain.reopen_succeeded(); }",
-        "new": "        if result.is_ok() {}",
+        "file": "crates/ezsdr-radio/src/staging.rs",
+        "old": "self.device.reopen_succeeded(); None",
+        "new": "None",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
@@ -10838,19 +10838,19 @@
       {
         "id": "P1299",
         "name": "loss clears the per-streamer burst cursor and tail (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "    fn lose(&mut self) {\n        self.burst = DeviceBurst::Closed;\n        self.recovery = Recovery::Clean;\n    }",
-        "new": "    fn lose(&mut self) {\n        self.recovery = Recovery::Clean;\n    }",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "tx_chain_recovery_transitions"
+        "file": "crates/ezsdr-radio/src/staging.rs",
+        "old": "pub fn lose(&mut self) {\n        self.burst = DeviceBurst::Closed;\n        self.recovery = Recovery::Clean;\n    }",
+        "new": "pub fn lose(&mut self) {\n        self.recovery = Recovery::Clean;\n    }",
+        "crate": "ezsdr-radio",
+        "test_bin": "staging",
+        "filter": "e3b_b4_recovery_transitions"
       },
       {
         "id": "P1302",
         "name": "Provider::stop clears recovery only after ending the open burst (L2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "let cancelled = self.with_book(TxBook::cancel_all); self.stop_now(ezsdr_radio::CancelReason::ProviderStop, cancelled); self.chain.provider_stop();",
-        "new": "self.chain.provider_stop(); let cancelled = self.with_book(TxBook::cancel_all); self.stop_now(ezsdr_radio::CancelReason::ProviderStop, cancelled);",
+        "old": "let cancelled = self.with_book(TxBook::cancel_all); self.stop_now(ezsdr_radio::CancelReason::ProviderStop, cancelled); self.with_device(DeviceChain::provider_stop);",
+        "new": "self.with_device(DeviceChain::provider_stop); let cancelled = self.with_book(TxBook::cancel_all); self.stop_now(ezsdr_radio::CancelReason::ProviderStop, cancelled);",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_26_provider_stop_ends_recovery_after_stop_and_keeps_shutdown_report_reads"
@@ -10858,9 +10858,9 @@
       {
         "id": "P1303",
         "name": "Stop during a claimed reopen clears pending recovery without refusal (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "Reopen::Interrupted => self.chain.provider_stop(), } streams.give_back(claim);",
-        "new": "Reopen::Interrupted => {} } streams.give_back(claim);",
+        "file": "crates/ezsdr-radio/src/staging.rs",
+        "old": "Reopen::Interrupted { lost: false } => { self.device.provider_stop(); None }",
+        "new": "Reopen::Interrupted { lost: false } => { None }",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_stop_and_loss_during_owner_recovery_release_the_claim"
@@ -10868,9 +10868,9 @@
       {
         "id": "P1304",
         "name": "loss during a claimed reopen ends recovery without further device work (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "Reopen::Interrupted if core.is_lost() => self.chain.lose(),",
-        "new": "Reopen::Interrupted if core.is_lost() => {}",
+        "file": "crates/ezsdr-radio/src/staging.rs",
+        "old": "Reopen::Interrupted { lost: true } => { self.device.lose(); None }",
+        "new": "Reopen::Interrupted { lost: true } => { None }",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_stop_and_loss_during_owner_recovery_release_the_claim"
@@ -10879,8 +10879,8 @@
         "id": "P1305",
         "name": "the TX owner returns its claim after interrupted recovery (L2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "Reopen::Interrupted => self.chain.provider_stop(), } streams.give_back(claim); }",
-        "new": "Reopen::Interrupted => self.chain.provider_stop(), } }",
+        "old": "halted = true; } streams.give_back(claim); }",
+        "new": "halted = true; } }",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_stop_and_loss_during_owner_recovery_release_the_claim"
@@ -10898,29 +10898,29 @@
       {
         "id": "P1309",
         "name": "Provider::stop ends pending reopen work (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "    fn provider_stop(&mut self) { self.recovery = Recovery::Clean; }",
-        "new": "    fn provider_stop(&mut self) {}",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "tx_chain_recovery_transitions"
+        "file": "crates/ezsdr-radio/src/staging.rs",
+        "old": "pub fn provider_stop(&mut self) { self.recovery = Recovery::Clean; }",
+        "new": "pub fn provider_stop(&mut self) {}",
+        "crate": "ezsdr-radio",
+        "test_bin": "staging",
+        "filter": "e3b_b4_recovery_transitions"
       },
       {
         "id": "P1311",
         "name": "a front from another clock domain is replaced (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "        let sample = self.front.filter(|(old_domain, _)| *old_domain == domain).map_or(sample, |(_, old)| old.max(sample));",
-        "new": "        let sample = self.front.map_or(sample, |(_, old)| old.max(sample));",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "tx_chain_device_burst_open_matrix"
+        "file": "crates/ezsdr-radio/src/staging.rs",
+        "old": "let sample = self.front.filter(|(old_domain, _)| *old_domain == domain).map_or(sample, |(_, old)| old.max(sample));",
+        "new": "let sample = self.front.map_or(sample, |(_, old)| old.max(sample));",
+        "crate": "ezsdr-radio",
+        "test_bin": "staging",
+        "filter": "e3b_b3_front_domains"
       },
       {
         "id": "P1312",
         "name": "only a fully acknowledged T3 advances the front (L2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "if flush.acknowledged {",
-        "new": "if true {",
+        "old": "(Ok(flush), Some(clock)) if flush.acknowledged =>",
+        "new": "(Ok(flush), Some(clock)) if true =>",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
@@ -10928,29 +10928,29 @@
       {
         "id": "P1313",
         "name": "opening a device burst stores its cursor and held tail (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "    fn open_device_burst(&mut self, first: i64, next: i64, tail: Option<Tail>) {\n        assert!(matches!(self.burst, DeviceBurst::Closed));\n        self.burst = DeviceBurst::Open { first, next, tail };\n    }",
-        "new": "    fn open_device_burst(&mut self, first: i64, next: i64, tail: Option<Tail>) {\n        assert!(matches!(self.burst, DeviceBurst::Closed));\n        self.burst = DeviceBurst::Closed;\n    }",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "tx_chain_device_burst_open_matrix"
+        "file": "crates/ezsdr-radio/src/staging.rs",
+        "old": "pub fn open_device_burst(&mut self, first: i64, next: i64, tail: Option<T>) {\n        assert!(matches!(self.burst, DeviceBurst::Closed));\n        self.burst = DeviceBurst::Open { first, next, tail };\n    }",
+        "new": "pub fn open_device_burst(&mut self, first: i64, next: i64, tail: Option<T>) {\n        assert!(matches!(self.burst, DeviceBurst::Closed));\n        self.burst = DeviceBurst::Closed;\n    }",
+        "crate": "ezsdr-radio",
+        "test_bin": "staging",
+        "filter": "e3b_b1_device_chain_open_continue_close"
       },
       {
         "id": "P1314",
         "name": "continuing a device burst preserves its held tail (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "    fn continue_device_burst(&mut self, next: i64, tail: Option<Tail>) {\n        let DeviceBurst::Open { first, .. } = self.burst else { panic!(\"a device burst is open\") };\n        self.burst = DeviceBurst::Open { first, next, tail };\n    }",
-        "new": "    fn continue_device_burst(&mut self, next: i64, tail: Option<Tail>) {\n        let DeviceBurst::Open { first, .. } = self.burst else { panic!(\"a device burst is open\") };\n        self.burst = DeviceBurst::Open { first, next, tail: None };\n    }",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "tx_chain_device_burst_open_matrix"
+        "file": "crates/ezsdr-radio/src/staging.rs",
+        "old": "pub fn continue_device_burst(&mut self, next: i64, tail: Option<T>) {\n        let DeviceBurst::Open { first, .. } = self.burst else { panic!(\"a device burst is open\") };\n        self.burst = DeviceBurst::Open { first, next, tail };\n    }",
+        "new": "pub fn continue_device_burst(&mut self, next: i64, tail: Option<T>) {\n        let DeviceBurst::Open { first, .. } = self.burst else { panic!(\"a device burst is open\") };\n        self.burst = DeviceBurst::Open { first, next, tail: None };\n    }",
+        "crate": "ezsdr-radio",
+        "test_bin": "staging",
+        "filter": "e3b_b1_device_chain_open_continue_close"
       },
       {
         "id": "P1315",
         "name": "a non-lost payload EOB error does not restore recovery after concurrent loss (L2 fix)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "                    self.core.reject_note(json!({ \"call\": \"tx_close\", \"stream\": self.k, \"error\": error.message }));\n                    if self.core.is_lost() { self.chain.lose(); } else { self.chain.mark_reopen_needed(); }",
-        "new": "                    self.core.reject_note(json!({ \"call\": \"tx_close\", \"stream\": self.k, \"error\": error.message }));\n                    if error.lost { self.chain.lose(); } else { self.chain.mark_reopen_needed(); }",
+        "old": "if self.core.is_lost() { end = DeviceEnd::Lost; } else if device_open && !eob_failed {",
+        "new": "if self.core.is_lost() && !eob_failed { end = DeviceEnd::Lost; } else if device_open && !eob_failed {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_29_non_lost_payload_eob_error_after_concurrent_loss_does_not_reopen"
@@ -12825,8 +12825,8 @@
       "id": "N48S1-02",
       "name": "the reopen front is the flush end plus the gap, plus two (UR-22, TBD-d2)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "clock.at_or_after(tick.saturating_sub(1)).saturating_add(self.short_gap(clock))",
-      "new": "clock.at_or_after(tick.saturating_sub(1)).saturating_add(self.short_gap(clock)).saturating_add(2)",
+      "old": "close_front(clock.at_or_after(tick.saturating_sub(1)), 0, self.short_gap(clock))",
+      "new": "close_front(clock.at_or_after(tick.saturating_sub(1)), 2, self.short_gap(clock))",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_22_a_failed_one_sample_padded_eob_is_not_safe_until_flush_recovery"
@@ -12875,8 +12875,8 @@
       "id": "N48S1-08",
       "name": "the restart after a padded close is one sample after its payload (UR-23, D9b-1a)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "self.chain.advance_front(clock.domain, next.saturating_add(pad as i64 + gap));",
-      "new": "self.chain.advance_front(clock.domain, next.saturating_add(1));",
+      "old": "front: plan.front(next, self.short_gap(clock)).map(|front| (clock.domain, front))",
+      "new": "front: plan.device_eob.then(|| (clock.domain, end.saturating_add(1)))",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_23_a_one_sample_burst_restarts_after_its_padded_device_burst"
@@ -12905,7 +12905,7 @@
       "id": "N48S1-14",
       "name": "a first send that waited past its device lead is sent instead of judged by its late policy (UR-21, FS-5)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "let late_start = first && !self.chain.continues_at(next) && !matches!(self.start_outcome(clock, k, policy), Ok(LateOutcome::OnTime {}));",
+      "old": "let late_start = first && !device.continues_at(next) && !matches!(self.start_outcome(clock, k, policy), Ok(LateOutcome::OnTime {}));",
       "new": "let late_start = false;",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
@@ -13004,9 +13004,9 @@
   {
     "id": "N-11",
     "name": "a failed nonterminal reopen does not mark the chain (UR-22, S2a-ii)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.chain.reopen_failed();\n                halted = true;",
-    "new": "halted = true;",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.device.reopen_failed(); open",
+    "new": "open",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
@@ -13770,8 +13770,8 @@
     "id": "N47S4-09a",
     "name": "the owner's guard ignores the previous device burst's end (the guard is dropped, owner guard (a))",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let previous_end = self.chain.front().filter(|(domain, _)| *domain == clock.domain).map(|(_, sample)| sample);",
-    "new": "let previous_end: Option<i64> = None;",
+    "old": "let previous_end = device.front().filter(|(domain, _)| *domain == clock.domain).map(|(_, sample)| sample);",
+    "new": "let previous_end: Option<i64> = device.front().and(None);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_value_waits_for_a_burst_moved_at_dispatch_past_its_booked_end"
@@ -13780,8 +13780,8 @@
     "id": "N47S4-09b",
     "name": "a one-sample padded burst's device end is its payload end (owner guard (b))",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "next.saturating_add(pad as i64 + gap)",
-    "new": "next.saturating_add(1)",
+    "old": "plan.front(next, self.short_gap(clock))",
+    "new": "plan.device_eob.then(|| end.saturating_add(1))",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_value_waits_for_a_padded_one_sample_burst"
@@ -13790,8 +13790,8 @@
     "id": "N47S4-09c",
     "name": "a Stop's closing two samples are not counted in the device end (owner guard (c), m9)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(2 + CLOSE_GAP));",
-    "new": "self.chain.advance_front(clock.domain, close_start);",
+    "old": "front: close_front(first, CLOSE_SAMPLES, gap)",
+    "new": "front: first",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_value_waits_for_a_stop_s_held_tail"
@@ -13801,7 +13801,7 @@
     "name": "the late policy decides the burst before the configure, not after it (S8)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
     "old": "Values::Configure(generation) => return self.configure_turn(clock, k, generation),",
-    "new": "Values::Configure(generation) => { let held = self.take_held(k).expect(\"the first key\"); let Some(held) = self.dispatch_start(clock, held) else { return true }; let k = held.k; self.hold(held); return self.configure_turn(clock, k, generation); }",
+    "new": "Values::Configure(generation) => { let held = self.take_held(k).expect(\"the first key\"); let Some(held) = self.dispatch_start(clock, held, device.front()) else { return true }; let k = held.k; self.hold(held); return self.configure_turn(clock, k, generation); }",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_25_a_slow_configure_makes_a_burst_late_by_its_policy"
@@ -13977,9 +13977,9 @@
   {
     "id": "N47S5-02",
     "name": "5a: a closed burst of 4 to 32 samples fronts at its transmitted end, not the gap past it (RM-15)",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "start.checked_add(len.max(4))?.checked_add(gap?)",
-    "new": "Some(start.checked_add(len.max(4))?)",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "checked_close_front(start, len.max(rules.min_first_send), gap?)",
+    "new": "Some(start.checked_add(len.max(rules.min_first_send))?)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_closed_burst_front_is_end_plus_gap"
@@ -13987,9 +13987,9 @@
   {
     "id": "N47S5-03",
     "name": "5a: a burst of 1 to 3 samples fronts the gap past start plus 3, not past start plus 4 (RM-15, the padded first send)",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "start.checked_add(len.max(4))?.checked_add(gap?)",
-    "new": "start.checked_add(len.max(3))?.checked_add(gap?)",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "checked_close_front(start, len.max(rules.min_first_send), gap?)",
+    "new": "checked_close_front(start, len.max(3), gap?)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_1_to_3_sample_burst_front_is_transmitted_end_plus_gap"
@@ -13997,9 +13997,9 @@
   {
     "id": "N47S5-04",
     "name": "5a: a held tail fronts at its end plus 1, not plus 4 (RM-15)",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) if joined || len > PACKETS.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),",
-    "new": "Some(len) if joined || len > PACKETS.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT - 1),",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "Some(len) if joined || len > rules.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),",
+    "new": "Some(len) if joined || len > rules.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT - 1),",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_held_tail_front_is_end_plus_four"
@@ -14067,7 +14067,7 @@
   {
     "id": "N47S5-11",
     "name": "5a: a repeat's region ends at its first sample, not at infinity (RM-16)",
-    "file": "crates/ezsdr-radio/src/staging.rs",
+    "file": "crates/ezsdr-radio/src/segment.rs",
     "old": "None => Some(i64::MAX),",
     "new": "None => Some(start),",
     "crate": "ezsdr-radio",
@@ -14108,7 +14108,7 @@
     "id": "N47S5-16",
     "name": "5b-1: a Stop bound is the first sample at or after the window, without the five-sample margin (RM-16)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "at_or_after(at.saturating_add(in_flight)).saturating_add(STOP_FRONT)",
+    "old": "close_front(at_or_after(at.saturating_add(in_flight)), CLOSE_SAMPLES, CLOSE_GAP)",
     "new": "at_or_after(at.saturating_add(in_flight))",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -14629,9 +14629,9 @@
   {
     "id": "N47S5-81",
     "name": "5h: the hand-over horizon is inclusive (a chain starting exactly at it counts as handable)",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.start < horizon && !self.chains.iter()",
-    "new": "c.start <= horizon && !self.chains.iter()",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "start < horizon && !behind_open_join()",
+    "new": "start <= horizon && !behind_open_join()",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_a_booking_before_a_chain_inside_the_hand_over_horizon_is_refused"
@@ -14660,8 +14660,8 @@
     "id": "N47S5-84",
     "name": "5h: a chain behind an open join is treated as handable (the joinable-blocker term is removed)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.start < horizon && !self.chains.iter().any(|x| x.join && x.end <= c.start && now <= join_by(x.end))",
-    "new": "c.start < horizon",
+    "old": "may_have_handed(c.start, horizon, || self.chains.iter().any(|x| x.join && x.end <= c.start && now <= join_by(x.end)))",
+    "new": "may_have_handed(c.start, horizon, || false)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_a_chain_behind_an_open_join_is_not_yet_handed"
@@ -14700,7 +14700,7 @@
     "id": "N47S5-88",
     "name": "5i (F10): a dispatch move is accepted without the clash test, so a pruned head moved into a later booking is not refused (retargeted in rev 29, F49)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "(!bookings.meets(new, front(bookings.gap, new, len, false)?, None)).then_some(new)",
+    "old": "(!bookings.meets(new, predicted_front(&PACKETS, bookings.gap, new, len, false)?, None)).then_some(new)",
     "new": "Some(new)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -14861,7 +14861,7 @@
    "crate": "ezsdr-radio",
    "test_bin": "staging",
    "filter": "rm_15_place_tests_the_full_front",
-   "old": "front(self.gap, k, len, join.is_some())?",
+   "old": "predicted_front(&PACKETS, self.gap, k, len, join.is_some())?",
    "new": "k + 1"
  },
  {
@@ -15067,9 +15067,9 @@
   {
     "id": "N47S5-137",
     "name": "rev 29 (F50): a booking whose front overflows the clock panics (debug) instead of being refused: the checked front is replaced by a plain sum",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) if joined || len > PACKETS.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),",
-    "new": "Some(len) if joined || len > PACKETS.min_open_first_send => Some(start + len + HELD_TAIL_FRONT),",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "Some(len) if joined || len > rules.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),",
+    "new": "Some(len) if joined || len > rules.min_open_first_send => Some(start + len + HELD_TAIL_FRONT),",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_a_front_past_the_clock_is_refused_without_a_panic_or_a_change"
@@ -15108,7 +15108,7 @@
     "id": "N47S5-141",
     "name": "rev 30 (S2): a surviving short head keeps its joined front, not its standalone one (remove_head does not set the front)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.front = front(gap, c.start, Some(c.end - c.start), false).unwrap_or(c.front);",
+    "old": "c.front = predicted_front(&PACKETS, gap, c.start, Some(c.end - c.start), false).unwrap_or(c.front);",
     "new": "let _ = c.end - c.start;",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -15626,9 +15626,9 @@
   {
     "id": "N49B-01",
     "name": "5a (B1): a closed short burst of 1 to 32 samples fronts nine past its transmitted end, not the gap (15 at 1 MS/s, RM-15)",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "start.checked_add(len.max(4))?.checked_add(gap?)",
-    "new": "start.checked_add(len.max(4))?.checked_add(9)",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "checked_close_front(start, len.max(rules.min_first_send), gap?)",
+    "new": "checked_close_front(start, len.max(rules.min_first_send), 9)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_closed_burst_front_is_end_plus_gap"
@@ -15636,9 +15636,9 @@
   {
     "id": "N49B-02",
     "name": "5a (B1): a 32-sample closed head is not short (its front is its end plus four, not the gap)",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) if joined || len > PACKETS.min_open_first_send =>",
-    "new": "Some(len) if joined || len >= PACKETS.min_open_first_send =>",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "Some(len) if joined || len > rules.min_open_first_send =>",
+    "new": "Some(len) if joined || len >= rules.min_open_first_send =>",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_closed_burst_front_is_end_plus_gap"
@@ -15686,9 +15686,9 @@
   {
     "id": "N49B-05",
     "name": "step F: the owner's short-burst discriminator is dropped, so a closed first send of at most 32 samples fronts at +3 (UR-22)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let gap = if plan.closes_short { self.short_gap(clock) } else { CLOSE_GAP };",
-    "new": "let gap = CLOSE_GAP;",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "if self.closes_short { short_gap } else { CLOSE_GAP }",
+    "new": "CLOSE_GAP",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_closed_short_burst_s_owner_front_is_gap_past_its_end"
@@ -16067,8 +16067,8 @@
     "id": "E1-U13",
     "name": "E1: an abandon queues the Run end's halt (UR-26)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.with_book(|book| book.abandon(repeat, id, cursor, clock.instant(cursor.saturating_add(STOP_FRONT))));",
-    "new": "self.with_book(|book| { let cancelled = book.abandon(repeat, id, cursor, clock.instant(cursor.saturating_add(STOP_FRONT))); book.list.halt(ezsdr_radio::CancelReason::ProviderStop); cancelled });",
+    "old": "self.with_book(|book| book.abandon(repeat, id, cursor, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))));",
+    "new": "self.with_book(|book| { let cancelled = book.abandon(repeat, id, cursor, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))); book.list.halt(ezsdr_radio::CancelReason::ProviderStop); cancelled });",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "e1_q5_a_booking_waiting_when_the_repeat_is_abandoned_still_plays"
@@ -16156,9 +16156,9 @@
   {
     "id": "N49F-05",
     "name": "a short head's front keeps one fixed gap, whatever the stream's rate",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": ".checked_add(gap?)",
-    "new": ".checked_add(gap.map(|_| 15)?)",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "checked_close_front(start, len.max(rules.min_first_send), gap?)",
+    "new": "checked_close_front(start, len.max(rules.min_first_send), gap.map(|_| 15)?)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_1_to_3_sample_burst_front_is_transmitted_end_plus_gap"
@@ -16166,9 +16166,9 @@
   {
     "id": "N49F-06",
     "name": "an unarmed record books a short head with no guard",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": ".checked_add(gap?)",
-    "new": ".checked_add(gap.unwrap_or(0))",
+    "file": "crates/ezsdr-radio/src/segment.rs",
+    "old": "checked_close_front(start, len.max(rules.min_first_send), gap?)",
+    "new": "checked_close_front(start, len.max(rules.min_first_send), gap.unwrap_or(0))",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_an_unarmed_record_refuses_a_closed_short_head"
@@ -16367,8 +16367,8 @@
   "id": "N49F-26",
   "name": "step F: uhd-tx's abandon fronts at the cursor + 2 + 3, not + g (D1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "cursor.saturating_add(2).saturating_add(self.short_gap(clock))",
-  "new": "cursor.saturating_add(2).saturating_add(CLOSE_GAP)",
+  "old": "end = self.close_device_burst(None, cursor, clock, self.short_gap(clock));",
+  "new": "end = self.close_device_burst(None, cursor, clock, CLOSE_GAP);",
   "filter": "ur_23_the_abandon_front_follows_the_rate",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib"
@@ -16467,8 +16467,8 @@
   "id": "E2A2A-08",
   "name": "E2a-2a: ending the open booking with no outcome also clears the playing repeat",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "assert!(self.ops.inflight.is_none(), \"an open booking is ended with an operation in flight\"); self.open.take().map(|open| open.booking)",
-  "new": "assert!(self.ops.inflight.is_none(), \"an open booking is ended with an operation in flight\"); self.playing = None; self.open.take().map(|open| open.booking)",
+  "old": "self.device.end(end); self.open.take().map(|open| open.booking)",
+  "new": "self.device.end(end); self.playing = None; self.open.take().map(|open| open.booking)",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "txbook_take_untake_and_end_open_keep_one_open_booking_and_change_no_record"
@@ -16497,7 +16497,7 @@
   "id": "E2A2A-M1",
   "name": "E2a-2a: the Mock does not complete its block, so the next block is issued with one in flight (MR-15)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "self.tx[k].book.complete(id, Outcome::Accepted(block));",
+  "old": "self.tx[k].book.complete(id, Outcome::Accepted(block), None);",
   "new": "",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
@@ -16607,8 +16607,8 @@
   "id": "E2A2B-10",
   "name": "A5 (F4): an underflow with no device burst open abandons the open booking, with a stray end-of-burst (UR-22)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "if self.chain.underflowed(tick) { self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device burst underflowed; burst not resumed\" }));",
-  "new": "if self.with_book(|book| book.open.is_some()) || self.chain.underflowed(tick) { self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device burst underflowed; burst not resumed\" }));",
+  "old": "if self.with_device(|device| device.underflowed(tick)) { self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device burst underflowed; burst not resumed\" }));",
+  "new": "if self.with_book(|book| book.open.is_some()) || self.with_device(|device| device.underflowed(tick)) { self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device burst underflowed; burst not resumed\" }));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "e2a_f4_a_late_underflow_with_nothing_issued_sends_nothing_and_keeps_the_booking"
@@ -16826,29 +16826,29 @@
  {
   "id": "E2A4-01",
   "name": "#93 (UR-22): an underflow abandons the open device burst whatever its tick, so a late report of the burst before cuts the next one",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "file": "crates/ezsdr-radio/src/staging.rs",
   "old": "DeviceBurst::Open { first, .. } => tick.is_none_or(|tick| tick >= first),",
   "new": "DeviceBurst::Open { .. } => true,",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "e2a_93_a_late_underflow_of_the_burst_before_does_not_cut_the_next_device_burst"
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "e3b_b2_underflowed_boundary"
  },
  {
   "id": "E2A4-02",
   "name": "#93 (UR-22): a report at the open device burst's first tick is taken as the burst before's (< swapped with <=)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "file": "crates/ezsdr-radio/src/staging.rs",
   "old": "tick.is_none_or(|tick| tick >= first)",
   "new": "tick.is_none_or(|tick| tick > first)",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "e2a_93_an_underflow_at_the_open_burst_s_first_tick_abandons_it"
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "e3b_b2_underflowed_boundary"
  },
  {
   "id": "E2A4-03",
   "name": "#93 (UR-22): a new start-of-burst does not take its own first tick (it stays at the clock's origin), so a late report of the burst before cuts it",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "self.chain.open_device_burst(clock.instant(start), next, tail);",
-  "new": "self.chain.open_device_burst(clock.origin, next, tail);",
+  "old": "first: clock.instant(start)",
+  "new": "first: clock.origin",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "e2a_93_a_late_underflow_of_the_burst_before_does_not_cut_the_next_device_burst"
@@ -16856,12 +16856,12 @@
  {
   "id": "E2A4-04",
   "name": "#93 (UR-22): a report with no tick abandons nothing (is_none_or swapped with is_some_and)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "file": "crates/ezsdr-radio/src/staging.rs",
   "old": "tick.is_none_or(|tick| tick >= first)",
   "new": "tick.is_some_and(|tick| tick >= first)",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_29_eob_loss_from_report_prevents_next_burst_send"
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "e3b_b2_underflowed_boundary"
  },
  {
   "id": "E2A4-05",
@@ -17445,8 +17445,8 @@
   "id": "N95-16",
   "name": "#95: stop_fits saturates the sample plus STOP_FRONT instead of checking it",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": ".and_then(|k| k.checked_add(STOP_FRONT))",
-  "new": ".map(|k| k.saturating_add(STOP_FRONT))",
+  "old": ".and_then(|k| checked_close_front(k, CLOSE_SAMPLES, CLOSE_GAP))",
+  "new": ".map(|k| close_front(k, CLOSE_SAMPLES, CLOSE_GAP))",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "rm_16_a_stop_fits_only_when_its_horizon_sample_and_instant_fit_the_clock"
@@ -17675,8 +17675,8 @@
   "id": "E2B-08",
   "name": "E2b: an interrupted reopen ends the open booking as a failed one does",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "if outcome != Reopen::Failed {",
-  "new": "if outcome == Reopen::Reopened {",
+  "old": "Reopen::Interrupted { lost: false } => { self.device.provider_stop(); None }",
+  "new": "Reopen::Interrupted { lost: false } => { self.device.provider_stop(); self.open.take().map(|open| open.booking) }",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "txbook_a_reopen_that_succeeds_or_is_interrupted_changes_nothing"
@@ -17801,8 +17801,8 @@
   "id": "E2B-20",
   "name": "E2b: the reopen is issued before the stop, loss and claim checks, so a refused claim leaves it in flight",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let mut streams = lock(&core.streams); if streams.stop.is_some() || core.is_lost() {",
-  "new": "let mut streams = lock(&core.streams); let early = streams.stream_mut(key).book.issue_reopen(); if streams.stop.is_some() || core.is_lost() {",
+  "old": "let (claim, id, configured) = { if streams.stop.is_some() || core.is_lost() {",
+  "new": "let (claim, id, configured) = { let early = streams.stream_mut(key).book.issue_reopen(); if streams.stop.is_some() || core.is_lost() {",
   "old2": "(claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured)",
   "new2": "(claim, early, streams.stream(key).configured)",
   "crate": "ezsdr-radio-uhd",
@@ -18719,5 +18719,445 @@
   "crate": "ezsdr-acceptance",
   "test_bin": "parity",
   "filter": "uhd_rig_settle_advances"
+ },
+ {
+  "id": "E3B-01",
+  "name": "E3b-2: close_front drops the samples the close carries",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "start.saturating_add(samples).saturating_add(gap)",
+  "new": "start.saturating_add(gap)",
+  "filter": "e3b_p_cf_close_front"
+ },
+ {
+  "id": "E3B-02",
+  "name": "E3b-2: close_front drops the gap the device keeps",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "start.saturating_add(samples).saturating_add(gap)",
+  "new": "start.saturating_add(samples)",
+  "filter": "e3b_p_cf_close_front"
+ },
+ {
+  "id": "E3B-03",
+  "name": "E3b-2: checked_close_front drops the gap, so a front past the range is not refused (RM-15)",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "Some(end) => end.checked_add(gap),",
+  "new": "Some(end) => Some(end),",
+  "filter": "e3b_p_cf_each_close_at_the_end_of_the_range"
+ },
+ {
+  "id": "E3B-04",
+  "name": "E3b-2: checked_close_front saturates instead of refusing a front past the range (RM-15)",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "Some(end) => end.checked_add(gap),",
+  "new": "Some(end) => Some(end.saturating_add(gap)),",
+  "filter": "e3b_p_cf_each_close_at_the_end_of_the_range"
+ },
+ {
+  "id": "E3B-05",
+  "name": "E3b-2: HELD_TAIL_FRONT counts the close from the payload end, not from its last sample (RM-15)",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "pub const HELD_TAIL_FRONT: i64 = close_front(-1, CLOSE_SAMPLES, CLOSE_GAP);",
+  "new": "pub const HELD_TAIL_FRONT: i64 = close_front(0, CLOSE_SAMPLES, CLOSE_GAP);",
+  "filter": "e3b_p_cf_close_front"
+ },
+ {
+  "id": "E3B-06",
+  "name": "E3b-2: STOP_FRONT counts the two-zero close from one past the cursor (RM-16)",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "pub const STOP_FRONT: i64 = close_front(0, CLOSE_SAMPLES, CLOSE_GAP);",
+  "new": "pub const STOP_FRONT: i64 = close_front(1, CLOSE_SAMPLES, CLOSE_GAP);",
+  "filter": "e3b_p_cf_close_front"
+ },
+ {
+  "id": "E3B-07",
+  "name": "E3b-2: a closing send always keeps the short gap, a long head's too (UR-22)",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "if self.closes_short { short_gap } else { CLOSE_GAP }",
+  "new": "short_gap",
+  "filter": "e3b_p_cf_plan_front_is_the_direct_close"
+ },
+ {
+  "id": "E3B-08",
+  "name": "E3b-2: a closing send's front counts its samples without the pad (UR-22)",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "close_front(start, self.device_count,",
+  "new": "close_front(start, self.count,",
+  "filter": "e3b_p_cf_plan_front_is_the_direct_close"
+ },
+ {
+  "id": "E3B-09",
+  "name": "E3b-2: a send that does not end the device burst leaves a front (UR-22)",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "self.device_eob.then(|| close_front(start, self.device_count, if self.closes_short { short_gap } else { CLOSE_GAP }))",
+  "new": "Some(close_front(start, self.device_count, if self.closes_short { short_gap } else { CLOSE_GAP }))",
+  "filter": "e3b_p_cf_plan_front_is_the_direct_close"
+ },
+ {
+  "id": "E3B-10",
+  "name": "E3b-2: a joined piece's predicted front is a standalone head's (RM-15)",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "Some(len) if joined || len > rules.min_open_first_send =>",
+  "new": "Some(len) if len > rules.min_open_first_send =>",
+  "filter": "e3b_p_cf_predicted_front_rows"
+ },
+ {
+  "id": "E3B-11",
+  "name": "E3b-2: a chain behind an open join may have been handed (RM-15)",
+  "file": "crates/ezsdr-radio/src/segment.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "segment",
+  "old": "start < horizon && !behind_open_join()",
+  "new": "start < horizon",
+  "filter": "e3b_p_mh_may_have_handed"
+ },
+ {
+  "id": "E3B-12",
+  "name": "E3b-2: a Bookings abandon's bound is the cursor, without the close behind it (RM-16)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "let stop = close_front(cursor_k, CLOSE_SAMPLES, CLOSE_GAP);",
+  "new": "let stop = close_front(cursor_k, CLOSE_SAMPLES, 0);",
+  "filter": "txbook_abandon_equals_a_stop_at_the_cursor_except_the_named_differences"
+ },
+ {
+  "id": "E3B-13",
+  "name": "E3b-2: the owner's closing send fronts from the send's end, not its start (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "plan.front(next, self.short_gap(clock))",
+  "new": "plan.front(end, self.short_gap(clock))",
+  "filter": "ur_23_a_closed_short_burst_s_owner_front_is_gap_past_its_end"
+ },
+ {
+  "id": "E3B-14",
+  "name": "E3b-3: the cursor prefers the device burst's next sample to the open booking's",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.open.as_ref().map(|open| open.next).or_else(|| self.device.next())",
+  "new": "self.device.next().or_else(|| self.open.as_ref().map(|open| open.next))",
+  "filter": "e3b_b7_cursor_is_the_open_booking_s_next_sample_else_the_device_burst_s"
+ },
+ {
+  "id": "E3B-15",
+  "name": "E3b-3: a new owner keeps the book's old device chain",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "stream.book.device = DeviceChain::default();",
+  "new": "stream.book.device = stream.book.device;",
+  "filter": "e3b_b8_a_new_owner_starts_with_a_closed_chain"
+ },
+ {
+  "id": "E3B-16",
+  "name": "E3b-3: a failed reopen keeps the device burst open",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "pub fn reopen_failed(&mut self) {\n        self.burst = DeviceBurst::Closed;\n        self.recovery = Recovery::Clean;\n    }",
+  "new": "pub fn reopen_failed(&mut self) {\n        self.recovery = Recovery::Clean;\n    }",
+  "filter": "e3b_b4_recovery_transitions"
+ },
+ {
+  "id": "E3B-17",
+  "name": "E3b-3: a continuation moves the device burst's first sample to its next",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "let DeviceBurst::Open { first, .. } = self.burst else { panic!(\"a device burst is open\") };\n        self.burst = DeviceBurst::Open { first, next, tail };",
+  "new": "let DeviceBurst::Open { first, .. } = self.burst else { panic!(\"a device burst is open\") };\n        self.burst = DeviceBurst::Open { first: next, next, tail };",
+  "filter": "e3b_b1_device_chain_open_continue_close"
+ },
+ {
+  "id": "E3B-18",
+  "name": "E3b-3: a same-domain front takes the lower of the two",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "old.max(sample)",
+  "new": "old.min(sample)",
+  "filter": "e3b_b3_front_domains"
+ },
+ {
+  "id": "E3B-19",
+  "name": "E3b-3: a loss leaves the recovery pending",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "pub fn lose(&mut self) {\n        self.burst = DeviceBurst::Closed;\n        self.recovery = Recovery::Clean;\n    }",
+  "new": "pub fn lose(&mut self) {\n        self.burst = DeviceBurst::Closed;\n    }",
+  "filter": "e3b_b4_recovery_transitions"
+ },
+ {
+  "id": "E3B-20",
+  "name": "E3b-3: Provider::stop closes the device burst",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "pub fn provider_stop(&mut self) {\n        self.recovery = Recovery::Clean;\n    }",
+  "new": "pub fn provider_stop(&mut self) {\n        self.recovery = Recovery::Clean;\n        self.burst = DeviceBurst::Closed;\n    }",
+  "filter": "e3b_b4_recovery_transitions"
+ },
+ {
+  "id": "E3B-21",
+  "name": "E3b-3: the interrupted reopen writes the chain through a second lock of the streams mutex it holds (a re-entry)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "let open = streams.stream_mut(key).book.complete_reopen(id, outcome);",
+  "new": "let open = streams.stream_mut(key).book.complete_reopen(id, outcome); self.with_device(DeviceChain::provider_stop);",
+  "filter": "ur_22_stop_and_loss_during_owner_recovery_release_the_claim"
+ },
+ {
+  "id": "E3B-22",
+  "name": "E3b-4: a whole ending send does not close the device burst",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "if send.eob { self.close_device_burst(); } else if send.sob {",
+  "new": "if false { self.close_device_burst(); } else if send.sob {",
+  "filter": "e3b_b5_complete_applies_the_device_effect"
+ },
+ {
+  "id": "E3B-23",
+  "name": "E3b-4: a send that starts the device burst opens it at its end, not its first tick",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.open_device_burst(send.first, send.next, send.tail);",
+  "new": "self.open_device_burst(send.next, send.next, send.tail);",
+  "filter": "e3b_b5_complete_applies_the_device_effect"
+ },
+ {
+  "id": "E3B-24",
+  "name": "E3b-4: a send that continues the device burst holds no tail",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.continue_device_burst(send.next, send.tail);",
+  "new": "self.continue_device_burst(send.next, None);",
+  "filter": "e3b_b5_complete_applies_the_device_effect"
+ },
+ {
+  "id": "E3B-25",
+  "name": "E3b-4: an ending send's front is not applied",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "if let Some((domain, front)) = send.front { self.advance_front(domain, front); }",
+  "new": "if let Some((domain, front)) = send.front.filter(|_| false) { self.advance_front(domain, front); }",
+  "filter": "e3b_b5_complete_applies_the_device_effect"
+ },
+ {
+  "id": "E3B-26",
+  "name": "E3b-4: a send that came up short applies its effect all the same",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "Outcome::Accepted(accepted) => accepted,",
+  "new": "Outcome::Accepted(accepted) => { if let Some(send) = device { self.device.send(send); } accepted }",
+  "filter": "e3b_b5_complete_applies_the_device_effect"
+ },
+ {
+  "id": "E3B-27",
+  "name": "E3b-4: the end that keeps the device burst closes it",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "DeviceEnd::Keep => {}",
+  "new": "DeviceEnd::Keep => self.close_device_burst(),",
+  "filter": "e3b_b6_end_open_applies_the_device_end"
+ },
+ {
+  "id": "E3B-28",
+  "name": "E3b-4: the end that a held booking continues drops the held tail",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "DeviceEnd::Continue { next } => self.continue_device_burst(next, self.tail()),",
+  "new": "DeviceEnd::Continue { next } => self.continue_device_burst(next, None),",
+  "filter": "e3b_b6_end_open_applies_the_device_end"
+ },
+ {
+  "id": "E3B-29",
+  "name": "E3b-4: the end that sent nothing leaves the device burst open",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "DeviceEnd::Closed => self.close_device_burst(),",
+  "new": "DeviceEnd::Closed => {}",
+  "filter": "e3b_b6_end_open_applies_the_device_end"
+ },
+ {
+  "id": "E3B-30",
+  "name": "E3b-4: a close the device took advances the front one sample short",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "DeviceEnd::Sent { domain, front } => { self.close_device_burst(); self.advance_front(domain, front); }",
+  "new": "DeviceEnd::Sent { domain, front } => { self.close_device_burst(); self.advance_front(domain, front.saturating_sub(1)); }",
+  "filter": "e3b_b6_end_open_applies_the_device_end"
+ },
+ {
+  "id": "E3B-31",
+  "name": "E3b-4: a close that did not complete leaves no recovery pending",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "DeviceEnd::Uncertain => { self.close_device_burst(); self.mark_reopen_needed(); }",
+  "new": "DeviceEnd::Uncertain => { self.close_device_burst(); }",
+  "filter": "e3b_b6_end_open_applies_the_device_end"
+ },
+ {
+  "id": "E3B-32",
+  "name": "E3b-4: a loss keeps the recovery pending",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "DeviceEnd::Lost => self.lose(),",
+  "new": "DeviceEnd::Lost => self.close_device_burst(),",
+  "filter": "e3b_b6_end_open_applies_the_device_end"
+ },
+ {
+  "id": "E3B-33",
+  "name": "E3b-4: with no open booking the end applies nothing to the device burst",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.device.end(end); self.open.take().map(|open| open.booking)",
+  "new": "if self.open.is_some() { self.device.end(end); } self.open.take().map(|open| open.booking)",
+  "filter": "e3b_b6_end_open_applies_the_device_end"
+ },
+ {
+  "id": "E3B-34",
+  "name": "E3b-4: the end changes the device burst before it refuses an operation in flight",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "assert!(self.ops.inflight.is_none(), \"an open booking is ended with an operation in flight\"); self.device.end(end);",
+  "new": "self.device.end(end); assert!(self.ops.inflight.is_none(), \"an open booking is ended with an operation in flight\");",
+  "filter": "e3b_b6_end_open_applies_the_device_end"
+ },
+ {
+  "id": "E3B-35",
+  "name": "E3b-4: a reopened streamer does not take the flush's front",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.device.advance_front(domain, front);",
+  "new": "self.device.advance_front(domain, front.saturating_sub(1));",
+  "filter": "e3b_b6_complete_reopen_applies_the_device_effect"
+ },
+ {
+  "id": "E3B-37",
+  "name": "E3b-4: a loss found while a burst ends is taken for a plain close",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "if device_eob && self.core.is_lost() { end = DeviceEnd::Lost; }",
+  "new": "if device_eob && self.core.is_lost() { end = DeviceEnd::Closed; }",
+  "filter": "e3b_c3c_a_loss_found_while_the_open_burst_ends"
+ },
+ {
+  "id": "E3B-38",
+  "name": "E3b-4: an abandon after a failed end-of-burst waits for no reopen",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "let mut end = if eob_failed { DeviceEnd::Uncertain } else { DeviceEnd::Closed };",
+  "new": "let mut end = DeviceEnd::Closed;",
+  "filter": "ur_22_a_failed_one_sample_padded_eob_is_not_safe_until_flush_recovery"
+ },
+ {
+  "id": "E3B-39",
+  "name": "E3b-4: an abandon after a failed end-of-burst sends a close as well",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "} else if device_open && !eob_failed {",
+  "new": "} else if device_open {",
+  "filter": "ur_22_a_failed_one_sample_padded_eob_is_not_safe_until_flush_recovery"
+ },
+ {
+  "id": "E3B-40",
+  "name": "E3b-4: the send plans no held tail for the device burst",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "first: clock.instant(start), next: end, tail,",
+  "new": "first: clock.instant(start), next: end, tail: None,",
+  "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it"
+ },
+ {
+  "id": "E3B-41",
+  "name": "E3b-4: the send plans no end of the device burst",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "DeviceSend { sob: device_sob, eob: device_eob,",
+  "new": "DeviceSend { sob: device_sob, eob: false,",
+  "filter": "ur_23_a_one_sample_burst_restarts_after_its_padded_device_burst"
+ },
+ {
+  "id": "E3B-42",
+  "name": "E3b-4: the reopen's result carries no flush front",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "Reopen::Reopened { front: flush_front }",
+  "new": "Reopen::Reopened { front: None }",
+  "filter": "e3b_c1_the_front_after_each_close"
+ },
+ {
+  "id": "E3B-43",
+  "name": "E3b-4: the stat reads no device front after the close",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "let device_front = self.end_open(true);",
+  "new": "let device_front = self.end_open(true).filter(|_| false);",
+  "filter": "e3b_c4c_the_stat_reads_the_front_the_close_leaves"
+ },
+ {
+  "id": "E3B-44",
+  "name": "E3b-4: the stat reads the device front before the close",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "let (ended, front) = self.with_book(|book| (book.end_open(end), book.device.front()));",
+  "new": "let (ended, front) = self.with_book(|book| { let front = book.device.front(); (book.end_open(end), front) });",
+  "filter": "e3b_c4c_the_stat_reads_the_front_the_close_leaves"
+ },
+ {
+  "id": "E3B-45",
+  "name": "E3b-4: an abandon applies no end to the device burst",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "self.with_book(|book| book.end_open(end)); true",
+  "new": "self.with_book(|book| book.end_open(DeviceEnd::Keep)); true",
+  "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
  }
 ]

@@ -271,7 +271,7 @@ fn record_front(gap: i64, head: i64, piece: Option<i64>) -> i64 {
         book
     };
     let end = head + piece.unwrap_or(0);
-    (end + 1..end + 100).find(|&k| build().accept(k, Some(1), 0, |_| i64::MAX, i64::MIN) != Err(Overlap::Booking)).expect("a front")
+    (end + 1..end + gap + 100).find(|&k| build().accept(k, Some(1), 0, |_| i64::MAX, i64::MIN) != Err(Overlap::Booking)).expect("a front")
 }
 
 /// The front the device burst's close leaves, as the executor computes it: a direct close at the send's padded end plus the gap, a held tail's
@@ -304,5 +304,247 @@ fn e3_p_f2_the_close_front_against_the_record() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn e3b_p_cf_the_front_classes() {
+    // Every close the executor makes (`close_front`, today's arithmetic of `Tx::send`) against the record's front at receipt, by class: equal for a
+    // short head's padded close, for a held-tail close and for a joined one-sample piece's close; one sample less (the device front is the
+    // end plus three, the record's the end plus four: F1) for a long head's, or a joined piece of two or more samples', direct close.
+    for gap in [3, 15, 30, 3_000] {
+        for len in 1..=70 {
+            for open_ended in [false, true] {
+                let lone = one(plan(&ext(finite(len), 0, None), true, 10_000, open_ended));
+                let (device, record) = (close_front(&lone, len, gap), record_front(gap, len, None));
+                let direct_long = len > 32 && !lone.hold;
+                assert_eq!(record - device, i64::from(direct_long), "head {len}, gap {gap}, open_ended {open_ended}: {lone:?}");
+                let piece = Waveform { start: 40, len, repeat: false, tiled: false };
+                let joined = one(plan(&ext(piece, 40, None), false, 10_000, open_ended));
+                let (device, record) = (close_front(&joined, 40 + len, gap), record_front(gap, 40, Some(len)));
+                let direct_long = len > 1 && !joined.hold;
+                assert_eq!(record - device, i64::from(direct_long), "piece {len}, gap {gap}, open_ended {open_ended}: {joined:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn e3b_p_cf_the_receipt_front_near_the_end_of_the_range() {
+    // The record's front uses checked addition (RM-15): a booking whose front does not fit an `i64` is refused, never wrapped or saturated into an
+    // accepted footprint. For each shape the largest start whose front fits is accepted and the next is refused. (The executor's fronts saturate
+    // and are not reachable through a clock at these samples: their rows are written with the shared function in E3b-2.)
+    let gap = 15;
+    let new = || {
+        let mut book = Bookings::unarmed();
+        book.arm(gap);
+        book
+    };
+    let on_time = |_: i64| i64::MAX;
+    for (shape, len, last) in [
+        ("short head 1 (padded to 4)", 1, i64::MAX - 4 - gap),
+        ("short head 4", 4, i64::MAX - 4 - gap),
+        ("short head 32", 32, i64::MAX - 32 - gap),
+        ("long head 33", 33, i64::MAX - 33 - HELD_TAIL_FRONT),
+        ("long head 100", 100, i64::MAX - 100 - HELD_TAIL_FRONT),
+    ] {
+        assert_eq!(new().accept(last, Some(len), 0, on_time, i64::MIN), Ok(()), "{shape}: the largest start that fits");
+        assert_eq!(new().accept(last + 1, Some(len), 0, on_time, i64::MIN), Err(Overlap::Booking), "{shape}: one more does not fit: refused");
+    }
+    for (shape, piece, last) in [("a joined piece of 10", 10, i64::MAX - 54), ("a joined one-sample piece", 1, i64::MAX - 45)] {
+        let book = |head: i64| {
+            let mut bookings = new();
+            bookings.accept(head, Some(40), 0, on_time, i64::MIN).map(|()| bookings)
+        };
+        let mut ok = book(last).expect("the head fits");
+        assert_eq!(ok.accept(last + 40, Some(piece), 0, on_time, i64::MIN), Ok(()), "{shape}: the largest start whose piece's front fits");
+        let mut over = book(last + 1).expect("the head still fits");
+        assert_eq!(over.accept(last + 1 + 40, Some(piece), 0, on_time, i64::MIN), Err(Overlap::Booking), "{shape}: one more does not fit: refused");
+    }
+    assert_eq!(new().accept(i64::MAX - 3, None, 0, on_time, i64::MIN), Ok(()), "a repeat's front is the end of the range, not a sum");
+}
+
+#[test]
+fn e3b_p_mh_the_receipt_rule_against_the_handed_end() {
+    // RM-15 (`may_be_handed`, through `accept`'s `Handed`) is the window rule alone: a chain starting below the horizon may have been handed. MR-25's
+    // `handed_end` is the stricter question of whether the executor's first send fits the window. The receipt's refusal implies nothing of the
+    // owner (F5): `handed_end` is `None` for a chain whose first send (32 samples, a shorter burst's whole length) does not fit, and the receipt
+    // still refuses. Columns: the chain's start `S` below the horizon `H`, the receipt's answer for a booking before it, `handed_end`.
+    const H: i64 = 10_000;
+    let receipt = |start: i64, len: Option<i64>| {
+        let mut book = Bookings::unarmed();
+        book.arm(15);
+        book.accept(start, len, 0, ON_TIME_J, UNHANDED).unwrap();
+        book.accept(start - 1_000, Some(10), 0, ON_TIME_J, H)
+    };
+    for (len, label) in [(Some(10), "10"), (Some(31), "31"), (Some(32), "32"), (Some(100), "100"), (None, "a repeat")] {
+        let first = len.map_or(32, |len: i64| len.min(32));
+        for below in [100, 40, 33, 32, 31, 10, 2, 1] {
+            let start = H - below;
+            let handed = handed_end(&PACKETS, Pending { start, len: len.unwrap_or(1_000), repeat: len.is_none(), open: false }, H).is_some();
+            assert_eq!(receipt(start, len), Err(Overlap::Handed), "{label} at H-{below}: every chain below the horizon is refused for");
+            assert_eq!(handed, below >= first, "{label} at H-{below}: the first send fits the window exactly when {first} samples lie below H");
+        }
+        let start = H;
+        assert_eq!(receipt(start, len), Ok(()), "{label} at H: not below the horizon");
+        assert!(handed_end(&PACKETS, Pending { start, len: len.unwrap_or(1_000), repeat: len.is_none(), open: false }, H).is_none());
+    }
+}
+
+#[test]
+fn e3b_p_mh_the_join_exemption_is_not_in_handed_end() {
+    // The counterexample to "the first send fits, so the chain may be handed" (plan m2): C (40 at 70) fits the window (`handed_end` is `Some`) but A
+    // (40 at 0) ends before it and can still be joined, so the owner holds A's device burst and `may_be_handed` is false: a booking before C is accepted.
+    // Past A's join deadline the exemption ends and the receipt refuses.
+    let deadline = |e: i64| e + 100;
+    let book = |now: i64| {
+        let mut bookings = armed_gap(15);
+        bookings.accept(0, Some(40), 0, deadline, UNHANDED).unwrap();
+        bookings.accept(70, Some(40), 0, deadline, UNHANDED).unwrap();
+        bookings.accept(45, Some(1), now, deadline, 200)
+    };
+    let c = Pending { start: 70, len: 40, repeat: false, open: false };
+    assert_eq!(handed_end(&PACKETS, c, 200), Some(110), "C's first send fits the window");
+    assert_eq!(book(0), Ok(()), "while A can be joined, C is not handed: the booking before C is accepted");
+    assert_eq!(book(140), Ok(()), "at A's join deadline J(40) = 140 itself");
+    assert_eq!(book(141), Err(Overlap::Handed), "past it C may be handed");
+}
+
+const ON_TIME_J: fn(i64) -> i64 = |_| i64::MAX;
+const UNHANDED: i64 = i64::MIN;
+
+fn armed_gap(gap: i64) -> Bookings {
+    let mut bookings = Bookings::unarmed();
+    bookings.arm(gap);
+    bookings
+}
+
+use ezsdr_radio::segment as seg;
+use ezsdr_radio::staging::{stop_fits, stop_sample};
+
+#[test]
+fn e3b_p_cf_close_front() {
+    // The one arithmetic, written out: the sum of the close's first sample, the samples it carries and the gap the device keeps.
+    assert_eq!((seg::CLOSE_GAP, seg::CLOSE_SAMPLES, HELD_TAIL_FRONT, seg::STOP_FRONT), (3, 2, 4, 5), "the derived constants keep their values");
+    assert_eq!(seg::close_front(0, 4, 15), 19, "a one-sample head padded to four, at 1 MS/s");
+    assert_eq!(seg::close_front(0, 32, 15), 47, "a 32-sample head");
+    assert_eq!(seg::close_front(0, 4, 3_000), 3_004, "a one-sample head at 200 MS/s");
+    assert_eq!(seg::close_front(100, 2, 3), 105, "a Stop's or an end's two-zero close at the cursor: STOP_FRONT");
+    assert_eq!(seg::close_front(139, 2, 3), 144, "a held tail's close, one before the payload end 140: that end plus HELD_TAIL_FRONT");
+    assert_eq!(seg::close_front(100, 2, 15), 117, "an abandon at the cursor, at 1 MS/s");
+    assert_eq!(seg::close_front(50, 0, 15), 65, "the flush: its end is the ack's sample, no samples of its own");
+    assert_eq!(seg::checked_close_front(0, 4, 15), Some(19));
+    assert_eq!(seg::checked_close_front(-1, 2, 3), Some(HELD_TAIL_FRONT));
+}
+
+#[test]
+fn e3b_p_cf_each_close_at_the_end_of_the_range() {
+    // m3: the executor's fronts saturate, the receipt's are checked. At each shape's largest fitting start they agree; one more start saturates the
+    // executor's front to the end of the range and makes the receipt's `None` (a refusal at `accept`).
+    const MAX: i64 = i64::MAX;
+    let gap = 15;
+    let rules = &PACKETS;
+    // each: (shape, close start, samples, gap)
+    for (shape, samples, gap) in [
+        ("direct close of a short head (padded to 4)", 4, gap),
+        ("direct close of a long head or piece (CLOSE_GAP)", 40, CLOSE_GAP),
+        ("held tail's close or a Stop's or an end's", seg::CLOSE_SAMPLES, CLOSE_GAP),
+        ("abandon", seg::CLOSE_SAMPLES, gap),
+        ("flush", 0, gap),
+    ] {
+        let last = MAX - samples - gap;
+        assert_eq!(seg::close_front(last, samples, gap), MAX, "{shape}: the largest start is exact");
+        assert_eq!(seg::checked_close_front(last, samples, gap), Some(MAX), "{shape}: and fits the receipt");
+        assert_eq!(seg::close_front(last + 1, samples, gap), MAX, "{shape}: one more saturates");
+        assert_eq!(seg::checked_close_front(last + 1, samples, gap), None, "{shape}: and does not fit the receipt");
+    }
+    // a direct close through a plan
+    let lone = one(plan(&ext(finite(10), 0, None), true, 10_000, false));
+    assert_eq!(lone.front(MAX - 4 - gap, gap), Some(MAX));
+    assert_eq!(lone.front(MAX - 3 - gap, gap), Some(MAX), "a plan's front saturates");
+    // the receipt's prediction of the same shapes
+    assert_eq!(seg::predicted_front(rules, Some(gap), MAX - 4 - gap, Some(1), false), Some(MAX));
+    assert_eq!(seg::predicted_front(rules, Some(gap), MAX - 3 - gap, Some(1), false), None);
+    assert_eq!(seg::predicted_front(rules, Some(gap), MAX - 33 - HELD_TAIL_FRONT, Some(33), false), Some(MAX));
+    assert_eq!(seg::predicted_front(rules, Some(gap), MAX - 32 - HELD_TAIL_FRONT, Some(33), false), None);
+    assert_eq!(seg::predicted_front(rules, Some(gap), MAX - 1, None, false), Some(MAX), "a repeat's front is the end of the range, not a sum");
+    // a Stop's sample saturates and its checked twin refuses
+    let (at_or_after, instant) = (|k: i64| k, |k: i64| Some(k));
+    assert_eq!(stop_sample(MAX - 1, 0, at_or_after), MAX);
+    assert!(!stop_fits(MAX - 1, 0, Some, instant), "the Stop does not fit: refused");
+    assert!(stop_fits(MAX - 5, 0, Some, instant), "the largest that fits");
+}
+
+#[test]
+fn e3b_p_cf_predicted_front_rows() {
+    let rules = &PACKETS;
+    let p = |gap: Option<i64>, start: i64, len: Option<i64>, joined: bool| seg::predicted_front(rules, gap, start, len, joined);
+    for (len, front) in [(1, 19), (2, 19), (3, 19), (4, 19), (5, 20), (10, 25), (32, 47)] {
+        assert_eq!(p(Some(15), 0, Some(len), false), Some(front), "a short head of {len} (padded to 4) keeps the gap");
+    }
+    for (len, front) in [(33, 37), (40, 44), (100, 104)] {
+        assert_eq!(p(Some(15), 0, Some(len), false), Some(front), "a head of {len} ends in a held tail: its end plus four, whatever the gap");
+        assert_eq!(p(Some(3_000), 0, Some(len), false), Some(front));
+    }
+    assert_eq!(p(Some(15), 40, Some(1), true), Some(45), "a joined one-sample piece");
+    assert_eq!(p(Some(15), 40, Some(10), true), Some(54), "a joined piece, however short, is a held tail's");
+    assert_eq!(p(Some(15), 7, None, false), Some(i64::MAX), "a repeat never ends");
+    assert_eq!(p(None, 0, Some(10), false), None, "a short head's front needs the gap");
+    assert_eq!(p(None, 0, Some(40), false), Some(44), "a held tail's does not");
+    assert_eq!(p(None, 0, None, false), Some(i64::MAX));
+    // the packet rules are a parameter: a profile with a longer open first send and a wider pad
+    let other = PacketRules { min_open_first_send: 40, min_first_send: 6 };
+    assert_eq!(seg::predicted_front(&other, Some(15), 0, Some(40), false), Some(55), "40 is short on this profile");
+    assert_eq!(seg::predicted_front(&other, Some(15), 0, Some(41), false), Some(45), "41 is long");
+    assert_eq!(seg::predicted_front(&other, Some(15), 0, Some(2), false), Some(21), "padded to 6");
+}
+
+#[test]
+fn e3b_p_cf_plan_front_is_the_direct_close() {
+    // `Plan::front` is the executor's front of the send that ends the device burst: none for a send that does not close, and for each class that
+    // `close_front` of the send's padded end with the gap its class takes.
+    for gap in [3, 15, 3_000] {
+        for len in 1..=70 {
+            for open_ended in [false, true] {
+                let lone = one(plan(&ext(finite(len), 0, None), true, 10_000, open_ended));
+                let device = lone.device_count;
+                assert_eq!(lone.front(0, gap), lone.device_eob.then(|| device + if len <= 32 { gap } else { CLOSE_GAP }), "head {len}, gap {gap}, open_ended {open_ended}");
+                let piece = Waveform { start: 40, len, repeat: false, tiled: false };
+                let joined = one(plan(&ext(piece, 40, None), false, 10_000, open_ended));
+                assert_eq!(joined.front(40, gap), joined.device_eob.then(|| 40 + joined.device_count + CLOSE_GAP), "piece {len}, gap {gap}, open_ended {open_ended}");
+                assert_eq!(joined.front(40, gap).is_none(), joined.hold, "a joined piece closes now or holds its tail");
+            }
+        }
+    }
+    let mid = one(plan(&ext(finite(10_000), 0, None), true, 2_500, false));
+    assert_eq!(mid.front(0, 15), None, "a send that does not end the device burst leaves no front");
+    // a held tail closes later, at its payload end less one, with two samples: the receipt's front for it
+    for len in 33..=70 {
+        let held = one(plan(&ext(finite(len), 0, None), true, 10_000, true));
+        assert!(held.hold && held.front(0, 15).is_none());
+        assert_eq!(seg::close_front(len - 1, seg::CLOSE_SAMPLES, CLOSE_GAP), record_front(15, len, None), "head {len}");
+    }
+}
+
+#[test]
+fn e3b_p_mh_may_have_handed() {
+    use std::cell::Cell;
+    let join = Cell::new(0);
+    let behind = |open: bool| {
+        join.set(join.get() + 1);
+        open
+    };
+    assert!(seg::may_have_handed(99, 100, || behind(false)), "below the horizon");
+    assert!(!seg::may_have_handed(100, 100, || behind(false)), "at the horizon: `<`, not `<=`");
+    assert!(!seg::may_have_handed(101, 100, || behind(false)));
+    assert!(!seg::may_have_handed(99, 100, || behind(true)), "behind an open join the owner holds the burst");
+    assert!(seg::may_have_handed(i64::MIN, 100, || behind(false)));
+    assert_eq!(join.get(), 3, "the join is asked only below the horizon");
+    // the 31-sample margin of F5: a chain starting in the last 31 samples below the horizon may have been handed, though the executor's first send of 32
+    // needs the window: `handed_end` says no for exactly those
+    for below in 1..=40_i64 {
+        let (start, horizon) = (10_000 - below, 10_000);
+        assert!(seg::may_have_handed(start, horizon, || false), "{below} below");
+        assert_eq!(handed_end(&PACKETS, pending(start, 1_000, false, false), horizon).is_some(), below >= 32, "{below} below: the first send fits");
     }
 }

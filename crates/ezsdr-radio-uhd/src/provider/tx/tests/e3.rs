@@ -10,20 +10,20 @@ use super::*;
 
 /// The snapshots a test expects, as `(case, lines)`; a case that differs, or that the table lacks, is reported in the form that is pasted
 /// back, so that a snapshot is written from a base run and then only read.
-type Expected = &'static [(&'static str, &'static [&'static str])];
+pub(super) type Expected = &'static [(&'static str, &'static [&'static str])];
 
-struct Cases {
+pub(super) struct Cases {
     expected: Expected,
     checked: Vec<String>,
     differs: Vec<String>,
 }
 
 impl Cases {
-    fn new(expected: Expected) -> Cases {
+    pub(super) fn new(expected: Expected) -> Cases {
         Cases { expected, checked: Vec::new(), differs: Vec::new() }
     }
 
-    fn check(&mut self, case: impl Into<String>, actual: Vec<String>) {
+    pub(super) fn check(&mut self, case: impl Into<String>, actual: Vec<String>) {
         let case = case.into();
         let want = self.expected.iter().find(|(name, _)| *name == case).map(|(_, lines)| *lines);
         if want != Some(actual.iter().map(String::as_str).collect::<Vec<_>>().as_slice()) {
@@ -33,7 +33,7 @@ impl Cases {
         self.checked.push(case);
     }
 
-    fn finish(self) {
+    pub(super) fn finish(self) {
         let stale: Vec<&str> = self.expected.iter().map(|(name, _)| *name).filter(|name| !self.checked.iter().any(|case| case == name)).collect();
         assert!(self.differs.is_empty() && stale.is_empty(), "snapshots that differ from the written ones (stale cases: {stale:?}):\n{}", self.differs.concat());
     }
@@ -43,8 +43,8 @@ impl Cases {
 /// records and the stats (the lock-wait maximum left out: it measures contention, not behaviour).
 fn snap(core: &Core, device: &FakeDevice, tx: &Tx) -> Vec<String> {
     let mut lines: Vec<String> = device.calls().into_iter().filter(|call| call.starts_with("tx_send ")).collect();
-    lines.push(format!("front {:?}", tx.chain.front().map(|(_, sample)| sample)));
-    lines.push(format!("chain next {:?} tail {}", tx.chain.next(), tx.chain.tail().is_some()));
+    lines.push(format!("front {:?}", tx.chain().front().map(|(_, sample)| sample)));
+    lines.push(format!("chain next {:?} tail {}", tx.chain().next(), tx.chain().tail().is_some()));
     lines.push(format!("open next {:?} first {:?}", tx.open_next(), tx.open_first()));
     let rec = lock(&core.rec);
     for row in &rec.bursts {
@@ -80,7 +80,7 @@ fn e3_c1_a_lone_finite_burst_by_length() {
 
 /// A signature of what the owner has done: the sends so far, where the open booking stands and whether a sample is held.
 fn signature(device: &FakeDevice, tx: &Tx) -> String {
-    format!("sends {} open next {:?} chain next {:?} tail {}", sends(device).len(), tx.open_next(), tx.chain.next(), tx.chain.tail().is_some())
+    format!("sends {} open next {:?} chain next {:?} tail {}", sends(device).len(), tx.open_next(), tx.chain().next(), tx.chain().tail().is_some())
 }
 
 /// The owner at each device time `from..=to` (samples, one a step), one line for the time a signature first appears: where a send goes

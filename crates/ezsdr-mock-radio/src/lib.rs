@@ -27,7 +27,8 @@ use ezsdr_kernel::stream::{
 use ezsdr_kernel::time::{ClockRegistry, Duration, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimePoint};
 use ezsdr_radio::segment::{self, Extent, Pending, Waveform};
 use ezsdr_radio::staging::{
-    Bookings, Outcome, Overlap, Playing, Read, Staging, SwitchRecord, SwitchRefusal, TxBook, TxSend, handover_horizon, is_switch, ordinary_k, stop_bound, stop_fits, stop_sample, write_settled,
+    Bookings, DeviceEnd, Outcome, Overlap, Playing, Read, Staging, SwitchRecord, SwitchRefusal, TxBook, TxSend, handover_horizon, is_switch, ordinary_k, stop_bound, stop_fits, stop_sample,
+    write_settled,
 };
 use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment, StreamKey};
 use ezsdr_radio::{Addressed, channels, x3xx};
@@ -1175,7 +1176,7 @@ impl MockRadio {
         self.tx[k].device.close();
         // The halt pushed above cancels the held bookings and an open one that has emitted no block (#85, the book's one rule).
         self.read_tx(k, now, reason)?;
-        self.tx[k].book.end_open();
+        self.tx[k].book.end_open(DeviceEnd::Keep);
         Ok(())
     }
 
@@ -1876,7 +1877,7 @@ impl MockRadio {
                         self.record_burst(record);
                     }
                     self.tx[k].device.close();
-                    self.tx[k].book.end_open();
+                    self.tx[k].book.end_open(DeviceEnd::Keep);
                     break;
                 }
             }
@@ -1896,7 +1897,7 @@ impl MockRadio {
                     self.record_burst(record);
                 }
                 self.tx[k].device.close();
-                self.tx[k].book.end_open();
+                self.tx[k].book.end_open(DeviceEnd::Keep);
                 progressed = true;
                 break;
             }
@@ -1905,7 +1906,7 @@ impl MockRadio {
             // MR-15: the block is the device's whole result; the book advances the burst, and its last block ends it.
             let block = i64::from(len);
             let id = self.tx[k].book.issue(TxSend { count: block, device_count: block, ends });
-            self.tx[k].book.complete(id, Outcome::Accepted(block));
+            self.tx[k].book.complete(id, Outcome::Accepted(block), None);
             if ends {
                 self.tx[k].device.close();
             }

@@ -508,12 +508,12 @@ fn arm_loss_at(core: &Arc<Core>, name: &'static str) -> Arc<AtomicUsize> {
 /// The owner rig with a pending recovery and B (one sample, 60 ms ahead) held, as `ur_22_stop_and_loss_during_owner_recovery_release_the_claim`
 /// holds it; B's sample.
 fn recovering(faults: Vec<FakeFault>) -> (OwnerRig, Clock, i64) {
-    let mut rig = owner_with(1, faults);
+    let rig = owner_with(1, faults);
     let clock = rig.3.clock.expect("a clock");
     let target = clock.at_or_after(rig.0.now() + rig.0.ticks(60_000_000));
     hold(&rig.3, held(&clock, target, 1, LatePolicy::DropAndFlag));
     lock(&rig.0.streams).record_configured(key0(), Some(1));
-    rig.3.chain.mark_reopen_needed();
+    rig.3.chain().mark_reopen_needed();
     (rig, clock, target)
 }
 
@@ -621,7 +621,7 @@ fn e2b_r2b_the_line_lock_is_free_inside_the_reopen() {
     let clock = core.register(Dir::Tx, 200, 0).unwrap();
     let (_to_tx, cmds) = std::sync::mpsc::channel();
     let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-    tx.chain.mark_reopen_needed();
+    tx.chain().mark_reopen_needed();
     let host = core.device.host();
     let (worked, _frozen) = released(Frozen::on(host.clone()), &host, move || tx.pass());
     assert!(worked, "the reopen turn");

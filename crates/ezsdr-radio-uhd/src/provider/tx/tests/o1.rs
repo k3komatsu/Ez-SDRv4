@@ -720,7 +720,7 @@ fn o1_uhd_t6d_a_booking_after_a_stop_survives_the_failing_close_of_the_burst_it_
     r.rig.control.book(Dispatched::new(ActionId(9), Action::Stop { target: Some(crate::provider::test_support::target_of(&node)) }, Some(node)));
     r.book(2, 1, 30_000, false, LatePolicy::DropAndFlag);
     drain_tx(&mut r.rig.tx);
-    assert!(r.rig.tx.chain.needs_reopen(), "the Stop's close failed, so the streamer is uncertain");
+    assert!(r.rig.tx.chain().needs_reopen(), "the Stop's close failed, so the streamer is uncertain");
     assert!(lock(&r.rig.core.rec).rejected.iter().any(|row| row["call"] == "tx_close"), "the failed close is noted: {:?}", lock(&r.rig.core.rec).rejected);
     // A's samples are read before the streamer is replaced (the fake drops the old streamer's history on the reopen).
     let a_slots = o::Slots { segs: vec![o::Seg::once(5, 10_000, 12_000).cuttable()], cut: Some((t_k, bound)) };
@@ -736,7 +736,7 @@ fn o1_uhd_t6d_a_booking_after_a_stop_survives_the_failing_close_of_the_burst_it_
         (tx, passed)
     });
     assert!(passed, "the owner reopened the uncertain streamer");
-    assert!(!tx.chain.needs_reopen());
+    assert!(!tx.chain().needs_reopen());
     for ms in 21..=40 {
         device_at(&core, &time, &device, ms * MS);
         for _ in 0..8 {

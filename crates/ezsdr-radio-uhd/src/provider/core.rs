@@ -20,7 +20,7 @@ use serde_json::{Value as Json, json};
 
 use super::control::{ColdConfig, Planned};
 use super::mode::{DescriptionExt, channel_list};
-use super::tx::Held;
+use super::tx::{Held, Tail};
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
 use crate::device::{Iq, TxCode, TxReport};
 use crate::host::{ClockGuard, ClockMutex};
@@ -397,8 +397,8 @@ pub(crate) struct StreamState {
     /// The transmit clock registered at `arm` (RM-25): none or one.
     pub clock: Option<Clock>,
     /// The transmit stream's book (RM-21): the record a receipt is judged by (never the hand-over state), the accepted bookings and halts
-    /// in receipt order (UR-21, UR-26) and the repeat a switch replaces (RM-37), under one lock.
-    pub book: TxBook<Held>,
+    /// in receipt order (UR-21, UR-26), the repeat a switch replaces (RM-37) and the device chain only the owner writes, under one lock.
+    pub book: TxBook<Held, Tail>,
 }
 
 impl Default for StreamState {

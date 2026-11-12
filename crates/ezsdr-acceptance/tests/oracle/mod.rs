@@ -408,3 +408,94 @@ pub const JOINED_AT_A_STOP: [(i64, i64); 2] = [(-90, 40), (-50, 100)];
 pub fn recorded(completed: &[(i64, i64)]) -> i64 {
     completed.iter().map(|(_, n)| n).sum()
 }
+
+/// A receipt row (design note 49 E3b-1, table C5): bookings accepted in order, an optional Stop, then one probe booking received last on a
+/// fresh stream. Offsets are in samples from the stream's receipt sample `t_k` (`near`) or from `t_k + FAR` (the bookings are then far outside
+/// the hand-over window, so RM-15's hand-over rule plays no part): a start never late. The verdict column is typed from RM-15 and RM-16, and each
+/// Provider's test reads it against the oracle's `admit` and its own receipt.
+#[derive(Clone, Copy, Debug)]
+pub struct FrontReceipt {
+    pub label: &'static str,
+    /// `(offset, len)` of the bookings accepted first (`len` `None`: a repeat).
+    pub bookings: &'static [(i64, Option<i64>)],
+    /// A Stop received after the bookings.
+    pub stop: bool,
+    /// The offsets are from `t_k` itself, not from `t_k + FAR`.
+    pub near: bool,
+    /// `(offset, len, verdict)` of the probe; each probe runs on its own fresh stream.
+    pub probes: &'static [(i64, i64, Verdict)],
+}
+
+/// The distance, in samples, of table C5's far bookings from the receipt sample.
+pub const FAR: i64 = 50_000;
+
+pub const FRONT_RECEIPTS: [FrontReceipt; 11] = [
+    FrontReceipt { label: "short head 1", bookings: &[(0, Some(1))], stop: false, near: false, probes: &[(18, 1, Verdict::Refuse), (19, 1, Verdict::Accept)] },
+    FrontReceipt { label: "short head 3", bookings: &[(0, Some(3))], stop: false, near: false, probes: &[(18, 1, Verdict::Refuse), (19, 1, Verdict::Accept)] },
+    FrontReceipt { label: "short head 4", bookings: &[(0, Some(4))], stop: false, near: false, probes: &[(18, 1, Verdict::Refuse), (19, 1, Verdict::Accept)] },
+    FrontReceipt { label: "short head 32", bookings: &[(0, Some(32))], stop: false, near: false, probes: &[(46, 1, Verdict::Refuse), (47, 1, Verdict::Accept)] },
+    FrontReceipt {
+        label: "long head 33: a booking at its end joins it, then end + 4",
+        bookings: &[(0, Some(33))],
+        stop: false,
+        near: false,
+        probes: &[(33, 1, Verdict::Accept), (34, 1, Verdict::Refuse), (36, 1, Verdict::Refuse), (37, 1, Verdict::Accept)],
+    },
+    FrontReceipt { label: "long head 100", bookings: &[(0, Some(100))], stop: false, near: false, probes: &[(100, 1, Verdict::Accept), (103, 1, Verdict::Refuse), (104, 1, Verdict::Accept)] },
+    FrontReceipt {
+        label: "a piece joined to a long head: end + 4 of the piece",
+        bookings: &[(0, Some(40)), (40, Some(10))],
+        stop: false,
+        near: false,
+        probes: &[(50, 1, Verdict::Accept), (53, 1, Verdict::Refuse), (54, 1, Verdict::Accept)],
+    },
+    FrontReceipt {
+        label: "a one-sample piece joined to a long head",
+        bookings: &[(0, Some(40)), (40, Some(1))],
+        stop: false,
+        near: false,
+        probes: &[(44, 1, Verdict::Refuse), (45, 1, Verdict::Accept)],
+    },
+    FrontReceipt { label: "a repeat holds the rest of the stream", bookings: &[(0, None)], stop: false, near: false, probes: &[(10, 1, Verdict::Refuse), (1_000_000, 1, Verdict::Refuse)] },
+    FrontReceipt {
+        label: "a Stop that cancelled a booking inside its window leaves the region to B",
+        bookings: &[(5_000, Some(20))],
+        stop: true,
+        near: true,
+        probes: &[(5_000, 1, Verdict::Refuse), (10_004, 1, Verdict::Refuse), (10_005, 1, Verdict::Accept)],
+    },
+    FrontReceipt {
+        label: "a Stop that cancelled nothing leaves no region",
+        bookings: &[(FAR, Some(20))],
+        stop: true,
+        near: true,
+        probes: &[(5_000, 1, Verdict::Accept), (10_004, 1, Verdict::Accept)],
+    },
+];
+
+impl FrontReceipt {
+    /// The first sample of an offset of this row, for the stream whose receipt sample is `t_k`.
+    pub fn start(&self, t_k: i64, offset: i64) -> i64 {
+        t_k + if self.near { 0 } else { FAR } + offset
+    }
+
+    /// The oracle's verdict on the probe `(offset, len)` of this row, every booking and the Stop received at root tick `recv` (stream sample `t_k`):
+    /// the regions of RM-15 (a piece that starts at the end of a head of more than 32 samples extends that head's region to its own end plus four)
+    /// and the Stop's region of RM-16.
+    pub fn verdict(&self, p: &Params, t_k: i64, recv: i64, probe: (i64, i64)) -> Verdict {
+        let mut regions: Vec<Region> = Vec::new();
+        for &(offset, len) in self.bookings {
+            let start = self.start(t_k, offset);
+            let joined = len.and_then(|len| regions.iter().position(|r| r.end == start && r.len > SHORT).map(|i| (i, len)));
+            match joined {
+                Some((i, len)) => regions[i] = Region { end: start + len, front: start + front_offset(len, true, p.gap()), ..regions[i] },
+                None => regions.push(region(p, start, len)),
+            }
+        }
+        if self.stop {
+            let cancelled: Vec<i64> = self.bookings.iter().map(|&(offset, _)| self.start(t_k, offset)).collect();
+            regions.extend(stop_region(p, recv, &cancelled));
+        }
+        admit(p, &regions, recv, self.start(t_k, probe.0), Some(probe.1))
+    }
+}

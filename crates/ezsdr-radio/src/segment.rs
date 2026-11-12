@@ -1,9 +1,40 @@
 //! The pure segmentation decisions of transmit (note 49 §5.4, E3a): how large the next send is, where it is cut, when the window lets it go,
 //! whether the device burst ends with it, and what MR-25 counts as handed over at a `Stop`. Integers and plain structs only; no clock is
 //! read here, so each decision is a table of inputs and results. The UHD Module's real-time executor and MockRadio's stepped model of it
-//! (MR-15, MR-25) both call these, with the packet rules of their profile ([`PacketRules`]).
+//! (MR-15, MR-25) both call these, with the packet rules of their profile ([`PacketRules`]). The front arithmetic of every close is here too
+//! ([`close_front`]), and the receipt's prediction of it ([`predicted_front`]) and of the hand-over ([`may_have_handed`]).
 
 use crate::x3xx::PacketRules;
+
+/// RM-15, UR-22: the samples past any closing send's exclusive end that the next device burst keeps (every close but a closed short device burst's),
+/// and the floor of [`crate::staging::closed_short_gap`].
+pub const CLOSE_GAP: i64 = 3;
+
+/// UR-22, UR-23: the samples of the close that ends a device burst with a held tail (the tail and one zero) or with no payload (two zeros).
+pub const CLOSE_SAMPLES: i64 = 2;
+
+/// UR-22: the front a close leaves, the first sample a next device burst may start at: the close's first sample `start`, the `samples` it
+/// carries and the `gap` the device keeps after them. Every front in the tree is an instance of this sum. It saturates: an executor's front near
+/// the end of the range stays a bound ([`checked_close_front`] is the receipt's, which refuses instead).
+pub const fn close_front(start: i64, samples: i64, gap: i64) -> i64 {
+    start.saturating_add(samples).saturating_add(gap)
+}
+
+/// [`close_front`] that is `None` when the sum does not fit an `i64`: a receipt refuses such a booking, it never saturates one into an accepted
+/// footprint (RM-15).
+pub const fn checked_close_front(start: i64, samples: i64, gap: i64) -> Option<i64> {
+    match start.checked_add(samples) {
+        Some(end) => end.checked_add(gap),
+        None => None,
+    }
+}
+
+/// RM-15: a head longer than 32 samples, or a joined piece, closes with its held tail and a zero, which start at its last payload sample: the front
+/// is its payload end plus this.
+pub const HELD_TAIL_FRONT: i64 = close_front(-1, CLOSE_SAMPLES, CLOSE_GAP);
+
+/// RM-16: a Stop's two-zero close starts at the cursor: the front is the cursor plus this.
+pub const STOP_FRONT: i64 = close_front(0, CLOSE_SAMPLES, CLOSE_GAP);
 
 /// UR-23: the largest send, in samples.
 pub const SEND_CAP_MAX: i64 = 20_000;
@@ -119,6 +150,15 @@ pub fn plan_send(rules: &PacketRules, extent: &Extent, device_sob: bool, window_
     Some(Plan { count, eob, short_first, hold, device_eob, sending, pad, device_count, closes_short })
 }
 
+impl Plan {
+    /// UR-22: the front this send's close leaves, or `None` when the send does not end the device burst. `start` is the send's first sample;
+    /// `short_gap` is the stream's [`crate::staging::closed_short_gap`], kept past a closing first send of at most the open first send
+    /// ([`Plan::closes_short`]) and not past any other close ([`CLOSE_GAP`]). Saturating, as [`close_front`].
+    pub fn front(&self, start: i64, short_gap: i64) -> Option<i64> {
+        self.device_eob.then(|| close_front(start, self.device_count, if self.closes_short { short_gap } else { CLOSE_GAP }))
+    }
+}
+
 /// A booking the Mock counts for MR-25's Stop cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pending {
@@ -145,4 +185,25 @@ pub fn handed_end(rules: &PacketRules, pending: Pending, window_end: i64) -> Opt
         pending.len.min(rules.min_open_first_send)
     };
     (pending.start.saturating_add(first) <= window_end).then(|| if pending.repeat { window_end } else { pending.start.saturating_add(pending.len).min(window_end) })
+}
+
+/// RM-15: the exclusive front of a booking's region at receipt, before any send exists: the envelope of the fronts the executor's closes can leave
+/// it. A standalone head of at most `min_open_first_send` samples is one closed device burst, padded to `min_first_send` and kept `gap`
+/// ([`crate::staging::closed_short_gap`]) past that; a longer head and a joined piece end in a held tail, [`HELD_TAIL_FRONT`] past their end (a close
+/// without the hold, [`Plan::front`], is one sample less: the receipt keeps the later front); a repeat never ends. Checked: `None` when the front
+/// does not fit an `i64` (the booking is refused, not wrapped), or when a short head's `gap` is not known.
+pub fn predicted_front(rules: &PacketRules, gap: Option<i64>, start: i64, len: Option<i64>, joined: bool) -> Option<i64> {
+    match len {
+        None => Some(i64::MAX),
+        Some(len) if joined || len > rules.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),
+        Some(len) => checked_close_front(start, len.max(rules.min_first_send), gap?),
+    }
+}
+
+/// RM-15 (note 47 stage 5 §1.3): whether the owner may already have handed a chain that starts at `start` when a booking is received before the
+/// hand-over `horizon` ([`crate::staging::handover_horizon`]): it starts below it, and no earlier chain is still open to a join (`behind_open_join`),
+/// for the owner holds that device burst until its join deadline. The window rule alone: a chain may be handed without the owner having sent a sample
+/// of it, which is what [`handed_end`] asks.
+pub fn may_have_handed(start: i64, horizon: i64, behind_open_join: impl FnOnce() -> bool) -> bool {
+    start < horizon && !behind_open_join()
 }

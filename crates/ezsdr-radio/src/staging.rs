@@ -9,10 +9,12 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use ezsdr_kernel::event::ActionId;
+use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::spec::{Key, Scalar, Value};
 use ezsdr_kernel::stream::LatePolicy;
 use ezsdr_kernel::time::TimePoint;
 
+use crate::segment::{CLOSE_SAMPLES, checked_close_front, close_front, may_have_handed, predicted_front};
 use crate::x3xx::PACKETS;
 use crate::{CancelReason, Concrete, concrete};
 
@@ -76,16 +78,8 @@ pub enum Overlap {
     Handed,
 }
 
-/// RM-15, UR-22: the samples past any closing send's exclusive end that the next device burst keeps (every close but a short head's), and
-/// the floor of [`closed_short_gap`].
-pub const CLOSE_GAP: i64 = 3;
-
-/// RM-15: a head longer than 32 samples, or a joined piece, closes with its held tail and at most one zero, so its closing end is its payload
-/// end plus one and its front that plus [`CLOSE_GAP`].
-pub const HELD_TAIL_FRONT: i64 = 1 + CLOSE_GAP;
-
-/// RM-16: a Stop's two-zero close starts at the cursor and ends two samples later; the front is that end plus [`CLOSE_GAP`].
-pub const STOP_FRONT: i64 = 2 + CLOSE_GAP;
+// The close constants are defined with the front arithmetic they come from (note 49 E3b).
+pub use crate::segment::{CLOSE_GAP, HELD_TAIL_FRONT, STOP_FRONT};
 
 /// RM-15: the samples past a closed short device burst's padded end that the next device burst keeps: `max(3, ceil(15 µs × rate))`, the
 /// stream's sample rate being `root_hz × ticks_den / ticks_num` (`ticks_num / ticks_den` root ticks per sample). Integer arithmetic.
@@ -136,7 +130,7 @@ impl Chain {
         starts
             .zip(ends)
             .filter(|&(s, e)| s < handed && e.checked_sub(s).is_some_and(|len| len <= PACKETS.min_open_first_send))
-            .filter_map(|(s, e)| front(gap, s, Some(e - s), false))
+            .filter_map(|(s, e)| predicted_front(&PACKETS, gap, s, Some(e - s), false))
             .max()
             .unwrap_or(i64::MIN)
     }
@@ -396,12 +390,18 @@ pub enum Outcome {
 /// How a transmit streamer's reopen ended (UR-22, RM-25).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reopen {
-    /// The streamer was replaced.
-    Reopened,
+    /// The streamer was replaced. `front` is the acknowledged T3 flush's front, a closed short burst's (UR-22, UR-33).
+    Reopened {
+        /// The first sample a next device burst may start at, with its clock domain.
+        front: Option<(ClockDomainId, i64)>,
+    },
     /// The reopen failed with the device not lost and no `Provider::stop`: the stream's clock ends.
     Failed,
     /// A loss or `Provider::stop` ended the recovery.
-    Interrupted,
+    Interrupted {
+        /// The device is lost (otherwise `Provider::stop` ended it).
+        lost: bool,
+    },
 }
 
 /// What the executor does after a send completed (UR-22).
@@ -420,10 +420,244 @@ pub enum Settle {
 /// the stream's clock cannot place the first sample).
 pub type StopReach = (i64, Option<(i64, i64)>);
 
+/// The device burst the executor has open on a transmit stream (UR-22, UR-23). `T` is the payload of its held tail, which only a Provider that
+/// drives the device (the UHD Module) holds.
+#[derive(Clone, Copy, Debug)]
+// Keep the fixed-capacity tail inline; boxing it would allocate on the TX path.
+#[allow(clippy::large_enum_variant)]
+pub enum DeviceBurst<T> {
+    /// No device burst is open.
+    Closed,
+    /// One is open.
+    Open {
+        /// The root tick of the device burst's first sample, its start-of-burst send's instant.
+        first: i64,
+        /// The first sample the device has nothing past.
+        next: i64,
+        /// The held last sample: a continuation sends it first.
+        tail: Option<T>,
+    },
+}
+
+/// Whether an uncertain end-of-burst close waits for the executor's reopen and flush (UR-22).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Recovery {
+    /// Nothing waits.
+    #[default]
+    Clean,
+    /// The streamer is to be replaced before anything else is sent.
+    ReopenNeeded,
+}
+
+/// What a send that went out whole does to the device burst (UR-22), planned with the send and applied by [`TxBook::complete`]: it ends the device
+/// burst, starts one or continues the open one, holds its tail, and an ending one moves the front.
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceSend<T> {
+    /// The send starts the device burst.
+    pub sob: bool,
+    /// The send ends the device burst.
+    pub eob: bool,
+    /// The root tick of the send's first sample: the device burst's, when the send starts it.
+    pub first: i64,
+    /// The first sample the device has nothing past once the send is whole.
+    pub next: i64,
+    /// The held last sample the next send continues from.
+    pub tail: Option<T>,
+    /// An ending send's front.
+    pub front: Option<(ClockDomainId, i64)>,
+}
+
+/// What becomes of the device burst when the executor ends the open booking ([`TxBook::end_open`]) (UR-22, UR-23).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeviceEnd {
+    /// The device burst stays as it is.
+    Keep,
+    /// A held booking continues the device burst at `next`: its held tail stays.
+    Continue {
+        /// The held booking's first sample.
+        next: i64,
+    },
+    /// The device burst ends and nothing was sent to end it.
+    Closed,
+    /// The device burst ends with a two-sample close the device took whole: the next device burst may start at `front`.
+    Sent {
+        /// The close's clock domain.
+        domain: ClockDomainId,
+        /// The first sample a next device burst may start at.
+        front: i64,
+    },
+    /// The device burst ends with a close the device did not take whole: the streamer is to be reopened.
+    Uncertain,
+    /// The device is lost.
+    Lost,
+}
+
+/// What the executor knows of the device (note 49 E3b): its open device burst, the first sample the next device burst may start at (the actual
+/// safe front) and its recovery. Only the executor writes it, through the transitions below; a receipt is judged by the record and never reads it.
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceChain<T> {
+    burst: DeviceBurst<T>,
+    front: Option<(ClockDomainId, i64)>,
+    recovery: Recovery,
+}
+
+impl<T> Default for DeviceChain<T> {
+    fn default() -> Self {
+        DeviceChain { burst: DeviceBurst::Closed, front: None, recovery: Recovery::Clean }
+    }
+}
+
+impl<T> DeviceChain<T> {
+    /// The first sample the open device burst has nothing past.
+    pub fn next(&self) -> Option<i64> {
+        match self.burst {
+            DeviceBurst::Closed => None,
+            DeviceBurst::Open { next, .. } => Some(next),
+        }
+    }
+
+    /// The open device burst's root tick of its first sample.
+    pub fn first(&self) -> Option<i64> {
+        match self.burst {
+            DeviceBurst::Closed => None,
+            DeviceBurst::Open { first, .. } => Some(first),
+        }
+    }
+
+    /// Whether the open device burst has nothing past `sample`.
+    pub fn continues_at(&self, sample: i64) -> bool {
+        self.next() == Some(sample)
+    }
+
+    /// Whether a device burst is open.
+    pub fn burst_is_open(&self) -> bool {
+        matches!(self.burst, DeviceBurst::Open { .. })
+    }
+
+    /// Whether an underflow report reaches the open device burst: one is open, and `tick` is none or not before the burst's first sample
+    /// (an earlier tick is the device burst before's, #93).
+    pub fn underflowed(&self, tick: Option<i64>) -> bool {
+        match self.burst {
+            DeviceBurst::Closed => false,
+            DeviceBurst::Open { first, .. } => tick.is_none_or(|tick| tick >= first),
+        }
+    }
+
+    /// The first sample a next device burst may start at, with its clock domain.
+    pub fn front(&self) -> Option<(ClockDomainId, i64)> {
+        self.front
+    }
+
+    /// The recovery state.
+    pub fn recovery(&self) -> Recovery {
+        self.recovery
+    }
+
+    /// Whether the streamer is to be reopened before anything else is sent.
+    pub fn needs_reopen(&self) -> bool {
+        self.recovery == Recovery::ReopenNeeded
+    }
+
+    /// A send starts a device burst that stays open. Panics while one is open.
+    pub fn open_device_burst(&mut self, first: i64, next: i64, tail: Option<T>) {
+        assert!(matches!(self.burst, DeviceBurst::Closed));
+        self.burst = DeviceBurst::Open { first, next, tail };
+    }
+
+    /// A send continues the open device burst. Panics when none is open.
+    pub fn continue_device_burst(&mut self, next: i64, tail: Option<T>) {
+        let DeviceBurst::Open { first, .. } = self.burst else { panic!("a device burst is open") };
+        self.burst = DeviceBurst::Open { first, next, tail };
+    }
+
+    /// The device burst ends.
+    pub fn close_device_burst(&mut self) {
+        self.burst = DeviceBurst::Closed;
+    }
+
+    /// The front moves up to `sample` within `domain`; a front of another domain is replaced.
+    pub fn advance_front(&mut self, domain: ClockDomainId, sample: i64) {
+        let sample = self.front.filter(|(old_domain, _)| *old_domain == domain).map_or(sample, |(_, old)| old.max(sample));
+        self.front = Some((domain, sample));
+    }
+
+    /// A send that went out whole.
+    pub fn send(&mut self, send: DeviceSend<T>) {
+        if send.eob {
+            self.close_device_burst();
+        } else if send.sob {
+            self.open_device_burst(send.first, send.next, send.tail);
+        } else {
+            self.continue_device_burst(send.next, send.tail);
+        }
+        if let Some((domain, front)) = send.front {
+            self.advance_front(domain, front);
+        }
+    }
+
+    /// The executor ends the open booking with `end`.
+    pub fn end(&mut self, end: DeviceEnd)
+    where
+        T: Copy,
+    {
+        match end {
+            DeviceEnd::Keep => {}
+            DeviceEnd::Continue { next } => self.continue_device_burst(next, self.tail()),
+            DeviceEnd::Closed => self.close_device_burst(),
+            DeviceEnd::Sent { domain, front } => {
+                self.close_device_burst();
+                self.advance_front(domain, front);
+            }
+            DeviceEnd::Uncertain => {
+                self.close_device_burst();
+                self.mark_reopen_needed();
+            }
+            DeviceEnd::Lost => self.lose(),
+        }
+    }
+
+    /// An uncertain end-of-burst close waits for a reopen.
+    pub fn mark_reopen_needed(&mut self) {
+        self.recovery = Recovery::ReopenNeeded;
+    }
+
+    /// The reopen replaced the streamer; the device burst stays as it was.
+    pub fn reopen_succeeded(&mut self) {
+        self.recovery = Recovery::Clean;
+    }
+
+    /// The reopen failed: the stream's clock ends and the device burst with it.
+    pub fn reopen_failed(&mut self) {
+        self.burst = DeviceBurst::Closed;
+        self.recovery = Recovery::Clean;
+    }
+
+    /// `Provider::stop` ends pending reopen work.
+    pub fn provider_stop(&mut self) {
+        self.recovery = Recovery::Clean;
+    }
+
+    /// The device is lost: nothing is open and nothing waits.
+    pub fn lose(&mut self) {
+        self.burst = DeviceBurst::Closed;
+        self.recovery = Recovery::Clean;
+    }
+}
+
+impl<T: Copy> DeviceChain<T> {
+    /// The held tail of the open device burst.
+    pub fn tail(&self) -> Option<T> {
+        match self.burst {
+            DeviceBurst::Closed => None,
+            DeviceBurst::Open { tail, .. } => tail,
+        }
+    }
+}
+
 /// One transmit stream's book: the record that judges receipts, the receipt list the executor reads, and the repeat a switch replaces
 /// (`playing`), under one lock. A Provider's write to any of the three goes through a transition here; receipt-side reads and the
 /// judging calls reach `record` directly until the later steps of note 49 stage E2a move them in.
-pub struct TxBook<P> {
+pub struct TxBook<P, T = ()> {
     /// The bookings and Stops (RM-15, RM-16, RM-21).
     pub record: Bookings,
     /// The receipts, in receipt order.
@@ -436,12 +670,22 @@ pub struct TxBook<P> {
     pub ops: Ops,
     /// When the Provider's repeats count as started (UR-38).
     pub started_rule: Started,
+    /// The device burst the executor has open, its safe front and its recovery. The executor writes it only with the operation that changes it,
+    /// in that operation's own section: [`TxBook::complete`] (a whole send), [`TxBook::end_open`] (an end, a close's result) and
+    /// [`TxBook::complete_reopen`]; the few writes with no booking operation (a loss, `Provider::stop`) go through [`DeviceChain`]'s transitions.
+    /// The MockRadio, whose device check is its own model (MR-24), never writes it.
+    pub device: DeviceChain<T>,
 }
 
-impl<P: Booked> TxBook<P> {
+impl<P: Booked, T: Copy> TxBook<P, T> {
     /// An empty book of a Provider whose repeats start by `started_rule`.
-    pub fn new(started_rule: Started) -> TxBook<P> {
-        TxBook { record: Bookings::unarmed(), list: TxList::default(), playing: None, open: None, ops: Ops::default(), started_rule }
+    pub fn new(started_rule: Started) -> TxBook<P, T> {
+        TxBook { record: Bookings::unarmed(), list: TxList::default(), playing: None, open: None, ops: Ops::default(), started_rule, device: DeviceChain::default() }
+    }
+
+    /// The first sample the device has nothing past: the open booking's next sample, or the open device burst's.
+    pub fn cursor(&self) -> Option<i64> {
+        self.open.as_ref().map(|open| open.next).or_else(|| self.device.next())
     }
 
     /// The executor opens `booking` at its first sample `next`.
@@ -458,9 +702,11 @@ impl<P: Booked> TxBook<P> {
         self.list.held.insert(open.next, open.booking);
     }
 
-    /// The executor ends the open booking with no send outcome: the record is unchanged (RM-16: nothing handed is recalled).
-    pub fn end_open(&mut self) -> Option<P> {
+    /// The executor ends the open booking with no send outcome: the record is unchanged (RM-16: nothing handed is recalled). `end` is what
+    /// becomes of the device burst, applied here with the booking's end: the executor's close has no section of its own for it.
+    pub fn end_open(&mut self, end: DeviceEnd) -> Option<P> {
         assert!(self.ops.inflight.is_none(), "an open booking is ended with an operation in flight");
+        self.device.end(end);
         self.open.take().map(|open| open.booking)
     }
 
@@ -495,9 +741,10 @@ impl<P: Booked> TxBook<P> {
         op
     }
 
-    /// The device's `outcome` of the send `id`: a whole send advances the open booking (and its last ends it); any other outcome
-    /// abandons it at the cursor UR-22 gives: what the device took of a short send, all of a failed one, nothing past a failed tail.
-    pub fn complete(&mut self, id: OpId, outcome: Outcome) -> Settle {
+    /// The device's `outcome` of the send `id`: a whole send advances the open booking (and its last ends it) and applies `device`, its effect on
+    /// the device burst (none on a Provider that does not drive the chain); any other outcome abandons the booking at the cursor UR-22 gives
+    /// (what the device took of a short send, all of a failed one, nothing past a failed tail) and leaves the device burst to the abandon.
+    pub fn complete(&mut self, id: OpId, outcome: Outcome, device: Option<DeviceSend<T>>) -> Settle {
         let send = self.finish(id, "Send", |op| if let TxOp::Send(send) = op { Some(send) } else { None });
         let open = self.open.as_mut().expect("a booking is open");
         let handed = match outcome {
@@ -506,6 +753,9 @@ impl<P: Booked> TxBook<P> {
                 open.first = false;
                 if send.ends {
                     self.open = None;
+                }
+                if let Some(send) = device {
+                    self.device.send(send);
                 }
                 return Settle::Sent;
             }
@@ -540,16 +790,35 @@ impl<P: Booked> TxBook<P> {
         self.start(TxOp::Reopen)
     }
 
-    /// How the reopen `id` ended. Only a failure changes the book (RM-25): the open booking ends, whatever it has sent, and is returned for the
-    /// executor to report; the stream's clock ends, and with it the pending switch. The held bookings stay for the executor to take.
+    /// How the reopen `id` ended, and what it does to the device burst: a reopened streamer clears the recovery and moves the front to the
+    /// flush's, an interrupted one clears it (a loss also ends the device burst). A failure changes the booking side too (RM-25): the open
+    /// booking ends, whatever it has sent, and is returned for the executor to report; the stream's clock ends, and with it the pending
+    /// switch and the device burst. The held bookings stay for the executor to take.
     pub fn complete_reopen(&mut self, id: OpId, outcome: Reopen) -> Option<P> {
         self.finish(id, "Reopen", |op| matches!(op, TxOp::Reopen).then_some(()));
-        if outcome != Reopen::Failed {
-            return None;
+        match outcome {
+            Reopen::Reopened { front } => {
+                if let Some((domain, front)) = front {
+                    self.device.advance_front(domain, front);
+                }
+                self.device.reopen_succeeded();
+                None
+            }
+            Reopen::Interrupted { lost: true } => {
+                self.device.lose();
+                None
+            }
+            Reopen::Interrupted { lost: false } => {
+                self.device.provider_stop();
+                None
+            }
+            Reopen::Failed => {
+                let open = self.open.take().map(|open| open.booking);
+                self.record.cancel_switch();
+                self.device.reopen_failed();
+                open
+            }
         }
-        let open = self.open.take().map(|open| open.booking);
-        self.record.cancel_switch();
-        open
     }
 
     /// The executor reads the list's oldest receipt: a halt cancels what [`TxBook::cancel_all`] takes.
@@ -760,7 +1029,7 @@ impl Bookings {
     /// [`Bookings::prune`] at this receipt: a switch due by `now` is applied by then, and `accept` reads only the chains and the region.
     pub fn accept(&mut self, start: i64, len: Option<i64>, now: i64, join_by: impl Fn(i64) -> i64, horizon: i64) -> Result<(), Overlap> {
         let join = self.joinable(start, len, now, &join_by);
-        let front = front(self.gap, start, len, join.is_some()).ok_or(Overlap::Booking)?;
+        let front = predicted_front(&PACKETS, self.gap, start, len, join.is_some()).ok_or(Overlap::Booking)?;
         let early = self.chains.iter().any(|c| start < c.start && self.may_be_handed(c, now, horizon, &join_by));
         if self.meets(start, front, join) {
             return Err(Overlap::Booking);
@@ -817,7 +1086,7 @@ impl Bookings {
         loop {
             let k = self.first_free(from, len.is_some(), now, &join_by, horizon)?;
             let join = self.joinable(k, len, now, &join_by);
-            match self.met_front(k, front(self.gap, k, len, join.is_some())?, join) {
+            match self.met_front(k, predicted_front(&PACKETS, self.gap, k, len, join.is_some())?, join) {
                 Some(i64::MAX) => return None,
                 Some(next) => from = next,
                 None => return Some(k),
@@ -838,7 +1107,7 @@ impl Bookings {
     /// when no sample is free.
     pub fn region_move(&self, at: i64, len: Option<i64>, now: i64, join_by: impl Fn(i64) -> i64, horizon: i64) -> Result<i64, Overlap> {
         let join = self.joinable(at, len, now, &join_by);
-        let front = front(self.gap, at, len, join.is_some()).ok_or(Overlap::Booking)?;
+        let front = predicted_front(&PACKETS, self.gap, at, len, join.is_some()).ok_or(Overlap::Booking)?;
         if self.chain_front(at, front, join).is_some() || self.region_met(at, front).is_none() {
             return Ok(at);
         }
@@ -955,7 +1224,7 @@ impl Bookings {
     ///
     /// Returns the switches it settled, as settled.
     pub fn abandon(&mut self, cursor_k: i64, bound: i64) -> Vec<Settled> {
-        let stop = cursor_k.saturating_add(STOP_FRONT);
+        let stop = close_front(cursor_k, CLOSE_SAMPLES, CLOSE_GAP);
         let mut settled = Vec::new();
         let mut never_started = Vec::new();
         for s in self.settled.iter_mut().filter(|s| s.outcome == SwitchOutcome::Applied && s.boundary >= cursor_k) {
@@ -1012,7 +1281,7 @@ impl Bookings {
     /// not a chain's head is not moved here: the record does not reframe its chain (host lateness, RM-16).
     pub fn move_start(&mut self, old: i64, new: i64, len: Option<i64>) -> Result<(), Overlap> {
         // The hand-over horizon of `accept` does not apply: the owner hands in start order, so no chain after the moved head was handed before it.
-        self.move_head(old, len, |bookings| (!bookings.meets(new, front(bookings.gap, new, len, false)?, None)).then_some(new)).map(|_| ()).ok_or(Overlap::Booking)
+        self.move_head(old, len, |bookings| (!bookings.meets(new, predicted_front(&PACKETS, bookings.gap, new, len, false)?, None)).then_some(new)).map(|_| ()).ok_or(Overlap::Booking)
     }
 
     /// RM-14, RM-15, D24: takes the chain head `old` out of the record and puts it back at the start that `place` returns, with its
@@ -1029,7 +1298,7 @@ impl Bookings {
             self.remove_head(i, old, len);
         }
         let gap = self.gap;
-        let placed = place(self).and_then(|start| Some((start, front(gap, start, len, false)?)));
+        let placed = place(self).and_then(|start| Some((start, predicted_front(&PACKETS, gap, start, len, false)?)));
         let Some((start, region_front)) = placed else {
             self.chains = saved;
             return None;
@@ -1058,12 +1327,12 @@ impl Bookings {
                 c.joined.retain(|&j| j > c.start);
                 if c.closed_short() {
                     c.join = false;
-                    c.front = front(gap, c.start, Some(c.end - c.start), false).unwrap_or(c.front);
+                    c.front = predicted_front(&PACKETS, gap, c.start, Some(c.end - c.start), false).unwrap_or(c.front);
                 } else if !c.joined.is_empty() {
                     c.join = false;
                     let starts = std::iter::once(c.start).chain(c.joined.iter().copied());
                     let ends = c.joined.iter().copied().chain(std::iter::once(c.end));
-                    let pieces = starts.zip(ends).filter_map(|(s, e)| front(gap, s, Some(e - s), false)).max().unwrap_or(c.front);
+                    let pieces = starts.zip(ends).filter_map(|(s, e)| predicted_front(&PACKETS, gap, s, Some(e - s), false)).max().unwrap_or(c.front);
                     c.front = c.front.max(pieces);
                 }
             }
@@ -1104,7 +1373,7 @@ impl Bookings {
     /// `now`. Its start must lie below `horizon`. It cannot have reached the device while a joinable chain that ends before it is
     /// still open to a join (`now <= join_by(end)`): the owner holds that device burst until its join deadline (`tx.rs`, `continuation_open`).
     fn may_be_handed(&self, c: &Chain, now: i64, horizon: i64, join_by: &impl Fn(i64) -> i64) -> bool {
-        c.start < horizon && !self.chains.iter().any(|x| x.join && x.end <= c.start && now <= join_by(x.end))
+        may_have_handed(c.start, horizon, || self.chains.iter().any(|x| x.join && x.end <= c.start && now <= join_by(x.end)))
     }
 
     /// The front of the accepted region that holds `k`, if any; a join point (the end of a chain
@@ -1120,19 +1389,6 @@ impl Bookings {
     }
 }
 
-/// RM-15: the exclusive front of a booking's region. A standalone head of at most 32 samples is
-/// one closed device burst, and its front is its transmitted end (padded to four) plus `gap`
-/// ([`closed_short_gap`]), the safe start after it (UR-22); a head longer than 32 and a joined piece end in a held
-/// tail, `end + HELD_TAIL_FRONT`; a repeat never ends. `None` when the front does not fit in an `i64`
-/// (the booking is refused, not wrapped), or when a short head's `gap` is not known ([`Bookings::unarmed`]).
-fn front(gap: Option<i64>, start: i64, len: Option<i64>, joined: bool) -> Option<i64> {
-    match len {
-        None => Some(i64::MAX),
-        Some(len) if joined || len > PACKETS.min_open_first_send => start.checked_add(len)?.checked_add(HELD_TAIL_FRONT),
-        Some(len) => start.checked_add(len.max(4))?.checked_add(gap?),
-    }
-}
-
 /// RM-15: the first sample a booking received at decision instant `decided` may start at without
 /// being late (note 47 stage 5, §0): one sample past the decision, plus the device lead.
 /// `at_or_after` and `instant` are the stream's clock, which each Provider passes in.
@@ -1144,7 +1400,7 @@ pub fn ordinary_k(decided: i64, lead: i64, at_or_after: impl Fn(i64) -> i64, ins
 /// the first sample at or after `at + in_flight`, plus [`STOP_FRONT`]. The window `in_flight` is the
 /// profile's; `at_or_after` is the stream's clock, which each Provider passes in.
 pub fn stop_sample(at: i64, in_flight: i64, at_or_after: impl Fn(i64) -> i64) -> i64 {
-    at_or_after(at.saturating_add(in_flight)).saturating_add(STOP_FRONT)
+    close_front(at_or_after(at.saturating_add(in_flight)), CLOSE_SAMPLES, CLOSE_GAP)
 }
 
 /// RM-16: the root tick a `Stop` at `at` bounds a transmit stream by: [`stop_sample`] in root ticks.
@@ -1156,7 +1412,7 @@ pub fn stop_bound(at: i64, in_flight: i64, at_or_after: impl Fn(i64) -> i64, ins
 /// [`STOP_FRONT`] and that sample's root tick, and the sample at or after `at`, each checked (`None` is an overflow). A Stop that has no
 /// bound is refused at receipt on both Providers; [`stop_bound`] and [`stop_sample`] are its saturating twins for what is already received.
 pub fn stop_fits(at: i64, in_flight: i64, at_or_after: impl Fn(i64) -> Option<i64>, instant: impl Fn(i64) -> Option<i64>) -> bool {
-    at.checked_add(in_flight).and_then(&at_or_after).and_then(|k| k.checked_add(STOP_FRONT)).and_then(instant).is_some() && at_or_after(at).is_some()
+    at.checked_add(in_flight).and_then(&at_or_after).and_then(|k| checked_close_front(k, CLOSE_SAMPLES, CLOSE_GAP)).and_then(instant).is_some() && at_or_after(at).is_some()
 }
 
 /// RM-15 (note 47 stage 5 §1.3): the first sample a receipt at root tick `now` cannot yet be sure the owner has not handed: the

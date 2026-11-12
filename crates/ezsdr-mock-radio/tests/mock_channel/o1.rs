@@ -1076,3 +1076,34 @@ fn e3_mc5_the_wake_follows_the_block() {
         }
     }
 }
+
+// ------------------------------------------------------------------------------------------------------------ E3b-1 (design note 49 E3b), table C5
+
+#[test]
+fn e3b_c5_receipts_by_provider_mock_column() {
+    // Table C5 (`o::FRONT_RECEIPTS`, the literal the UHD owner's `e3b_c5_receipts_by_provider_uhd_column` reads too): a booking received after the
+    // row's bookings (and Stop) is accepted or refused as the table says, as the independent oracle says and as the Mock's receipt says. Each
+    // probe runs on a fresh stepped Mock; a receipt is the tick the test steps to, never a thread's timing.
+    for row in o::FRONT_RECEIPTS {
+        for &(offset, len, want) in row.probes {
+            let mut waves: Vec<(u8, usize)> = row.bookings.iter().enumerate().map(|(i, &(_, len))| (i as u8 + 1, len.unwrap_or(100) as usize)).collect();
+            waves.push((60, len as usize));
+            let mut m = x3xx(&waves);
+            let t_k = X;
+            for (i, &(at, booked)) in row.bookings.iter().enumerate() {
+                m.book(i, row.start(t_k, at), booked.is_none(), LatePolicy::DropAndFlag);
+            }
+            assert_eq!(m.all_refusals(), 0, "{}: the row's own bookings are accepted", row.label);
+            if row.stop {
+                m.stop();
+            }
+            m.all_refusals();
+            m.book(row.bookings.len(), row.start(t_k, offset), false, LatePolicy::DropAndFlag);
+            let reasons = m.refusals();
+            let got = if reasons.is_empty() { o::Verdict::Accept } else { o::Verdict::Refuse };
+            assert!(reasons.iter().all(|reason| reason == "MR-16: burst overlaps an accepted booking"), "{}: a refusal is an overlap: {reasons:?}", row.label);
+            assert_eq!(row.verdict(&m.p, t_k, T0, (offset, len)), want, "{}: probe {offset}: the oracle reads the literal", row.label);
+            assert_eq!(got, want, "{}: probe {offset} of {len}: the Mock's receipt", row.label);
+        }
+    }
+}
