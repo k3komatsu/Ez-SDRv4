@@ -2957,6 +2957,82 @@ fn o1_parity_a_switched_repeat_changes_waveform_at_its_recorded_boundary_on_its_
     assert_eq!((mock_rows[1].0, mock_rows[1].1, mock_rows[1].2, mock_rows[1].3.as_str()), (mb, mock_cut - mb, (mock_cut - mb) / 400, "stop"), "the Mock's successor record");
 }
 
+#[test]
+fn c2_parity_a_switch_whose_boundary_precedes_the_stops_bound_is_cancelled_alike() {
+    // RM-37 (note 49 stage C2): the Stop's bound (the Stop's `at` plus the 10 ms window, plus five) is past a switch's boundary only when it
+    // is, so a switch whose boundary is beyond it is cancelled: the same cell as `s15_parity_provider_stop_cancels_a_pending_switch`
+    // with a Stop Action in place of `Provider::stop`. Both Providers cancel it, and the old repeat is the only burst.
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    let long = pair.sized(1_000).clone();
+    let tone = pair.tone.clone();
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &long, 20, true, false)]);
+    let rel = o1_wait_playing(&mut pair, 7);
+    let (mock_switch, _) = o1_asap(&pair, &tone, 26, true, true);
+    let (_, uhd_switch) = o1_asap(&pair, &tone, rel + 1_000, true, true);
+    o1_mock_at(&mut pair, 22, mock_switch);
+    o1_uhd_at(&mut pair, 202, rel, [uhd_switch]);
+    o1_mock_at(&mut pair, 23, o1_asap_stop());
+    o1_uhd_at(&mut pair, 203, rel + 1, [o1_asap_stop()]);
+    pair.uhd.wait_until(pair.uhd_t0 + ms(rel + 60));
+    pair.mock.step(pair.t0 + ms(80));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    for (case, instance, namespace) in [("Mock", &mock, "ezsdr.radio.mock"), ("UHD", &uhd, "ezsdr.radio.uhd")] {
+        let outcomes: Vec<String> = switch_rows(instance, &format!("{namespace}.switches")).into_iter().map(|row| row.3).collect();
+        assert_eq!(outcomes, ["cancelled"], "{case}: the switch is cancelled");
+        assert_eq!(manifest_rows(instance, &format!("{namespace}.bursts")).len(), 1, "{case}: the old repeat is the only burst");
+    }
+}
+
+/// R (700 samples) from 40 ms, switched to a 400-sample waveform and stopped: the Mock's switch is received at 43 ms and its Stop at
+/// `mock_stop` ms, the UHD's switch once R is observed started and its Stop `stop_after` ms (device time) after the switch.
+fn c2_switch_then_stop(mock_stop: i64, stop_after: i64) -> (ProviderInstance, ProviderInstance) {
+    let mut pair = o1_pair(&[(8, 700), (9, 400)]);
+    let (old, new) = (pair.ramp(8, 700).clone(), pair.ramp(9, 400).clone());
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &old, 40, true, false)]);
+    let rel = o1_wait_playing(&mut pair, 7).max(43);
+    let (mock_switch, _) = o1_asap(&pair, &new, 44, true, true);
+    let (_, uhd_switch) = o1_asap(&pair, &new, rel, true, true);
+    o1_mock_at(&mut pair, 43, mock_switch);
+    o1_uhd_at(&mut pair, 202, rel, [uhd_switch]);
+    o1_mock_at(&mut pair, mock_stop, o1_asap_stop());
+    o1_uhd_at(&mut pair, 203, rel + stop_after, [o1_asap_stop()]);
+    pair.uhd.wait_until(pair.uhd_t0 + ms(rel + stop_after + 70));
+    pair.mock.step(pair.t0 + ms(mock_stop + 70));
+    (pair.mock.finish_in_place(), pair.uhd.finish_in_place())
+}
+
+#[test]
+fn c2_parity_a_stop_right_after_a_switch_cancels_it_alike() {
+    // KL-42 (note 49 stage C2): a Stop 2 ms after the switch has its window edge short of the boundary (12 ms or more past the receipt): the
+    // sample at the boundary was not sent on either Provider, so both say `cancelled` (the UHD's row used to say `applied` for a sample it
+    // never sent) and the old repeat is the only burst.
+    let (mock, uhd) = c2_switch_then_stop(45, 2);
+    for (case, instance, namespace) in [("Mock", &mock, "ezsdr.radio.mock"), ("UHD", &uhd, "ezsdr.radio.uhd")] {
+        let outcomes: Vec<String> = switch_rows(instance, &format!("{namespace}.switches")).into_iter().map(|row| row.3).collect();
+        assert_eq!(outcomes, ["cancelled"], "{case}");
+        assert_eq!(manifest_rows(instance, &format!("{namespace}.bursts")).len(), 1, "{case}: no successor record");
+    }
+}
+
+#[test]
+fn c2_parity_a_switch_sent_before_the_stop_is_applied_alike() {
+    // RM-37, RM-16 (note 49 stage C2): the Stop comes 20 ms after the switch, after both Providers handed the new waveform's first sample: both
+    // say `applied` and record a successor for it.
+    let (mock, uhd) = c2_switch_then_stop(63, 20);
+    for (case, instance, namespace) in [("Mock", &mock, "ezsdr.radio.mock"), ("UHD", &uhd, "ezsdr.radio.uhd")] {
+        let outcomes: Vec<String> = switch_rows(instance, &format!("{namespace}.switches")).into_iter().map(|row| row.3).collect();
+        assert_eq!(outcomes, ["applied"], "{case}");
+        assert_eq!(manifest_rows(instance, &format!("{namespace}.bursts")).len(), 2, "{case}: the old repeat and its successor");
+    }
+}
+
 // ---------------------------------------------------------------- the rig's driver (note 51 stage 1b)
 
 fn one_stream_rig(config: FakeConfig) -> UhdRig {

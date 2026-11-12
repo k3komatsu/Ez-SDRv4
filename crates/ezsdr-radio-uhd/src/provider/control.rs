@@ -314,7 +314,7 @@ impl Control {
                     }
                     let seq = streams.next_seq();
                     if streams.book(&self.core, stream, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop }, Some(id)) {
-                        if let Some(bound) = streams.stream_mut(stream).stop_at(now, self.core.tx_in_flight()) {
+                        if let Some(bound) = streams.stream_mut(stream).stop_at(now, self.core.tx_in_flight(), false) {
                             self.core.timing(json!({ "what": "tx_stop_applied", "stream": k, "at": now, "bound": bound }));
                         }
                     }

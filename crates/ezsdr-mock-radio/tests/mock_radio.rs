@@ -1966,6 +1966,23 @@ fn mr_25_s11_loss_before_the_boundary_in_one_step_cancels_the_switch() {
 }
 
 #[test]
+fn c2_mr_25_a_loss_settles_a_switch_by_the_loss_sample() {
+    // RM-37, MR-42 (note 49 stage C2, Q1): a loss at the sample `t_k` radiates up to it, so the switch (boundary 6 000 on `ideal`) is applied only
+    // when `b < t_k`: a loss before or at `b` cancels it, whatever the Stop bound `t_k + 3` says; a loss one sample after `b` applies it, and
+    // one sample of the new waveform was radiated. The step runs past both the loss and `b` in one go (the loss is replayed first, MR-20).
+    for (loss_ns, outcome, radiated) in [(5_999_000, "cancelled", false), (6_000_000, "cancelled", false), (6_001_000, "applied", true)] {
+        let env = [("sim.faults", serde_json::json!([device_lost_at(loss_ns)]))];
+        let mut lost = Harness::new("ideal", &[("radio.tx.c0.stream", eq(Scalar::from(0)))], &[], &env, Some((BackPressure::DropOldest, 64)));
+        let domain = playing_ideal(&mut lost);
+        lost.actions.push(switch_action(domain, 5_000, 2_000));
+        lost.step(5_000_000).unwrap();
+        assert_eq!(lost.step(7_000_000).unwrap_err().kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+        assert_eq!(switch_rows(&lost)[0]["outcome"], outcome, "loss at {loss_ns}");
+        assert_eq!(bursts(&lost).iter().any(|record| record.target.ticks_in(domain).unwrap() == 6_000), radiated, "loss at {loss_ns}: the new waveform's sample");
+    }
+}
+
+#[test]
 fn mr_16_metadata_is_empty_or_the_mark_only() {
     // RM-13, MR-16 (note 47): a repeat on a busy stream is a switch only with the mark alone; empty metadata is
     // refused by the overlap rule, and any other metadata is refused as invalid.

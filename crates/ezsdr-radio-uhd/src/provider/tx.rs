@@ -876,7 +876,8 @@ impl Tx {
             let (repeat, id) = self
                 .with_book(|book| book.open.as_ref().map(|open| (open.booking.repeat, open.booking.settings.action())))
                 .unwrap_or_else(|| (self.with_held(|map| map.get(&cursor).is_some_and(|held| held.switch)), None));
-            let cancelled = self.with_book(|book| book.abandon(repeat, id, cursor, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))));
+            let now = clock.at_or_after(self.core.now());
+            let cancelled = self.with_book(|book| book.abandon(repeat, id, cursor, now, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))));
             for _ in 0..cancelled {
                 self.report_cancelled_burst("UR-22: the repeat switch was cancelled with the repeat it replaces", ezsdr_radio::CancelReason::Stop);
             }
@@ -1189,7 +1190,7 @@ impl Tx {
 /// The O1 spec oracle (design note 49 §5.4.11), one source shared with the acceptance and Mock tests: it names no Provider type.
 #[cfg(test)]
 #[path = "../../../ezsdr-acceptance/tests/oracle/mod.rs"]
-mod oracle;
+pub(super) mod oracle;
 
 #[cfg(test)]
 mod tests {
@@ -1297,6 +1298,7 @@ mod tests {
     use ezsdr_radio::staging::{DeviceChain, Recovery};
     use ezsdr_radio::timeline::Channels;
 
+    mod c2;
     mod e1;
     mod e2a;
     mod e2b;
@@ -6973,6 +6975,8 @@ mod tests {
         stop(&mut rig);
         assert_eq!(rig.device.transmitted(rig.clock.instant(15_000), 1), vec![Some(NEW)]);
         assert!(!rig.device.transmitted(rig.clock.instant(18_100), 900).contains(&Some(NEW)), "{:?}", rig.device.calls());
+        assert_eq!(switch_row(&rig.core, 0)["outcome"], "pending", "device time (8 ms) is short of the boundary");
+        run(&mut rig, 9, 20);
         assert_eq!(switch_row(&rig.core, 0)["outcome"], "applied");
     }
 

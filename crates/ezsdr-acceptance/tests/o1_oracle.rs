@@ -163,13 +163,103 @@ fn o1_oracle_ramp_is_distinct_and_never_zero() {
 
 #[test]
 fn o1_oracle_rm_37_outcomes() {
-    assert_eq!(outcome_after_stop(15_000, 14_003), Outcome::Cancelled, "B before b");
-    assert_eq!(outcome_after_stop(15_000, 15_000), Outcome::Cancelled, "B at b: `at or before`");
-    assert_eq!(outcome_after_stop(15_000, 15_001), Outcome::Applied);
-    assert_eq!(outcome_after_abandon(14_000, 12_000), Outcome::Cancelled);
-    assert_eq!(outcome_after_abandon(14_000, 14_000), Outcome::Cancelled, "a cursor at b has not handed the sample at b");
-    assert_eq!(outcome_after_abandon(14_000, 16_500), Outcome::Applied);
     assert!(switch_refused_unstarted(), "#84: a switch on a repeat not started on the device is refused at receipt");
+}
+
+#[test]
+fn o1_oracle_c2_a_switch_applies_at_device_time_only_when_its_boundary_send_was_taken() {
+    let b = 15_000;
+    assert_eq!(switch_outcome_at_device_time(b, b, Sent::Whole), Outcome::Applied, "S1: device time reaches b");
+    assert_eq!(switch_outcome_at_device_time(b, b - 1, Sent::Whole), Outcome::Pending, "one sample short of b");
+    assert_eq!(switch_outcome_at_device_time(b, b + 5_000, Sent::Short(1)), Outcome::Applied, "S8: one sample is enough");
+    assert_eq!(switch_outcome_at_device_time(b, b + 5_000, Sent::Short(0)), Outcome::Pending, "S8: none taken");
+    assert_eq!(switch_outcome_at_device_time(b, b + 5_000, Sent::NotIssued), Outcome::Pending, "S11: a late host has not sent b");
+    assert_eq!(switch_outcome_at_device_time(b, b + 5_000, Sent::Failed), Outcome::Pending, "S9: an exception settles at the abandon");
+}
+
+#[test]
+fn o1_oracle_c2_a_stop_settles_a_switch_by_its_bound_and_its_boundary_send() {
+    let (b, after, before) = (15_000, 15_003, 14_003);
+    for sent in [Sent::Whole, Sent::Short(1), Sent::Short(0), Sent::Failed, Sent::NotIssued] {
+        assert_eq!(switch_outcome_after_stop(b, before, sent), Outcome::Cancelled, "S2: B before b, {sent:?}");
+        assert_eq!(switch_outcome_after_stop(b, b, sent), Outcome::Cancelled, "S2: B at b, {sent:?}");
+    }
+    assert_eq!(switch_outcome_after_stop(b, after, Sent::Whole), Outcome::Applied, "S3: sent before the Stop (H1)");
+    assert_eq!(switch_outcome_after_stop(b, after, Sent::NotIssued), Outcome::Cancelled, "S4 (KL-42): never sent");
+    assert_eq!(switch_outcome_after_stop(b, after, Sent::Short(1)), Outcome::Applied, "S5/S8: one sample taken");
+    assert_eq!(switch_outcome_after_stop(b, after, Sent::Short(0)), Outcome::Cancelled, "S5/S8: none taken");
+    assert_eq!(switch_outcome_after_stop(b, after, Sent::Failed), Outcome::Uncertain, "S5/S9: an exception");
+}
+
+#[test]
+fn o1_oracle_c2_an_abandon_settles_a_switch_by_the_cursor_and_its_boundary_send() {
+    let b = 14_000;
+    for sent in [Sent::Whole, Sent::Failed, Sent::Short(1), Sent::NotIssued] {
+        assert_eq!(switch_outcome_after_abandon(b, 12_000, sent), Outcome::Cancelled, "S6: the cursor before b, {sent:?}");
+        assert_eq!(switch_outcome_after_abandon(b, b, sent), Outcome::Cancelled, "S7: a cursor at b has not handed the sample at b, {sent:?}");
+    }
+    assert_eq!(switch_outcome_after_abandon(b, 16_500, Sent::Whole), Outcome::Applied, "S10: an underflow after a whole boundary send");
+    assert_eq!(switch_outcome_after_abandon(b, 16_500, Sent::Failed), Outcome::Uncertain, "S9");
+    assert_eq!(switch_outcome_after_abandon(b, 16_500, Sent::Short(0)), Outcome::Cancelled, "S8");
+    // An abandon halts at device time: a loss at a sample at or before b after it cancels a whole boundary send, one past b leaves it applied.
+    assert_eq!(switch_outcome_after_abandon_and_loss(b, 16_500, 9_000, Sent::Whole), Outcome::Cancelled, "a loss before b");
+    assert_eq!(switch_outcome_after_abandon_and_loss(b, 16_500, b, Sent::Whole), Outcome::Cancelled, "a loss at b");
+    assert_eq!(switch_outcome_after_abandon_and_loss(b, 16_500, b + 1, Sent::Whole), Outcome::Applied, "a loss past b");
+    assert_eq!(switch_outcome_after_abandon_and_loss(b, 16_500, 9_000, Sent::Failed), Outcome::Uncertain, "the exception wins");
+    assert_eq!(switch_outcome_after_abandon_and_loss(b, b, b + 1, Sent::Whole), Outcome::Cancelled, "a cursor at b");
+}
+
+#[test]
+fn o1_oracle_c2_a_loss_settles_a_switch_by_device_time_at_the_loss() {
+    let (b, t) = (15_000, 15_000);
+    // The loss's own bound is past b (the window is longer than the distance to b), except where the case says otherwise.
+    let bound = b + 60;
+    assert_eq!(switch_outcome_after_loss(b, bound, 12_000, Sent::Whole), Outcome::Cancelled, "S13: lost before b, whatever was sent");
+    assert_eq!(switch_outcome_after_loss(b, bound, t, Sent::Whole), Outcome::Cancelled, "the sample at b is not before the loss");
+    assert_eq!(switch_outcome_after_loss(b, bound, t + 1, Sent::Whole), Outcome::Applied, "b was played");
+    assert_eq!(switch_outcome_after_loss(b, bound, t + 1, Sent::Short(1)), Outcome::Applied);
+    assert_eq!(switch_outcome_after_loss(b, bound, t + 1, Sent::Short(0)), Outcome::Cancelled);
+    assert_eq!(switch_outcome_after_loss(b, bound, t + 1, Sent::NotIssued), Outcome::Cancelled, "never sent, so never played");
+    assert_eq!(switch_outcome_after_loss(b, bound, 12_000, Sent::Failed), Outcome::Uncertain, "Q1: a failed boundary send is uncertain at any loss time");
+    assert_eq!(switch_outcome_after_loss(b, bound, t + 1, Sent::Failed), Outcome::Uncertain);
+    assert_eq!(switch_outcome_after_loss(b, 12_060, 12_000, Sent::Failed), Outcome::Cancelled, "a loss whose bound is before b cancels at once, before the exception matters");
+}
+
+#[test]
+fn o1_oracle_c2_a_stop_and_a_loss_together_settle_a_switch_in_either_order() {
+    let (b, stop) = (15_000, 15_003);
+    // A loss before b cancels what the Stop would have applied, whichever came first; B at or before b still cancels; a failure is uncertain.
+    assert_eq!(switch_outcome_after_loss(b, stop, 12_000, Sent::Whole), Outcome::Cancelled);
+    assert_eq!(switch_outcome_after_stop(b, stop, Sent::Whole), Outcome::Applied, "the Stop alone: applied, until a loss at or before b follows");
+    assert_eq!(switch_outcome_after_loss(b, stop, 15_002, Sent::Whole), Outcome::Applied, "the loss after b leaves the Stop's answer");
+    assert_eq!(switch_outcome_after_loss(b, stop, 15_002, Sent::Short(1)), Outcome::Applied);
+    assert_eq!(switch_outcome_after_loss(b, stop, 12_000, Sent::Short(0)), Outcome::Cancelled);
+    assert_eq!(switch_outcome_after_loss(b, stop, 12_000, Sent::Failed), Outcome::Uncertain);
+    assert_eq!(switch_outcome_after_loss(b, b, 20_000, Sent::Whole), Outcome::Cancelled, "B at b");
+    assert_eq!(switch_outcome_after_loss(b, b, 20_000, Sent::Failed), Outcome::Cancelled, "B at b, before the exception matters");
+}
+
+#[test]
+fn o1_oracle_c2_an_unresolved_boundary_send_is_uncertain_when_the_manifest_is_written() {
+    let b = 15_000;
+    assert_eq!(switch_outcome_at_close(b, None), Outcome::Uncertain, "no halt: the owner left with the send in flight");
+    assert_eq!(switch_outcome_at_close(b, Some(b + 3)), Outcome::Uncertain, "a halt past b waits for a result that never comes");
+    assert_eq!(switch_outcome_at_close(b, Some(b)), Outcome::Cancelled, "B at b cancels first");
+    assert_eq!(switch_outcome_at_close(b, Some(b - 1)), Outcome::Cancelled);
+    assert_eq!(switch_outcome_at_close(b, Some(b + 3)), switch_outcome_after_stop(b, b + 3, Sent::Failed), "the same as a send that ended in an exception");
+}
+
+#[test]
+fn o1_oracle_c2_the_mock_settles_a_switch_by_the_payload_cut() {
+    assert_eq!(switch_outcome_after_mock_stop(15_000, 15_001), Outcome::Applied, "b below the cut");
+    assert_eq!(switch_outcome_after_mock_stop(15_000, 15_000), Outcome::Cancelled, "the cut at b emits nothing of it");
+    assert_eq!(switch_outcome_after_mock_stop(15_000, 12_000), Outcome::Cancelled);
+}
+
+#[test]
+fn o1_oracle_c2_outcome_labels() {
+    let labels = [Outcome::Applied, Outcome::Cancelled, Outcome::Uncertain, Outcome::Pending].map(Outcome::as_str);
+    assert_eq!(labels, ["applied", "cancelled", "uncertain", "pending"]);
 }
 
 #[test]

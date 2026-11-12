@@ -431,12 +431,22 @@ impl StreamState {
     }
 
     /// RM-16: a `Stop` taking effect at root tick `at` ends the stream's transmit bookings: the
-    /// value rule and the overlap rule are both bounded by the stream's clock. A stream with no clock has none.
+    /// value rule and the overlap rule are both bounded by the stream's clock. A stream with no clock has none. A `lost` device played the
+    /// samples before the loss sample only (RM-37); a Stop leaves what was handed.
     /// Returns the root tick the bookings end at (the `tx_stop_applied` timing row).
-    pub fn stop_at(&mut self, at: i64, in_flight: i64) -> Option<i64> {
+    pub fn stop_at(&mut self, at: i64, in_flight: i64, lost: bool) -> Option<i64> {
         let reach = self.stop_reach(at, in_flight)?;
-        self.book.stop(reach);
+        let played = reach.1.filter(|_| lost).map_or(i64::MAX, |(at_stop, _)| at_stop);
+        self.book.stop_played(reach, played);
         Some(reach.0)
+    }
+
+    /// RM-37: a loss at root tick `at` after the streams already ended: no end is booked again, but the loss sample is kept on a switch
+    /// still waiting for its boundary send's result.
+    pub fn lose_at(&mut self, at: i64) {
+        if let Some(played) = self.clock.and_then(|clock| clock.try_at_or_after(at)) {
+            self.book.record.lose(played);
+        }
     }
 
     /// RM-16: what a `Stop` at root tick `at` reaches on the record; none for a stream with no clock.
@@ -640,11 +650,14 @@ impl Streams {
             }
         }
         if std::mem::replace(&mut self.ended, true) {
+            if lost {
+                self.tx.iter_mut().for_each(|stream| stream.lose_at(at));
+            }
             return;
         }
         let seq = if lost { 0 } else { self.next_seq() };
         for stream in &mut self.tx {
-            stream.stop_at(at, core.tx_in_flight());
+            stream.stop_at(at, core.tx_in_flight(), lost);
             // A loss pushes nothing: the owner idles and its shutdown cancels with ProviderStop (UR-26).
             if !lost {
                 stream.book.list.halt(ezsdr_radio::CancelReason::ProviderStop);
@@ -1113,6 +1126,13 @@ impl Core {
     /// `device` section records it.
     pub fn rates_checked(&self, dir: Dir) -> bool {
         lock(&self.rates)[dir as usize].is_some()
+    }
+
+    /// RM-37, UR-30: the Manifest is about to be written, so a boundary send the owner never reported is settled as a send whose result is
+    /// unknown ([`ezsdr_radio::staging::Bookings::settle_unresolved`]).
+    pub fn settle_unresolved_switches(&self) {
+        let mut streams = lock(&self.streams);
+        (0..self.description.stream_count(Dir::Tx)).for_each(|k| streams.stream_mut(stream_key(Dir::Tx, k)).book.record.settle_unresolved());
     }
 
     /// RM-37, UR-30: writes the outcome of every switch the transmit records settled into its row of the `switches` section.

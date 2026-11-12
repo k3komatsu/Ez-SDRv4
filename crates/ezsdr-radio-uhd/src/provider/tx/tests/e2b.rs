@@ -138,7 +138,7 @@ fn full_stop(core: &Core) -> Option<i64> {
     let mut streams = lock(&core.streams);
     let now = core.now();
     let clock = streams.stream(key0()).clock;
-    let bound = streams.stream_mut(key0()).stop_at(now, core.tx_in_flight());
+    let bound = streams.stream_mut(key0()).stop_at(now, core.tx_in_flight(), false);
     streams.stream_mut(key0()).book.list.halt(ezsdr_radio::CancelReason::Stop);
     core.release_streams(streams);
     clock.zip(bound).map(|(clock, bound)| clock.at_or_after(bound))

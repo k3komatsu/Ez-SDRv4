@@ -1149,20 +1149,24 @@ impl MockRadio {
             let window = self.tx_window()?;
             let bound = stop_bound(now, window, |t| time::k_at_or_after(origin, ratio, t).unwrap_or(i64::MAX), |k| time::v_of(origin, ratio, k).unwrap_or(i64::MAX));
             let region = time::k_at_or_after(origin, ratio, now).map(|at_stop| (at_stop, stop_sample(now, window, |t| time::k_at_or_after(origin, ratio, t).unwrap_or(i64::MAX))));
-            self.tx[k].book.stop((bound, region));
+            // MR-25's payload cut and MR-17's later-booking margin stay separate.
+            let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop);
+            let mut planned = None;
             if let Some((at_stop, _)) = region {
-                self.settle_switches(k);
-                // MR-25's payload cut and MR-17's later-booking margin stay separate.
-                let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop);
-                let (until, cut) = if handover {
-                    let horizon = now.saturating_add(window);
+                planned = Some(if handover {
                     let payload = self.tx_handed_end(k, now, self.next_order)?;
                     let previous = self.tx[k].stop_cut.filter(|front| front.domain == domain).map(|front| front.sample);
-                    let cut = timeline::later_bound(at_stop, merge_front(payload, previous));
-                    (horizon, cut)
+                    (now.saturating_add(window), timeline::later_bound(at_stop, merge_front(payload, previous)))
                 } else {
                     (now, at_stop)
-                };
+                });
+            }
+            // RM-37, MR-42: a switch is applied iff its boundary is below the payload cut, the first sample the Mock does not emit.
+            self.tx[k].book.stop_played((bound, region), planned.map_or(i64::MAX, |(_, cut)| cut));
+            if let Some((until, cut)) = planned {
+                // The cut is known: no loss can follow it, so the record does not hold a sent switch back for device time (RM-37).
+                self.tx[k].book.record.settle_unresolved();
+                self.settle_switches(k);
                 self.transmit_until_cut(k, until, cut)?;
                 self.cut_segments(k, cut);
                 if handover {

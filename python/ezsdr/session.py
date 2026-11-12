@@ -501,7 +501,10 @@ class Tx(_Stream):
         must have this stream's channel count, and nothing else is sent: the stream keeps its values. Raises
         ``Rejected`` when the Provider refuses it at booking: no repeat plays on this stream (none, a stopped one, a
         finite burst), a switch is already pending, or the radio has not yet sent the repeat it would replace (a host
-        or configure delay held its start back; retry once it sounds, KL-41)."""
+        or configure delay held its start back; retry once it sounds, KL-41). The outcome of a switch is one of
+        ``applied``, ``cancelled`` or ``uncertain`` in the Manifest's ``switches`` section (read it from
+        ``sdr.manifest``): ``uncertain`` means the send that carried the new waveform's first sample ended in an
+        exception, so whether any of it was sent is unknown."""
         channels, data = _cf32(x)
         self._check_channels(channels)
         action = {

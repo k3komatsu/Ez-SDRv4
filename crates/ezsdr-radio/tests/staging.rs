@@ -7,7 +7,7 @@ use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_radio::CancelReason;
 use ezsdr_radio::staging::{
-    Booked, Bookings, DeviceChain, DeviceEnd, DeviceSend, OpId, Outcome, Overlap, Playing, Read, Recovery, Refusal, Reopen, STOP_FRONT, Settle, Settled, Staging, Started, SwitchAccepted,
+    Booked, Bookings, Carried, DeviceChain, DeviceEnd, DeviceSend, OpId, Outcome, Overlap, Playing, Read, Recovery, Refusal, Reopen, STOP_FRONT, Settle, Settled, Staging, Started, SwitchAccepted,
     SwitchOutcome, SwitchRefusal, TxBook, TxList, TxSend, Until, closed_short_gap, ordinary_k, repeat_boundary, stop_bound, stop_fits,
 };
 
@@ -979,8 +979,8 @@ fn rm_37_a_switch_taken_at_the_abandoned_cursor_is_cancelled() {
     // waveform never starts, so the switch is cancelled, not applied.
     let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(bookings.switch(ActionId(2), 100, 10, true).is_ok());
-    assert_eq!(bookings.abandon(100, 105 * 200), [Settled { id: ActionId(2), outcome: SwitchOutcome::Cancelled, boundary: 100 }]);
+    assert!(bookings.switch(ActionId(2), 100, 10, true, Carried::Sent).is_ok());
+    assert_eq!(bookings.abandon(100, 100, 105 * 200), [Settled { id: ActionId(2), outcome: SwitchOutcome::Cancelled, boundary: 100 }]);
     assert_eq!(settled(&mut bookings), [(ActionId(2), SwitchOutcome::Cancelled)]);
 }
 
@@ -988,8 +988,8 @@ fn rm_37_a_switch_taken_at_the_abandoned_cursor_is_cancelled() {
 fn rm_16_switch_pending_until_the_boundary_is_reached() {
     let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(bookings.switch(ActionId(2), 100, 10, true).is_ok());
-    assert!(bookings.switch(ActionId(3), 200, 99, true).is_err(), "pending before its boundary: a second switch is refused");
+    assert!(bookings.switch(ActionId(2), 100, 10, true, Carried::Sent).is_ok());
+    assert!(bookings.switch(ActionId(3), 200, 99, true, Carried::Sent).is_err(), "pending before its boundary: a second switch is refused");
     bookings.advance(99);
     assert_eq!(settled(&mut bookings), [], "not applied before its boundary");
     bookings.advance(100);
@@ -1002,17 +1002,17 @@ fn rm_16_switch_pending_until_the_boundary_is_reached() {
 fn rm_16_advance_runs_inside_every_call() {
     let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(bookings.switch(ActionId(2), 100, 10, true).is_ok());
+    assert!(bookings.switch(ActionId(2), 100, 10, true, Carried::Sent).is_ok());
     bookings.prune(101);
     assert_eq!(settled(&mut bookings), [(ActionId(2), SwitchOutcome::Applied)], "a receipt at 101 applies the switch due at 100");
-    assert!(bookings.switch(ActionId(3), 200, 101, true).is_ok(), "a second switch after the first boundary is not refused by a stale pending");
+    assert!(bookings.switch(ActionId(3), 200, 101, true, Carried::Sent).is_ok(), "a second switch after the first boundary is not refused by a stale pending");
     bookings.halt(150, 160);
     assert_eq!(settled(&mut bookings), [(ActionId(3), SwitchOutcome::Cancelled)], "a Stop before its boundary cancels it");
 
     let mut direct = armed();
     direct.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(direct.switch(ActionId(2), 100, 10, true).is_ok());
-    assert!(direct.switch(ActionId(3), 200, 101, true).is_ok(), "the switch itself applies the first switch due at 100");
+    assert!(direct.switch(ActionId(2), 100, 10, true, Carried::Sent).is_ok());
+    assert!(direct.switch(ActionId(3), 200, 101, true, Carried::Sent).is_ok(), "the switch itself applies the first switch due at 100");
     assert_eq!(settled(&mut direct), [(ActionId(2), SwitchOutcome::Applied)]);
 }
 
@@ -1020,7 +1020,7 @@ fn rm_16_advance_runs_inside_every_call() {
 fn rm_16_a_stop_after_a_boundary_cuts_the_new_repeat_at_its_bound() {
     let mut bookings = armed();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(bookings.switch(ActionId(2), 100, 10, true).is_ok());
+    assert!(bookings.switch(ActionId(2), 100, 10, true, Carried::Sent).is_ok());
     bookings.halt(150, 160);
     assert_eq!(settled(&mut bookings), [(ActionId(2), SwitchOutcome::Applied)], "a switch whose boundary the Stop has passed is applied");
     assert_eq!(bookings.accept(159, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the new repeat holds up to the bound");
@@ -1031,17 +1031,17 @@ fn rm_16_a_stop_after_a_boundary_cuts_the_new_repeat_at_its_bound() {
 fn rm_16_switch_refused_unless_a_repeat_is_playing() {
     let mut finite = armed();
     finite.accept(0, Some(10), 0, ON_TIME, UNHANDED).unwrap();
-    assert!(finite.switch(ActionId(2), 100, 5, true).is_err(), "a finite burst");
+    assert!(finite.switch(ActionId(2), 100, 5, true, Carried::Sent).is_err(), "a finite burst");
     let mut booked = armed();
     booked.accept(50, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(booked.switch(ActionId(2), 100, 10, true).is_err(), "a repeat booked but not started");
+    assert!(booked.switch(ActionId(2), 100, 10, true, Carried::Sent).is_err(), "a repeat booked but not started");
     let mut stopped = armed();
     stopped.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     stopped.halt(20, 30);
-    assert!(stopped.switch(ActionId(2), 100, 25, true).is_err(), "a stopped repeat");
+    assert!(stopped.switch(ActionId(2), 100, 25, true, Carried::Sent).is_err(), "a stopped repeat");
     let mut playing = armed();
     playing.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
-    assert!(playing.switch(ActionId(2), 100, 0, true).is_ok(), "a repeat that has started");
+    assert!(playing.switch(ActionId(2), 100, 0, true, Carried::Sent).is_ok(), "a repeat that has started");
 }
 
 /// What both Providers do for an untimed booking: place it, then accept it at the placed start.
@@ -1467,7 +1467,7 @@ fn repeat_at(start: i64) -> Bookings {
 /// R at 0 with switch 2 at boundary 10 on its grid, taken at receipt.
 fn switch_pending() -> Bookings {
     let mut r = repeat_at(0);
-    assert!(r.switch(ActionId(2), 10, 0, true).is_ok());
+    assert!(r.switch(ActionId(2), 10, 0, true, Carried::Sent).is_ok());
     r
 }
 
@@ -1522,32 +1522,11 @@ fn txbook_abandon_equals_a_stop_at_the_cursor_except_the_named_differences() {
         let pending_at = name.contains("pending S");
         for c in cursors {
             let mut book = TxBook { record: record.clone(), ..new_book() };
-            book.abandon(true, Some(ActionId(1)), c, abandon_bound(c));
+            book.abandon(true, Some(ActionId(1)), c, c, abandon_bound(c));
             let mut today = abandon_today(&record, pending_at.then_some(10), c);
             assert_eq!(book.record, today, "{name}, cursor {c}");
             assert_eq!(book.record.take_settled(), today.take_settled(), "{name}, cursor {c}: the settled switches");
         }
-    }
-    // (c) An applied switch at or after the cursor never started: settled cancelled, whether its payload was held or is the unsent open
-    // booking (the record does not know which; today only a held payload's row was cancelled, by uhd-tx). The record is today's.
-    let mut book = TxBook { record: switch_applied(), ..new_book() };
-    book.abandon(true, Some(ActionId(1)), 5, abandon_bound(5));
-    let mut today = abandon_today(&switch_applied(), None, 5);
-    assert_eq!(settled(&mut today), [(ActionId(2), SwitchOutcome::Applied)], "today's record leaves it applied");
-    assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "(c): cancelled");
-    assert_eq!(book.record, today, "past the cursor's footprint: the record is today's");
-    // (b) R + applied S with c <= b < c + 5: R's front is set to its footprint c + 5, where today a separate Stop region [c, c + 5) is
-    // left with R's front at b, so a SendAsap booking in [b, c + 5) is refused at receipt instead of moved. P12 has the cell.
-    for c in [7, 10] {
-        let mut book = TxBook { record: switch_applied(), ..new_book() };
-        book.abandon(true, Some(ActionId(2)), c, abandon_bound(c));
-        let mut today = abandon_today(&switch_applied(), None, c);
-        assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "cursor {c}");
-        assert_eq!(settled(&mut today), [(ActionId(2), SwitchOutcome::Applied)], "cursor {c}");
-        // Today's record with R's front (its first chain's, at b = 10) set to c + STOP_FRONT; the Stop region [c, c + 5) stays.
-        let want = format!("{today:?}").replacen("front: 10,", &format!("front: {},", c + STOP_FRONT), 1);
-        assert_ne!(want, format!("{today:?}"), "cursor {c}: today's R fronts at b");
-        assert_eq!(format!("{:?}", book.record), want, "cursor {c}: the named difference (b)");
     }
 }
 
@@ -1568,7 +1547,7 @@ fn txbook_abandon_keeps_a_later_booking_its_chain_playing_and_busy_end() {
         record.book(len.map(|len| (300 + len) * 200));
         let playing = if len.is_none() { b_repeat } else { PLAYING };
         let mut book = TxBook { record, playing: Some(playing), ..new_book() };
-        book.abandon(true, Some(ActionId(1)), 20, abandon_bound(20));
+        book.abandon(true, Some(ActionId(1)), 20, 20, abandon_bound(20));
         assert_eq!(book.record.accept(300, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}: B's chain stays");
         assert_eq!(book.record.accept(24, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}: R's footprint is [0, 25)");
         assert_eq!(book.record.clone().accept(25, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "{case}: 25 is free");
@@ -1585,7 +1564,7 @@ fn txbook_abandon_keeps_a_later_booking_its_chain_playing_and_busy_end() {
     }
     // With no later booking, the value rule is capped at the abandon's bound (today's).
     let mut book = TxBook { record: stopped(), playing: Some(PLAYING), ..new_book() };
-    book.abandon(true, Some(ActionId(1)), 20, abandon_bound(20));
+    book.abandon(true, Some(ActionId(1)), 20, 20, abandon_bound(20));
     assert_eq!(book.record.stageable(abandon_bound(20)), Ok(()));
     assert_eq!(book.record.stageable(abandon_bound(20) - 1), Err(Refusal::TxBusy { until: Until::At(abandon_bound(20)) }));
     assert_eq!(book.playing, None);
@@ -1593,17 +1572,29 @@ fn txbook_abandon_keeps_a_later_booking_its_chain_playing_and_busy_end() {
 
 #[test]
 fn txbook_abandon_at_a_switch_boundary_extends_the_old_repeat_to_its_footprint() {
-    // P12 (F3, RM-15): R plays from 0 and its switch S at 10 is applied in the record; the owner abandons at c (S never started). The
-    // footprint of R is [0, c + 5): a SendAsap booking at b + 1 meets R's chain and stays where it asked, so it is refused (today it met
-    // only the Stop region and moved past it). The pending twin (S taken, not applied) answers the same, as today.
-    for (case, record, c) in [("applied, c == b", switch_applied(), 10), ("applied, c < b < c + 5", switch_applied(), 7), ("pending, c == b", switch_pending(), 10)] {
-        let mut book = TxBook { record, ..new_book() };
-        book.abandon(true, Some(ActionId(1)), c, abandon_bound(c));
-        assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "{case}");
-        assert_eq!(book.record.region_move(11, Some(100), 0, ON_TIME, UNHANDED), Ok(11), "{case}: not moved");
-        assert_eq!(book.record.accept(11, Some(100), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}: refused at receipt");
-        assert_eq!(book.record.accept(c + STOP_FRONT, Some(100), 0, ON_TIME, UNHANDED), Ok(()), "{case}: the footprint ends at c + 5");
-    }
+    // P12 (F3, RM-15): R plays from 0 and its switch S at 10 is pending; the owner abandons at c == b (S never started). The footprint
+    // of R is [0, c + 5): a SendAsap booking at b + 1 meets R's chain and stays where it asked, so it is refused (today it met only the
+    // Stop region and moved past it). An applied switch cannot be abandoned at or before its boundary: it applied only once its
+    // boundary send was taken, so the cursor is past it (C2).
+    let c = 10;
+    let mut book = TxBook { record: switch_pending(), ..new_book() };
+    book.abandon(true, Some(ActionId(1)), c, c, abandon_bound(c));
+    assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)]);
+    assert_eq!(book.record.region_move(11, Some(100), 0, ON_TIME, UNHANDED), Ok(11), "not moved");
+    assert_eq!(book.record.accept(11, Some(100), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "refused at receipt");
+    assert_eq!(book.record.accept(c + STOP_FRONT, Some(100), 0, ON_TIME, UNHANDED), Ok(()), "the footprint ends at c + 5");
+}
+
+#[test]
+fn txbook_abandon_sets_the_repeat_s_front_to_its_footprint_even_when_a_stop_cut_it_lower() {
+    // F3 (RM-15): R plays from 0 and a Stop at 2 capped it at 7; what the device had been handed reaches the abandon's cursor 10, so R's
+    // footprint is [0, 15): the abandon sets its front to c + STOP_FRONT, not to the lower of the two.
+    let mut record = repeat_at(0);
+    record.halt(2, 2 + STOP_FRONT);
+    let mut book = TxBook { record, ..new_book() };
+    book.abandon(true, Some(ActionId(1)), 10, 10, abandon_bound(10));
+    assert_eq!(book.record.accept(10 + STOP_FRONT - 1, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "R holds [0, c + 5)");
+    assert_eq!(book.record.accept(10 + STOP_FRONT, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "the footprint ends at c + 5");
 }
 
 #[test]
@@ -1615,9 +1606,9 @@ fn txbook_a_finite_abandon_changes_nothing() {
     record.book(Some(40 * 200));
     record.accept(100, None, 0, ON_TIME, UNHANDED).unwrap();
     record.book(None);
-    assert!(record.switch(ActionId(2), 120, 100, true).is_ok());
+    assert!(record.switch(ActionId(2), 120, 100, true, Carried::Sent).is_ok());
     let mut book = TxBook { record: record.clone(), playing: Some(PLAYING), ..new_book() };
-    book.abandon(false, Some(ActionId(5)), 20, abandon_bound(20));
+    book.abandon(false, Some(ActionId(5)), 20, 20, abandon_bound(20));
     assert_eq!((&book.record, book.playing), (&record, Some(PLAYING)));
     assert!(settled(&mut book.record).is_empty());
 }
@@ -1681,7 +1672,7 @@ fn open_book() -> TxBook<Pl> {
     let mut record = armed();
     record.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     record.book(None);
-    record.switch(ActionId(2), 10, 0, true).unwrap();
+    record.switch(ActionId(2), 10, 0, true, Carried::Sent).unwrap();
     let mut book = TxBook { record, playing: Some(PLAYING), ..new_book() };
     book.take(pl(7), 100);
     book
@@ -2013,6 +2004,15 @@ fn txbook_receive_switch_takes_the_boundary_at_receipt() {
     book.advance(19);
     assert_eq!(settled(&mut book.record), [], "pending before its boundary");
     book.advance(20);
+    assert_eq!(settled(&mut book.record), [], "pending at its boundary until the sample there is sent (C2)");
+    book.take(switch_pl(1, 2), 20);
+    let id = book.issue(TxSend { count: 7, device_count: 7, ends: false });
+    book.advance(20);
+    assert_eq!(settled(&mut book.record), [], "pending while the boundary send is in flight");
+    assert_eq!(book.complete(id, Outcome::Accepted(7), None), Settle::Sent);
+    book.advance(19);
+    assert_eq!(settled(&mut book.record), [], "pending before its boundary");
+    book.advance(20);
     assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Applied)], "applied at its boundary");
     let mut later = playing_book(true);
     assert_eq!(later.receive_switch(ActionId(2), 7, 33, 15, false, 0).map(|accepted| accepted.boundary), Ok(40), "an `at` past the bound decides");
@@ -2145,11 +2145,14 @@ fn txbook_issue_starts_the_playing_repeat_and_a_switch_s_own_payload() {
     assert!(book.receive_switch(ActionId(2), 10, 0, 15, false, 0).is_ok());
     assert_eq!(book.playing.map(|playing| (playing.id, playing.started)), Some((ActionId(2), false)));
     book.advance(20);
-    assert_eq!(book.receive_switch(ActionId(3), 10, 0, 35, false, 21), Err(SwitchRefusal::NotStarted), "S applied in the record, not issued");
+    assert_eq!(book.receive_switch(ActionId(3), 10, 0, 35, false, 21), Err(SwitchRefusal::PendingSwitch), "S is pending until its own boundary send is taken (C2)");
     book.end_open(DeviceEnd::Keep);
     book.take(switch_pl(2, 2), 20);
-    book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
     assert_eq!(book.playing.map(|playing| (playing.id, playing.started)), Some((ActionId(2), true)), "S's own first issue");
+    assert_eq!(book.receive_switch(ActionId(3), 10, 0, 35, false, 21), Err(SwitchRefusal::PendingSwitch), "in flight");
+    assert_eq!(book.complete(id, Outcome::Accepted(10), None), Settle::Sent);
+    book.advance(20);
     assert!(book.receive_switch(ActionId(3), 10, 0, 35, false, 21).is_ok());
 }
 
@@ -2403,5 +2406,551 @@ fn e3b_b6_complete_reopen_applies_the_device_effect() {
         assert_eq!(book.complete_reopen(id, outcome), open_ends.then(|| pl(1)), "{case}");
         assert_eq!(book.open.is_none(), open_ends, "{case}");
         assert_eq!(line(&book), expected, "{case}");
+    }
+}
+
+// Note 49 stage C2: a switch's outcome follows whether the sample at its boundary was sent (RM-37, UR-38).
+
+/// R (id 1) from 0 and the switch 2, boundary 100, received at 10, whose boundary send is in the state `carried`, reached through the
+/// record's own transitions: issued and then `Sent` or `Unknown`, issued and in flight, or not issued.
+fn switch_carried(carried: Carried) -> Bookings {
+    let mut record = repeat_at(0);
+    assert!(record.switch(ActionId(2), 100, 10, true, Carried::Unissued).is_ok());
+    if matches!(carried, Carried::InFlight | Carried::Sent | Carried::Unknown) {
+        record.issued(ActionId(2));
+    }
+    if matches!(carried, Carried::Sent | Carried::Unknown) {
+        record.carried(ActionId(2), carried);
+    }
+    record
+}
+
+#[test]
+fn c2_record_a_halt_settles_a_pending_switch_by_what_became_of_its_boundary_send() {
+    // S2 to S4, S8, S9, S13: B at or before b cancels whatever the send did; otherwise sent → applied while b is below `played`, an
+    // exception → uncertain whatever `played` says, nothing taken or issued → cancelled. The halt comes with device time at b: a Stop
+    // before it waits for device time (`c2_record_a_stop_before_device_time_reaches_b_…`).
+    let b = 100;
+    for (carried, stop, played, expected) in [
+        (Carried::Unissued, 150, i64::MAX, SwitchOutcome::Cancelled),
+        (Carried::Unissued, 90, i64::MAX, SwitchOutcome::Cancelled),
+        (Carried::Sent, 150, i64::MAX, SwitchOutcome::Applied),
+        (Carried::Sent, 150, b + 1, SwitchOutcome::Applied),
+        (Carried::Sent, 150, b, SwitchOutcome::Cancelled),
+        (Carried::Sent, 150, b - 1, SwitchOutcome::Cancelled),
+        (Carried::Sent, b, i64::MAX, SwitchOutcome::Cancelled),
+        (Carried::Sent, 90, i64::MAX, SwitchOutcome::Cancelled),
+        (Carried::Unknown, 150, i64::MAX, SwitchOutcome::Uncertain),
+        (Carried::Unknown, 150, b, SwitchOutcome::Uncertain),
+        (Carried::Unknown, b, i64::MAX, SwitchOutcome::Cancelled),
+        (Carried::Unknown, 90, i64::MAX, SwitchOutcome::Cancelled),
+    ] {
+        let mut record = switch_carried(carried);
+        record.halt_played(b, stop, played);
+        assert_eq!(settled(&mut record), [(ActionId(2), expected)], "{carried:?}, B {stop}, played {played}");
+    }
+    let mut stop = switch_carried(Carried::Sent);
+    stop.halt(b, 150);
+    assert_eq!(settled(&mut stop), [(ActionId(2), SwitchOutcome::Applied)], "a Stop plays what was handed: `halt` is `halt_played` with `i64::MAX`");
+}
+
+#[test]
+fn c2_record_a_halt_during_the_boundary_send_waits_for_the_result() {
+    // S5: a Stop while the send that carries b is in flight leaves the switch pending, whatever device time says, and the result decides.
+    for (result, expected) in [(Carried::Sent, SwitchOutcome::Applied), (Carried::Unknown, SwitchOutcome::Uncertain), (Carried::Unissued, SwitchOutcome::Cancelled)] {
+        let mut record = switch_carried(Carried::InFlight);
+        record.halt(120, 150);
+        assert_eq!(settled(&mut record), [], "{result:?}: pending between the Stop and the result");
+        record.advance(10_000);
+        assert_eq!(settled(&mut record), [], "{result:?}: device time passing b does not settle a halted switch");
+        record.carried(ActionId(2), result);
+        assert_eq!(settled(&mut record), [(ActionId(2), expected)], "{result:?}");
+        let mut reference = switch_carried(result);
+        reference.halt(120, 150);
+        assert_eq!(settled(&mut reference), [(ActionId(2), expected)]);
+        assert_eq!(record, reference, "{result:?}: the chains are those of a Stop that came after the result");
+    }
+    let mut at_or_before = switch_carried(Carried::InFlight);
+    at_or_before.halt(50, 100);
+    assert_eq!(settled(&mut at_or_before), [(ActionId(2), SwitchOutcome::Cancelled)], "a bound at b cancels at once: no send result can change it");
+    at_or_before.carried(ActionId(2), Carried::Sent);
+    assert_eq!(settled(&mut at_or_before), [], "and a result after it settles nothing");
+}
+
+#[test]
+fn c2_record_a_second_halt_keeps_the_first_bound() {
+    // S18: two Stops while the boundary send is in flight: the apply geometry is the first Stop's (the chains were cut at it); a later
+    // bound does not move it.
+    let mut record = switch_carried(Carried::InFlight);
+    record.halt(110, 150);
+    record.halt(120, 170);
+    record.carried(ActionId(2), Carried::Sent);
+    assert_eq!(settled(&mut record), [(ActionId(2), SwitchOutcome::Applied)]);
+    assert_eq!(record.accept(149, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the new repeat holds up to the first bound");
+    assert_eq!(record.accept(150, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "and no further: a second bound of 170 does not extend it");
+}
+
+#[test]
+fn c2_record_advance_applies_only_a_sent_switch() {
+    for (carried, expected) in [(Carried::Unissued, vec![]), (Carried::InFlight, vec![]), (Carried::Unknown, vec![]), (Carried::Sent, vec![(ActionId(2), SwitchOutcome::Applied)])] {
+        let mut record = switch_carried(carried);
+        record.advance(99);
+        assert_eq!(settled(&mut record), [], "{carried:?}: before the boundary");
+        record.advance(10_000);
+        assert_eq!(settled(&mut record), expected, "{carried:?}: device time far past the boundary");
+    }
+    let mut halted = switch_carried(Carried::InFlight);
+    halted.halt(50, 150);
+    halted.advance(10_000);
+    assert_eq!(settled(&mut halted), [], "a halted switch is not applied by device time");
+}
+
+#[test]
+fn c2_record_an_abandon_settles_by_the_cursor_and_the_carry() {
+    // S6 to S10: an abandon at a cursor at or before b has not handed the sample at b; past it, the boundary send decides.
+    for (carried, cursor, expected) in [
+        (Carried::Unissued, 90, SwitchOutcome::Cancelled),
+        (Carried::Unissued, 100, SwitchOutcome::Cancelled),
+        (Carried::Sent, 100, SwitchOutcome::Cancelled),
+        (Carried::Sent, 150, SwitchOutcome::Applied),
+        (Carried::Unknown, 150, SwitchOutcome::Uncertain),
+        (Carried::Unissued, 150, SwitchOutcome::Cancelled),
+    ] {
+        let mut record = switch_carried(carried);
+        let returned = record.abandon(cursor, cursor, abandon_bound(cursor));
+        assert_eq!(returned.iter().map(|s| (s.id, s.outcome)).collect::<Vec<_>>(), [(ActionId(2), expected)], "{carried:?}, cursor {cursor}");
+        assert_eq!(settled(&mut record), [(ActionId(2), expected)], "{carried:?}, cursor {cursor}");
+    }
+}
+
+#[test]
+fn c2_record_an_abandon_halts_at_device_time_and_cuts_the_chains_at_the_cursor() {
+    // Opus re-check of fix round 2: `Halted.at` is device time, not the cursor. A boundary send taken whole, device time 50 below b = 100,
+    // an abandon at the cursor 150 past b: the row waits for device time like a Stop's (a loss at a sample at or before b cancels it), and
+    // the chains are cut at the cursor, as `abandon_bound` says.
+    let abandoned = || {
+        let mut record = switch_carried(Carried::Sent);
+        assert_eq!(record.abandon(150, 50, abandon_bound(150)), [], "nothing settled by the abandon");
+        record
+    };
+    let mut record = abandoned();
+    assert_eq!(settled(&mut record), [], "pending: device time is short of b");
+    record.advance(99);
+    assert_eq!(settled(&mut record), [], "device time below b");
+    record.advance(100);
+    assert_eq!(settled(&mut record), [(ActionId(2), SwitchOutcome::Applied)], "device time reached b");
+    assert_eq!(record.accept(150 + STOP_FRONT - 1, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the new repeat holds up to the cursor's front");
+    assert_eq!(record.accept(150 + STOP_FRONT, Some(1), 0, ON_TIME, UNHANDED), Ok(()));
+    for (loss, expected) in [(90, Some(SwitchOutcome::Cancelled)), (100, Some(SwitchOutcome::Cancelled)), (101, None)] {
+        let mut record = abandoned();
+        record.lose(loss);
+        assert_eq!(settled(&mut record), expected.map(|outcome| (ActionId(2), outcome)).into_iter().collect::<Vec<_>>(), "loss at {loss}");
+    }
+    let mut manifest = abandoned();
+    manifest.settle_unresolved();
+    assert_eq!(settled(&mut manifest), [(ActionId(2), SwitchOutcome::Applied)], "the Manifest write applies it");
+    let mut reached = switch_carried(Carried::Sent);
+    assert_eq!(
+        reached.abandon(150, 100, abandon_bound(150)).iter().map(|s| (s.id, s.outcome)).collect::<Vec<_>>(),
+        [(ActionId(2), SwitchOutcome::Applied)],
+        "device time at b: applied by the abandon"
+    );
+    // A Stop that left the row waiting, then an abandon at device time past b: settled with the Stop's bound.
+    let mut stopped = switch_carried(Carried::Sent);
+    stopped.halt(50, 160);
+    assert_eq!(settled(&mut stopped), [], "the Stop leaves it waiting");
+    assert_eq!(stopped.abandon(150, 110, abandon_bound(150)).iter().map(|s| (s.id, s.outcome)).collect::<Vec<_>>(), [(ActionId(2), SwitchOutcome::Applied)]);
+    let mut still = switch_carried(Carried::Sent);
+    still.halt(50, 160);
+    assert_eq!(still.abandon(150, 60, abandon_bound(150)), [], "an abandon at device time 60 does not end the wait");
+    assert_eq!(settled(&mut still), []);
+}
+
+#[test]
+fn c2_record_an_abandon_after_a_stop_keeps_its_footprint_whatever_the_waiting_switch_becomes() {
+    // Opus re-check of fix round 3: a Stop leaves a sent switch waiting (bound 200), then the owner abandons at the cursor 150 before
+    // device time reaches b = 100. The record refuses the same starts whether the switch applies later, applied at the abandon or was
+    // cancelled by a loss: the abandon's footprint `[start, 150 + STOP_FRONT)` (RM-15), not the Stop's bound.
+    let footprint = |record: &Bookings| (90..260).map(|start| record.clone().accept(start, Some(1), 0, ON_TIME, UNHANDED).is_ok()).collect::<Vec<_>>();
+    let waiting = || {
+        let mut record = switch_carried(Carried::Sent);
+        record.halt(50, 200);
+        assert_eq!(record.abandon(150, 60, abandon_bound(150)), [], "the abandon at device time 60 does not end the wait");
+        record
+    };
+    let mut applied_later = waiting();
+    applied_later.advance(300);
+    assert_eq!(settled(&mut applied_later), [(ActionId(2), SwitchOutcome::Applied)]);
+    let mut lost = waiting();
+    lost.lose(90);
+    assert_eq!(settled(&mut lost), [(ActionId(2), SwitchOutcome::Cancelled)]);
+    let mut at_once = switch_carried(Carried::Sent);
+    at_once.halt(50, 200);
+    assert_eq!(at_once.abandon(150, 110, abandon_bound(150)).iter().map(|s| s.outcome).collect::<Vec<_>>(), [SwitchOutcome::Applied]);
+    let expected = footprint(&at_once);
+    assert_eq!(footprint(&applied_later), expected, "applied after the abandon");
+    assert_eq!(footprint(&lost), expected, "cancelled by a loss");
+    assert_eq!(expected.iter().position(|ok| *ok).map(|i| 90 + i as i64), Some(150 + STOP_FRONT), "the first free start is the abandon's front");
+}
+
+#[test]
+fn c2_txbook_an_abandon_that_leaves_the_switch_waiting_ends_the_playing_repeat() {
+    // UR-22: the owner's abandon ends the repeat whether or not its switch has settled: `playing` is cleared, so a new switch is refused.
+    for id in [Some(ActionId(2)), None] {
+        let record = switch_carried(Carried::Sent);
+        let mut book = TxBook { record, playing: Some(Playing { id: ActionId(2), origin: 100, period: 10, started: true }), ..new_book() };
+        book.abandon(true, id, 150, 50, abandon_bound(150));
+        assert_eq!(settled(&mut book.record), [], "{id:?}: the switch waits");
+        assert_eq!(book.playing, None, "{id:?}: the repeat is over");
+    }
+}
+
+#[test]
+fn c2_record_the_footprint_does_not_depend_on_the_outcome() {
+    // A halt's outcome is what the row says; what the record refuses afterwards is the union of the chains, the same for an applied, an
+    // uncertain and a cancelled switch.
+    let answers = |carried: Carried| {
+        let mut record = switch_carried(carried);
+        record.halt(50, 150);
+        (90..200).map(|start| record.clone().accept(start, Some(1), 0, ON_TIME, UNHANDED)).collect::<Vec<_>>()
+    };
+    let sent = answers(Carried::Sent);
+    assert_eq!(answers(Carried::Unknown), sent, "uncertain");
+    assert_eq!(answers(Carried::Unissued), sent, "cancelled");
+    assert!(sent[..60].iter().all(Result::is_err) && sent[60..].iter().all(Result::is_ok), "the footprint ends at the bound 150: {sent:?}");
+}
+
+#[test]
+fn c2_record_a_loss_during_the_boundary_send_is_kept_until_the_result() {
+    // S19, S19b (Q1): a loss at the sample `t_k` while the send that carries b is in flight: pending until the result; then cancelled when
+    // the sample at b was never played (`t_k` at or before b), whatever the send did; applied when it was (`b < t_k`) and the send was taken.
+    for (t_k, taken, expected) in [
+        (90, Carried::Sent, SwitchOutcome::Cancelled),
+        (100, Carried::Sent, SwitchOutcome::Cancelled),
+        (101, Carried::Sent, SwitchOutcome::Applied),
+        (90, Carried::Unknown, SwitchOutcome::Uncertain),
+        (101, Carried::Unknown, SwitchOutcome::Uncertain),
+        (90, Carried::Unissued, SwitchOutcome::Cancelled),
+        (101, Carried::Unissued, SwitchOutcome::Cancelled),
+    ] {
+        let mut record = switch_carried(Carried::InFlight);
+        record.halt_played(t_k, t_k + 60, t_k);
+        assert_eq!(settled(&mut record), [], "loss at {t_k}: pending until the result");
+        record.carried(ActionId(2), taken);
+        assert_eq!(settled(&mut record), [(ActionId(2), expected)], "loss at {t_k}, send {taken:?}");
+    }
+}
+
+#[test]
+fn c2_record_a_loss_after_the_boundary_send_settles_at_once() {
+    // S20: the boundary send is `Sent` and the loss comes before device time reaches b: the sample was never played.
+    for (t_k, carried, expected) in
+        [(90, Carried::Sent, SwitchOutcome::Cancelled), (100, Carried::Sent, SwitchOutcome::Cancelled), (101, Carried::Sent, SwitchOutcome::Applied), (90, Carried::Unknown, SwitchOutcome::Uncertain)]
+    {
+        let mut record = switch_carried(carried);
+        record.halt_played(t_k, t_k + 60, t_k);
+        assert_eq!(settled(&mut record), [(ActionId(2), expected)], "loss at {t_k}, send {carried:?}");
+    }
+}
+
+#[test]
+fn c2_record_a_stop_and_a_loss_in_flight_keep_the_first_bound_and_the_earliest_loss() {
+    // S21: a Stop (`played` = MAX, bound 150) and a loss (`played` = its sample), in either order, while the boundary send is in flight.
+    // The bound of the first is the apply geometry; the earliest `played` decides `applied`.
+    for (loss, expected) in [(90, SwitchOutcome::Cancelled), (120, SwitchOutcome::Applied)] {
+        for stop_first in [true, false] {
+            let mut record = switch_carried(Carried::InFlight);
+            if stop_first {
+                record.halt_played(50, 150, i64::MAX);
+                record.halt_played(loss, loss + 70, loss);
+            } else {
+                record.halt_played(loss, 150, loss);
+                record.halt_played(50, 220, i64::MAX);
+            }
+            assert_eq!(settled(&mut record), [], "loss at {loss}, stop first {stop_first}: pending");
+            record.carried(ActionId(2), Carried::Sent);
+            assert_eq!(settled(&mut record), [(ActionId(2), expected)], "loss at {loss}, stop first {stop_first}");
+            if expected == SwitchOutcome::Applied {
+                assert_eq!(record.accept(149, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "loss at {loss}, stop first {stop_first}: the first bound is 150");
+                assert_eq!(record.accept(150, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "loss at {loss}, stop first {stop_first}");
+            }
+        }
+    }
+    let mut failed = switch_carried(Carried::InFlight);
+    failed.halt_played(50, 150, i64::MAX);
+    failed.halt_played(90, 160, 90);
+    failed.carried(ActionId(2), Carried::Unknown);
+    assert_eq!(settled(&mut failed), [(ActionId(2), SwitchOutcome::Uncertain)], "an exception is uncertain whatever the loss");
+}
+
+#[test]
+fn c2_record_a_loss_after_a_halt_in_flight_keeps_the_earliest_sample() {
+    // Sol's code review, major 1: a Provider stop (`played` = MAX, bound 150) is the first halt while the boundary send (b = 100) is in
+    // flight, and a loss follows after the streams already ended ([`Bookings::lose`]): the earliest sample decides `applied`, and the
+    // Stop's bound stays the apply geometry. A loss with no halt before it, or no switch pending, changes nothing.
+    for (losses, expected) in [(&[90][..], SwitchOutcome::Cancelled), (&[120][..], SwitchOutcome::Applied), (&[120, 90][..], SwitchOutcome::Cancelled), (&[90, 120][..], SwitchOutcome::Cancelled)] {
+        let mut record = switch_carried(Carried::InFlight);
+        record.halt_played(100, 150, i64::MAX);
+        for &loss in losses {
+            record.lose(loss);
+        }
+        assert_eq!(settled(&mut record), [], "losses {losses:?}: pending");
+        record.carried(ActionId(2), Carried::Sent);
+        assert_eq!(settled(&mut record), [(ActionId(2), expected)], "losses {losses:?}");
+        if expected == SwitchOutcome::Applied {
+            assert_eq!(record.accept(149, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "losses {losses:?}: the first bound is 150");
+        }
+    }
+    let mut unhalted = switch_carried(Carried::InFlight);
+    unhalted.lose(90);
+    unhalted.carried(ActionId(2), Carried::Sent);
+    unhalted.advance(100);
+    assert_eq!(settled(&mut unhalted), [(ActionId(2), SwitchOutcome::Applied)], "a loss with no halt before it is not recorded");
+    let mut done = switch_carried(Carried::Sent);
+    done.halt_played(100, 150, i64::MAX);
+    done.lose(90);
+    assert_eq!(settled(&mut done), [(ActionId(2), SwitchOutcome::Applied)], "a settled switch keeps its outcome");
+}
+
+#[test]
+fn c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss() {
+    // Opus re-check of fix round 1 (applying Q1: a loss settles by device time): the boundary send is `Sent`, a Stop with B > b comes while
+    // device time (the Stop's sample 50) is below b = 100. The switch is applied when device time reaches b (with the Stop's geometry),
+    // cancelled when a loss at a sample at or before b follows, and applied at the Manifest write if nothing said otherwise.
+    for halt_in_flight in [false, true] {
+        let case = if halt_in_flight { "halt in flight, result Sent" } else { "Sent, then the halt" };
+        let reached = || {
+            let mut record = switch_carried(if halt_in_flight { Carried::InFlight } else { Carried::Sent });
+            record.halt(50, 150);
+            if halt_in_flight {
+                record.carried(ActionId(2), Carried::Sent);
+            }
+            record
+        };
+        let mut record = reached();
+        assert_eq!(settled(&mut record), [], "{case}: pending after the Stop");
+        record.advance(99);
+        assert_eq!(settled(&mut record), [], "{case}: device time below b");
+        record.advance(100);
+        assert_eq!(settled(&mut record), [(ActionId(2), SwitchOutcome::Applied)], "{case}: device time reached b");
+        assert_eq!(record.accept(149, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}: the new repeat holds up to the Stop's bound");
+        assert_eq!(record.accept(150, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "{case}");
+
+        for (loss, expected) in [(90, Some(SwitchOutcome::Cancelled)), (100, Some(SwitchOutcome::Cancelled)), (101, None)] {
+            let mut record = reached();
+            record.lose(loss);
+            assert_eq!(settled(&mut record), expected.map(|outcome| (ActionId(2), outcome)).into_iter().collect::<Vec<_>>(), "{case}: loss at {loss}");
+            if expected.is_none() {
+                record.advance(100);
+                assert_eq!(settled(&mut record), [(ActionId(2), SwitchOutcome::Applied)], "{case}: a loss past b leaves it to device time");
+            }
+        }
+
+        let mut second_halt = reached();
+        second_halt.halt_played(60, 170, 90);
+        assert_eq!(settled(&mut second_halt), [(ActionId(2), SwitchOutcome::Cancelled)], "{case}: a loss through `halt_played` is the same");
+
+        let mut later = reached();
+        later.halt(110, 170);
+        assert_eq!(settled(&mut later), [(ActionId(2), SwitchOutcome::Applied)], "{case}: a second Stop at device time 110, past b, settles it, with the first bound");
+        assert_eq!(later.accept(149, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "{case}");
+        assert_eq!(later.accept(150, Some(1), 0, ON_TIME, UNHANDED), Ok(()), "{case}: the first bound 150, not 170");
+
+        let mut manifest = reached();
+        manifest.settle_unresolved();
+        assert_eq!(settled(&mut manifest), [(ActionId(2), SwitchOutcome::Applied)], "{case}: the Manifest write applies it");
+        let mut by_device_time = reached();
+        by_device_time.advance(100);
+        assert_eq!(settled(&mut by_device_time), [(ActionId(2), SwitchOutcome::Applied)]);
+        assert_eq!(manifest, by_device_time, "{case}: one settlement: the Manifest write leaves the chains device time would have (the Mock runs on)");
+    }
+    for at in [100, 120] {
+        let mut record = switch_carried(Carried::Sent);
+        record.halt(at, 150);
+        assert_eq!(settled(&mut record), [(ActionId(2), SwitchOutcome::Applied)], "device time {at} has reached b: applied at once");
+    }
+}
+
+#[test]
+fn c2_txbook_a_failed_reopen_cancels_a_switch_a_stop_is_holding() {
+    // UR-22 (F8), UR-38: the reopen that ends the repeat ends the clock and the switch with it. A sent switch that a Stop left waiting for
+    // device time is cancelled too (it was applied at once before it waited): the sample at b was not played by a clock that ended.
+    for (case, record) in [
+        ("sent, no Stop", switch_carried(Carried::Sent)),
+        ("sent, a Stop waits", {
+            let mut record = switch_carried(Carried::Sent);
+            record.halt(50, 150);
+            record
+        }),
+    ] {
+        let mut book = device_book(true);
+        book.record = record;
+        book.device.mark_reopen_needed();
+        let id = book.issue_reopen();
+        book.complete_reopen(id, Reopen::Failed);
+        assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Cancelled)], "{case}");
+    }
+}
+
+#[test]
+fn c2_record_an_unresolved_boundary_send_is_uncertain_when_the_manifest_is_written() {
+    // Sol's code review, major 2: a boundary send still in flight when the Provider writes its Manifest has no owner left to report it. It
+    // settles as an exception would: uncertain, with or without a halt waiting for the result; a halt with a bound at or before b had
+    // cancelled it already. Any other carry is not touched.
+    let mut unhalted = switch_carried(Carried::InFlight);
+    unhalted.settle_unresolved();
+    assert_eq!(settled(&mut unhalted), [(ActionId(2), SwitchOutcome::Uncertain)]);
+    assert!(unhalted.switch(ActionId(3), 200, 101, true, Carried::Unissued).is_ok(), "nothing is pending any more");
+    for loss in [None, Some(90)] {
+        let mut halted = switch_carried(Carried::InFlight);
+        halted.halt_played(50, 150, loss.unwrap_or(i64::MAX));
+        assert_eq!(settled(&mut halted), [], "waiting for the result");
+        halted.settle_unresolved();
+        assert_eq!(settled(&mut halted), [(ActionId(2), SwitchOutcome::Uncertain)], "loss {loss:?}");
+    }
+    let mut cancelled = switch_carried(Carried::InFlight);
+    cancelled.halt_played(10, 100, i64::MAX);
+    cancelled.settle_unresolved();
+    assert_eq!(settled(&mut cancelled), [(ActionId(2), SwitchOutcome::Cancelled)], "a bound at or before b cancels first, once");
+    for carried in [Carried::Unissued, Carried::Sent, Carried::Unknown] {
+        let mut record = switch_carried(carried);
+        record.settle_unresolved();
+        assert_eq!(settled(&mut record), [], "{carried:?} is left as it is");
+        record.advance(100);
+        assert_eq!(settled(&mut record), if carried == Carried::Sent { [(ActionId(2), SwitchOutcome::Applied)].to_vec() } else { vec![] }, "{carried:?}");
+    }
+}
+
+#[test]
+fn c2_record_two_switches_keep_their_own_carry() {
+    // m2: the first send of switch 2's booking settles switch 2 only. A send of booking 2 that comes while switch 3 is pending marks
+    // nothing of 3, and 3's own first send is the one that decides it.
+    let mut record = switch_carried(Carried::Sent);
+    record.advance(100);
+    assert_eq!(settled(&mut record), [(ActionId(2), SwitchOutcome::Applied)]);
+    assert!(record.switch(ActionId(3), 200, 101, true, Carried::Unissued).is_ok());
+    record.issued(ActionId(2));
+    record.carried(ActionId(2), Carried::Sent);
+    let mut cancelled = record.clone();
+    cancelled.halt(150, 250);
+    assert_eq!(settled(&mut cancelled), [(ActionId(3), SwitchOutcome::Cancelled)], "switch 2's send did not carry switch 3's boundary");
+    record.issued(ActionId(3));
+    let mut sent = record.clone();
+    sent.carried(ActionId(2), Carried::Unknown);
+    sent.carried(ActionId(3), Carried::Sent);
+    sent.halt(200, 250);
+    assert_eq!(settled(&mut sent), [(ActionId(3), SwitchOutcome::Applied)], "switch 2's result did not settle switch 3's boundary send");
+    record.carried(ActionId(3), Carried::Unknown);
+    record.halt(150, 250);
+    assert_eq!(settled(&mut record), [(ActionId(3), SwitchOutcome::Uncertain)]);
+}
+
+/// The state of the pending switch of `record` as a halt reads it: what `Bookings::halt` settles it to.
+fn carry_of(record: &Bookings) -> &'static str {
+    let mut probe = record.clone();
+    probe.halt(30, 100);
+    match settled(&mut probe).as_slice() {
+        [] => "in flight",
+        [(_, SwitchOutcome::Cancelled)] => "unissued",
+        [(_, SwitchOutcome::Applied)] => "sent",
+        [(_, SwitchOutcome::Uncertain)] => "unknown",
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A repeat R (id 1) playing and the switch 2 received (boundary 20), on a book whose repeats start by `rule`.
+fn book_with_switch(rule: Started) -> TxBook<Pl> {
+    let mut book = TxBook { started_rule: rule, ..playing_book(true) };
+    assert!(book.receive_switch(ActionId(2), 7, 3, 15, false, 0).is_ok());
+    book
+}
+
+#[test]
+fn txbook_issue_marks_only_the_switch_s_own_first_send_in_flight() {
+    let mut book = book_with_switch(Started::AtFirstIssue);
+    assert_eq!(carry_of(&book.record), "unissued");
+    // The old repeat's own sends, and a booking nobody booked for the switch, carry nothing.
+    book.take(Pl { n: 0, id: Some(ActionId(1)), switch: false }, 10);
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    assert_eq!(carry_of(&book.record), "unissued", "the old repeat's send");
+    book.complete(id, Outcome::Accepted(10), None);
+    assert_eq!(carry_of(&book.record), "unissued", "the old repeat's completion");
+    book.end_open(DeviceEnd::Keep);
+    book.take(pl(9), 40);
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: true });
+    assert_eq!(carry_of(&book.record), "unissued", "a finite burst's first send");
+    book.complete(id, Outcome::Accepted(10), None);
+    // The switch's own first send is in flight from its issue; its later sends change nothing.
+    book.take(switch_pl(1, 2), 20);
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    assert_eq!(carry_of(&book.record), "in flight");
+    book.complete(id, Outcome::Accepted(10), None);
+    assert_eq!(carry_of(&book.record), "sent");
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    assert_eq!(carry_of(&book.record), "sent", "the second send");
+    book.complete(id, Outcome::Failed, None);
+    assert_eq!(carry_of(&book.record), "sent", "a later failure is not the boundary send's");
+}
+
+#[test]
+fn txbook_complete_sets_carried_by_the_outcome() {
+    for (outcome, expected) in [
+        (Outcome::Accepted(10), "sent"),
+        (Outcome::Accepted(4), "sent"),
+        (Outcome::Accepted(1), "sent"),
+        (Outcome::Accepted(0), "unissued"),
+        (Outcome::TailShort, "unissued"),
+        (Outcome::Failed, "unknown"),
+    ] {
+        let mut book = book_with_switch(Started::AtFirstIssue);
+        book.take(switch_pl(1, 2), 20);
+        let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
+        book.complete(id, outcome, None);
+        assert_eq!(carry_of(&book.record), expected, "{outcome:?}");
+    }
+}
+
+#[test]
+fn txbook_receive_switch_starts_the_carry_by_the_provider_s_rule() {
+    assert_eq!(carry_of(&book_with_switch(Started::AtFirstIssue).record), "unissued", "UHD: the send is the owner's");
+    assert_eq!(carry_of(&book_with_switch(Started::AtAcceptance).record), "sent", "the Mock's boundary emission is its own step");
+}
+
+#[test]
+fn txbook_stop_passes_the_played_cut_to_the_record() {
+    // The Mock's Stop: a switch whose boundary (20) is below the payload cut is applied, at or above it cancelled; `stop` is `played` MAX.
+    for (cut, expected) in [(21, SwitchOutcome::Applied), (20, SwitchOutcome::Cancelled), (i64::MAX, SwitchOutcome::Applied)] {
+        let mut book = book_with_switch(Started::AtAcceptance);
+        book.stop_played(reach(30), cut);
+        assert_eq!(settled(&mut book.record), [(ActionId(2), expected)], "cut {cut}");
+    }
+    let mut book = book_with_switch(Started::AtAcceptance);
+    book.stop(reach(30));
+    assert_eq!(settled(&mut book.record), [(ActionId(2), SwitchOutcome::Applied)], "a Stop plays what was handed");
+}
+
+#[test]
+fn txbook_complete_applies_the_deferred_halt_by_its_loss_sample() {
+    // S19 at the book: a loss at the sample 18, before b = 20 (its bound 21 is past b), while the boundary send is in flight, and the
+    // result then: the sample was never played, so cancelled; an exception is uncertain; a Stop's `played` leaves a whole send pending until device time reaches b (applied at the Manifest write).
+    for (outcome, played, expected) in [
+        (Outcome::Accepted(10), 18, Some(SwitchOutcome::Cancelled)),
+        (Outcome::Accepted(4), 18, Some(SwitchOutcome::Cancelled)),
+        (Outcome::Accepted(0), 18, Some(SwitchOutcome::Cancelled)),
+        (Outcome::Failed, 18, Some(SwitchOutcome::Uncertain)),
+        (Outcome::Accepted(10), i64::MAX, None),
+        (Outcome::Failed, i64::MAX, Some(SwitchOutcome::Uncertain)),
+    ] {
+        let mut book = book_with_switch(Started::AtFirstIssue);
+        book.take(switch_pl(1, 2), 20);
+        let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
+        book.stop_played(reach(18), played);
+        assert_eq!(settled(&mut book.record), [], "{outcome:?}, played {played}: pending until the result");
+        book.complete(id, outcome, None);
+        assert_eq!(settled(&mut book.record).first().map(|s| s.1), expected, "{outcome:?}, played {played}");
+        if expected.is_none() {
+            book.record.settle_unresolved();
+            assert_eq!(settled(&mut book.record).first().map(|s| s.1), Some(SwitchOutcome::Applied), "a whole send after a Stop below b waits for device time: the Manifest applies it");
+        }
     }
 }

@@ -295,6 +295,10 @@ impl Slots {
 pub enum Outcome {
     Applied,
     Cancelled,
+    /// Note 49 §11.10: the send that carries the sample at `b` ended in an exception, so whether the device took any of it is unknown.
+    Uncertain,
+    /// Not settled yet.
+    Pending,
 }
 
 impl Outcome {
@@ -302,20 +306,89 @@ impl Outcome {
         match self {
             Outcome::Applied => "applied",
             Outcome::Cancelled => "cancelled",
+            Outcome::Uncertain => "uncertain",
+            Outcome::Pending => "pending",
         }
     }
 }
 
-/// RM-37: a Stop whose bound `B` is at or before the boundary `b` cancels the switch; one with `b < B` leaves it applied (the text
-/// design note 49's C2 will change: a switch whose new payload was never handed is then not `applied`).
-pub fn outcome_after_stop(b: i64, bound: i64) -> Outcome {
-    if bound <= b { Outcome::Cancelled } else { Outcome::Applied }
+/// What became of the send (UHD) or emission (Mock) that carries the sample at the switch's boundary `b`, the first of its own booking
+/// (note 49 §11.10): the whole of it taken, `n` samples taken (`Short(0)` is none), an exception (whether the device took any of it is
+/// unknown), or not issued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sent {
+    Whole,
+    Short(i64),
+    Failed,
+    NotIssued,
 }
 
-/// RM-37: a Provider that ends the repeat on its own (an abandon) before handing the sample at `b`, with its cursor `c` at or before
-/// `b`, cancels the switch.
-pub fn outcome_after_abandon(b: i64, cursor: i64) -> Outcome {
-    if b >= cursor { Outcome::Cancelled } else { Outcome::Applied }
+impl Sent {
+    /// The device took the sample at `b`: the whole send, or a short one with at least one sample.
+    fn took_the_boundary(self) -> bool {
+        matches!(self, Sent::Whole) || matches!(self, Sent::Short(n) if n >= 1)
+    }
+}
+
+/// Note 49 §11.10 (the one rule behind RM-37's outcomes): what a Stop (`stop` its bound `B`), a loss (`loss` its sample) or both,
+/// in any order, settle a switch to, whichever came while its boundary send was unresolved or after: `cancelled` when `B` is at or
+/// before `b`; `uncertain` when the boundary send failed; else, when the device took the sample at `b`, `applied`, unless a loss came
+/// at or before `b` (the sample was never played: device time had not passed `b`); everything else is `cancelled`.
+fn halted(b: i64, stop: Option<i64>, loss: Option<i64>, sent: Sent) -> Outcome {
+    if stop.is_some_and(|bound| bound <= b) {
+        Outcome::Cancelled
+    } else if sent == Sent::Failed {
+        Outcome::Uncertain
+    } else if sent.took_the_boundary() && loss.is_none_or(|t| b < t) {
+        Outcome::Applied
+    } else {
+        Outcome::Cancelled
+    }
+}
+
+/// UR-38: once device time `now` has reached `b`, a switch whose boundary send the device took is `applied`; any other stays `pending`
+/// until a Stop, a loss or an abandon settles it (a host that is late has not sent the sample at `b`).
+pub fn switch_outcome_at_device_time(b: i64, now: i64, sent: Sent) -> Outcome {
+    if sent.took_the_boundary() && b <= now { Outcome::Applied } else { Outcome::Pending }
+}
+
+/// RM-37: a Stop whose bound `B` is at or before `b` cancels the switch; a later one settles it by what became of its boundary send
+/// (what is handed to the device is not recalled, RM-16), unless a loss at or before `b` follows before device time reaches `b`
+/// ([`switch_outcome_after_loss`]).
+pub fn switch_outcome_after_stop(b: i64, bound: i64, sent: Sent) -> Outcome {
+    halted(b, Some(bound), None, sent)
+}
+
+/// RM-37: a loss at the sample `loss` settles by device time at the loss (owner, 2026-11-12), and so does a Stop that a loss follows, in
+/// either order, before device time reaches `b` or while the boundary send is unresolved: `bound` is the first halt's bound `B`, which
+/// cancels at or before `b`; `applied` only when the boundary send was taken and the sample at `b` was played (`b < loss`); `uncertain`
+/// when the boundary send failed; else `cancelled`. A Stop alone has no loss: [`switch_outcome_after_stop`].
+pub fn switch_outcome_after_loss(b: i64, bound: i64, loss: i64, sent: Sent) -> Outcome {
+    halted(b, Some(bound), Some(loss), sent)
+}
+
+/// RM-37: the Provider writes its Manifest while the send that carries the sample at `b` has no result and no owner to report one: it settles as a
+/// send that ended in an exception, `uncertain`, unless a Stop's bound `stop` at or before `b` cancelled it first.
+pub fn switch_outcome_at_close(b: i64, stop: Option<i64>) -> Outcome {
+    halted(b, stop, None, Sent::Failed)
+}
+
+/// RM-37: a Provider that ends the repeat on its own (an abandon) at its cursor `cursor`, at or before `b`, has not handed the sample at
+/// `b` and cancels the switch; past `b` it settles by the boundary send.
+pub fn switch_outcome_after_abandon(b: i64, cursor: i64, sent: Sent) -> Outcome {
+    if b >= cursor { Outcome::Cancelled } else { halted(b, None, None, sent) }
+}
+
+/// RM-37: the abandon of [`switch_outcome_after_abandon`] followed by a loss at the sample `loss` before device time reaches `b`: the abandon's
+/// halt is at device time, so the loss decides as it does after a Stop ([`switch_outcome_after_loss`], with no bound that cancels).
+pub fn switch_outcome_after_abandon_and_loss(b: i64, cursor: i64, loss: i64, sent: Sent) -> Outcome {
+    if b >= cursor { Outcome::Cancelled } else { halted(b, None, Some(loss), sent) }
+}
+
+/// MR-42: the Mock's boundary send is an ideal executor's and never fails (M5): at a Stop, `Provider::stop` or loss it settles `applied`
+/// iff `b` is below the payload cut (MR-25; for a loss, the loss sample).
+pub fn switch_outcome_after_mock_stop(b: i64, cut: i64) -> Outcome {
+    if b < cut { Outcome::Applied } else { Outcome::Cancelled }
 }
 
 /// UR-38 (#84): a switch on a repeat that has not started on the device is refused at receipt: no row, and the repeat it would replace

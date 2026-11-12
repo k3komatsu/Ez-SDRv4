@@ -517,6 +517,9 @@ pub fn switch_verdict(trial: &SwitchTrial) -> Verdict {
         Some(seams) if seams > 0 => return Verdict::Fail(format!("{seams} end-of-burst or start-of-burst send(s) at the switch: the repeat was closed and restarted")),
         Some(_) => {}
     }
+    if row == "uncertain" {
+        return Verdict::Inconclusive("the switch row is \"uncertain\": the send that carried the boundary ended in an exception, so whether the new waveform was sent is unknown".to_owned());
+    }
     if row != "applied" {
         return Verdict::Fail(format!("the switch row is {row:?}, expected \"applied\""));
     }
@@ -1186,6 +1189,15 @@ mod stage5_tests {
         let (tone, power) = (tone(), power(0.16));
         assert!(matches!(switch_verdict(&trial(&tone, &power, "cancelled", Some(0))), Verdict::Fail(_)));
         assert!(matches!(switch_verdict(&trial(&[], &power, "applied", Some(0))), Verdict::Inconclusive(_)));
+    }
+
+    #[test]
+    fn an_uncertain_switch_is_inconclusive_and_only_a_seam_or_a_refusal_still_fails_it() {
+        // note 49 stage C2 (Q2): the bench cannot tell either; the send's exception is not the switch's failure.
+        let (tone, power) = (tone(), power(0.16));
+        assert!(matches!(switch_verdict(&trial(&tone, &power, "uncertain", Some(0))), Verdict::Inconclusive(ref text) if text.contains("uncertain")));
+        assert!(matches!(switch_verdict(&trial(&tone, &power, "uncertain", Some(1))), Verdict::Fail(ref text) if text.contains("restarted")));
+        assert!(matches!(switch_verdict(&SwitchTrial { refusals: &refused(), ..trial(&tone, &power, "uncertain", Some(0)) }), Verdict::Fail(_)));
     }
 
     #[test]

@@ -269,24 +269,6 @@ fn e2a_80_the_booking_accepted_after_the_stop_is_the_playing_repeat() {
     assert!(time_errors.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{time_errors:?}");
 }
 
-/// T4d's state (`o1.rs`): R (waves[0]) from 2 000, a switch S to waves[1] received at 3 ms (boundary 15 000) and read; at 5.6 ms S is open
-/// with its first send unissued. With `stop`, uhd-control has received a Stop at 5.6 ms (unread), whose bound is past 15 000, so the record
-/// applied S.
-fn t4d_state(stop: bool) -> SwitchRig {
-    let mut rig = switch_rig(vec![o::ramp(8, 1_000), o::ramp(9, 1_000), o::ramp(10, 100)]);
-    book_repeat(&mut rig, 1, 2_000, 0);
-    run(&mut rig, 0, 3);
-    book_switch(&mut rig, 2, 3_000, 1);
-    run(&mut rig, 3, 5);
-    at(&rig, 5 * MS + 3 * MS / 5);
-    turn(&mut rig);
-    assert_eq!((rig.tx.open_next(), rig.tx.open_first()), (Some(15_000), Some(true)), "S is open with nothing issued");
-    if stop {
-        stop_receipt(&mut rig);
-    }
-    rig
-}
-
 /// A SendAsapAndFlag and a DropAndFlag booking of waves[2] at `k`, each judged at receipt: the ids refused.
 fn book_both_at(rig: &mut SwitchRig, k: i64) -> Vec<u64> {
     rejected(&rig.events);
@@ -296,25 +278,10 @@ fn book_both_at(rig: &mut SwitchRig, k: i64) -> Vec<u64> {
 }
 
 #[test]
-fn e2a_f3_a_booking_at_b_plus_one_after_an_abandon_at_a_switch_boundary_is_refused_at_receipt() {
-    // F3 (RM-15's footprint): from T4d's state, the Stop's record applied S; before the owner reads the Stop, an underflow abandons at
-    // c = b = 15 000 (S issued nothing). R's footprint is [2 000, b + 5): a SendAsap booking at b + 1, 2 ms and more ahead of device time,
-    // is refused at receipt like the DropAndFlag one (today it was moved past a Stop region [b, b + 5)), and S's row is cancelled (its
-    // payload was the unsent open booking; today the row stayed applied).
-    let b = 15_000;
-    let mut rig = t4d_state(true);
-    rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(b)), channel: 0 });
-    assert!(rig.clock.instant(b + 1) - rig.core.now() >= 2 * MS, "the bookings have the device lead");
-    assert_eq!(book_both_at(&mut rig, b + 1), [5, 6], "both refused at receipt: {:?}", lock(&rig.core.rec).rejected);
-    run(&mut rig, 6, 30);
-    assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled");
-    assert!(!rig.device.transmitted(rig.clock.instant(2_000), 28_000).iter().flatten().any(|s| o::ramp(9, 1_000).contains(s) && *s != [0.0, 0.0]), "no sample of S");
-}
-
-#[test]
 fn e2a_f3_the_pending_twin_answers_the_same() {
-    // The same cell with S pending (taken, not applied: no Stop) and R's cursor at b: the underflow cancels S and R's front is b + 5, so
-    // both bookings at b + 1 are refused (today's answer).
+    // F3 (RM-15's footprint): S is pending (taken at receipt, its first send unissued) and R's cursor is at b = 15 000: an underflow
+    // cancels S and R's front is b + 5, so a SendAsap and a DropAndFlag booking at b + 1 are both refused at receipt. S cannot be
+    // applied with its boundary at the cursor: it applies only once its boundary send was taken (C2).
     let b = 15_000;
     let mut rig = switch_rig(vec![o::ramp(8, 1_000), o::ramp(9, 1_000), o::ramp(10, 100)]);
     book_repeat(&mut rig, 1, 2_000, 0);
@@ -454,9 +421,9 @@ fn e2a_f1_a_failed_send_with_a_switch_received_in_flight_cancels_it() {
 #[test]
 fn e2a_84_a_second_switch_on_a_switch_the_host_has_not_issued_is_refused() {
     // D3 (UR-38): a switch is the playing repeat from receipt and starts only when its own payload is issued. S1 (boundary 15 000) is
-    // received at 3 ms; device time reaches 16 ms before the owner steps again, so the record has applied S1 but the owner has issued none
-    // of it: a second switch S2 is refused at receipt, naming S2, and nothing changes. Once S1's payload is issued by normal running, a
-    // switch on it is accepted and names S1's period as the old one.
+    // received at 3 ms; device time reaches 16 ms before the owner steps again, so the owner has issued none of it and the record still
+    // holds S1 pending (C2: it is applied only once the sample at b was sent): a second switch S2 is refused at receipt, naming S2, and
+    // nothing changes. Once S1's payload is issued by normal running, a switch on it is accepted and names S1's period as the old one.
     let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 500], vec![NEW; 300]]);
     book_repeat(&mut rig, 1, 2_000, 0);
     run(&mut rig, 0, 3);
@@ -465,7 +432,7 @@ fn e2a_84_a_second_switch_on_a_switch_the_host_has_not_issued_is_refused() {
     at(&rig, 16 * MS);
     rejected(&rig.events);
     book_switch(&mut rig, 3, 16_000, 2);
-    assert_eq!(refusals(&rig.events), ["UR-38: the repeat the switch replaces has not started on the device"], "{:?}", lock(&rig.core.rec).rejected);
+    assert_eq!(refusals(&rig.events), ["UR-21: a repeat switch needs a playing repeat and no pending switch"], "{:?}", lock(&rig.core.rec).rejected);
     assert_eq!(lock(&rig.core.rec).switches.len(), 1, "a refused switch writes no row");
     assert_eq!(rig.tx.with_book(|book| book.playing.map(|playing| (playing.id, playing.started))), Some((ActionId(2), false)));
 
@@ -564,10 +531,10 @@ fn e2a_88_a_switch_after_a_repeat_moved_at_dispatch_takes_a_boundary_on_the_move
 }
 
 #[test]
-fn e2a_s11_a_stop_after_a_switch_whose_boundary_is_before_the_bound_applies_it_and_cancels_the_payload() {
-    // RM-37, RM-16 (note 49 §5.4.5): a switch (boundary 15 000) and then a Stop at 5.6 ms (bound 15 605) are received before the owner
-    // reads either. The record applies the switch, as MockRadio's does (b < B); the owner reads the payload, then the Stop, which cancels
-    // the payload with one note: the device burst closes before the boundary and no sample of the new waveform sounds.
+fn e2a_s11_a_stop_after_a_switch_whose_boundary_is_before_the_bound_cancels_it_and_its_payload() {
+    // RM-37, RM-16 (note 49 §5.4.5, KL-42): a switch (boundary 15 000) and then a Stop at 5.6 ms (bound 15 605) are received before the
+    // owner reads either. The owner reads the payload, then the Stop, which cancels the payload with one note: the device burst closes
+    // before the boundary, no sample of the new waveform was sent, and the row is `cancelled` (C2).
     let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
     book_repeat(&mut rig, 1, 2_000, 0);
     run(&mut rig, 0, 3);
@@ -575,7 +542,7 @@ fn e2a_s11_a_stop_after_a_switch_whose_boundary_is_before_the_bound_applies_it_a
     at(&rig, 5 * MS + 3 * MS / 5);
     stop_receipt(&mut rig);
     rig.tx.read_list();
-    assert_eq!(switch_row(&rig.core, 0)["outcome"], "applied");
+    assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled");
     assert_eq!(notes(&rig.core), ["UR-26: cancelled by Stop"], "{:?}", lock(&rig.core.rec).rejected);
     assert!(rejection_events(&rig.events).is_empty());
     run(&mut rig, 6, 30);

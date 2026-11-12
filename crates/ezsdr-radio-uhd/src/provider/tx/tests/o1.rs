@@ -439,7 +439,7 @@ fn o1_uhd_t4c_a_stop_before_the_boundary_cancels_the_switch() {
     assert!(bound <= b, "the case needs B <= b");
     r.stop();
     r.turns(5, 30);
-    assert_eq!(r.switch_row(0)["outcome"], o::outcome_after_stop(b, bound).as_str());
+    assert_eq!(r.switch_row(0)["outcome"], o::switch_outcome_after_stop(b, bound, o::Sent::NotIssued).as_str());
     r.assert_switch_ids(0);
     assert!(!r.heard(9, 2_000, 30_000));
     let slots = o::Slots { segs: vec![o::Seg::repeating(8, 2_000, 1_000, i64::MAX).cuttable()], cut: Some((t_k, bound)) };
@@ -463,20 +463,18 @@ fn stopped_after_switch(stop_ticks: i64) -> (Rig, i64, i64, i64) {
 }
 
 #[test]
-fn o1_uhd_t4d_a_stop_with_b_before_its_bound_leaves_the_row_applied_with_no_new_sample_handed() {
-    // RM-37 (seq 4): the owner drained the switch before the Stop (otherwise today's UHD answers `cancelled`, note 49 §5.4.5). The Stop at
-    // 5.6 ms has its window edge at b + 600, below the 2 500 samples the new waveform's first chunk needs, so none of it is handed.
-    // C2 (note 49 §11.10) changes the ROW below; the emission assertion stays.
+fn o1_uhd_t4d_a_stop_with_b_before_its_bound_cancels_a_switch_whose_first_sample_was_not_handed() {
+    // RM-37 (seq 4, KL-42): the owner drained the switch before the Stop. The Stop at 5.6 ms has its window edge at b + 600, below the
+    // 2 500 samples the new waveform's first chunk needs, so none of it is handed: the row is `cancelled` (C2, note 49 §11.10).
     let (r, b, t_k, bound) = stopped_after_switch(5 * MS + 3 * MS / 5);
     let slots = o::Slots { segs: vec![o::Seg::repeating(8, 2_000, 1_000, b).cuttable(), o::Seg::repeating(9, b, 1_000, i64::MAX).cuttable()], cut: Some((t_k, bound)) };
     let cut = r.check(&slots, 1_990, 30_000).expect("cut");
     assert!(cut <= b, "no sample of the new waveform was handed: cut {cut}, boundary {b}");
     assert!(!r.heard(9, 2_000, 30_000));
-    // The row, pinned apart from the emission (C2 changes it):
-    assert_eq!(r.switch_row(0)["outcome"], o::outcome_after_stop(b, bound).as_str(), "C2: this outcome changes with note 49 §11.10");
-    assert_eq!(r.switch_row(0)["outcome"], "applied");
+    assert_eq!(r.switch_row(0)["outcome"], o::switch_outcome_after_stop(b, bound, o::Sent::NotIssued).as_str());
+    assert_eq!(r.switch_row(0)["outcome"], "cancelled");
     r.assert_switch_ids(0);
-    // Applied with no new payload handed leaves no successor record today (C2 changes the row, not this): only the predecessor's.
+    // No new payload was handed: no successor record, only the predecessor's.
     assert_eq!(r.full_recs().len(), 1, "{:?}", r.full_recs());
     // #85: the new repeat is the open booking with nothing issued when the owner reads the Stop, so the Stop cancels it with a note.
     assert_eq!(r.cancellations(), 1, "{:?}", lock(&r.rig.core.rec).rejected);
@@ -491,7 +489,7 @@ fn o1_uhd_t4e_a_stop_after_the_new_waveform_sounded_leaves_it_applied() {
     let cut = r.check(&slots, 1_990, 30_000).expect("cut");
     assert!(cut > b + 1_000, "the new waveform sounded: cut {cut}, boundary {b}");
     assert!(r.heard(9, b, b + 100));
-    assert_eq!(r.switch_row(0)["outcome"], o::outcome_after_stop(b, bound).as_str(), "C2 (note 49 §11.10) may change the unhanded case, not this one");
+    assert_eq!(r.switch_row(0)["outcome"], o::switch_outcome_after_stop(b, bound, o::Sent::Whole).as_str());
     r.assert_switch_ids(0);
     // The successor's record: its own target, the samples the device played of it, wraps, end stop; not late. The receipt pushed the
     // switch's `at` (3 000) to 15 000, so its requested target is that `at` (#86).
@@ -793,7 +791,7 @@ fn o1_uhd_t7a_a_failed_send_ends_a_repeat_at_its_attempted_end_and_cancels_the_s
     assert_eq!(o::recorded(&completed), 7_500);
     r.check(&o::Slots { segs: vec![o::Seg::repeating(17, 2_000, 1_000, a + attempt / 2)], cut: None }, 1_990, cursor);
     assert!(!r.heard(18, 2_000, 30_000), "no sample of the new waveform ever sounds");
-    assert_eq!(r.switch_row(0)["outcome"], o::outcome_after_abandon(14_000, cursor).as_str());
+    assert_eq!(r.switch_row(0)["outcome"], o::switch_outcome_after_abandon(14_000, cursor, o::Sent::NotIssued).as_str());
     let rows = r.rows();
     assert_eq!((rows[0]["samples"].as_i64(), rows[0]["end"].as_str()), (Some(7_500), Some("stop")), "{rows:?}");
 }
@@ -850,20 +848,20 @@ fn o1_uhd_t7a3_a_failed_send_that_ends_at_the_boundary_still_cancels_the_switch(
     let r = failing_switch(4);
     let (a, attempt) = failed_attempt(&r, 4, 12_000);
     assert_eq!(a + attempt, 14_000);
-    assert_eq!(r.switch_row(0)["outcome"], o::outcome_after_abandon(14_000, a + attempt).as_str());
+    assert_eq!(r.switch_row(0)["outcome"], o::switch_outcome_after_abandon(14_000, a + attempt, o::Sent::NotIssued).as_str());
     assert!(!r.heard(18, 2_000, 30_000));
     r.check(&o::Slots { segs: vec![o::Seg::repeating(17, 2_000, 1_000, a + attempt / 2)], cut: None }, 1_990, a + attempt);
 }
 
 #[test]
-fn o1_uhd_t7c_a_failed_send_that_carries_the_boundary_leaves_the_switch_applied_today() {
-    // RM-37 (seq 7): FailSend(5) fails the send that carries b, [14 000, 16 500). The sample at b was attempted, so the row is `applied`
-    // today and half of it sounds. C2 (note 49 §5.4.5: an `uncertain` outcome for a failed send at b) will change the ROW below.
+fn o1_uhd_t7c_a_failed_send_that_carries_the_boundary_leaves_the_switch_uncertain() {
+    // RM-37 (seq 7): FailSend(5) fails the send that carries b, [14 000, 16 500). Whether the device took any of it is unknown, so the row
+    // is `uncertain` (C2, note 49 §11.10) whatever the fake did: half of it sounds.
     let r = failing_switch(5);
     let (a, attempt) = failed_attempt(&r, 5, 14_000);
     assert_eq!(a + attempt, 16_500);
-    assert_eq!(o::outcome_after_abandon(14_000, a + attempt), o::Outcome::Applied);
-    assert_eq!(r.switch_row(0)["outcome"], "applied", "C2 changes this row");
+    assert_eq!(o::switch_outcome_after_abandon(14_000, a + attempt, o::Sent::Failed), o::Outcome::Uncertain);
+    assert_eq!(r.switch_row(0)["outcome"], "uncertain");
     r.check(&o::Slots { segs: vec![o::Seg::repeating(17, 2_000, 1_000, 14_000), o::Seg::repeating(18, 14_000, 400, a + attempt / 2)], cut: None }, 1_990, a + attempt);
 }
 

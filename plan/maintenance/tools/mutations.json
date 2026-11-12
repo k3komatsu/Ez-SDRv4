@@ -5101,8 +5101,8 @@
    "id": "P243",
    "name": "a second end books another End on every line (RM-16, D15)",
    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-   "old": "        if std::mem::replace(&mut self.ended, true) {\n            return;\n        }",
-   "new": "        if false {\n            return;\n        }",
+   "old": "if std::mem::replace(&mut self.ended, true) {",
+   "new": "if false {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_26_a_stop_ends_every_line_once"
@@ -7082,8 +7082,8 @@
     "id": "P670",
     "name": "Mock Stop does not add the restart margin to its payload cut (MR-25)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "                    let cut = timeline::later_bound(at_stop, merge_front(payload, previous));",
-    "new": "                    let cut = timeline::later_bound(at_stop, merge_front(payload.map(|sample| sample.saturating_add(2)), previous));",
+    "old": "timeline::later_bound(at_stop, merge_front(payload, previous))",
+    "new": "timeline::later_bound(at_stop, merge_front(payload.map(|sample| sample.saturating_add(2)), previous))",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_channel",
     "filter": "mr_25_a_stopped_burst_transmits_every_sample_before_the_stop"
@@ -13580,8 +13580,8 @@
     "id": "N47S4-43",
     "name": "Provider::stop does not bound the transmit Busy (RM-16, VH-2)",
     "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-    "old": "stream.stop_at(at, core.tx_in_flight());",
-    "new": "let _ = (at, core.tx_in_flight());",
+    "old": "stream.stop_at(at, core.tx_in_flight(), lost);",
+    "new": "let _ = (at, core.tx_in_flight(), lost);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_provider_stop_ends_a_repeat_at_its_in_flight_window"
@@ -13630,8 +13630,8 @@
     "id": "N47S4-18c",
     "name": "a MockRadio Stop does not bound the stream's Busy (RM-16, S3)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "self.tx[k].book.stop((bound, region));",
-    "new": "self.tx[k].book.stop((i64::MAX, region));",
+    "old": ".stop_played((bound, region),",
+    "new": ".stop_played((i64::MAX, region),",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_25_a_transmit_value_after_a_stop_takes_effect_after_the_in_flight_window"
@@ -14198,7 +14198,7 @@
     "id": "N47S5-24",
     "name": "5b-2a: UHD's Stop does not end the transmit bookings at the Stop (RM-16, S7)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "streams.stream_mut(stream).stop_at(now, self.core.tx_in_flight())",
+    "old": "streams.stream_mut(stream).stop_at(now, self.core.tx_in_flight(), false)",
     "new": "None::<i64>",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -14228,8 +14228,8 @@
     "id": "N47S5-29",
     "name": "5b-2a: the Mock's Stop adds no stop tail to the overlap record (RM-16, S7)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "self.tx[k].book.stop((bound, region));",
-    "new": "self.tx[k].book.stop((bound, None));",
+    "old": ".stop_played((bound, region),",
+    "new": ".stop_played((bound, None),",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_25_s7_stop_tail_refuses_until_bound"
@@ -14458,8 +14458,8 @@
     "id": "N47S5-35",
     "name": "5d-M, E2a-3: a pending switch is applied one sample late (pending until device time passes the boundary, not reaches it)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": ".filter(|s| s.boundary <= now_k)",
-    "new": ".filter(|s| s.boundary < now_k)",
+    "old": "s.boundary <= now_k",
+    "new": "s.boundary < now_k",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_switch_pending_until_the_boundary_is_reached"
@@ -14468,8 +14468,8 @@
     "id": "N47S5-36",
     "name": "5d-M: a Stop before a pending switch's boundary does not cancel it (RM-16, S11)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(switch) => self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Cancelled, boundary: switch.boundary }),",
-    "new": "Some(_) => {}",
+    "old": "_ if switch.boundary >= stop => SwitchOutcome::Cancelled,",
+    "new": "_ if switch.boundary >= stop => return,",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_25_s11_stop_cancels_pending_switch"
@@ -14552,7 +14552,7 @@
     "new": "stream.book.advance(i64::MAX);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_21_s5_second_switch_refused_while_device_time_is_before_the_boundary"
+    "filter": "c2_s3_a_stop_after_the_boundary_send_leaves_it_applied"
   },
   {
     "id": "N47S5-44",
@@ -15058,8 +15058,8 @@
     "id": "N47S5-136",
     "name": "rev 28 (S4), E2a-2b: the abandoned repeat is kept as if it were a later booking, so it is not ended in the record and a switch is accepted for a repeat that is gone",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": ".partition(|c| c.start >= stop && !never_started.contains(&c.start));",
-    "new": ".partition(|c| (c.start >= stop || c.end == i64::MAX) && !never_started.contains(&c.start));",
+    "old": ".partition(|c| c.start >= stop);",
+    "new": ".partition(|c| (c.start >= stop || c.end == i64::MAX));",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_s4_an_underflow_ends_the_repeat_so_a_later_switch_is_refused_at_receipt"
@@ -15175,16 +15175,6 @@
     "filter": "ur_21_s4_a_report_between_the_join_and_the_switch_s_open_cancels_it"
   },
   {
-    "id": "N47S5-152",
-    "name": "rev 33, E2a-3: an applied switch at the abandoned cursor is not cancelled (the abandon reaches only switches past the cursor)",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "s.outcome == SwitchOutcome::Applied && s.boundary >= cursor_k",
-    "new": "s.outcome == SwitchOutcome::Applied && s.boundary > cursor_k",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_21_s4_a_switch_joined_then_abandoned_late_is_cancelled_not_applied"
-  },
-  {
     "id": "N47S5-153",
     "name": "rev 33, E2a-2b: a finite burst's abandon reaches the record (KL-39: it keeps its whole region and the pending switch of a repeat it has not started)",
     "file": "crates/ezsdr-radio/src/staging.rs",
@@ -15210,9 +15200,9 @@
     "file": "crates/ezsdr-radio/src/staging.rs",
     "old": "if switch.boundary >= cursor_k { self.cancel_switch(); }",
     "new": "if switch.boundary > cursor_k { self.cancel_switch(); }",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_21_s4_a_switch_at_the_abandoned_cursor_is_cancelled_not_applied"
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_37_a_switch_taken_at_the_abandoned_cursor_is_cancelled"
   },
   {
     "id": "N47S5-156",
@@ -15917,8 +15907,8 @@
     "id": "O1-M4",
     "name": "O1b: the Mock's Stop cut is one sample late (MR-25)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "let cut = timeline::later_bound(at_stop, merge_front(payload, previous));",
-    "new": "let cut = timeline::later_bound(at_stop, merge_front(payload, previous)) + 1;",
+    "old": "timeline::later_bound(at_stop, merge_front(payload, previous))",
+    "new": "timeline::later_bound(at_stop, merge_front(payload, previous)) + 1",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_channel",
     "filter": "o1_mock_t9_the_stop_cut_follows_mr_25_in_full"
@@ -16067,8 +16057,8 @@
     "id": "E1-U13",
     "name": "E1: an abandon queues the Run end's halt (UR-26)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.with_book(|book| book.abandon(repeat, id, cursor, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))));",
-    "new": "self.with_book(|book| { let cancelled = book.abandon(repeat, id, cursor, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))); book.list.halt(ezsdr_radio::CancelReason::ProviderStop); cancelled });",
+    "old": "self.with_book(|book| book.abandon(repeat, id, cursor, now, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))));",
+    "new": "self.with_book(|book| { let cancelled = book.abandon(repeat, id, cursor, now, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP))); book.list.halt(ezsdr_radio::CancelReason::ProviderStop); cancelled });",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "e1_q5_a_booking_waiting_when_the_repeat_is_abandoned_still_plays"
@@ -16518,7 +16508,7 @@
   "id": "E2A2B-01",
   "name": "#80: the abandon removes every chain at or after its cursor (today's retain)",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": ".partition(|c| c.start >= stop && !never_started.contains(&c.start));",
+  "old": ".partition(|c| c.start >= stop);",
   "new": ".partition(|_| false);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -16538,7 +16528,7 @@
   "id": "E2A2B-03",
   "name": "#80: the abandon clears playing whatever repeat it names (RM-37)",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "if self.playing.is_some_and(|playing| Some(playing.id) == id || settled.iter().any(|s| s.id == playing.id)) {",
+  "old": "if self.playing.is_some_and(|playing| Some(playing.id) == id || settled.iter().any(|s| s.id == playing.id) || waiting == Some(playing.id)) {",
   "new": "if self.playing.is_some() {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -16552,27 +16542,17 @@
   "new": "repeat.front = repeat.front.min(stop);",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
-  "filter": "txbook_abandon_at_a_switch_boundary_extends_the_old_repeat_to_its_footprint"
+  "filter": "txbook_abandon_sets_the_repeat_s_front_to_its_footprint_even_when_a_stop_cut_it_lower"
  },
  {
   "id": "E2A2B-05",
   "name": "rule 3 (c == r): a repeat chain starting at the cursor is kept as a later booking, open, instead of removed",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": ".partition(|c| c.start >= stop && !never_started.contains(&c.start));",
-  "new": ".partition(|c| c.start >= cursor_k && !never_started.contains(&c.start));",
+  "old": ".partition(|c| c.start >= stop);",
+  "new": ".partition(|c| c.start >= cursor_k);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "e2a_80_an_abandon_at_the_repeat_s_own_start_keeps_today_s_answers"
- },
- {
-  "id": "E2A2B-06",
-  "name": "change (c): an applied switch whose boundary is the cursor (its payload the unsent open booking) is left applied",
-  "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "s.boundary >= cursor_k",
-  "new": "s.boundary > cursor_k",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "e2a_f3_a_booking_at_b_plus_one_after_an_abandon_at_a_switch_boundary_is_refused_at_receipt"
  },
  {
   "id": "E2A2B-07",
@@ -16623,16 +16603,6 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_25_rx_stop_leaves_transmit_running_and_stop_records_an_unstarted_burst"
- },
- {
-  "id": "E2A2B-12",
-  "name": "rule 2 precedes rule 5: an applied switch whose chain starts at or after the cursor plus STOP_FRONT is kept as a later booking",
-  "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "!never_started.contains(&c.start)",
-  "new": "true",
-  "crate": "ezsdr-radio",
-  "test_bin": "staging",
-  "filter": "txbook_abandon_equals_a_stop_at_the_cursor_except_the_named_differences"
  },
  {
   "id": "E2A2B-13",
@@ -16698,8 +16668,8 @@
   "id": "E2A3-06",
   "name": "RM-37: a refused switch becomes the playing repeat (playing is written before the record's refusal)",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "self.record.switch(id, boundary, now_k, playing.started)?; self.play(true, id, boundary, period);",
-  "new": "self.play(true, id, boundary, period); self.record.switch(id, boundary, now_k, playing.started)?;",
+  "old": "self.record.switch(id, boundary, now_k, playing.started, carried)?; self.play(true, id, boundary, period);",
+  "new": "self.play(true, id, boundary, period); self.record.switch(id, boundary, now_k, playing.started, carried)?;",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "txbook_a_refused_switch_changes_nothing"
@@ -16738,8 +16708,8 @@
   "id": "E2A3-10",
   "name": "RM-37: an accepted switch is not the playing repeat (the replaced one stays, with its grid)",
   "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "self.record.switch(id, boundary, now_k, playing.started)?; self.play(true, id, boundary, period);",
-  "new": "self.record.switch(id, boundary, now_k, playing.started)?;",
+  "old": "self.record.switch(id, boundary, now_k, playing.started, carried)?; self.play(true, id, boundary, period);",
+  "new": "self.record.switch(id, boundary, now_k, playing.started, carried)?;",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "txbook_receive_switch_takes_the_boundary_at_receipt"
@@ -17496,8 +17466,8 @@
   "id": "N95-21",
   "name": "#95: MockRadio: the stop's hand-over horizon fails where it passes i64::MAX instead of saturating",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "let horizon = now.saturating_add(window);",
-  "new": "let horizon = now.checked_add(window).expect(\"a horizon\");",
+  "old": "now.saturating_add(window), timeline::later_bound",
+  "new": "now.checked_add(window).expect(\"a horizon\"), timeline::later_bound",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_25_a_stop_whose_bound_does_not_fit_the_clock_is_refused_with_its_id_and_the_run_goes_on"
@@ -19363,5 +19333,435 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_28_a_value_during_an_underflow_recovery_is_applied_after_the_recovery"
+ },
+ {
+  "id": "C2-01",
+  "name": "C2: a Stop at or before the boundary no longer cancels a switch whatever its boundary send did (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "_ if switch.boundary >= stop => SwitchOutcome::Cancelled,",
+  "new": "",
+  "filter": "c2_record_a_halt_settles_a_pending_switch"
+ },
+ {
+  "id": "C2-02",
+  "name": "C2: a halt's `played` is ignored: a loss or a Mock cut before the boundary still applies a sent switch (RM-37, Q1)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "Carried::Sent if switch.boundary < played => SwitchOutcome::Applied,",
+  "new": "Carried::Sent => SwitchOutcome::Applied,",
+  "filter": "c2_record_a_halt_settles_a_pending_switch"
+ },
+ {
+  "id": "C2-03",
+  "name": "C2: a halt settles a switch whose boundary send ended in an exception as applied, not uncertain (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "Carried::Unknown => SwitchOutcome::Uncertain,",
+  "new": "Carried::Unknown => SwitchOutcome::Applied,",
+  "filter": "c2_record_a_halt_settles_a_pending_switch"
+ },
+ {
+  "id": "C2-04",
+  "name": "C2: a halt while the boundary send is in flight settles at once instead of waiting for the result (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "Carried::InFlight => true,",
+  "new": "Carried::InFlight => false,",
+  "filter": "c2_record_a_halt_during_the_boundary_send_waits_for_the_result"
+ },
+ {
+  "id": "C2-05",
+  "name": "C2: the boundary send's result does not settle the switch a halt left waiting (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.pending = Some(Switch { carried, ..switch }); self.settle_halt();",
+  "new": "self.pending = Some(Switch { carried, ..switch });",
+  "filter": "c2_record_a_halt_during_the_boundary_send_waits_for_the_result"
+ },
+ {
+  "id": "C2-06",
+  "name": "C2: device time applies a switch whose boundary send was not taken (RM-37, UR-38)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "s.carried == Carried::Sent && s.boundary <= now_k",
+  "new": "s.boundary <= now_k",
+  "filter": "c2_record_advance_applies_only_a_sent_switch"
+ },
+ {
+  "id": "C2-07",
+  "name": "C2: the issue of any booking marks the pending switch's boundary send in flight (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "switch.id == id && switch.carried == Carried::Unissued",
+  "new": "switch.carried == Carried::Unissued",
+  "filter": "c2_record_two_switches_keep_their_own_carry"
+ },
+ {
+  "id": "C2-08",
+  "name": "C2: the executor's issue never marks the boundary send in flight (UR-38)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.record.issued(id);",
+  "new": "let _ = id;",
+  "filter": "txbook_issue_marks_only_the_switch_s_own_first_send_in_flight"
+ },
+ {
+  "id": "C2-09",
+  "name": "C2: a send that took no sample counts as the boundary send taken (UR-22, RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "Outcome::Accepted(accepted) if accepted >= 1 || accepted == send.device_count => Carried::Sent,",
+  "new": "Outcome::Accepted(accepted) if true || accepted == send.device_count => Carried::Sent,",
+  "filter": "txbook_complete_sets_carried_by_the_outcome"
+ },
+ {
+  "id": "C2-10",
+  "name": "C2: a send that ended in an exception counts as the boundary send taken (UR-22, RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "Outcome::Failed => Carried::Unknown,",
+  "new": "Outcome::Failed => Carried::Sent,",
+  "filter": "txbook_complete_sets_carried_by_the_outcome"
+ },
+ {
+  "id": "C2-11",
+  "name": "C2: a UHD switch starts with its boundary send taken (UR-38)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "let carried = if self.started_rule == Started::AtAcceptance { Carried::Sent } else { Carried::Unissued };",
+  "new": "let carried = Carried::Sent;",
+  "filter": "txbook_receive_switch_starts_the_carry_by_the_provider_s_rule"
+ },
+ {
+  "id": "C2-12",
+  "name": "C2: a Mock switch starts with its boundary send not taken, so device time never applies it (MR-42)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "old": "let carried = if self.started_rule == Started::AtAcceptance { Carried::Sent } else { Carried::Unissued };",
+  "new": "let carried = Carried::Unissued;",
+  "filter": "mr_16_s8_applied_switch_settles_at_device_time_without_a_stop"
+ },
+ {
+  "id": "C2-13",
+  "name": "C2: the Mock's Stop settles a switch by its bound, not by its payload cut (MR-42, MR-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "old": "planned.map_or(i64::MAX, |(_, cut)| cut)",
+  "new": "i64::MAX",
+  "filter": "c2_mr_25_a_stop_settles_a_switch_by_the_payload_cut"
+ },
+ {
+  "id": "C2-14",
+  "name": "C2: an uncertain switch's row reads applied (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "SwitchOutcome::Uncertain => \"uncertain\",",
+  "new": "SwitchOutcome::Uncertain => \"applied\",",
+  "filter": "o1_uhd_t7c_a_failed_send_that_carries_the_boundary_leaves_the_switch_uncertain"
+ },
+ {
+  "id": "C2-16",
+  "name": "C2: the deferred halt settles with the Stop's `played`, forgetting a loss that came while the boundary send was in flight (RM-37, Q1)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.settle_halted(switch, switch.carried, halted.stop, halted.played);",
+  "new": "self.settle_halted(switch, switch.carried, halted.stop, i64::MAX);",
+  "filter": "c2_record_a_loss_during_the_boundary_send_is_kept_until_the_result"
+ },
+ {
+  "id": "C2-17",
+  "name": "C2: a second halt in flight overwrites the earliest `played` (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "played: first.played.min(played)",
+  "new": "played: played",
+  "filter": "c2_record_a_stop_and_a_loss_in_flight_keep_the_first_bound_and_the_earliest_loss"
+ },
+ {
+  "id": "C2-18",
+  "name": "C2: a second halt in flight overwrites the first bound, the apply geometry (RM-37, RM-16)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "stop: first.stop,",
+  "new": "stop,",
+  "filter": "c2_record_a_second_halt_keeps_the_first_bound"
+ },
+ {
+  "id": "C2-19",
+  "name": "C2: UHD's loss settles a switch as a Stop does, by `played` = MAX (RM-37, Q1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "reach.1.filter(|_| lost).map_or(i64::MAX, |(at_stop, _)| at_stop)",
+  "new": "i64::MAX",
+  "filter": "c2_s13_a_loss_before_the_boundary_is_decided_by_device_time"
+ },
+ {
+  "id": "C2-20",
+  "name": "C2: a send of another booking settles the pending switch's boundary send (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "switch.id == id && switch.carried == Carried::InFlight",
+  "new": "switch.carried == Carried::InFlight",
+  "filter": "c2_record_two_switches_keep_their_own_carry"
+ },
+ {
+  "id": "C2-21",
+  "name": "C2: a Stop at or before the boundary waits for the boundary send's result (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "switch.boundary < halted.stop && match switch.carried {",
+  "new": "match switch.carried {",
+  "filter": "c2_record_a_halt_during_the_boundary_send_waits_for_the_result"
+ },
+ {
+  "id": "C2-22",
+  "name": "C2: the book passes no `played` to the record's halt (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.record.halt_played(at, stop, played);",
+  "new": "self.record.halt_played(at, stop, i64::MAX);",
+  "filter": "txbook_stop_passes_the_played_cut_to_the_record"
+ },
+ {
+  "id": "C2-23",
+  "name": "C2: a loss after `Provider::stop` ended the streams does not keep its sample on the switch waiting for the boundary send's result (RM-37)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "if lost { self.tx.iter_mut().for_each(|stream| stream.lose_at(at)); }",
+  "new": "if false { self.tx.iter_mut().for_each(|stream| stream.lose_at(at)); }",
+  "filter": "c2_s22_a_loss_after_provider_stop_in_flight_keeps_the_loss_sample"
+ },
+ {
+  "id": "C2-24",
+  "name": "C2: a later loss overwrites the earliest `played` of a switch waiting for the boundary send's result (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "halted.played = halted.played.min(played);",
+  "new": "halted.played = played;",
+  "filter": "c2_record_a_loss_after_a_halt_in_flight_keeps_the_earliest_sample"
+ },
+ {
+  "id": "C2-25",
+  "name": "C2: the Manifest write settles a pending switch whatever became of its boundary send (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.pending.take_if(|switch| switch.carried == Carried::InFlight || (switch.carried == Carried::Sent && switch.halted.is_some()))",
+  "new": "self.pending.take_if(|_| true)",
+  "filter": "c2_record_an_unresolved_boundary_send_is_uncertain_when_the_manifest_is_written"
+ },
+ {
+  "id": "C2-26",
+  "name": "C2: an unresolved boundary send in flight settles as applied at the Manifest write (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "_ => self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Uncertain, boundary: switch.boundary }),",
+  "new": "_ => self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Applied, boundary: switch.boundary }),",
+  "filter": "c2_record_an_unresolved_boundary_send_is_uncertain_when_the_manifest_is_written"
+ },
+ {
+  "id": "C2-27",
+  "name": "C2: the Provider's Manifest write does not settle an unresolved boundary send (RM-37, UR-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "core.settle_unresolved_switches();",
+  "new": "",
+  "filter": "c2_a_boundary_send_whose_worker_panicked_is_uncertain_in_the_manifest"
+ },
+ {
+  "id": "C2-28",
+  "name": "C2: the Core settles an unresolved boundary send on no stream (RM-37, UR-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "book.record.settle_unresolved()",
+  "new": "book.record.lose(i64::MAX)",
+  "filter": "c2_s23_a_worker_that_panics_in_the_boundary_send_leaves_the_row_uncertain_at_the_close"
+ },
+ {
+  "id": "C2-29",
+  "name": "C2: a sent switch that a Stop below b leaves is settled at once instead of waiting for device time (RM-37, Q1)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "Carried::Sent => halted.at < switch.boundary && switch.boundary < halted.played,",
+  "new": "Carried::Sent => false,",
+  "filter": "c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss"
+ },
+ {
+  "id": "C2-30",
+  "name": "C2: a sent switch waits for device time that has already reached b (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "halted.at < switch.boundary &&",
+  "new": "halted.at <= switch.boundary &&",
+  "filter": "c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss"
+ },
+ {
+  "id": "C2-31",
+  "name": "C2: a sent switch whose boundary sample a loss did not play keeps waiting (RM-37, Q1)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "halted.at < switch.boundary && switch.boundary < halted.played,",
+  "new": "halted.at < switch.boundary,",
+  "filter": "c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss"
+ },
+ {
+  "id": "C2-32",
+  "name": "C2: a loss after a halt does not settle the switch that waited on it (RM-37, Q1)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "halted.played = halted.played.min(played); self.settle_halt();",
+  "new": "halted.played = halted.played.min(played);",
+  "filter": "c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss"
+ },
+ {
+  "id": "C2-33",
+  "name": "C2: a switch applied by device time after a Stop gets the open geometry instead of the Stop's bound (RM-37, RM-16)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.apply(switch, switch.halted.map_or(i64::MAX, |halted| halted.stop), SwitchOutcome::Applied);",
+  "new": "self.apply(switch, i64::MAX, SwitchOutcome::Applied);",
+  "filter": "c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss"
+ },
+ {
+  "id": "C2-34",
+  "name": "C2: the Manifest write leaves a sent switch that a Stop is holding back pending (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": " || (switch.carried == Carried::Sent && switch.halted.is_some())",
+  "new": "",
+  "filter": "c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss"
+ },
+ {
+  "id": "C2-35",
+  "name": "C2: the Manifest write settles a sent switch that a Stop is holding back as uncertain (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "Some(halted) if switch.carried == Carried::Sent => self.apply(switch, halted.stop, SwitchOutcome::Applied),",
+  "new": "Some(halted) if switch.carried == Carried::Sent => self.apply(switch, halted.stop, SwitchOutcome::Uncertain),",
+  "filter": "c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss"
+ },
+ {
+  "id": "C2-36",
+  "name": "C2: a second halt does not move the device time the first one recorded (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "at: first.at.max(at)",
+  "new": "at: first.at",
+  "filter": "c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss"
+ },
+ {
+  "id": "C2-37",
+  "name": "C2: the Mock leaves a sent switch pending after a Stop below b until device time reaches it (RM-37, MR-42)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "old": "self.tx[k].book.record.settle_unresolved();",
+  "new": "",
+  "filter": "c2_mr_25_a_stop_below_b_settles_the_row_at_the_stop"
+ },
+ {
+  "id": "C2-38",
+  "name": "C2: a loss after a halt does not reach the switch waiting on it (RM-37, Q1)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "if let Some(halted) = self.pending.as_mut().and_then(|switch| switch.halted.as_mut()) {",
+  "new": "if let Some(halted) = self.pending.as_mut().and_then(|switch| switch.halted.as_mut()).filter(|_| false) {",
+  "filter": "c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss"
+ },
+ {
+  "id": "C2-39",
+  "name": "C2: an abandon halts at its cursor, not at device time (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.halt_at(cursor_k, now_k, stop, i64::MAX);",
+  "new": "self.halt_at(cursor_k, cursor_k, stop, i64::MAX);",
+  "filter": "c2_record_an_abandon_halts_at_device_time_and_cuts_the_chains_at_the_cursor"
+ },
+ {
+  "id": "C2-40",
+  "name": "C2: uhd-tx passes the abandon's cursor as device time (RM-37)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "old": "book.abandon(repeat, id, cursor, now,",
+  "new": "book.abandon(repeat, id, cursor, cursor,",
+  "filter": "c2_s26_an_abandon_after_a_whole_boundary_send_halts_at_device_time"
+ },
+ {
+  "id": "C2-41",
+  "name": "C2: an abandon that leaves its switch waiting leaves the repeat playing (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "|| waiting == Some(playing.id)",
+  "new": "|| false",
+  "filter": "c2_txbook_an_abandon_that_leaves_the_switch_waiting_ends_the_playing_repeat"
+ },
+ {
+  "id": "C2-42",
+  "name": "C2: the Manifest write applies a held switch without its chains (RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "Some(halted) if switch.carried == Carried::Sent => self.apply(switch, halted.stop, SwitchOutcome::Applied),",
+  "new": "Some(halted) if switch.carried == Carried::Sent => self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Applied, boundary: switch.boundary }),",
+  "filter": "c2_record_a_stop_before_device_time_reaches_b_leaves_the_switch_to_a_later_loss"
+ },
+ {
+  "id": "C2-43",
+  "name": "C2: a failed reopen leaves a switch a Stop is holding pending (RM-37, UR-22)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "old": "self.record.cancel_switch();",
+  "new": "",
+  "filter": "c2_txbook_a_failed_reopen_cancels_a_switch_a_stop_is_holding"
+ },
+ {
+  "id": "C2-44",
+  "name": "C2 (Opus re-check of fix round 3): an abandon leaves a waiting switch the earlier Stop's bound, so its later apply widens the footprint (RM-15)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "halted.stop = stop;",
+  "new": "",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "c2_record_an_abandon_after_a_stop_keeps_its_footprint_whatever_the_waiting_switch_becomes"
  }
 ]

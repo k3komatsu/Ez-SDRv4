@@ -335,6 +335,15 @@ fn o1_mock_t3_a_repeat_keeps_its_phase_across_wraps_and_a_stop_cuts_it_at_mr_25s
 // ------------------------------------------------------------------------------------------------------------ T4
 
 /// R (`period` long) from `X + 2 000` and a switch to waveform 1 received at sample `recv` for `at`, on the `x3xx` Mock.
+/// The `ideal` Mock's twin of [`switched`]: R from 2 000, the switch received at `recv`.
+fn ideal_switched(period: usize, new_period: usize, recv: i64, at: i64) -> M {
+    let mut m = ideal(&[(8, period), (9, new_period)]);
+    m.book(0, 2_000, true, LatePolicy::DropAndFlag);
+    m.go(recv);
+    m.book_switch(1, at);
+    m
+}
+
 fn switched(period: usize, new_period: usize, recv: i64, at: i64) -> M {
     let mut m = x3xx(&[(8, period), (9, new_period)]);
     m.book(0, X + 2_000, true, LatePolicy::DropAndFlag);
@@ -393,7 +402,7 @@ fn o1_mock_t4c_a_stop_before_the_boundary_cancels_the_switch() {
     m.stop();
     m.go(X + 60_000);
     let cut = o::mock_cut(&m.p, t, &[o::MBurst { start: s, len: None, started: true, before_stop: true }, o::MBurst { start: b, len: None, started: false, before_stop: true }], None);
-    assert_eq!(m.switch_rows()[0]["outcome"], o::outcome_after_stop(b, bound).as_str());
+    assert_eq!(m.switch_rows()[0]["outcome"], o::switch_outcome_after_mock_stop(b, cut).as_str());
     m.assert_switch_ids(0);
     assert!(!m.heard(9, s, X + 50_000));
     m.check(&o::Slots { segs: vec![o::Seg::repeating(8, s, 1_000, cut)], cut: None }, s - 10, X + 40_000);
@@ -408,7 +417,7 @@ fn pushed(m: &M, s: i64) -> Option<i64> {
     requested
 }
 
-fn stopped_after_switch(after: i64) -> (M, i64, i64, i64, i64) {
+fn stopped_after_switch(after: i64) -> (M, i64, i64, i64) {
     let s = X + 2_000;
     let mut m = switched(1_000, 1_000, s + 2_000, s + 2_000);
     let b = s + 14_000;
@@ -421,18 +430,36 @@ fn stopped_after_switch(after: i64) -> (M, i64, i64, i64, i64) {
     m.go(X + 60_000);
     let bursts = [o::MBurst { start: s, len: None, started: true, before_stop: true }, o::MBurst { start: b, len: None, started: false, before_stop: true }];
     let cut = o::mock_cut(&m.p, t, &bursts, None);
-    (m, s, b, bound, cut)
+    (m, s, b, cut)
+}
+
+#[test]
+fn c2_mr_25_a_stop_below_b_settles_the_row_at_the_stop() {
+    // RM-37, MR-42: the Mock's payload cut is known at the Stop, and no loss can follow it, so the row is settled there and does not wait
+    // for device time to reach `b` (as UHD's does: `c2_s3_…`): a Stop whose window edge is `b + 600` hands the new waveform's sample at `b`.
+    let (s, recv) = (X + 2_000, X + 4_000);
+    let mut m = switched(1_000, 1_000, recv, recv);
+    let b = o::switch_boundary(&m.p, s, 1_000, m.tick(recv), Some(recv)).unwrap();
+    let t_sample = b + 600 - 10_000;
+    m.go(t_sample);
+    let t = m.tick(t_sample);
+    let (_, bound) = m.p.stop_bound(t);
+    m.stop();
+    let bursts = [o::MBurst { start: s, len: None, started: true, before_stop: true }, o::MBurst { start: b, len: None, started: false, before_stop: true }];
+    let cut = o::mock_cut(&m.p, t, &bursts, None);
+    assert!(t_sample < b && b < cut && b < bound, "the Stop is below b and hands it: b {b}, B {bound}, cut {cut}");
+    assert_eq!(m.switch_rows()[0]["outcome"], "applied", "b {b}, B {bound}, cut {cut}");
 }
 
 #[test]
 fn o1_mock_t4d_a_stop_with_b_before_its_bound_leaves_the_row_applied() {
     // RM-37, MR-25, MR-42 (seq 4): the Mock installed the switch at receipt, so with b < B it is applied and its new repeat is cut at MR-25's
-    // point: the window edge is b + 600 and the new repeat's first 32 samples fit, so [b, b + 600) of it radiates. C2 (note 49 §11.10)
-    // changes the ROW; the emission stays.
-    let (mut m, s, b, bound, cut) = stopped_after_switch(600);
+    // point: the window edge is b + 600 and the new repeat's first 32 samples fit, so [b, b + 600) of it radiates, and the row says so (C2:
+    // applied iff b is below the payload cut).
+    let (mut m, s, b, cut) = stopped_after_switch(600);
     assert_eq!(cut, b + 600);
     m.check(&o::Slots { segs: vec![o::Seg::repeating(8, s, 1_000, b), o::Seg::repeating(9, b, 1_000, cut)], cut: None }, s - 10, cut + 100);
-    assert_eq!(m.switch_rows()[0]["outcome"], o::outcome_after_stop(b, bound).as_str(), "C2: this outcome changes with note 49 §11.10");
+    assert_eq!(m.switch_rows()[0]["outcome"], o::switch_outcome_after_mock_stop(b, cut).as_str());
     assert_eq!(m.switch_rows()[0]["outcome"], "applied");
     m.assert_switch_ids(0);
     assert_eq!(m.pairs(), [(s, (b - s) as u64), (b, (cut - b) as u64)]);
@@ -442,13 +469,42 @@ fn o1_mock_t4d_a_stop_with_b_before_its_bound_leaves_the_row_applied() {
 #[test]
 fn o1_mock_t4e_a_stop_after_the_new_waveform_sounded_leaves_it_applied() {
     // RM-37 (seq 4): as T4d with the window edge at b + 3 000: 3 000 samples of the new waveform radiate; the row is applied.
-    let (mut m, s, b, bound, cut) = stopped_after_switch(3_000);
+    let (mut m, s, b, cut) = stopped_after_switch(3_000);
     assert_eq!(cut, b + 3_000);
     m.check(&o::Slots { segs: vec![o::Seg::repeating(8, s, 1_000, b), o::Seg::repeating(9, b, 1_000, cut)], cut: None }, s - 10, cut + 100);
-    assert_eq!(m.switch_rows()[0]["outcome"], o::outcome_after_stop(b, bound).as_str());
+    assert_eq!(m.switch_rows()[0]["outcome"], o::switch_outcome_after_mock_stop(b, cut).as_str());
     m.assert_switch_ids(0);
     assert_eq!(m.full_rec(0), (s, (b - s) as u64, ((b - s) / 1_000) as u32, None, false, "eob"), "the predecessor's record");
     assert_eq!(m.full_rec(1), (b, (cut - b) as u64, ((cut - b) / 1_000) as u32, pushed(&m, s), false, "stop"), "the successor's record");
+}
+
+#[test]
+fn c2_mr_25_a_stop_settles_a_switch_by_the_payload_cut() {
+    // RM-37, MR-25, MR-42 (note 49 stage C2, KL-42): a Stop settles a switch `applied` only when `b` is below the payload cut, the first sample
+    // the Mock does not emit; `B` at or before `b` cancels it, and so does a Stop whose bound is past `b` but whose cut is not (a switch the
+    // window did not hand: the row said `applied` for a sample never radiated). The row follows the oracle, and agrees with what radiated:
+    // the new waveform exists exactly when it is applied.
+    for (profile, afters) in [("x3xx", vec![-10, -3, -2, 0, 31, 32, 600]), ("ideal", vec![-5, -3, -2, -1, 1])] {
+        for after in afters {
+            let (s, recv) = if profile == "x3xx" { (X + 2_000, X + 4_000) } else { (2_000, 3_500) };
+            let mut m = if profile == "x3xx" { switched(1_000, 1_000, recv, recv) } else { ideal_switched(1_000, 1_000, recv, recv) };
+            let b = o::switch_boundary(&m.p, s, 1_000, m.tick(recv), Some(recv)).unwrap();
+            // On x3xx the Stop's window edge is b + after; on ideal (no window) its sample is.
+            let t_sample = if profile == "x3xx" { b + after - 10_000 } else { b + after };
+            m.go(t_sample);
+            let t = m.tick(t_sample);
+            let (_, bound) = m.p.stop_bound(t);
+            m.stop();
+            m.go(b + 60_000);
+            let bursts = [o::MBurst { start: s, len: None, started: true, before_stop: true }, o::MBurst { start: b, len: None, started: false, before_stop: true }];
+            let cut = o::mock_cut(&m.p, t, &bursts, None);
+            let expected = if bound <= b { o::Outcome::Cancelled } else { o::switch_outcome_after_mock_stop(b, cut) };
+            let case = format!("{profile}, after {after}: b {b}, B {bound}, cut {cut}");
+            assert_eq!(m.switch_rows()[0]["outcome"], expected.as_str(), "{case}");
+            let successor = m.pairs().iter().any(|(start, _)| *start == b);
+            assert_eq!(successor, expected == o::Outcome::Applied, "{case}: the new waveform radiates exactly when the row says applied: {:?}", m.pairs());
+        }
+    }
 }
 
 #[test]

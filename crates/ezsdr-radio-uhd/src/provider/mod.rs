@@ -408,6 +408,7 @@ impl UhdRadio {
     }
 
     fn write_sections(&mut self, core: &Core) {
+        core.settle_unresolved_switches();
         core.settle_switches();
         let rec = lock(&core.rec);
         let sections = &mut self.instance.sections;
@@ -1478,6 +1479,47 @@ mod tests {
             assert_eq!(device.calls().iter().filter(|call| *call == "mark_lost").count(), 1, "a second stop and cleanup change nothing");
             assert_one_plan_row(&core);
         });
+    }
+
+    /// The Manifest's `switches` outcome of the row of action 2.
+    fn switch_outcome(radio: &UhdRadio) -> Json {
+        radio.instance.sections[&section("switches")][0]["outcome"].clone()
+    }
+
+    #[test]
+    fn c2_a_boundary_send_whose_worker_panicked_is_uncertain_in_the_manifest() {
+        // Sol's code review, major 2: the tx worker panics after it issued the send that carries a switch's boundary sample (the book keeps the
+        // send in flight: no result will come), and the panic handler publishes the loss. The Manifest is written with the row settled as a
+        // send whose result is unknown: uncertain, unless a Stop's bound at or before b cancelled it first. With a clock the loss is a halt
+        // (bound past b: the row waits for the result that never comes); without one nothing halted it.
+        use super::tx::oracle;
+        // The oracle's cell for each: no halt (the close); a halt whose bound is past b; a loss whose bound is at or before b.
+        for (clock, boundary, bound) in [(false, 1, None), (true, 1, Some(2)), (true, 1_000_000_000_000, Some(1_000_000_000_000))] {
+            let expected = match bound {
+                None => oracle::switch_outcome_at_close(boundary, None),
+                Some(bound) => oracle::switch_outcome_after_loss(boundary, bound, 0, oracle::Sent::Failed),
+            };
+            test_support::bounded("a worker that panicked in the boundary send", Wall::from_secs(30), move || {
+                let (mut radio, core, _device, _events) = running_radio();
+                let _control = clock.then(|| control_on(&core, Arc::new(NoActions)));
+                {
+                    let mut streams = lock(&core.streams);
+                    let record = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).book.record;
+                    record.arm(1_000_000);
+                    record.accept(0, None, 0, |_| i64::MAX, i64::MIN).unwrap();
+                    record.book(None);
+                    record.switch(ezsdr_kernel::event::ActionId(2), boundary, 0, true, ezsdr_radio::staging::Carried::Unissued).unwrap();
+                    record.issued(ezsdr_kernel::event::ActionId(2));
+                }
+                lock(&core.rec).switches.push(json!({ "action_id": 2, "boundary": boundary, "outcome": "pending" }));
+                let release = panics_when_released(&mut radio, &core, "uhd-tx-s0");
+                release.send(()).unwrap();
+                all_finished(&radio);
+                radio.stop(StopMode::Orderly).unwrap();
+                radio.cleanup();
+                assert_eq!(switch_outcome(&radio), expected.as_str(), "clock {clock}, boundary {boundary}");
+            });
+        }
     }
 
     #[test]
