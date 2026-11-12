@@ -716,7 +716,12 @@ fn kc_29_an_end_the_data_thread_requested_is_cleaned_up_at_the_next_call() {
     let mut run = lost_device_session(&probe);
     assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
     std::thread::sleep(Wall::from_millis(50));
-    running(&run);
+    if !matches!(run.state(), RunState::Running {}) {
+        // A Run the data thread moved on dropped mid-unwind trips cleanup's debug_assert and aborts: leak it so the failure is the assertion.
+        let state = run.state();
+        std::mem::forget(run);
+        panic!("{state:?}");
+    }
     let lost = kind(EventKind::DEVICE_LOST);
     let radio = support::node_source("radio");
     assert!(run.events(0).iter().any(|e| e.kind == lost && e.source == radio), "{:?}", run.events(0));

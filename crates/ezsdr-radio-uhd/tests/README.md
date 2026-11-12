@@ -52,9 +52,15 @@ tests in `src/authority.rs` (the first anchor exact, a read wider than 1 ms disc
 kept apart). Every manual-clock test arms one shared
 wall watchdog (`common/watchdog.rs`, plan 30 §7): a clock a mutant freezes aborts the
 process with the test's name once `EZSDR_TEST_WATCHDOG_SECS` (default 120 s) passes,
-instead of hanging the suite; a watchdog that cannot start fails its test at once. The
-real clock stays where a real host deadline is the point: the Authority's own
-diagnostics, `ur_07_now_is_monotonic_across_a_reanchor` (a diagnostic, since the guard is
+instead of hanging the suite, after writing an `EZSDR-INFRA:` marker line straight to stderr
+(`common/infra.rs`: libtest's capture would lose a printed line to the abort); a watchdog that
+cannot start fails its test at once. The same marker is written, once, before the one panic of a
+Run or rig that ends at its creation on a real-time bound (`session_with`, `spec_run`, the parity
+rig's constructor), and `EZSDR-TIMING:` names a test that a serial re-run may pass. The mutation
+runner reads both from the output (`mutate.py`'s docstring): a marker makes a row `ERROR` unless
+the row declares `"kill": "bound"`. `infra_fixtures/` holds the tests `mutate.py --e2e` runs to
+pin that; they return at once unless `EZSDR_INFRA_FIXTURE` names them. The real clock stays where a real host deadline
+is the point: the Authority's own diagnostics, `ur_07_now_is_monotonic_across_a_reanchor` (a diagnostic, since the guard is
 pinned by a unit test in `src/authority.rs`; the re-anchor's bracket error is real
 time's), the device's own time against the process's clock
 (`ur_33_a_real_fake_s_time_starts_at_its_own_creation`), and the intentionally

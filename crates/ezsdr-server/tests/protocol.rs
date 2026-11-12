@@ -1348,6 +1348,9 @@ fn ea_14_refusals_before_a_child_runs() {
     // A duration that does not fit the child's clock (Review H, P2-3).
     assert_eq!(refuse(&mut server, receive_spec(10), Vec::new(), Some(u64::MAX), Vec::new()).message, "EA-14: duration_ns does not fit the child's clock");
     // Half the tick range is the bound: 5·10^18 ns on a nanosecond root is over it (Review I, P2-4).
+    // First with a spec the child cannot compile: past the bound the check must refuse before the child is built, so an admitted duration
+    // fails here with another message instead of running 5·10^18 ns.
+    assert_eq!(refuse(&mut server, json!({}), Vec::new(), Some(5_000_000_000_000_000_000), Vec::new()).message, "EA-14: duration_ns does not fit the child's clock");
     assert_eq!(refuse(&mut server, receive_spec(10), Vec::new(), Some(5_000_000_000_000_000_000), Vec::new()).message, "EA-14: duration_ns does not fit the child's clock");
     let (manifest, _) = finish(&mut server);
     assert!(manifest.action_log.is_empty(), "no refused request reached the log");

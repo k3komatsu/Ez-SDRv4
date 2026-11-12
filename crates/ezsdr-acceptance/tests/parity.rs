@@ -39,6 +39,10 @@ use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 use ezsdr_radio_uhd::{Device, DeviceAuthority, FakeConfig, FakeDevice, FakeFault, UhdRadio};
 use serde_json::json;
 
+/// The marker the runners read when a real-time bound expires (note 51 §6.3): shared with the UHD tests.
+#[path = "../../ezsdr-radio-uhd/tests/common/infra.rs"]
+mod infra;
+
 /// The O1 spec oracle (design note 49 §5.4.11): one source shared with the UHD and Mock tests; it names no Provider type.
 mod oracle;
 
@@ -349,7 +353,13 @@ impl UhdRig {
     ) -> Result<UhdRig, ezsdr_kernel::module_api::ModuleError> {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..config }));
         let clocks = Arc::new(ClockRegistry::new());
-        let authority = DeviceAuthority::new(device.clone(), clocks.clone(), "internal", "internal", "type=fake").unwrap();
+        let authority = DeviceAuthority::new(device.clone(), clocks.clone(), "internal", "internal", "type=fake").unwrap_or_else(|error| {
+            // The Authority's first read has a real-time bound (UR-7, 5 s): an expiry is the host's, so it is a marker (note 51 §6.2).
+            if error.contains("did not come within") {
+                infra::infra(&format!("the rig's Authority: {error}"));
+            }
+            panic!("{error}")
+        });
         let (time, root) = (authority.time(), authority.root());
         let mut registry = ModuleRegistry::new();
         let (mut checks, mut kinds) = (AdmissionCheckRegistry::new(), EventKindRegistry::with_kernel_kinds());

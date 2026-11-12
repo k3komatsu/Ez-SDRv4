@@ -6,6 +6,9 @@
 //! test's modules are not visible to another crate's test target, and the three files need
 //! the same one.
 //!
+//! When the bound passes, the watchdog writes an `EZSDR-INFRA:` marker (note 51 §6.3) straight to
+//! stderr before it aborts: libtest's capture would lose an `eprintln!` to the abort.
+//!
 //! The manual clock's time stops while a Provider thread is busy (M3); a mutant that never
 //! resumes it leaves a test waiting for an instant that never comes, and neither the test
 //! harness nor `mutate.py` bounds that before their own (900 s / 180 s) timeout. [`watch()`]
@@ -20,6 +23,11 @@
 use std::cell::RefCell;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration as Wall, Instant};
+
+/// The markers (`EZSDR-INFRA:`, `EZSDR-TIMING:`) live beside the watchdog so that the three files that include this one
+/// carry them too; `#[path]` resolves next to this file.
+#[path = "infra.rs"]
+pub mod infra;
 
 /// How long a test may run before the watchdog aborts it. Generous: the slowest smoke test is
 /// ~50 s on the implementer's Mac, and a mutation shard on the lab hosts runs several tests at
@@ -50,10 +58,9 @@ impl Watchdog {
             while !*stopped {
                 let left = deadline.saturating_duration_since(Instant::now());
                 if left.is_zero() {
-                    eprintln!(
-                        "the test `{what}` did not finish within {bound:?}: a participant's clock wait \
-                         never ended (plan 30 §7's watchdog; EZSDR_TEST_WATCHDOG_SECS overrides the \
-                         bound). Aborting."
+                    infra::infra_for(
+                        &what,
+                        &format!("the test did not finish within {bound:?}: a participant's clock wait never ended (plan 30 §7's watchdog; EZSDR_TEST_WATCHDOG_SECS overrides the bound). Aborting."),
                     );
                     std::process::abort();
                 }

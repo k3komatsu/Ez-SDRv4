@@ -1928,6 +1928,14 @@ fn rejected_run_reason(run: &RunHandle) -> Option<String> {
     })
 }
 
+/// [`rejected_run_reason`] for [`super::start_spec`]'s result: a Run that ended at creation is its termination.
+fn rejected_start_reason(started: &Result<RunHandle, Box<Manifest>>) -> Option<String> {
+    match started {
+        Ok(run) => rejected_run_reason(run),
+        Err(ended) => Some(format!("{:?}", ended.termination.reason)),
+    }
+}
+
 fn stream_clock(run: &RunHandle, direction: Direction) -> Result<SampleClockRecord, String> {
     let suffix = match direction {
         Direction::Rx => "usrp/rx/s0",
@@ -2786,10 +2794,10 @@ fn rx_throughput_group(device: Arc<dyn Device>, plan: &MeasurementPlan, include_
         let dir = super::TempDir::new();
         let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
         let spec = super::receive_spec(1, *rate as f64, super::bench_hz(&*device), None);
-        let mut run = super::spec_run(&spec, &doc, device.clone(), Default::default());
+        let started = super::start_spec(&spec, &doc, device.clone(), Default::default());
         let bytes_per_second = rate.checked_mul(wire_bytes).ok_or("receive bytes per second overflow")?;
         // A Run that validate or prepare refused has no T0: the rate is an admission rejection, not a group failure.
-        if let Some(reason) = rejected_run_reason(&run) {
+        if let Some(reason) = rejected_start_reason(&started) {
             stages.push(CandidateStage { value: bytes_per_second, trials: vec![TrialClass::AdmissionRejection] });
             conditions.push(rx_condition(&id, *rate as f64));
             let stage = candidate_stage_json(&id, bytes_per_second, &[TrialClass::AdmissionRejection], &[None]);
@@ -2802,6 +2810,7 @@ fn rx_throughput_group(device: Arc<dyn Device>, plan: &MeasurementPlan, include_
             )?);
             continue;
         }
+        let Ok(mut run) = started else { unreachable!("a Run that ended at creation was rejected above") };
         let t0 = run.start_instant().ok_or("receive Run has no T0")?;
         let root = t0.domain();
         let start = t0.ticks_in(root).map_err(|error| error.to_string())?;
@@ -3022,8 +3031,8 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
             &*device,
         );
         let inputs = BTreeMap::from([(waveform.hash.clone(), bytes.clone())]);
-        let mut run = super::spec_run(&spec, &profile, device.clone(), inputs);
-        if let Some(reason) = rejected_run_reason(&run) {
+        let started = super::start_spec(&spec, &profile, device.clone(), inputs);
+        if let Some(reason) = rejected_start_reason(&started) {
             let value = tx_bytes_per_second(*rate, wire_bytes)?;
             stages.push(CandidateStage { value, trials: vec![TrialClass::AdmissionRejection] });
             conditions.push(tx_rate_condition(&id, *rate));
@@ -3037,6 +3046,7 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
             )?);
             continue;
         }
+        let Ok(mut run) = started else { unreachable!("a Run that ended at creation was rejected above") };
         let clock = stream_clock(&run, Direction::Tx)?;
         if !clock_rate_matches(&clock, *rate) {
             return Err(format!("TX throughput Run declared the wrong SampleClock rate for {rate} Hz"));

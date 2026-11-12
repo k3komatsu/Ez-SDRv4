@@ -159,7 +159,8 @@
   "new": "            if false {",
   "crate": "ezsdr-kernel",
   "test_bin": "device_paced",
-  "filter": "kg_04_a_provider_that_never_finishes_fails_the_run"
+  "filter": "kg_04_a_provider_that_never_finishes_fails_the_run",
+  "kill": "bound"
  },
  {
   "id": "G17",

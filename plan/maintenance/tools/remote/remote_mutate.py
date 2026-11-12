@@ -2,6 +2,7 @@
 
 Usage (from the repository root):
     python3 plan/maintenance/tools/remote/remote_mutate.py <lists> <host:shards>[,<host:shards>...] [ID ...]
+    python3 plan/maintenance/tools/remote/remote_mutate.py --e2e <host:shards>[,...]
 
 <lists> is `maintenance`, `phaseN`, a comma-separated set of them, or `all` (the six lists);
 every list is run by plan/maintenance/tools/mutate.py with its own mutations.json. Every
@@ -14,7 +15,10 @@ the workspace once for all the lists it runs and no two shards share a build dir
 The tree is copied as it is on disk, uncommitted changes included. Prints each shard's log
 and exits 1 unless every row is killed. Needs ssh and rsync locally, docker without sudo on
 each host. `REMOTE_SSH` replaces the ssh command (for a tunnel's config file), and
-`REMOTE_CPUS` is each shard's CPU limit (default 4). Standard library only.
+`REMOTE_CPUS` is each shard's CPU limit (default 4). Results are read from the `EZSDR-ROW {...}` line
+mutate.py prints per row, never from the free-text line (#91). `--e2e` runs `mutate.py --self-test` and
+`mutate.py --e2e` (the infra fixtures, through the same `cargo_test()` the rows use) in one container of
+the first host, and prints `e2e: N/M ok; failed: [...]; self-test: ok`. Standard library only.
 """
 import json
 import os
@@ -28,24 +32,68 @@ SSH = os.environ.get("REMOTE_SSH", "ssh").split()  # e.g. "ssh -F tunnels.conf"
 CPUS = os.environ.get("REMOTE_CPUS", "4")  # per shard
 EXCLUDES = [".git", "target", "v3", "tmp", ".cargo", "ezsdr-runs", ".claude", "__pycache__"]
 ALL = ["maintenance", "phase3", "phase4", "phase5", "phase6", "phase7"]
-KILLED = ("killed", "killed (timeout)")
+KILLED = ("killed", "killed (bound)")  # `killed (bound)`: the row declares that a real-time bound is its kill (mutate.py)
 PASSED = KILLED + ("equivalent (survived)",)  # a recorded equivalent must survive (mutate.py)
-ROW = re.compile(r"^(\S+) (.+?): (killed|equivalent \(survived\)|SURVIVED|NOT FOUND|COMPILE ERROR|BASELINE FAILED)(.*)$")
+ROW = re.compile(r"^EZSDR-ROW (\{.*\})$")
+E2E_LINE = re.compile(r"^EZSDR-E2E (\{.*\})$")
 HEADER = re.compile(r"^--- (\S+) \((\S+)\)$")
 
 
+def fixed_field(pattern, line):
+    """The JSON object of a `EZSDR-ROW`/`EZSDR-E2E` line, or None for any other line (and for a malformed one)."""
+    m = pattern.match(line)
+    try:
+        found = json.loads(m[1]) if m else None
+    except ValueError:
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def row_record(line):
+    """The row's fields (`id`, `outcome`, `real_clock`, `reruns`, and `why` for an ERROR) from a mutate.py `EZSDR-ROW` line; None for other lines."""
+    found = fixed_field(ROW, line)
+    return found if found and isinstance(found.get("id"), str) and isinstance(found.get("outcome"), str) else None
+
+
 def row_outcome(line):
-    """(id, outcome) for a mutate.py row line, where outcome is all the text after the colon; None for other lines.
-    gate.py reads the results through this too, so the two cannot disagree about what passes."""
-    m = ROW.match(line)
-    return (m[1], (m[3] + m[4]).strip()) if m else None
+    """(id, outcome) for a mutate.py row line; None for other lines. gate.py reads the results through this
+    too, so the two cannot disagree about what passes."""
+    found = row_record(line)
+    return (found["id"], found["outcome"]) if found else None
 
 
 def run(*args, **kw):
     return subprocess.run(args, check=True, text=True, **kw)
 
 
+def upload(host, work):
+    run(*SSH, host, f"mkdir -p {work}/src {work}/out && chmod 777 {work}/out")  # the container runs as its own user
+    run("rsync", "-a", "--chmod=Dgo+rx,Fgo+r", "--delete",  # a 0600 file (umask 0077) is unreadable to the container user
+        "-e", " ".join(SSH), *[f"--exclude={e}" for e in EXCLUDES], "./", f"{host}:{work}/src/")
+    run(*SSH, host, f"docker build -q -t {REMOTE} {work}/src/plan/maintenance/tools/remote >/dev/null")
+
+
+def e2e(spec):
+    """One container on the first host runs mutate.py's self-test and its --e2e cases in the image the rows run in."""
+    host = spec.split(",")[0].split(":")[0]
+    work = f"{REMOTE}/e2e-{int(time.time())}"
+    upload(host, work)
+    inner = ("cd /src && export EZSDR_PYTHON=python3; python3 plan/maintenance/tools/mutate.py --self-test; "
+             "python3 plan/maintenance/tools/mutate.py --e2e /tmp/scratch")
+    out = subprocess.run([*SSH, host, f"docker run --rm --cpus={CPUS} -v ~/{work}/src:/src:ro {REMOTE} bash -c {json.dumps(inner)}"],
+                         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout
+    run(*SSH, host, f"rm -rf {work}")
+    print(out, end="")
+    cases = [c for c in (fixed_field(E2E_LINE, line) for line in out.splitlines()) if c and "id" in c]
+    bad = [c["id"] for c in cases if c.get("ok") is not True]
+    selftest = "mutate.py self-test: ok" in out.splitlines()
+    print(f"e2e: {len(cases) - len(bad)}/{len(cases)} ok; failed: {bad}; self-test: {'ok' if selftest else 'FAILED'}")
+    return 0 if cases and not bad and selftest else 1
+
+
 def main():
+    if sys.argv[1:2] == ["--e2e"] and len(sys.argv) == 3:
+        return e2e(sys.argv[2])
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
@@ -62,10 +110,7 @@ def main():
     tag = f"{'-'.join(names) if len(names) < 3 else 'multi'}-{int(time.time())}"
     work = f"{REMOTE}/{tag}"
     for host in {h for h, _ in hosts}:
-        run(*SSH, host, f"mkdir -p {work}/src {work}/out && chmod 777 {work}/out")  # the container runs as its own user
-        run("rsync", "-a", "--chmod=Dgo+rx,Fgo+r", "--delete",  # a 0600 file (umask 0077) is unreadable to the container user
-             "-e", " ".join(SSH), *[f"--exclude={e}" for e in EXCLUDES], "./", f"{host}:{work}/src/")
-        run(*SSH, host, f"docker build -q -t {REMOTE} {work}/src/plan/maintenance/tools/remote >/dev/null")
+        upload(host, work)
     for (host, i), chunk in shards.items():
         if not chunk:
             continue

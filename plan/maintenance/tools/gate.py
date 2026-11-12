@@ -8,12 +8,21 @@ Usage (from the checkout's root or any directory inside it):
     python3 plan/maintenance/tools/gate.py --self-test
 
 Steps, in this order: fmt, test, clippy, rules, rules-self-test, uhd-clippy, uhd-test, hw-build,
-py314, py39, and mutation (only with --mutation). Every step runs even after another fails, unless
+py314, py39, e2e, and mutation (only with --mutation). Every step runs even after another fails, unless
 --only leaves it out. <dir>/<step>.log keeps its output. A step passes only when its exit code is 0
 and its output parses into counts that its own check accepts; output that cannot be parsed fails.
 The mutation step is judged from the per-row and summary lines of remote_mutate.py, not from its
-exit code: a row passes when it is killed, or when it is a survivor listed in
-plan/maintenance/tools/known-survivors.txt; every selected row must appear in the results. The
+exit code: a row passes when it is killed (`killed`, or `killed (bound)` for a row that declares
+`"kill": "bound"`), or when it is a survivor listed in plan/maintenance/tools/known-survivors.txt; an `ERROR`
+row (a marker, a signal, a timeout: the mutant was not shown to be caught) is broken; every selected row must
+appear in the results. gate.json's mutation record counts the `killed (bound)` rows, the `ERROR` rows, the
+serial re-runs of timing-marked tests and the rows that select a real-clock FakeDevice test
+(`real-clock (unclassified)`, report only). The e2e step runs `remote_mutate.py --e2e`: mutate.py's
+self-test and the infra fixtures through the same `cargo_test()` the rows use, in the mutation image,
+and every case must draw its fixed verdict. A failure of the test step whose every failing test wrote an
+`EZSDR-TIMING:` marker (matched by name, and with no signal, infra marker or build error anywhere in the output) is
+re-run one test at a time (`--exact --test-threads=1`, at most twice each, and only a timing-marked re-run allows the
+next); the step passes when each of those re-runs passes without a marker, and gate.json counts the re-runs. The
 source identity (HEAD, git status, untracked files, and a sha256 over the diff and those files) is
 recorded before the first step and checked after the last. --out must lie outside the checkout.
 
@@ -46,13 +55,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "remote"))
-from remote_mutate import HEADER, KILLED, PASSED, REMOTE, row_outcome  # one parser for mutate.py's result lines
+from remote_mutate import E2E_LINE, HEADER, KILLED, PASSED, REMOTE, fixed_field, row_outcome, row_record  # one parser for mutate.py's result lines
+from mutate import E2E, RERUNS, Ran, ran_tests, rerunnable, row_line, settle_test, timing_tests  # the timing rule is mutate.py's too
 
 IMAGE = "ezsdr-v4-dev:uhd4.10"
 VENV_PYTHON = os.path.expanduser("~/.cache/ezsdr-venv/bin/python")
 KNOWN_FILE = "plan/maintenance/tools/known-survivors.txt"
 REMOTE_SSH = "ssh -o BatchMode=yes"
-STEPS = ["fmt", "test", "clippy", "rules", "rules-self-test", "uhd-clippy", "uhd-test", "hw-build", "py314", "py39", "mutation"]
+STEPS = ["fmt", "test", "clippy", "rules", "rules-self-test", "uhd-clippy", "uhd-test", "hw-build", "py314", "py39", "e2e", "mutation"]
 HOME = os.path.expanduser("~")
 ROOT = None
 LIST_SUMMARY = re.compile(r"^(\w+): (\d+)/(\d+) passed; not passed or missing: (\[.*\])$")
@@ -119,6 +129,27 @@ def check_unittest(counts):
     return ([] if counts["result"] == "OK" else [f"python tests {counts['result']}"]) + ([] if counts["ran"] else ["no tests ran"])
 
 
+E2E_SUMMARY = re.compile(r"^e2e: (\d+)/(\d+) ok; failed: (\[.*\]); self-test: (ok|FAILED)$", re.M)
+
+
+def parse_e2e(text):
+    summary = E2E_SUMMARY.search(text)
+    if not summary:
+        return None
+    cases = {}
+    for line in text.splitlines():
+        if case := fixed_field(E2E_LINE, line):
+            cases[case.get("id")] = case.get("ok") is True and case.get("outcome") == case.get("expected")
+    return {"cases": cases, "ok": int(summary[1]), "total": int(summary[2]), "self_test": summary[4]}
+
+
+def check_e2e(counts):
+    missing = [case["id"] for case in E2E if case["id"] not in counts["cases"]]
+    wrong = [i for i, ok in counts["cases"].items() if not ok]
+    return ([f"e2e case(s) missing from the output: {missing}"] if missing else []) + ([f"e2e case(s) drew the wrong verdict: {wrong}"] if wrong else []) + (
+        [] if counts["self_test"] == "ok" else ["mutate.py self-test failed"])
+
+
 PARSERS = {
     "fmt": (parse_fmt, check_fmt),
     "test": (parse_test, check_test),
@@ -130,6 +161,7 @@ PARSERS = {
     "hw-build": (parse_build, check_hw),
     "py314": (parse_unittest, check_unittest),
     "py39": (parse_unittest, check_unittest),
+    "e2e": (parse_e2e, check_e2e),
 }
 
 
@@ -143,18 +175,18 @@ def _ids(text):
 
 def parse_mutation(text, exit_code, expected, requested, known):
     """Returns (counts, mutation, reasons); counts is None when remote_mutate's total line is missing."""
-    seen, conflicts, unattributed, remote, total, current = {}, [], [], {}, None, None
+    seen, conflicts, unattributed, remote, total, current, rows = {}, [], [], {}, None, None, {}
     for line in text.splitlines():
         if m := HEADER.match(line):
             current = m[1]
-        elif found := row_outcome(line):
+        elif found := row_record(line):
             if current is None:
                 unattributed.append(line)
                 continue
-            key, outcome = f"{current}/{found[0]}", found[1]
+            key, outcome = f"{current}/{found['id']}", found["outcome"]
             if seen.get(key, outcome) != outcome:
                 conflicts.append(key)
-            seen[key] = outcome
+            seen[key], rows[key] = outcome, found
         elif m := LIST_SUMMARY.match(line):
             remote[m[1]] = (int(m[2]), int(m[3]), _ids(m[4]))
         elif m := TOTAL_SUMMARY.match(line):
@@ -203,7 +235,10 @@ def parse_mutation(text, exit_code, expected, requested, known):
         reasons.append(f"mutation: requested id(s) not in the results: {missing_ids}")
     notes = [f"{k} was a known survivor and is now killed: remove it from {KNOWN_FILE}" for k in known if seen.get(k) in KILLED]
     mutation = {"lists": lists, "not_killed": not_killed, "known": known_hits, "unexpected": unexpected, "baseline_failed": baseline,
-                "broken": broken, "missing": missing, "missing_ids": missing_ids, "notes": notes, "remote_exit": exit_code}
+                "broken": broken, "missing": missing, "missing_ids": missing_ids, "notes": notes, "remote_exit": exit_code,
+                "errors": sorted(k for k in exp if seen.get(k) == "ERROR"), "killed_by_bound": sorted(k for k in exp if seen.get(k) == "killed (bound)"),
+                "timing_reruns": {k: rows[k]["reruns"] for k in exp if k in rows and rows[k].get("reruns")},
+                "real-clock (unclassified)": sorted(k for k in exp if k in rows and rows[k].get("real_clock"))}
     return {"passed": total[0], "total": total[1]}, mutation, reasons
 
 
@@ -320,6 +355,7 @@ def local_commands_for(name, ctx):
         "py39": [(["docker", "run", "--rm", "--user", uid, "-e", "HOME=/tmp", "-e", "PYTHONDONTWRITEBYTECODE=1",
                    "-e", "EZSDR_SERVER=/srv/ezsdr-server", "-v", f"{ROOT}:/work:ro", "-v", f"{ctx.server}:/srv/ezsdr-server:ro",
                    "-w", "/work", "python:3.9-slim", "sh", "-c", "pip -q install --user numpy && python -m unittest discover -s python/tests"], {})],
+        "e2e": [(["python3", "plan/maintenance/tools/remote/remote_mutate.py", "--e2e", ctx.hosts], {"REMOTE_SSH": REMOTE_SSH})],
         "mutation": [(["python3", "plan/maintenance/tools/remote/remote_mutate.py", ctx.lists, ctx.hosts, *ctx.ids],
                       {"REMOTE_SSH": REMOTE_SSH})],
     }
@@ -350,6 +386,33 @@ def judge(name, code, text):
     elif check:
         reasons += [f"{name}: {message}" for message in check(counts)]
     return counts, reasons
+
+
+def rerun_argv(package, binary, path, remote):
+    cargo = ["cargo", "test", "-p", package, "--test", binary, "--", "--exact", "--test-threads=1", path]
+    return cargo if remote == "local" else ["python3", "plan/maintenance/tools/remote/rdev.py", "--host", remote, "--", *cargo]
+
+
+def run_rerun(argv):
+    proc = subprocess.run(argv, cwd=ROOT, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+    return proc.returncode, f"$ {shlex.join(argv)}\n{proc.stdout}"
+
+
+def excuse_timing(name, counts, reasons, text, rerun):
+    """The result of a test step after the serial re-runs of its timing-marked failures (note 51 Q16 b'').
+    Only when `rerunnable` finds every failed test named and marked, and nothing else wrong in the output (a signal or
+    an infra marker anywhere, another binary's included, is never excused): each is re-run alone by `settle_test`, and
+    the step passes if every one passes with no marker. A conclusive failure, or two marked re-runs, keeps the reasons.
+    `rerun(package, binary, path)` returns (exit code, output)."""
+    tests = rerunnable(text)
+    if not counts or not counts["failed"] or not tests:
+        return counts, reasons
+    attempts = {}
+    for package, binary, path in tests:
+        result, again, attempts[path] = settle_test((package, binary, path), lambda p, b, t: Ran(*rerun(p, b, t)))
+        if result != "SURVIVED":
+            return {**counts, "timing_reruns": attempts}, reasons + [f"{name}: {path} fails again when re-run alone ({'timing-marked twice' if result == 'unsettled' else result})"]
+    return {**counts, "timing_reruns": attempts}, []
 
 
 def coverage_gaps(only, mutation, ids, available):
@@ -436,6 +499,11 @@ def execute(out, record, failures, plan):
             reasons += [f"mutation: image id on {host} {image}" for host, image in images.items() if image.startswith("unavailable")]
         else:
             counts, reasons = judge(name, code, text)
+            if name == "test":
+                reruns = []
+                counts, reasons = excuse_timing(name, counts, reasons, text, lambda p, b, t: reruns.append(run_rerun(rerun_argv(p, b, t, plan.remote))) or reruns[-1])
+                if reruns:
+                    log.write_text(log.read_text(encoding="utf-8") + "".join(again for _, again in reruns), encoding="utf-8")
         failures.extend(reasons)
         record["steps"].append({"name": name, "command": " && ".join(show(argv, extra) for argv, extra in commands_for(name, ctx)), "exit": code,
                                 "seconds": seconds, "counts": counts, "log": str(log), "ok": not reasons})
@@ -498,9 +566,25 @@ def main(argv):
 TEST_OK = ("running 2 tests\ntest a::b ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n"
            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n")
 TEST_FAIL = "test x::y ... FAILED\n\ntest result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
-MUT_KNOWN = ("--- phase3 (sim02)\nM39 a: killed\n--- phase7 (sim02)\nG09 b: SURVIVED\nG10 c: killed\n"
-             "phase3: 1/1 passed; not passed or missing: []\nphase7: 1/2 passed; not passed or missing: ['G09']\n"
-             "2/3 passed; not passed or missing: ['phase7/G09']\n")
+
+
+def remote_text(rows):
+    """remote_mutate's output for `(list, id, outcome)` rows: the headers, each row's fixed-field line and its free-text line, the summaries."""
+    text, current = "", None
+    for name, row_id, outcome in rows:
+        text += (f"--- {name} (sim02)\n" if name != current else "") + row_line(row_id, outcome, False, 0) + f"\n{row_id} a name: {outcome}\n"
+        current = name
+    for name in dict.fromkeys(r[0] for r in rows):
+        mine = [r for r in rows if r[0] == name]
+        text += f"{name}: {sum(o in PASSED for _, _, o in mine)}/{len(mine)} passed; not passed or missing: {[i for _, i, o in mine if o not in PASSED]}\n"
+    return text + f"{sum(o in PASSED for _, _, o in rows)}/{len(rows)} passed; not passed or missing: {[f'{n}/{i}' for n, i, o in rows if o not in PASSED]}\n"
+
+
+def mut_known(m39="killed", g09="SURVIVED", g10="killed"):
+    return remote_text([("phase3", "M39", m39), ("phase7", "G09", g09), ("phase7", "G10", g10)])
+
+
+MUT_KNOWN = mut_known()
 MUT_ROWS = [("phase3", "M39"), ("phase7", "G09"), ("phase7", "G10")]
 AVAILABLE = ["maintenance", "phase3", "phase4", "phase5", "phase6", "phase7"]
 
@@ -530,31 +614,85 @@ def self_test():
     counts, mutation, reasons = parse_mutation(MUT_KNOWN, 1, MUT_ROWS, [], {"phase7/G09": "race"})
     assert reasons == [] and mutation["known"] == ["phase7/G09"] and mutation["unexpected"] == [], "self-test: a known survivor passes"
     assert counts == {"passed": 2, "total": 3}, "self-test: mutation counts"
-    unexpected = MUT_KNOWN.replace("G09 b: SURVIVED", "G09 b: killed").replace("G10 c: killed", "G10 c: SURVIVED").replace(
-        "phase7: 1/2 passed; not passed or missing: ['G09']", "phase7: 1/2 passed; not passed or missing: ['G10']").replace(
-        "2/3 passed; not passed or missing: ['phase7/G09']", "2/3 passed; not passed or missing: ['phase7/G10']")
-    _, mutation, reasons = parse_mutation(unexpected, 1, MUT_ROWS, [], {"phase7/G09": "race"})
+    _, mutation, reasons = parse_mutation(mut_known(g09="killed", g10="SURVIVED"), 1, MUT_ROWS, [], {"phase7/G09": "race"})
     assert mutation["unexpected"] == ["phase7/G10"] and reasons, "self-test: an unexpected survivor fails"
     assert mutation["notes"] and mutation["known"] == [], "self-test: a known survivor now killed is a note"
-    for outcome in ("COMPILE ERROR", "NOT FOUND: no anchor"):
-        broken = MUT_KNOWN.replace("G09 b: SURVIVED", f"G09 b: {outcome}")
-        _, mutation, reasons = parse_mutation(broken, 1, MUT_ROWS, [], {"phase7/G09": "race"})
+    for outcome in ("COMPILE ERROR", "NOT FOUND: no anchor", "ERROR"):
+        _, mutation, reasons = parse_mutation(mut_known(g09=outcome), 1, MUT_ROWS, [], {"phase7/G09": "race"})
         assert mutation["known"] == [] and mutation["broken"] == {"phase7/G09": outcome} and reasons, f"self-test: a known id with {outcome} fails"
-    _, mutation, reasons = parse_mutation(MUT_KNOWN.replace("G09 b: SURVIVED\n", ""), 1, MUT_ROWS, [], {"phase7/G09": "race"})
+    _, mutation, reasons = parse_mutation(mut_known(g09="ERROR"), 1, MUT_ROWS, [], {})
+    assert mutation["errors"] == ["phase7/G09"] and any("not killed, and not a survivor" in r for r in reasons), "self-test: an ERROR row is broken, even when it is not a known survivor"
+    text = remote_text([("phase3", "M39", "killed (bound)"), ("phase7", "G09", "killed"), ("phase7", "G10", "killed")]).replace(
+        row_line("G10", "killed", False, 0), row_line("G10", "killed", True, 2))
+    _, mutation, reasons = parse_mutation(text, 0, MUT_ROWS, [], {})
+    assert reasons == [] and mutation["killed_by_bound"] == ["phase3/M39"] and mutation["real-clock (unclassified)"] == ["phase7/G10"] and mutation["timing_reruns"] == {"phase7/G10": 2}, "self-test: a bound kill passes and is counted; real-clock rows and re-runs are reported"
+    _, mutation, reasons = parse_mutation(MUT_KNOWN.replace("G09 a name: SURVIVED", "G09 a name: killed"), 1, MUT_ROWS, [], {"phase7/G09": "race"})
+    assert mutation["known"] == ["phase7/G09"], "self-test: the free-text line is not a result"
+    spoof = remote_text([("phase3", "M39", "SURVIVED")]).replace("M39 a name: SURVIVED", "M39 a: killed")
+    assert parse_mutation(spoof, 1, [("phase3", "M39")], [], {})[1]["unexpected"] == ["phase3/M39"], "self-test: a row named `a: killed` is not read as killed (#91)"
+    _, mutation, reasons = parse_mutation(MUT_KNOWN.replace(row_line("G09", "SURVIVED", False, 0) + "\n", ""), 1, MUT_ROWS, [], {"phase7/G09": "race"})
     assert mutation["missing"] == ["phase7/G09"] and any("missing" in r for r in reasons), "self-test: a known id with no result row fails"
-    baseline = MUT_KNOWN.replace("M39 a: killed", "M39 a: BASELINE FAILED").replace("phase3: 1/1 passed; not passed or missing: []", "phase3: 0/1 passed; not passed or missing: ['M39']").replace("2/3 passed; not passed or missing: ['phase7/G09']", "1/3 passed; not passed or missing: ['phase3/M39', 'phase7/G09']")
-    _, mutation, reasons = parse_mutation(baseline, 1, MUT_ROWS, [], {"phase7/G09": "race"})
+    _, mutation, reasons = parse_mutation(mut_known(m39="BASELINE FAILED"), 1, MUT_ROWS, [], {"phase7/G09": "race"})
     assert mutation["baseline_failed"] == ["phase3/M39"] and any("BASELINE FAILED" in r for r in reasons), "self-test: BASELINE FAILED fails"
-    only_m39 = "--- phase3 (sim02)\nM39 a: killed\nphase3: 1/1 passed; not passed or missing: []\n1/1 passed; not passed or missing: []\n"
+    only_m39 = remote_text([("phase3", "M39", "killed")])
     _, mutation, reasons = parse_mutation(only_m39, 0, [("phase3", "M39")], ["M39", "NOPE"], {})
     assert mutation["missing_ids"] == ["NOPE"] and any("NOPE" in r for r in reasons), "self-test: a requested id missing from the results fails"
-    equivalent = "--- phase3 (sim02)\nM39 a: killed, but recorded as equivalent\nphase3: 0/1 passed; not passed or missing: ['M39']\n0/1 passed; not passed or missing: ['phase3/M39']\n"
-    _, mutation, reasons = parse_mutation(equivalent, 1, [("phase3", "M39")], [], {})
+    _, mutation, reasons = parse_mutation(remote_text([("phase3", "M39", "killed, but recorded as equivalent")]), 1, [("phase3", "M39")], [], {})
     assert mutation["broken"] == {"phase3/M39": "killed, but recorded as equivalent"} and reasons, "self-test: a killed row recorded as equivalent fails"
-    assert row_outcome("M39 a: killed, but recorded as equivalent") == ("M39", "killed, but recorded as equivalent") and row_outcome("phase3: 1/1 passed; not passed or missing: []") is None, "self-test: the shared row parser"
-    assert "killed, but recorded as equivalent" not in PASSED and "killed (timeout)" in PASSED, "self-test: the shared outcome classes"
-    assert parse_mutation("--- phase3 (sim02)\nM39 a: killed\n", 0, [("phase3", "M39")], [], {})[2], "self-test: no summary is unparsable"
+    assert row_outcome(row_line("M39", "killed, but recorded as equivalent", False, 0)) == ("M39", "killed, but recorded as equivalent") and row_outcome("phase3: 1/1 passed; not passed or missing: []") is None, "self-test: the shared row parser"
+    assert "killed, but recorded as equivalent" not in PASSED and "killed (bound)" in PASSED and "ERROR" not in PASSED and "killed (timeout)" not in PASSED, "self-test: the shared outcome classes"
+    assert parse_mutation("--- phase3 (sim02)\n" + row_line("M39", "killed", False, 0) + "\n", 0, [("phase3", "M39")], [], {})[2], "self-test: no summary is unparsable"
     assert parse_mutation(MUT_KNOWN, 0, MUT_ROWS, [], {"phase7/G09": "race"})[2], "self-test: an exit code that disagrees with the summary fails"
+
+    marker = "EZSDR-TIMING: p b m::t: late\n"
+    cargo_error = "error: test failed, to rerun pass `-p p --test b`\n"
+    failed = "test m::t ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n" + cargo_error
+    other = "test m::u ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n" + cargo_error
+    sigkill = "error: test failed, to rerun pass `-p q --test c`\n\nCaused by:\n  process didn't exit successfully: `c` (signal: 9, SIGKILL: kill)\n"
+    once = parse_test(marker + failed)
+    calls = []
+
+    def reruns(*results):
+        queue = list(results)
+        return lambda package, binary, path: calls.append((package, binary, path)) or queue.pop(0)
+
+    def excused_by(text, *results, counts=None):
+        calls.clear()
+        return excuse_timing("test", counts or parse_test(text), ["test: exit 101"], text, reruns(*results))
+    excused, reasons = excuse_timing("test", once, ["test: exit 101", "test: 1 failed: m::t"], marker + failed, reruns((0, TEST_OK)))
+    assert reasons == [] and excused["timing_reruns"] == {"m::t": 1} and calls == [("p", "b", "m::t")], "self-test: a timing-marked failure that passes alone passes the step, and the re-run is counted"
+    excused, reasons = excuse_timing("test", once, ["test: exit 101"], marker + failed, reruns((101, marker + failed), (0, TEST_OK)))
+    assert reasons == [] and excused["timing_reruns"] == {"m::t": 2}, "self-test: a second re-run may pass"
+    for again in ((101, marker + failed), (101, failed), (0, marker + TEST_OK), (0, "running 0 tests\n")):
+        excused, reasons = excuse_timing("test", once, ["test: exit 101"], marker + failed, reruns(again, again))
+        assert reasons and excused["timing_reruns"] == {"m::t": 1 if again[1] in (failed, "running 0 tests\n") else 2}, f"self-test: a re-run that fails, passes with a marker or runs no test does not excuse it: {again}"
+    excused, reasons = excused_by(marker + failed, (101, marker + failed), (101, failed), (0, TEST_OK))
+    assert reasons and excused["timing_reruns"] == {"m::t": 2} and len(calls) == 2, "self-test: a re-run that fails without the marker is conclusive: no third attempt that passes may erase it"
+    excused, reasons = excused_by(marker + failed + other, (0, TEST_OK))
+    assert reasons and calls == [], "self-test: a failed test with no marker beside a marked one is not excused, and nothing is re-run"
+    text = marker + failed + sigkill
+    excused, reasons = excused_by(text, (0, TEST_OK), counts=parse_test(text))
+    assert reasons and calls == [], "self-test: another binary's SIGKILL is not excused by a passing re-run"
+    text = marker + failed + "EZSDR-INFRA: x::y: a bound expired\n"
+    assert excused_by(text, (0, TEST_OK))[1] and calls == [], "self-test: an infra marker anywhere is not excused"
+    text = marker + failed + "error: test failed, to rerun pass `-p q --test c`\n"
+    assert excused_by(text, (0, TEST_OK))[1] and calls == [], "self-test: a test binary that ended with no failure line is not excused"
+    text = marker + failed.replace("--test b", "--test c")
+    assert excused_by(text, (0, TEST_OK))[1] and calls == [], "self-test: a marker of another binary's test of the same path is not excused"
+    unmarked = parse_test(marker + "test a ... FAILED\n" + failed)
+    unmarked["failed"] = 2
+    assert excuse_timing("test", unmarked, ["test: exit 101"], marker + "test a ... FAILED\n" + failed, reruns()) == (unmarked, ["test: exit 101"]), "self-test: a failure with no marker is not excused"
+    assert excuse_timing("test", parse_test(TEST_FAIL), ["test: exit 101"], TEST_FAIL, reruns()) == (parse_test(TEST_FAIL), ["test: exit 101"]), "self-test: no marker, no re-run"
+    assert rerun_argv("p", "b", "m::t", "local")[:3] == ["cargo", "test", "-p"] and rerun_argv("p", "b", "m::t", "sim03")[2:5] == ["--host", "sim03", "--"], "self-test: the re-run command is local or through rdev"
+    assert rerun_argv("p", "b", "m::t", "local")[-3:] == ["--exact", "--test-threads=1", "m::t"], "self-test: the re-run is exact and serial"
+    e2e_ok = "".join("EZSDR-E2E " + json.dumps({"id": c["id"], "outcome": c["expect"], "expected": c["expect"], "ok": True}) + "\n" for c in E2E)
+    summary = f"e2e: {len(E2E)}/{len(E2E)} ok; failed: []; self-test: ok\n"
+    counts = parse_e2e(e2e_ok + summary)
+    assert counts and check_e2e(counts) == [], "self-test: every e2e case drew its verdict"
+    assert parse_e2e(e2e_ok) is None and parse_e2e("garbage") is None, "self-test: e2e output with no summary is unparsable"
+    assert any("missing" in r for r in check_e2e(parse_e2e("".join(e2e_ok.splitlines(True)[1:]) + summary))), "self-test: a missing e2e case fails"
+    assert any("wrong verdict" in r for r in check_e2e(parse_e2e(e2e_ok.replace('"ok": true', '"ok": false', 1) + summary))), "self-test: a case with the wrong verdict fails"
+    assert any("self-test" in r for r in check_e2e(parse_e2e(e2e_ok + summary.replace("self-test: ok", "self-test: FAILED")))), "self-test: a failed mutate.py self-test fails"
 
     assert coverage_gaps(None, "all", [], AVAILABLE) == [], "self-test: the full gate has no gaps"
     assert any("mutation" in g for g in coverage_gaps(None, None, [], AVAILABLE)), "self-test: no --mutation is a gap"

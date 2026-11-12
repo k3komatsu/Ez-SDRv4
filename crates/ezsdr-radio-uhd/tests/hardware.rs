@@ -1092,10 +1092,13 @@ fn hw_perf_rx_rates() {
         let dir = TempDir::new();
         let device = usrp();
         let doc = bench_profile(&*device, &dir, serde_json::json!({}), serde_json::json!({}), false);
-        let mut run = spec_run(&receive_spec(1, rate, bench_hz(&*device), None), &doc, device, Default::default());
-        let horizon = after_ticks(&run, ms(5_000));
-        let result = run.advance_to(horizon);
-        let manifest = run.finish();
+        let (result, manifest) = match start_spec(&receive_spec(1, rate, bench_hz(&*device), None), &doc, device, Default::default()) {
+            Err(ended) => (Err(ezsdr_kernel::coordinator::RunHandleError::Ended { termination: ended.termination.reason.clone() }), *ended),
+            Ok(mut run) => {
+                let horizon = after_ticks(&run, ms(5_000));
+                (run.advance_to(horizon), run.finish())
+            }
+        };
         println!(
             "B8 rate {} Msps: {result:?}; termination {:?}; overflows {}; stats {}",
             rate / 1e6,

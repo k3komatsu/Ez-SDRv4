@@ -10083,7 +10083,7 @@
    "new": "        refuse_or!(self, self.inner().raise_thread_priority())\n    }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_23_g1_a_refused_priority_does_not_latch_the_measurement_guard"
+   "filter": "ur_23_g1b_a_refused_priority_call_does_not_latch_the_guard"
   },
   {
    "id": "P1120",
@@ -16772,9 +16772,9 @@
   "file": "crates/ezsdr-radio/src/staging.rs",
   "old": "open.next += send.count;",
   "new": "let _ = send.count;",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_23_a_long_burst_in_many_chunks_plays_contiguously"
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_outcomes_give_the_cursors_the_executor_gives_today"
  },
  {
   "id": "E2A2A-02",

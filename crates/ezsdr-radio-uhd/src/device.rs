@@ -907,6 +907,10 @@ impl FakeDevice {
             ClockMode::Manual => HostClock::manual(),
             ClockMode::Real => real_host(),
         };
+        // Report-only class mark (note 51 §6.5): the mutation runner sets this variable for a row's baseline so that it can count the rows that select a real-clock test.
+        if matches!(config.clock, ClockMode::Real) && std::env::var_os("EZSDR_REAL_CLOCK_PROBE").is_some() {
+            eprintln!("EZSDR-CLASS: real-clock");
+        }
         let spec = [table_of(&config.front_ends, Dir::Rx), table_of(&config.front_ends, Dir::Tx)];
         let settings = [(0..spec[0].len()).map(|_| Channel::default_of(Dir::Rx)).collect(), (0..spec[1].len()).map(|_| Channel::default_of(Dir::Tx)).collect()];
         // The device's own zero (item 7): a real clock's origin is the process's, so a device

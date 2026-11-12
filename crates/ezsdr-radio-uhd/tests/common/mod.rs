@@ -32,6 +32,7 @@ use serde_json::{Value as Json, json};
 // ------------------------------------------------ the per-test wall watchdog (R05)
 
 mod watchdog;
+pub use watchdog::infra::{creation_limit, infra, timing};
 pub use watchdog::watch;
 pub mod d9;
 pub mod iii;
@@ -467,8 +468,41 @@ pub fn fake_real(config: FakeConfig) -> Arc<FakeDevice> {
     Arc::new(FakeDevice::new(config))
 }
 
+/// The Spec's Run, which must have started: a Run that ended at creation is classified by [`creation_end`], and any other end panics. A
+/// caller that expects the Run to end uses [`spec_run_ended`], one that handles both [`start_spec`].
 pub fn spec_run(spec: &Json, profile: &Json, device: Arc<dyn Device>, inputs: BTreeMap<ContentHash, Vec<u8>>) -> RunHandle {
-    start_spec_run(spec, profile, assembly(profile, device, inputs, |r| r)).unwrap()
+    start_spec(spec, profile, device, inputs).unwrap_or_else(|ended| panic!("the Spec's Run ended at creation: {:?}", ended.termination.reason))
+}
+
+/// The Manifest of a Spec's Run that the test expects to end at creation (a refusal at `arm`, say), after the same classification of a
+/// real-time bound as [`spec_run`]; what else ended it is the caller's to assert on.
+pub fn spec_run_ended(spec: &Json, profile: &Json, device: Arc<dyn Device>, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Manifest {
+    match start_spec(spec, profile, device, inputs) {
+        Err(ended) => *ended,
+        Ok(run) => panic!("expected the Run to end at creation: {:?}", run.state()),
+    }
+}
+
+/// The Spec's Run, or the Manifest of one that ended at creation, which `finish` consumed. A real-time bound that ended it is an
+/// `EZSDR-INFRA` marker and one panic ([`creation_end`]), not a return.
+pub fn start_spec(spec: &Json, profile: &Json, device: Arc<dyn Device>, inputs: BTreeMap<ContentHash, Vec<u8>>) -> Result<RunHandle, Box<Manifest>> {
+    let run = start_spec_run(spec, profile, assembly(profile, device, inputs, |r| r)).unwrap();
+    if matches!(run.state(), RunState::CleanedUp { .. }) { Err(Box::new(creation_end(run, "the Spec's Run"))) } else { Ok(run) }
+}
+
+/// The Manifest of a Run that ended before the test had it. It tells a real-time bound (an `EZSDR-INFRA` marker and one panic, note 51
+/// §6.2) from a failure the code under test caused, which is returned for the caller to assert on.
+fn creation_end(run: RunHandle, what: &str) -> Manifest {
+    let manifest = run.finish();
+    let reason = failure(&manifest);
+    let timed_out = manifest.termination.cleanup_failures.iter().any(|step| step.timed_out);
+    let notes: Vec<String> = manifest.section(&usrp(), "ezsdr.radio.uhd.rejected").and_then(Json::as_array).into_iter().flatten().filter_map(|row| row["reason"].as_str().map(str::to_owned)).collect();
+    if let Some(limit) = creation_limit(&reason, timed_out, &notes.iter().map(String::as_str).collect::<Vec<_>>()) {
+        let ended = format!("{what} ended at creation on {limit}: {:?}, cleanup failures {:?}", manifest.termination.reason, manifest.termination.cleanup_failures);
+        infra(&ended);
+        panic!("{ended}");
+    }
+    manifest
 }
 
 /// RM-30: no channel is in a stream unless a Session asks. The request that puts receive channel
@@ -508,6 +542,10 @@ pub fn session_with(profile: &Json, device: Arc<dyn Device>, initial: &InitialRe
 /// A Session on a prepared Assembly.
 pub fn session_on(profile: &Json, initial: &InitialRequests, assembly: Assembly) -> RunHandle {
     let run = connect(profile, initial, assembly, Lease::attached()).unwrap();
+    if let state @ RunState::CleanedUp { .. } = run.state() {
+        creation_end(run, "the Session");
+        panic!("{state:?}");
+    }
     assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
     run
 }

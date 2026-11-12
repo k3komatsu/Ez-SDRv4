@@ -6,6 +6,7 @@
 //! timing-precondition diagnostics.
 
 mod common;
+mod infra_fixtures;
 
 use ezsdr_kernel::spec::Scalar;
 use std::cell::RefCell;
@@ -1575,9 +1576,8 @@ fn ur_12_the_applied_values_are_recorded() {
 fn ur_12_a_rate_the_device_does_not_apply_is_refused() {
     let dir = TempDir::new();
     let device = fake(FakeConfig { faults: vec![FakeFault::WrongRate { claimed: 20e6, applied: 19.9e6, nth: 0 }], ..FakeConfig::default() });
-    let run = spec_run(&receive_spec(1, 20e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
-    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare, .. } }));
-    let manifest = run.finish();
+    let manifest = spec_run_ended(&receive_spec(1, 20e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Prepare, .. }));
     assert!(failure(&manifest).contains("UR-12: the device applied 19900000 S/s for the claimed 20000000"), "{}", failure(&manifest));
 }
 
@@ -1637,9 +1637,9 @@ fn ur_12_every_advertised_rate_is_accepted() {
 fn ur_13_arm_cases() {
     let dir = TempDir::new();
     let unlocked = fake(FakeConfig { faults: vec![FakeFault::Unlocked(Wall::ZERO)], ..FakeConfig::default() });
-    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), unlocked, BTreeMap::new());
-    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }));
-    assert!(failure(&run.finish()).contains("UR-13: the external reference is not locked"));
+    let manifest = spec_run_ended(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), unlocked, BTreeMap::new());
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Arm, .. }));
+    assert!(failure(&manifest).contains("UR-13: the external reference is not locked"));
     let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), fake(FakeConfig::default()), BTreeMap::new());
     running(&run);
     let _ = run.finish();
@@ -1649,9 +1649,8 @@ fn ur_13_arm_cases() {
 fn ur_15_start_cases() {
     let dir = TempDir::new();
     let early = profile(&dir, json!({}), json!({ "ezsdr.time": { "class": "hardware_in_loop", "start_lead_ns": 1_000_000_000u64 } }), false);
-    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &early, fake(FakeConfig::default()), BTreeMap::new());
-    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }));
-    let manifest = run.finish();
+    let manifest = spec_run_ended(&receive_spec(1, 1e6, 1e9, None), &early, fake(FakeConfig::default()), BTreeMap::new());
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Arm, .. }));
     assert!(failure(&manifest).contains("UR-15: the start at"), "{}", failure(&manifest));
     assert_eq!(events_of(&manifest, "radio.LATE_COMMAND").len(), 1);
     let manifest = captured(spec_run(&receive_spec(1, 1e6, 1e9, Some(1_000)), &profile(&dir, json!({}), json!({}), false), fake(FakeConfig::default()), BTreeMap::new()));
@@ -4853,9 +4852,8 @@ fn ur_13_arm_refuses_a_rate_set_the_description_does_not_have() {
         let inner = fake(FakeConfig { serial: format!("ur13-arm-refuse-{tx}"), ..FakeConfig::default() });
         let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: (!tx).then(off_grid), tx: tx.then(off_grid), failing: None });
         let spec = if tx { with_tx(receive_spec(1, 1e6, 1e9, None), 1e6) } else { receive_spec(1, 1e6, 1e9, None) };
-        let run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
-        assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }), "tx={tx}: {:?}", run.state());
-        let manifest = run.finish();
+        let manifest = spec_run_ended(&spec, &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+        assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Arm, .. }), "tx={tx}: {:?}", manifest.termination.reason);
         let reason = failure(&manifest);
         assert!(reason.contains("UR-13") && reason.contains(if tx { "tx" } else { "rx" }) && reason.contains("rates"), "tx={tx}: {reason}");
         let log = inner.calls();
@@ -4873,9 +4871,8 @@ fn ur_13_arm_refuses_a_pre_chain_rate_set_after_the_open() {
     let dir = TempDir::new();
     let inner = fake(FakeConfig { rates_before_open: true, serial: "ur13-pre-chain".to_owned(), ..FakeConfig::default() });
     let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: Some(vec![(1.0, 1.0, 0.0)]), tx: None, failing: None });
-    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
-    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }), "{:?}", run.state());
-    let manifest = run.finish();
+    let manifest = spec_run_ended(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Arm, .. }), "{:?}", manifest.termination.reason);
     assert!(failure(&manifest).contains("UR-13"), "{}", failure(&manifest));
     let log = inner.calls();
     assert_eq!(calls(&inner, "rx_open 0 [0]").len(), 1, "the refusal is after the open: {log:?}");
@@ -4937,9 +4934,9 @@ fn ur_13_a_transmit_stream_is_compared_with_the_whole_device_grid() {
     let inner = fake(FakeConfig { serial: "ur13-tx-restricted".to_owned(), ..FakeConfig::default() });
     let restricted: Vec<(f64, f64, f64)> = ezsdr_radio::x3xx::tx_rates(200_000_000).into_iter().map(|rate| (rate, rate, 0.0)).collect();
     let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner, rx: None, tx: Some(restricted), failing: None });
-    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
-    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }), "{:?}", run.state());
-    assert!(failure(&run.finish()).contains("UR-13"));
+    let manifest = spec_run_ended(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Arm, .. }), "{:?}", manifest.termination.reason);
+    assert!(failure(&manifest).contains("UR-13"));
 }
 
 // ------------------------------------------------ 1b-4c: stream 0 of the layout's keys
@@ -5479,9 +5476,8 @@ fn ur_13_a_rate_read_that_fails_refuses() {
     let dir = TempDir::new();
     let inner = fake(FakeConfig { serial: "ur13-read-fails".to_owned(), ..FakeConfig::default() });
     let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: None, tx: None, failing: Some(ezsdr_radio_uhd::Dir::Rx) });
-    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
-    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }), "{:?}", run.state());
-    let manifest = run.finish();
+    let manifest = spec_run_ended(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
+    assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Arm, .. }), "{:?}", manifest.termination.reason);
     let reason = failure(&manifest);
     assert!(reason.contains("UR-13:") && reason.contains("rates read failed"), "{reason}");
     let log = inner.calls();
@@ -6744,8 +6740,8 @@ fn the_candidate_ceiling_admits_what_the_profiles_link_limit_refuses() {
     let mut spec = spec;
     spec["outputs"].as_array_mut().unwrap().push(json!({ "id": "rec1", "kind": "sink.capture", "params": {},
         "feed": { "port": { "component": "radio", "port": "rx1" }, "policy": "drop_oldest", "capacity": 64 } }));
-    let refused = spec_run(&spec, &doc, device.clone(), BTreeMap::new()).start_instant().is_none();
-    assert!(refused, "the profile's own limit refuses it");
+    let refused = spec_run_ended(&spec, &doc, device.clone(), BTreeMap::new());
+    assert!(matches!(refused.termination.reason, Termination::Failed { stage: Stage::Validate, .. }), "the profile's own limit refuses it: {:?}", refused.termination.reason);
     let raised = ezsdr_radio::x3xx::performance(10);
     let candidate = ezsdr_radio::PerformanceEnvelope { rx_bytes_per_s: 1_250_000_000, tx_bytes_per_s: 1_250_000_000, wire_bytes_per_sample: raised.wire_bytes_per_sample };
     let admitted = start_spec_run(&spec, &doc, assembly(&doc, device, BTreeMap::new(), |radio| radio.with_measurement_performance(candidate))).unwrap();
@@ -7610,6 +7606,17 @@ fn ur_23_g1_a_refused_priority_does_not_latch_the_measurement_guard() {
     assert_eq!(rows.len(), 1, "{:?}", section(&manifest, "rejected"));
     assert!(rows[0]["error"].as_str().unwrap().contains("EPERM"), "{rows:?}");
     assert!(section(&manifest, "stats").get("tx_realtime").is_none());
+    assert!(guard.serial().is_ok(), "a later call is not refused");
+}
+
+/// The same refusal on the guard alone: a latch would be seen here at once, not as a Run that never starts.
+#[test]
+fn ur_23_g1b_a_refused_priority_call_does_not_latch_the_guard() {
+    let device = recording(ClockMode::Manual);
+    *device.priority.lock().unwrap() = Some(ezsdr_radio_uhd::DeviceError { lost: true, message: "uhd_set_thread_priority: UHD error 31: EPERM".to_owned() });
+    let guard = measurement::GuardedDevice::new(device.clone(), measurement::Latch::new());
+    assert!(guard.raise_thread_priority().unwrap_err().message.contains("EPERM"));
+    assert_eq!(guard.latched(), None, "the refusal latched the guard");
     assert!(guard.serial().is_ok(), "a later call is not refused");
 }
 
