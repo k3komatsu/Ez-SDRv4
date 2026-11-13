@@ -40,7 +40,9 @@ signal, no build error) is re-run one at a time while the mutant is applied (at 
 without the marker is conclusive and kills, a marker-free pass does not, two markers are `ERROR`; any other re-run
 result is kept and stops the attempts.
 The baseline of each row runs with `EZSDR_REAL_CLOCK_PROBE` set and `--show-output`, to report the rows
-that select a real-clock FakeDevice test (`real_clock`).
+that select a real-clock FakeDevice test (`real_clock`). The baseline is judged like a mutated run: a failure whose tests all
+carry an `EZSDR-TIMING:` marker is re-run alone (at most twice each) and the baseline is good when a re-run passes marker-free;
+its re-runs are counted in the `reruns` of the first row that uses it.
 
 `--self-test` checks the verdict table and the re-run rule on strings. `--e2e <scratch-dir>` runs the
 `infra_fixture_*` tests of `crates/ezsdr-radio-uhd/tests/infra_fixtures/` through the same `cargo_test()`
@@ -275,16 +277,19 @@ def exact_rerun(scratch, env):
 
 
 def run_one(scratch, env, mutation):
-    """`(outcome, real_clock, reruns, why)` for one row."""
+    """`(outcome, real_clock, reruns, why)` for one row. The baseline goes through `judge` like a mutated run (a timing-marked
+    baseline is re-run alone); its re-runs are added to the first row that uses it."""
     if mutation.get("kill") not in (None, "bound"):
         return f"NOT FOUND: unknown \"kill\" value {mutation['kill']!r}", False, 0, ""
     key = mutation.get("python") or (mutation["crate"], mutation["test_bin"], mutation["filter"])
+    baseline_reruns = 0
     if key not in BASELINES:
         baseline = cargo_test(scratch, dict(env, EZSDR_REAL_CLOCK_PROBE="1"), mutation, show_output=True)
-        BASELINES[key] = (baseline.returncode == 0 and ran_tests(baseline.output), REAL_CLOCK in baseline.output)
+        outcome, baseline_reruns, _ = judge(baseline, False, exact_rerun(scratch, env))
+        BASELINES[key] = (outcome == "SURVIVED" and (baseline_reruns > 0 or ran_tests(baseline.output)), REAL_CLOCK in baseline.output)
     ok, real_clock = BASELINES[key]
     if not ok:
-        return "BASELINE FAILED", real_clock, 0, ""
+        return "BASELINE FAILED", real_clock, baseline_reruns, ""
     path = os.path.join(scratch, mutation["file"])
     if mutation["file"] not in ORIGINALS:
         ORIGINALS[mutation["file"]] = open(path, encoding="utf-8").read()
@@ -297,7 +302,7 @@ def run_one(scratch, env, mutation):
     try:
         ran = cargo_test(scratch, env, mutation)
         outcome, reruns, reason = judge(ran, mutation.get("kill") == "bound", exact_rerun(scratch, env))
-        return outcome, real_clock, reruns, reason
+        return outcome, real_clock, baseline_reruns + reruns, reason
     finally:
         open(path, "w", encoding="utf-8").write(original)
 
@@ -326,6 +331,8 @@ E2E = [
     {"id": "5-abort-without-marker-bound", "fixture": "abort_without_marker", "env": {}, "bound": True, "expect": "ERROR", "markers": 0, "signal": True},
     {"id": "T1-timing-always", "fixture": "timing_always", "env": {}, "bound": False, "expect": "ERROR", "reruns": RERUNS},
     {"id": "T2-timing-once", "fixture": "timing_once", "env": {"EZSDR_INFRA_FIXTURE_STATE": "{state}"}, "bound": False, "expect": "SURVIVED", "reruns": 1},
+    {"id": "T3-trials-plain-failure", "fixture": "trials_plain_failure", "env": {}, "bound": False, "expect": "killed", "reruns": 0, "lacks": [r"EZSDR-TIMING:"]},
+    {"id": "T4-trials-all-skipped", "fixture": "trials_all_skipped", "env": {}, "bound": False, "expect": "ERROR", "reruns": RERUNS, "has": [r"EZSDR-TIMING:"]},
 ]
 
 
@@ -452,6 +459,44 @@ def self_test():
     assert row_outcome(tricky) == ("M01", "ERROR") and row_outcome("M01 the row's name: killed") is None, "self-test: a result is read from the fixed field only"
     assert row_outcome(row_line("M01", "killed, but recorded as equivalent", False, 0)) == ("M01", "killed, but recorded as equivalent"), "self-test: the outcome text is the whole field"
     assert run_one(".", {}, {"kill": "unbound"})[0].startswith("NOT FOUND"), "self-test: an unknown kill value is refused"
+
+    # The baseline goes through `judge`: `run_one` driven with a stub `cargo_test` (a queue of results, the calls recorded).
+    global cargo_test
+    real_cargo_test, calls = cargo_test, []
+
+    def stub(*queue):
+        queue = list(queue)
+
+        def fake(scratch, env, mutation, show_output=False):
+            calls.append(("exact" if mutation.get("exact") else "run", "EZSDR_REAL_CLOCK_PROBE" in env, show_output))
+            return queue.pop(0)
+        return fake
+    row = {"crate": "p", "test_bin": "b", "filter": "t", "file": "x.txt", "old": "aaa", "new": "bbb"}
+    first_run, re_run, mutated_run = ("run", True, True), ("exact", False, False), ("run", False, False)
+    try:
+        with tempfile.TemporaryDirectory() as dir_:
+            open(os.path.join(dir_, "x.txt"), "w").write("aaa")
+            for name, queue, expected, expected_calls in [
+                ("baseline marked once, then a pass: the row runs", [Ran(101, one), Ran(0, ok), Ran(101, fails("t::a"))], ("killed", False, 1, ""), [first_run, re_run, mutated_run]),
+                ("baseline marked, the probe line survives the failing run", [Ran(101, REAL_CLOCK + "\n" + one), Ran(0, ok), Ran(101, fails("t::a"))], ("killed", True, 1, ""), [first_run, re_run, mutated_run]),
+                ("baseline marked on every attempt", [Ran(101, one), Ran(101, one), Ran(101, one)], ("BASELINE FAILED", False, 2, ""), [first_run, re_run, re_run]),
+                ("baseline fails plainly", [Ran(101, fails("t::a"))], ("BASELINE FAILED", False, 0, ""), [first_run]),
+                ("baseline passes with no test run", [Ran(0, "running 0 tests\n")], ("BASELINE FAILED", False, 0, ""), [first_run]),
+                ("baseline marked, then a re-run that fails plainly", [Ran(101, one), Ran(101, fails("t::a"))], ("BASELINE FAILED", False, 1, ""), [first_run, re_run]),
+                ("baseline marked, then a re-run that ran no test", [Ran(101, one), Ran(0, "running 0 tests\n")], ("BASELINE FAILED", False, 1, ""), [first_run, re_run]),
+                ("baseline passes: no re-run", [Ran(0, ok), Ran(101, fails("t::a"))], ("killed", False, 0, ""), [first_run, mutated_run]),
+            ]:
+                BASELINES.clear(), ORIGINALS.clear(), calls.clear()
+                cargo_test = stub(*queue)
+                got = run_one(dir_, {}, row)
+                assert got == expected and calls == expected_calls, f"self-test: baseline: {name}: {got} {calls}"
+                assert open(os.path.join(dir_, "x.txt")).read() == "aaa", f"self-test: baseline: {name}: the file is restored"
+            BASELINES.clear(), ORIGINALS.clear(), calls.clear()
+            cargo_test = stub(Ran(101, one), Ran(0, ok), Ran(101, fails("t::a")), Ran(101, fails("t::a")))
+            assert [run_one(dir_, {}, row)[2] for _ in range(2)] == [1, 0], "self-test: baseline: its re-runs are counted once, in the first row that uses it"
+    finally:
+        cargo_test = real_cargo_test
+        BASELINES.clear(), ORIGINALS.clear()
     shown = Ran(101, marker + "thread 'a' panicked at x\n" + failed)
     cell = {"expect": "ERROR", "markers": 1, "panics": 1, "has": [r"EZSDR-INFRA: [^\n]*bound", r"test result: FAILED"]}
     assert e2e_seen(cell, shown, "ERROR", 0)[1] and e2e_seen(dict(cell, lacks=[r"never printed"]), shown, "ERROR", 0)[1], "self-test: an e2e case passes when its `lacks` patterns are absent"

@@ -16,8 +16,10 @@ pub const PER_1MSPS: i64 = 200;
 /// Ticks of a 25-sample window at 1 Msps.
 const SPAN: i64 = 25 * 200;
 
-/// The outcome of a claim about the tone: PASS and INCONCLUSIVE pass the test; FAIL is evidence against the claim.
+/// The outcome of a claim about the tone: PASS and INCONCLUSIVE pass the test; FAIL is evidence against the claim. A verdict that is computed and
+/// not asserted would be silent, so it must be used.
 #[derive(Debug)]
+#[must_use]
 pub enum Verdict {
     Pass(String),
     Inconclusive(String),

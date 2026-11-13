@@ -1064,3 +1064,231 @@ pub fn ma1_run(device: Arc<dyn Device>, wave: &[(f32, f32)], bytes: &[u8]) -> Re
     let manifest = run.finish();
     ma1_phase(&manifest, wave)
 }
+
+// ---------------------------------------------------------------- the rehearsal's lateness rule (note 51 stage 2c, §5.3b)
+
+/// What a rehearsal does with one trial (`Rehearsal::classify`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Class {
+    /// The Kernel did not admit an Action of the trial (§5.3 priority 2): a plain failure, read before any evidence.
+    Refused(String),
+    /// The trial carries evidence of host lateness (`iii::late_evidence`): it is not judged.
+    Skip(String),
+    Judge,
+}
+
+/// The trials of one rehearsal test. A trial with lateness evidence is not judged and its reason is kept; `finish` then writes the `EZSDR-TIMING:`
+/// marker once and fails, so the runners re-run the test alone (`mutate.py`, `gate.py`). A plain failure panics at its trial, before any marker.
+pub struct Rehearsal {
+    skipped: Vec<String>,
+}
+
+impl Rehearsal {
+    pub fn new() -> Rehearsal {
+        Rehearsal { skipped: Vec::new() }
+    }
+
+    /// Pure: the Kernel's refusal of any Action of the trial first, then the lateness evidence, else the trial is judged.
+    pub fn classify(lateness: &iii::Lateness) -> Class {
+        if let Some(tone::Verdict::Fail(text)) = iii::kernel_refused(lateness) {
+            return Class::Refused(text);
+        }
+        if let Some(why) = iii::late_evidence(lateness) {
+            return Class::Skip(why);
+        }
+        Class::Judge
+    }
+
+    /// Runs `judge` unless the trial is refused (a panic naming `label`) or carries evidence (kept for `finish`). `judge` holds everything that reads the
+    /// trial's data, its asserts included; it returns nothing, so there is no verdict a test could drop.
+    pub fn trial(&mut self, label: &str, lateness: &iii::Lateness, judge: impl FnOnce()) {
+        match Self::classify(lateness) {
+            Class::Refused(text) => panic!("{label}: {text}"),
+            Class::Skip(why) => self.skipped.push(format!("{label}: {why}")),
+            Class::Judge => judge(),
+        }
+    }
+
+    /// `None` when every trial was judged, else the marker's text: each skipped trial with its reason.
+    pub fn finish_text(&self) -> Option<String> {
+        (!self.skipped.is_empty()).then(|| format!("{} trial(s) carry evidence of host lateness and were not judged: {}", self.skipped.len(), self.skipped.join("; ")))
+    }
+
+    /// Writes the marker and fails when a trial was skipped.
+    pub fn finish(self) {
+        if let Some(text) = self.finish_text() {
+            timing(&text);
+            panic!("{text}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod rehearsal_tests {
+    use super::iii::{Booked, Faults, Lateness};
+    use super::tone::Verdict;
+    use super::*;
+    use std::cell::Cell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn booked(what: &'static str, deadline: Option<i64>, stamp: i64, admitted: bool) -> Booked {
+        Booked { what, deadline, stamp, admitted, detail: None }
+    }
+
+    fn on_time() -> Lateness {
+        Lateness { time_errors: vec![], booked: vec![booked("head", Some(100), 100, true), booked("tone", Some(200), 150, true)] }
+    }
+
+    fn dropped() -> Lateness {
+        Lateness { time_errors: vec![("late".to_owned(), "drop".to_owned())], booked: on_time().booked }
+    }
+
+    fn entry(ticks: i64, admitted: bool) -> ezsdr_kernel::session::LogEntry {
+        ezsdr_kernel::session::LogEntry {
+            seq: 0,
+            time: TimePoint::new(ClockDomainId::local(1), ticks),
+            action: SessionAction::Stop { target: None },
+            outcome: if admitted { Outcome::Admitted { coercions: vec![], warnings: vec![], dispatched: vec![] } } else { Outcome::Rejected { violations: vec![] } },
+        }
+    }
+
+    fn panic_text(result: std::thread::Result<()>) -> String {
+        let payload = result.expect_err("the trial should have panicked");
+        payload.downcast_ref::<String>().cloned().or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned())).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_trial_whose_only_time_error_is_late_at_device_is_judged_and_fails_unmarked() {
+        let lateness = Lateness { time_errors: vec![("late".to_owned(), "late_at_device".to_owned())], booked: on_time().booked };
+        let mut rehearsal = Rehearsal::new();
+        let mut recorded = None;
+        rehearsal.trial("t", &lateness, || recorded = Some(Verdict::Fail("the hand-over was late at the device".to_owned())));
+        assert!(matches!(recorded, Some(Verdict::Fail(_))), "the closure ran and its verdict is the trial's: {recorded:?}");
+        assert_eq!(rehearsal.finish_text(), None, "no marker: the failure is the trial's own");
+    }
+
+    #[test]
+    fn rehearsal_skips_a_trial_with_evidence_and_never_runs_its_verdict() {
+        let ran = Cell::new(false);
+        let mut rehearsal = Rehearsal::new();
+        rehearsal.trial("held", &dropped(), || ran.set(true));
+        assert!(!ran.get(), "the verdict of a trial with evidence is not computed");
+        let text = rehearsal.finish_text().expect("one trial was skipped");
+        assert!(text.contains("held") && text.contains("outcome drop"), "{text}");
+    }
+
+    #[test]
+    fn an_on_time_trial_with_an_underflow_is_judged_and_fails() {
+        let mut rehearsal = Rehearsal::new();
+        let mut recorded = None;
+        rehearsal.trial("t", &on_time(), || recorded = Some(iii::fault_verdict(Faults { time_errors: 0, underflows: 1, async_faults: 0 }, 0)));
+        assert!(matches!(recorded, Some(Verdict::Fail(_))), "{recorded:?}");
+        assert_eq!(rehearsal.finish_text(), None);
+    }
+
+    #[test]
+    fn an_on_time_trial_with_another_actions_time_error_cause_unclosed_burst_is_judged_and_fails() {
+        let lateness = Lateness { time_errors: vec![("unclosed_burst".to_owned(), "drop".to_owned())], booked: on_time().booked };
+        let mut rehearsal = Rehearsal::new();
+        let mut recorded = None;
+        rehearsal.trial("t", &lateness, || recorded = Some(iii::fault_verdict(Faults { time_errors: 1, underflows: 0, async_faults: 0 }, 0)));
+        assert!(matches!(recorded, Some(Verdict::Fail(_))), "{recorded:?}");
+        assert_eq!(rehearsal.finish_text(), None);
+    }
+
+    #[test]
+    fn classify_returns_refused_before_skip_before_judge() {
+        let refused = |lateness: &Lateness| Lateness { booked: [lateness.booked.clone(), vec![booked("calibration", Some(10), 5, false)]].concat(), ..lateness.clone() };
+        assert_eq!(Rehearsal::classify(&on_time()), Class::Judge);
+        assert!(matches!(Rehearsal::classify(&dropped()), Class::Skip(_)));
+        assert!(matches!(Rehearsal::classify(&refused(&on_time())), Class::Refused(ref text) if text.contains("calibration")));
+        assert!(matches!(Rehearsal::classify(&refused(&dropped())), Class::Refused(_)), "a refusal beside evidence is still a refusal");
+    }
+
+    #[test]
+    fn rehearsal_finish_text_lists_every_skipped_trial() {
+        let mut none = Rehearsal::new();
+        none.trial("a", &on_time(), || {});
+        none.trial("b", &on_time(), || {});
+        assert_eq!(none.finish_text(), None);
+        let mut some = Rehearsal::new();
+        let ran = Cell::new(0);
+        some.trial("a", &on_time(), || ran.set(ran.get() + 1));
+        some.trial("b", &dropped(), || ran.set(ran.get() + 1));
+        some.trial("c", &on_time(), || ran.set(ran.get() + 1));
+        assert_eq!(ran.get(), 2, "the trials after a skipped one are judged");
+        let text = some.finish_text().expect("b was skipped");
+        assert!(text.contains("1 trial(s)") && text.contains("b: ") && !text.contains("a: ") && !text.contains("c: "), "{text}");
+        let mut all = Rehearsal::new();
+        all.trial("x", &dropped(), || unreachable!());
+        all.trial("y", &dropped(), || unreachable!());
+        let text = all.finish_text().expect("both were skipped");
+        assert!(text.contains("2 trial(s)") && text.contains("x: ") && text.contains("y: "), "{text}");
+    }
+
+    #[test]
+    fn a_refused_action_beside_lateness_evidence_fails_unmarked() {
+        let lateness = Lateness { booked: [on_time().booked, vec![booked("calibration", Some(10), 5, false)]].concat(), ..dropped() };
+        let mut rehearsal = Rehearsal::new();
+        let ran = Cell::new(false);
+        let text = panic_text(catch_unwind(AssertUnwindSafe(|| rehearsal.trial("front", &lateness, || ran.set(true)))));
+        assert!(text.contains("front") && text.contains("calibration"), "{text}");
+        assert!(!ran.get(), "the closure does not decide a refused trial");
+        assert_eq!(rehearsal.finish_text(), None, "a refusal writes no marker");
+    }
+
+    #[test]
+    fn an_earlier_action_rejected_while_the_head_and_the_tone_are_admitted_fails_unmarked() {
+        let lateness = Lateness {
+            time_errors: vec![],
+            booked: vec![booked("capture", Some(50), 40, true), booked("calibration", Some(100), 90, false), booked("head", Some(200), 150, true), booked("tone", Some(300), 250, true)],
+        };
+        let mut rehearsal = Rehearsal::new();
+        let ran = Cell::new(false);
+        let closure = || {
+            let outcome = Verdict::Inconclusive("the fake shows no tone".to_owned());
+            assert!(!matches!(outcome, Verdict::Fail(_)));
+            ran.set(true);
+        };
+        let text = panic_text(catch_unwind(AssertUnwindSafe(|| rehearsal.trial("front", &lateness, closure))));
+        assert!(text.contains("calibration"), "{text}");
+        assert!(!ran.get());
+        assert_eq!(rehearsal.finish_text(), None);
+    }
+
+    #[test]
+    fn a_stop_submit_that_returns_err_fails_with_the_error() {
+        let mut lateness = Lateness::default();
+        lateness.book_submit("stop", None, Err::<ezsdr_kernel::session::LogEntry, _>("boom"));
+        let refused = iii::kernel_refused(&lateness);
+        assert!(matches!(refused, Some(Verdict::Fail(ref text)) if text.contains("stop") && text.contains("boom")), "{refused:?}");
+        let with_evidence = Lateness { time_errors: vec![("late".to_owned(), "drop".to_owned())], ..lateness };
+        let mut rehearsal = Rehearsal::new();
+        let ran = Cell::new(false);
+        let text = panic_text(catch_unwind(AssertUnwindSafe(|| rehearsal.trial("switch", &with_evidence, || ran.set(true)))));
+        assert!(text.contains("switch") && text.contains("stop") && text.contains("boom"), "{text}");
+        assert!(!ran.get());
+        assert_eq!(rehearsal.finish_text(), None);
+        let mut ok = Lateness::default();
+        ok.book_submit("stop", None, Ok::<_, String>(entry(100, true)));
+        assert!(iii::kernel_refused(&ok).is_none() && iii::late_evidence(&ok).is_none(), "a Stop the Kernel took, booked untimed: neither refused nor late");
+    }
+
+    #[test]
+    fn book_reads_the_kernels_stamp_and_admission_from_the_entry() {
+        let mut lateness = Lateness::default();
+        lateness.book("on time", Some(100), &entry(100, true));
+        assert!(iii::late_evidence(&lateness).is_none() && iii::kernel_refused(&lateness).is_none());
+        lateness.book("late", Some(100), &entry(101, true));
+        assert!(iii::late_evidence(&lateness).is_some_and(|why| why.contains("late")));
+        lateness.book("rejected", None, &entry(0, false));
+        assert!(iii::kernel_refused(&lateness).is_some_and(|verdict| matches!(verdict, Verdict::Fail(text) if text.contains("rejected"))));
+    }
+
+    #[test]
+    fn the_test_side_literals_equal_the_profile() {
+        assert_eq!(iii::WINDOW_LEAD_NS, ezsdr_radio_uhd::profile::DEVICE_LEAD_NS);
+        assert_eq!(iii::JOIN_LEAD_NS, ezsdr_radio_uhd::profile::DEVICE_LEAD_NS + ezsdr_radio_uhd::profile::DELIVERY_ALLOWANCE_NS);
+        assert_eq!(iii::IN_FLIGHT_NS, ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms()).tx_in_flight_ns);
+    }
+}

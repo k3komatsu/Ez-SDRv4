@@ -121,9 +121,12 @@ any other bound is still written, and a test that expects no bound captures noth
 or `all`) makes the calling thread sleep after the wrapper's `now`/`start_instant`, `submit` and waiting calls, and after `protocol.rs`'s
 `handle`, as a descheduled test thread would; it is a diagnostic for finding tests whose verdict depends on the test thread's timing, it
 gates and kills nothing, and no gate or bench run sets it. The wrapper does not see when the test thread acts: a test whose verdict depends on it fails by its own
-assertion under the delay (stage 2b moved those it could: a booking made untimed or `send_asap`, the Stop's own log stamp, the window on the `Direct` rig). Thirteen
-tests are left to stage 2c, because their expectation needs a receipt instant (the Provider's `receipts`, or the Kernel log for `n47s5_stop_end_rehearsal_on_the_fake`; 9 of the 13 failed under the 2a sweep's delay): the `n47s5_*` rehearsals (7), `s1_short_first_sends…`,
-`p70_one_sample_burst_then_timed_burst…`, `rx_start_lead_group_runs_on_the_fake`, and the three `rehearsal_b7_*`.
+assertion under the delay (stage 2b moved those it could: a booking made untimed or `send_asap`, the Stop's own log stamp, the window on the `Direct` rig). Nine rehearsals judge their
+trials through `common::Rehearsal` (note 51 stage 2c, §5.3b): a trial that carries evidence of host lateness (a `radio.TIME_ERROR` with cause `late`, or a Kernel log
+stamp past its deadline; `iii::late_evidence`) is not judged, and `finish()` writes the `EZSDR-TIMING:` marker and fails once, so `mutate.py` and `gate.py` re-run the test
+alone, up to twice (three marked runs: a red gate step, a mutation row `ERROR`). A trial without evidence is judged as before, and a Kernel refusal beside evidence is a plain
+failure. The three `rehearsal_b7_*` tests carry their own tolerance and are unchanged; `rx_start_lead_group_runs_on_the_fake` waits for stage 3: it reads `radio.LATE_COMMAND` /
+`START_LEAD_SHORT`, not `radio.TIME_ERROR`, and the Kernel log bounds its restart gap only from above, so about 1 ms of failure would stay unmarked until the trial runs on a rig with a fixed gap.
 
 Before the B3/B4/B6/B7 waveform/index assertions and the single-burst assertion,
 `require_stream_timing` checks measured stream events and expired-timeline

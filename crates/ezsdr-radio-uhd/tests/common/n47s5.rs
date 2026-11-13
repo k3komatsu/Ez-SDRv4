@@ -9,10 +9,9 @@ use std::sync::Arc;
 use ezsdr_kernel::event::ActionId;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::session::{LogEntry, Outcome};
-use ezsdr_kernel::spec::Scalar;
+use ezsdr_kernel::spec::{Scalar, Value};
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio::payloads::CommandRejectedPayload;
-use ezsdr_radio_uhd::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
 use ezsdr_radio_uhd::{Device, Iq};
 use serde_json::Value as Json;
 
@@ -56,6 +55,35 @@ pub fn now_root(run: &Run) -> i64 {
 pub fn tx_origin_per(run: &Run) -> (i64, i64) {
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
     (clock.origin.ticks_in(clock.root).unwrap(), clock.root_ticks_per_tick.num() as i64)
+}
+
+/// A capture of `samples` samples at `at`, submitted and booked: the Sink starts at the first sample at or after `at`, so its instant is its deadline.
+fn book_capture(run: &mut Run, lateness: &mut iii::Lateness, at: TimePoint, samples: i64) {
+    let entry = run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", Value::from(samples))]), None).unwrap();
+    lateness.book("capture", Some(at.ticks_in(at.domain()).unwrap()), &entry);
+}
+
+/// A timed transmit Action (`send` or `start_repeat`) at the transmit sample `at`, submitted and booked: its deadline is its instant less the Provider's
+/// device lead (`iii::WINDOW_LEAD_NS`).
+fn book_timed(run: &mut Run, lateness: &mut iii::Lateness, what: &'static str, action: &str, at: TimePoint, params: &[(&str, Value)], wave: &[u8]) -> LogEntry {
+    let deadline = transmit_root(run, &at) - ns_ticks(iii::WINDOW_LEAD_NS);
+    let entry = run.submit(verb(action, resource("radio/tx/s0"), Some(at), params), Some(wave)).unwrap();
+    lateness.book(what, Some(deadline), &entry);
+    entry
+}
+
+/// An untimed transmit Action, submitted and booked with no deadline: it is never late at receipt.
+fn book_untimed(run: &mut Run, lateness: &mut iii::Lateness, what: &'static str, action: &str, params: &[(&str, Value)], wave: &[u8]) -> LogEntry {
+    let entry = run.submit(verb(action, resource("radio/tx/s0"), None, params), Some(wave)).unwrap();
+    lateness.book(what, None, &entry);
+    entry
+}
+
+/// The Session `Stop` of the transmit stream, submitted and booked untimed; an `Err` is booked as an Action the Kernel did not take.
+fn book_stop(run: &mut Run, lateness: &mut iii::Lateness) -> Result<LogEntry, RunHandleError> {
+    let stop = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
+    lateness.book_submit("stop", None, stop.clone());
+    stop
 }
 
 /// The `rec` capture of a Manifest as root-tick samples. Each run of valid samples keeps its own first instant (SC-30): a hole stays
@@ -133,10 +161,14 @@ pub fn refusals_of(manifest: &Manifest, entry: &LogEntry) -> Vec<String> {
 /// The late amounts (ns) of the `radio.TIME_ERROR`s that dropped the booking at `sample` (the target's sample) as late (`cause` late,
 /// `outcome` drop). The late-arrival branch of T3 (f) reads them (`iii::late_arrival_verdict`).
 pub fn late_arrivals(manifest: &Manifest, sample: i64) -> Vec<i64> {
-    events_of(manifest, "radio.TIME_ERROR")
-        .iter()
-        .filter(|event| event.payload["cause"] == "late" && event.payload["outcome"] == "drop" && event.payload["target"]["ticks"].as_i64() == Some(sample))
-        .filter_map(|event| event.payload["late_by_ns"].as_i64())
+    late_arrivals_in(events_of(manifest, "radio.TIME_ERROR").iter().map(|event| &event.payload), sample)
+}
+
+/// [`late_arrivals`] over `radio.TIME_ERROR` payloads.
+pub fn late_arrivals_in<'a>(payloads: impl Iterator<Item = &'a Json>, sample: i64) -> Vec<i64> {
+    payloads
+        .filter(|payload| payload["cause"] == "late" && payload["outcome"] == "drop" && payload["target"]["ticks"].as_i64() == Some(sample))
+        .filter_map(|payload| payload["late_by_ns"].as_i64())
         .collect()
 }
 
@@ -168,6 +200,7 @@ pub struct FrontTrial {
     pub manifest: Manifest,
     /// The tone's booked instant in root ticks.
     pub burst: i64,
+    pub lateness: iii::Lateness,
 }
 
 pub fn front_trial(mut run: Run, samples: usize, rate: f64) -> FrontTrial {
@@ -181,20 +214,25 @@ pub fn front_trial(mut run: Run, samples: usize, rate: f64) -> FrontTrial {
     let a_k = a.ticks_in(domain).unwrap();
     let b = TimePoint::new(domain, a_k + iii::head_front(0, samples as i64, rate));
     let capture_at = after_ticks(&run, ms(5));
-    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(80_000))]), None).unwrap()));
-    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(cal), &[]), Some(&calibration)).unwrap()));
-    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&head)).unwrap()));
-    let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&tone)).unwrap();
+    let mut lateness = iii::Lateness::default();
+    book_capture(&mut run, &mut lateness, capture_at, 80_000);
+    book_timed(&mut run, &mut lateness, "calibration", "send", cal, &[], &calibration);
+    book_timed(&mut run, &mut lateness, "head", "send", a, &[], &head);
+    let entry = book_timed(&mut run, &mut lateness, "tone", "send", b, &[], &tone);
     let burst = transmit_root(&run, &b);
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let manifest = run.finish();
-    FrontTrial { admitted: admitted(&entry), refusals: refusals_of(&manifest, &entry), manifest, burst }
+    lateness.time_errors = iii::time_error_pairs(&manifest);
+    FrontTrial { admitted: admitted(&entry), refusals: refusals_of(&manifest, &entry), manifest, burst, lateness }
 }
 
 /// T2's verdict for one trial: admitted and not refused, the device's three acknowledgements (calibration, head, tone), the faults, and
 /// the tone's onset at the booked instant against the trial's loop delay (S7).
 pub fn front_outcome(trial: &FrontTrial) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
     let onset = tone_onset_of(&trial.manifest, trial.burst - ms(2), 100e3).map(|t| (t - trial.burst) / PER_1MSPS);
     iii::front_case_verdict(trial.admitted, &trial.refusals, iii::run_faults(&trial.manifest), burst_acks(&trial.manifest), 3, onset, first_delay_samples(&trial.manifest, 100e3), ONSET_TOLERANCE)
 }
@@ -209,6 +247,7 @@ pub struct LongCloseTrial {
     /// The probe's transmit sends and the ticks of a sample, for the shape check ([`iii::long_close_shape`]).
     pub sends: Vec<Json>,
     pub per: i64,
+    pub lateness: iii::Lateness,
 }
 
 /// The samples of the long burst of [`long_close_trial`].
@@ -220,33 +259,24 @@ pub fn long_close_trial(mut run: Run, probe: &ProbeDevice, rate: f64) -> LongClo
     let a = tx_at(&run, ms(40));
     let domain = a.domain();
     let b = TimePoint::new(domain, a.ticks_in(domain).unwrap() + iii::head_front(0, LONG_CLOSE_SAMPLES as i64, rate));
-    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&first)).unwrap()));
-    let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&second)).unwrap();
+    let mut lateness = iii::Lateness::default();
+    book_timed(&mut run, &mut lateness, "A", "send", a, &[], &first);
+    let entry = book_timed(&mut run, &mut lateness, "B", "send", b, &[], &second);
     wait(&mut run, ms(80));
     let manifest = run.finish();
-    LongCloseTrial { admitted: admitted(&entry), refusals: refusals_of(&manifest, &entry), manifest, sends: data_sends(probe), per: (MCR as f64 / rate).round() as i64 }
+    lateness.time_errors = iii::time_error_pairs(&manifest);
+    LongCloseTrial { admitted: admitted(&entry), refusals: refusals_of(&manifest, &entry), manifest, sends: data_sends(probe), per: (MCR as f64 / rate).round() as i64, lateness }
 }
 
 /// The verdict of a long close: the booking at the front is admitted and not refused, no late or underflow report, and both bursts
 /// are acknowledged once.
 pub fn long_close_outcome(trial: &LongCloseTrial) -> Verdict {
-    let admission = iii::admission_verdict(trial.admitted, &trial.refusals);
-    if matches!(admission, Verdict::Fail(_)) {
-        return admission;
-    }
-    let clean = iii::fault_verdict(iii::run_faults(&trial.manifest), 0);
-    if matches!(clean, Verdict::Fail(_)) {
-        return clean;
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
     }
     // The margin is shown only when the run took the shape the check is about: the close is the held tail and one zero, and the second burst
     // starts three samples past its end (the record's front, the payload end plus four).
-    if let Err(why) = iii::long_close_shape(&trial.sends, trial.per, 3) {
-        return Verdict::Inconclusive(format!("admitted and clean, but the run did not take the long-close shape: {why}"));
-    }
-    match burst_acks(&trial.manifest) {
-        2 => Verdict::Pass("the held tail and one zero closed the first burst, the second started three samples past it; both acknowledged, no late or underflow report".to_owned()),
-        acks => Verdict::Inconclusive(format!("{acks} BurstAck(s) for 2 bursts")),
-    }
+    iii::long_close_verdict(trial.admitted, &trial.refusals, iii::run_faults(&trial.manifest), iii::long_close_shape(&trial.sends, trial.per, 3), burst_acks(&trial.manifest))
 }
 
 /// One trial of T4: a 100 kHz repeat of 1 100 samples, then the switch to a 200 kHz repeat of 1 100 samples, untimed (`timed` false) or
@@ -256,6 +286,7 @@ pub struct SwitchEvidence {
     pub probe: Arc<ProbeDevice>,
     pub admitted: bool,
     pub refusals: Vec<String>,
+    pub lateness: iii::Lateness,
 }
 
 /// The first repeat is timed 15 ms after the capture starts (S5): the capture covers the first burst's target − 2 ms, so the loop's
@@ -264,22 +295,29 @@ pub fn repeat_switch_trial(mut run: Run, probe: Arc<ProbeDevice>, timed: bool) -
     let (first, _) = waveform_of(&tone_wave(1e6, 1_100, 100e3));
     let (second, _) = waveform_of(&tone_wave(1e6, 1_100, 200e3));
     let capture_at = after_ticks(&run, ms(1));
-    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(120_000))]), None).unwrap()));
-    assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx/s0"), Some(tx_at(&run, ms(15))), &[]), Some(&first)).unwrap()));
+    let mut lateness = iii::Lateness::default();
+    book_capture(&mut run, &mut lateness, capture_at, 120_000);
+    let repeat_at = tx_at(&run, ms(15));
+    book_timed(&mut run, &mut lateness, "repeat", "start_repeat", repeat_at, &[], &first);
     wait(&mut run, ms(20));
     let at = timed.then(|| tx_at(&run, ms(40)));
-    let mark = [("radio.repeat_operation", ezsdr_kernel::spec::Value::Scalar(ezsdr_kernel::spec::Scalar::from("switch")))];
+    let mark = [("radio.repeat_operation", Value::Scalar(Scalar::from("switch")))];
     let entry = run.submit(verb("start_repeat", resource("radio/tx/s0"), at, &mark), Some(&second)).unwrap();
+    lateness.book("switch", None, &entry);
     wait(&mut run, ms(60));
-    let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
+    let _ = book_stop(&mut run, &mut lateness);
     wait(&mut run, ms(20));
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let manifest = run.finish();
-    SwitchEvidence { refusals: refusals_of(&manifest, &entry), admitted: admitted(&entry), manifest, probe }
+    lateness.time_errors = iii::time_error_pairs(&manifest);
+    SwitchEvidence { refusals: refusals_of(&manifest, &entry), admitted: admitted(&entry), manifest, probe, lateness }
 }
 
 pub fn repeat_switch_verdict(trial: &SwitchEvidence) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
     if !trial.admitted {
         return Verdict::Fail("the switch was refused at receipt".to_owned());
     }
@@ -340,68 +378,128 @@ pub fn data_sends(probe: &ProbeDevice) -> Vec<Json> {
     probe.rows().into_iter().filter(|row| row["call"] == "tx_send" && row["tx_flush"] != true).collect()
 }
 
-/// T5 (1): an untimed repeat, stopped, then an untimed repeat again. The second is admitted and its tone is heard, with no fault.
-pub fn untimed_repeat_outcome(mut run: Run) -> Verdict {
+/// What T5 (1) read: the Manifest and the entries of its two repeats.
+pub struct UntimedRepeatTrial {
+    pub manifest: Manifest,
+    pub started: LogEntry,
+    pub again: LogEntry,
+    pub lateness: iii::Lateness,
+}
+
+/// T5 (1): an untimed repeat, stopped, then an untimed repeat again.
+pub fn untimed_repeat_trial(mut run: Run) -> UntimedRepeatTrial {
     let (first, _) = waveform_of(&tone_wave(1e6, 1_100, 100e3));
     let (second, _) = waveform_of(&tone_wave(1e6, 1_100, 200e3));
     let capture_at = after_ticks(&run, ms(1));
-    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(120_000))]), None).unwrap()));
-    let started = run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &[]), Some(&first)).unwrap();
+    let mut lateness = iii::Lateness::default();
+    book_capture(&mut run, &mut lateness, capture_at, 120_000);
+    let started = book_untimed(&mut run, &mut lateness, "first repeat", "start_repeat", &[], &first);
     wait(&mut run, ms(20));
-    let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
+    let _ = book_stop(&mut run, &mut lateness);
     wait(&mut run, ms(5));
-    let again = run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &[]), Some(&second)).unwrap();
+    let again = book_untimed(&mut run, &mut lateness, "second repeat", "start_repeat", &[], &second);
     wait(&mut run, ms(60));
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let manifest = run.finish();
-    let tone_found = tone_windows_of(&manifest).iter().any(|w| (w.hz - 200e3).abs() <= TONE_TOLERANCE_HZ);
-    let first_refusals = refusals_of(&manifest, &started);
-    let first_ok = if admitted(&started) && first_refusals.is_empty() {
+    lateness.time_errors = iii::time_error_pairs(&manifest);
+    UntimedRepeatTrial { manifest, started, again, lateness }
+}
+
+/// T5 (1)'s verdict: the first repeat is admitted and not refused, the second is admitted and its tone is heard, with no fault.
+pub fn untimed_repeat_verdict(trial: &UntimedRepeatTrial) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
+    let manifest = &trial.manifest;
+    let tone_found = tone_windows_of(manifest).iter().any(|w| (w.hz - 200e3).abs() <= TONE_TOLERANCE_HZ);
+    let first_refusals = refusals_of(manifest, &trial.started);
+    let first_ok = if admitted(&trial.started) && first_refusals.is_empty() {
         Verdict::Pass("the first untimed repeat is admitted and not refused".to_owned())
     } else {
         Verdict::Fail(format!("the first untimed repeat was refused: {first_refusals:?}"))
     };
-    iii::all_of(vec![first_ok, iii::untimed_repeat_verdict(admitted(&again), &refusals_of(&manifest, &again), tone_found, iii::run_faults(&manifest))])
+    iii::all_of(vec![first_ok, iii::untimed_repeat_verdict(admitted(&trial.again), &refusals_of(manifest, &trial.again), tone_found, iii::run_faults(manifest))])
 }
 
-/// T5 (2): an untimed 1 000-sample burst booked while a timed 30 000-sample one plays. It is placed after the timed one (the record's
-/// front, `head_front`), admitted, and its tone is at its applied target (S7), against the loop delay of the timed burst (S5).
-pub fn untimed_burst_outcome(mut run: Run) -> Verdict {
+/// T5 (1) as the bench runs it: the trial and its verdict.
+pub fn untimed_repeat_outcome(run: Run) -> Verdict {
+    untimed_repeat_verdict(&untimed_repeat_trial(run))
+}
+
+/// What T5 (2) read: the Manifest, the untimed burst's entry, the timed one's first sample and the transmit clock.
+pub struct UntimedBurstTrial {
+    pub manifest: Manifest,
+    pub b: LogEntry,
+    pub a_k: i64,
+    pub origin: i64,
+    pub per: i64,
+    pub lateness: iii::Lateness,
+}
+
+/// T5 (2): an untimed 1 000-sample burst booked while a timed 30 000-sample one plays.
+pub fn untimed_burst_trial(mut run: Run) -> UntimedBurstTrial {
     let (timed, _) = waveform_of(&tone_wave(1e6, 30_000, 100e3));
     let (untimed, _) = waveform_of(&tone_wave(1e6, 1_000, 200e3));
     let (origin, per) = tx_origin_per(&run);
     let capture_at = after_ticks(&run, ms(1));
-    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(120_000))]), None).unwrap()));
+    let mut lateness = iii::Lateness::default();
+    book_capture(&mut run, &mut lateness, capture_at, 120_000);
     let a = tx_at(&run, ms(40));
     let a_k = a.ticks_in(a.domain()).unwrap();
-    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&timed)).unwrap()));
+    book_timed(&mut run, &mut lateness, "A", "send", a, &[], &timed);
     let a_root = transmit_root(&run, &a);
     while now_root(&run) < a_root + ms(5) {
         wait(&mut run, ms(1) / 4);
     }
-    let b = run.submit(verb("send", resource("radio/tx/s0"), None, &[]), Some(&untimed)).unwrap();
+    let b = book_untimed(&mut run, &mut lateness, "B", "send", &[], &untimed);
     wait(&mut run, ms(80));
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let manifest = run.finish();
-    let bursts = section(&manifest, "bursts").as_array().unwrap().clone();
+    lateness.time_errors = iii::time_error_pairs(&manifest);
+    UntimedBurstTrial { manifest, b, a_k, origin, per, lateness }
+}
+
+/// T5 (2)'s verdict: the untimed burst is placed after the timed one (the record's front, `head_front`), admitted, and its tone is at its applied
+/// target (S7), against the loop delay of the timed burst (S5).
+pub fn untimed_burst_verdict(trial: &UntimedBurstTrial) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
+    let UntimedBurstTrial { manifest, b, a_k, origin, per, .. } = trial;
+    let (a_k, origin, per) = (*a_k, *origin, *per);
+    let bursts = section(manifest, "bursts").as_array().unwrap().clone();
     let placed = bursts.iter().find(|row| row["samples"] == 1_000).map(target_sample);
-    let onset = placed.and_then(|k| tone_onset_of(&manifest, origin + k * per - ms(2), 200e3).map(|t| (t - (origin + k * per)) / per));
-    let delay = first_delay_samples(&manifest, 100e3);
+    let onset = placed.and_then(|k| tone_onset_of(manifest, origin + k * per - ms(2), 200e3).map(|t| (t - (origin + k * per)) / per));
+    let delay = first_delay_samples(manifest, 100e3);
     println!("T5 (2): the untimed burst placed at sample {placed:?} after the timed one at {a_k}; onset {onset:?}; loop delay {delay:?} samples");
-    iii::untimed_burst_verdict(admitted(&b), &refusals_of(&manifest, &b), placed, iii::head_front(a_k, 30_000, 1e6), iii::run_faults(&manifest), onset, delay, ONSET_TOLERANCE)
+    iii::untimed_burst_verdict(admitted(b), &refusals_of(manifest, b), placed, iii::head_front(a_k, 30_000, 1e6), iii::run_faults(manifest), onset, delay, ONSET_TOLERANCE)
+}
+
+/// T5 (2) as the bench runs it: the trial and its verdict.
+pub fn untimed_burst_outcome(run: Run) -> Verdict {
+    untimed_burst_verdict(&untimed_burst_trial(run))
+}
+
+/// What one case of `hw_b8_burst_one_sample_after_a_burst` read: the Manifest, B's entry and its offset after A's start.
+pub struct OneSampleTrial {
+    pub manifest: Manifest,
+    pub entry: LogEntry,
+    pub offset: i64,
+    pub lateness: iii::Lateness,
 }
 
 /// `hw_b8_burst_one_sample_after_a_burst` for one case: a 30 000-sample burst A plays, and a 1 000-sample burst is booked at sample
 /// `offset` after A's start (30 001 to 30 003 are A's end + 1 to + 3, refused at receipt by the Provider, RM-15: the front after a held-tail
 /// close is the payload end plus four; 30 004 plays on time). `late_booking`
 /// books it after A's last buffer went out (8 ms before A's end).
-pub fn one_sample_after_a_burst(mut run: Run, offset: i64, late_booking: bool) -> Verdict {
+pub fn one_sample_after_a_burst_trial(mut run: Run, offset: i64, late_booking: bool) -> OneSampleTrial {
     wait(&mut run, ms(1));
     let a = tx_at(&run, ms(40));
     let (first, _) = waveform_of(&pn(30_000));
-    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&first)).unwrap()));
+    let mut lateness = iii::Lateness::default();
+    book_timed(&mut run, &mut lateness, "A", "send", a, &[], &first);
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
     let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
     if late_booking {
@@ -411,9 +509,10 @@ pub fn one_sample_after_a_burst(mut run: Run, offset: i64, late_booking: bool) -
     }
     let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + offset);
     let (second, _) = waveform_of(&pn(1_000));
-    let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&second)).unwrap();
+    let entry = book_timed(&mut run, &mut lateness, "B", "send", b, &[], &second);
     wait(&mut run, ms(80));
     let manifest = run.finish();
+    lateness.time_errors = iii::time_error_pairs(&manifest);
     println!(
         "B8 burst at end + {} samples, booked late {late_booking}: {:?}; refusals {:?}; TIME_ERROR {:?}; async {}; bursts {}",
         offset - 30_000,
@@ -423,13 +522,29 @@ pub fn one_sample_after_a_burst(mut run: Run, offset: i64, late_booking: bool) -
         section(&manifest, "async"),
         section(&manifest, "bursts")
     );
-    let faults = iii::late_control_verdict(iii::run_faults(&manifest), &iii::time_error_causes(&manifest), 0);
-    let refusals = refusals_of(&manifest, &entry);
-    if offset < 30_004 { iii::all_of(vec![iii::refusal_verdict(&refusals), faults]) } else { iii::all_of(vec![iii::admission_verdict(admitted(&entry), &refusals), faults]) }
+    OneSampleTrial { manifest, entry, offset, lateness }
+}
+
+/// The verdict of a one-sample trial: B at end + 1 to + 3 is refused by the Provider, at end + 4 it plays; either way no fault beyond the expected.
+pub fn one_sample_after_a_burst_verdict(trial: &OneSampleTrial) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
+    let manifest = &trial.manifest;
+    let faults = iii::late_control_verdict(iii::run_faults(manifest), &iii::time_error_causes(manifest), 0);
+    let refusals = refusals_of(manifest, &trial.entry);
+    if trial.offset < 30_004 { iii::all_of(vec![iii::refusal_verdict(&refusals), faults]) } else { iii::all_of(vec![iii::admission_verdict(admitted(&trial.entry), &refusals), faults]) }
+}
+
+/// The one-sample trial as the bench runs it: the trial and its verdict.
+pub fn one_sample_after_a_burst(run: Run, offset: i64, late_booking: bool) -> Verdict {
+    one_sample_after_a_burst_verdict(&one_sample_after_a_burst_trial(run, offset, late_booking))
 }
 
 /// One trial of T3 (f): a 30 000-sample tone burst A at `a`, ending at `e` (its held tail closes at `J(e)` = `e` − 5 ms, `join_by` in
-/// `src/provider/core.rs`, from the record's device lead and delivery allowance), and a 10 000-sample 100 kHz tone C at `e + c_offset`.
+/// `src/provider/core.rs`, from the record's device lead and delivery allowance), and a 1 000-sample 100 kHz tone C at `e + c_offset`. C is 1 000
+/// samples, not 10 000, so that its submit is quick and its receipt stays well before its instant under load (stage 2c, F2: `T − receipt` of C after
+/// `J(e)` was 3.4 ms or more with 1 000 samples and down to 0.8 ms with 10 000, against the Provider's 2 ms lead; Fake, manual clock, 1 MS/s).
 /// C is booked before `J(e)` (`after_join` None), or after it: submitted `after_join` ticks after `J(e)` (Some(0) is the first wait step
 /// after `J(e)`). The Run's dir is kept until the verdict is read.
 pub struct HeldTrial {
@@ -441,21 +556,30 @@ pub struct HeldTrial {
     /// The late amounts (ns) of the drops of C as late (`late_arrivals`).
     pub late: Vec<i64>,
     pub c_root: i64,
+    pub lateness: iii::Lateness,
     _dir: TempDir,
+}
+
+impl HeldTrial {
+    /// `lateness` less C's own expected late drop (the deliberately late cases submit C past its deadline): the trial is judged when only C is late.
+    pub fn lateness_without_c_late(&self) -> iii::Lateness {
+        iii::without_expected_late(&self.lateness, "C", self.late.len())
+    }
 }
 
 pub fn held_tail_trial(mut run: Run, probe: Arc<ProbeDevice>, dir: TempDir, c_offset: i64, after_join: Option<i64>) -> HeldTrial {
     let (a_wave, _) = waveform_of(&tone_wave(1e6, 30_000, 200e3));
-    let (c_wave, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
+    let (c_wave, _) = waveform_of(&tone_wave(1e6, 1_000, 100e3));
     let (origin, per) = tx_origin_per(&run);
     let a = tx_at(&run, ms(40));
     let domain = a.domain();
     let e = a.ticks_in(domain).unwrap() + 30_000;
     let e_root = origin + e * per;
-    let j_root = e_root - ns_ticks(DEVICE_LEAD_NS + DELIVERY_ALLOWANCE_NS);
+    let j_root = e_root - ns_ticks(iii::JOIN_LEAD_NS);
     let capture_at = after_ticks(&run, ms(10));
-    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(120_000))]), None).unwrap()));
-    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&a_wave)).unwrap()));
+    let mut lateness = iii::Lateness::default();
+    book_capture(&mut run, &mut lateness, capture_at, 120_000);
+    book_timed(&mut run, &mut lateness, "A", "send", a, &[], &a_wave);
     if let Some(lag) = after_join {
         while now_root(&run) < j_root + lag {
             wait(&mut run, ms(1) / 4);
@@ -463,23 +587,27 @@ pub fn held_tail_trial(mut run: Run, probe: Arc<ProbeDevice>, dir: TempDir, c_of
     }
     let submit_after_join = now_root(&run) - j_root;
     let c = TimePoint::new(domain, e + c_offset);
-    let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(c), &[]), Some(&c_wave)).unwrap();
+    let entry = book_timed(&mut run, &mut lateness, "C", "send", c, &[], &c_wave);
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let manifest = run.finish();
+    lateness.time_errors = iii::time_error_pairs(&manifest);
     let late = late_arrivals(&manifest, e + c_offset);
     println!(
         "T3 (f) C at e+{c_offset}, after_join {after_join:?}: submitted {:.3} ms after J(e); refusals {:?}; late drops {late:?} ns",
         submit_after_join as f64 / TICKS_PER_MS as f64,
         refusals_of(&manifest, &entry)
     );
-    HeldTrial { refusals: refusals_of(&manifest, &entry), admitted: admitted(&entry), late, manifest, probe, c_root: origin + (e + c_offset) * per, _dir: dir }
+    HeldTrial { refusals: refusals_of(&manifest, &entry), admitted: admitted(&entry), late, manifest, probe, c_root: origin + (e + c_offset) * per, lateness, _dir: dir }
 }
 
 /// The verdict of a held-tail trial that plays C: the late-arrival branch first (`iii::late_arrival_verdict`), then the device's
 /// end-of-burst sends (flushes left out) against the device bursts expected, the acknowledgements, and C's onset at its booked instant
 /// against the trial's loop delay (S7).
 pub fn held_played_verdict(trial: &HeldTrial, expected_bursts: usize) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
     let faults = iii::run_faults(&trial.manifest);
     if let Some(verdict) = iii::late_arrival_verdict(&trial.late, &trial.refusals, faults) {
         return verdict;
@@ -495,6 +623,9 @@ pub fn held_played_verdict(trial: &HeldTrial, expected_bursts: usize) -> Verdict
 /// The verdict of a held-tail trial whose C is booked at e+1 after J(e): refused at receipt by the Provider (the late-arrival branch
 /// first: a late drop is host latency), and A alone plays.
 pub fn held_refused_verdict(trial: &HeldTrial) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
     let faults = iii::run_faults(&trial.manifest);
     if let Some(verdict) = iii::late_arrival_verdict(&trial.late, &trial.refusals, faults) {
         return verdict;
@@ -503,46 +634,177 @@ pub fn held_refused_verdict(trial: &HeldTrial) -> Verdict {
     iii::all_of(vec![iii::refusal_verdict(&trial.refusals), iii::close_verdict(faults, Some(eobs), 1, burst_acks(&trial.manifest))])
 }
 
-/// One trial of T3 (b): a 100 kHz repeat stopped by `Stop`; the next burst, a 1 000-sample 200 kHz tone, is booked at the record's first
-/// sample after the Stop (`staging::stop_sample`, RM-16, with the in-flight window of the profile). The Stop's instant is the Stop
-/// entry's `time` (INFERRED: root ticks; the Stop is the control's `now`, `control.rs:310–321`).
+/// One trial of T3 (b): a 100 kHz repeat stopped by `Stop`, then two bookings after it. N1, a 1 000-sample 200 kHz tone, is booked at the record's first
+/// sample after the Stop by the Kernel's own stamp of it (`staging::stop_sample`, RM-16, with the in-flight window): the Provider's bound follows its own
+/// later receipt of the Stop, so the Provider refuses it as overlapping every time, and its `tx_stop_applied` row tells the Fake what it had to do (`stop_n1_check`).
+/// N2, a 1 000-sample 300 kHz tone submitted right after N1, is booked at `iii::stop_after_margin_sample`: past the bound of any receipt within
+/// `iii::STOP_MARGIN_NS` of the Stop's stamp, so the Provider must play it (`stop_after_margin_verdict`). The Stop's instant is the Stop entry's `time`
+/// (INFERRED: root ticks; the Stop is the control's `now`, `control.rs:310–321`).
 pub struct StopTrial {
     pub manifest: Manifest,
     pub probe: Arc<ProbeDevice>,
+    /// N1's admission and the Provider's refusals of it (`refusals_of`).
     pub admitted: bool,
-    /// The Provider's refusals of the next burst (`refusals_of`).
     pub refusals: Vec<String>,
     /// The Stop's instant in root ticks (its entry's `time`).
     pub stop_root: i64,
     pub next_root: i64,
+    /// N1's booked sample and the transmit clock (the oracle of `stop_n1_check`).
+    pub next_k: i64,
+    pub origin: i64,
+    pub per: i64,
+    /// N1's stamp (root ticks): N2's guarantee holds only while it is within the margin.
+    pub n1_stamp: i64,
+    pub next2_root: i64,
+    pub n2_admitted: bool,
+    pub n2_refusals: Vec<String>,
+    /// The late amounts of the `TIME_ERROR`s that dropped N2 as late (host lateness: `late_arrivals`).
+    pub n2_late: Vec<i64>,
+    pub lateness: iii::Lateness,
     _dir: TempDir,
 }
 
-/// The repeat is timed 15 ms after the capture starts (S5, as `repeat_switch_trial`), and the Stop follows 30 ms after its submission.
-pub fn stop_next_trial(mut run: Run, probe: Arc<ProbeDevice>, dir: TempDir) -> StopTrial {
-    let (repeat, _) = waveform_of(&tone_wave(1e6, 1_100, 100e3));
-    let (next, _) = waveform_of(&tone_wave(1e6, 1_000, 200e3));
-    let capture_at = after_ticks(&run, ms(1));
-    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(120_000))]), None).unwrap()));
-    assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx/s0"), Some(tx_at(&run, ms(15))), &[]), Some(&repeat)).unwrap()));
-    wait(&mut run, ms(30));
-    let stop = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None).unwrap();
-    let stop_root = stop.time.ticks_in(stop.time.domain()).unwrap();
-    let (origin, per) = tx_origin_per(&run);
-    let domain = tx_at(&run, ms(40)).domain();
-    let in_flight = ns_ticks(ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms()).tx_in_flight_ns);
-    let next_k = ezsdr_radio::staging::stop_sample(stop_root, in_flight, |t| sample_at_or_after(origin, per, t));
-    let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(TimePoint::new(domain, next_k)), &[]), Some(&next)).unwrap();
-    wait(&mut run, ms(80));
-    let manifest = run.finish();
-    StopTrial { refusals: refusals_of(&manifest, &entry), manifest, probe, admitted: admitted(&entry), stop_root, next_root: origin + next_k * per, _dir: dir }
+impl StopTrial {
+    /// The lateness of a trial whose N2 was submitted late on purpose (`n2_lag`): the trial less N2's own deadline and late drops, so it is judged
+    /// only when N2 alone is late.
+    pub fn lateness_without_n2_late(&self) -> iii::Lateness {
+        iii::without_expected_late(&self.lateness, "N2", self.n2_late.len())
+    }
 }
 
-/// The verdict of T3 (b)'s Session case: the booking's admission and refusals (`iii::stop_booking_verdict`, S3), the faults, and the next
-/// tone's onset against the repeat's loop delay.
+/// The repeat is timed 15 ms after the capture starts (S5, as `repeat_switch_trial`), and the Stop follows 30 ms after its submission. `n2_lag`
+/// (`None` on the bench) holds N2's submission until the clock is that many root ticks past its deadline, so that N2 arrives late with N1 on time.
+pub fn stop_next_trial(mut run: Run, probe: Arc<ProbeDevice>, dir: TempDir, n2_lag: Option<i64>) -> StopTrial {
+    let (repeat, _) = waveform_of(&tone_wave(1e6, 1_100, 100e3));
+    let (next, _) = waveform_of(&tone_wave(1e6, 1_000, 200e3));
+    let (after_margin, _) = waveform_of(&tone_wave(1e6, 1_000, 300e3));
+    let capture_at = after_ticks(&run, ms(1));
+    let mut lateness = iii::Lateness::default();
+    book_capture(&mut run, &mut lateness, capture_at, 120_000);
+    let repeat_at = tx_at(&run, ms(15));
+    book_timed(&mut run, &mut lateness, "repeat", "start_repeat", repeat_at, &[], &repeat);
+    wait(&mut run, ms(30));
+    let stop = book_stop(&mut run, &mut lateness).unwrap();
+    let stop_root = stamp_of(&stop);
+    let (origin, per) = tx_origin_per(&run);
+    let domain = tx_at(&run, ms(40)).domain();
+    let in_flight = ns_ticks(iii::IN_FLIGHT_NS);
+    let at_or_after = |t: i64| sample_at_or_after(origin, per, t);
+    let next_k = ezsdr_radio::staging::stop_sample(stop_root, in_flight, at_or_after);
+    let n1_at = TimePoint::new(domain, next_k);
+    let n1 = run.submit(verb("send", resource("radio/tx/s0"), Some(n1_at), &[]), Some(&next)).unwrap();
+    lateness.book("N1", Some(iii::stop_margin_deadline(stop_root)), &n1);
+    let next2_k = iii::stop_after_margin_sample(stop_root, ns_ticks(iii::STOP_MARGIN_NS), in_flight, at_or_after);
+    let n2_at = TimePoint::new(domain, next2_k);
+    if let Some(lag) = n2_lag {
+        let n2_deadline = origin + next2_k * per - ns_ticks(iii::WINDOW_LEAD_NS);
+        while now_root(&run) < n2_deadline + lag {
+            wait(&mut run, ms(1) / 4);
+        }
+    }
+    let n2 = book_timed(&mut run, &mut lateness, "N2", "send", n2_at, &[], &after_margin);
+    wait(&mut run, ms(80));
+    let manifest = run.finish();
+    lateness.time_errors = iii::time_error_pairs(&manifest);
+    StopTrial {
+        refusals: refusals_of(&manifest, &n1),
+        admitted: admitted(&n1),
+        n2_refusals: refusals_of(&manifest, &n2),
+        n2_admitted: admitted(&n2),
+        n2_late: late_arrivals(&manifest, next2_k),
+        manifest,
+        probe,
+        stop_root,
+        next_root: origin + next_k * per,
+        next_k,
+        origin,
+        per,
+        n1_stamp: stamp_of(&n1),
+        next2_root: origin + next2_k * per,
+        lateness,
+        _dir: dir,
+    }
+}
+
+/// The Kernel's stamp of an entry in root ticks.
+fn stamp_of(entry: &LogEntry) -> i64 {
+    entry.time.ticks_in(entry.time.domain()).unwrap()
+}
+
+/// The verdict of T3 (b)'s Session case, N1 only: the booking's admission and refusals (`iii::stop_booking_verdict`, S3), the faults (N2's own late
+/// drops are N2's verdict's, not N1's), and the next tone's onset against the repeat's loop delay. An overlap refusal is INCONCLUSIVE on hardware,
+/// where the Stop's receipt is not read.
 pub fn stop_next_verdict(trial: &StopTrial) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
     let onset = tone_onset_of(&trial.manifest, trial.next_root - ms(2), 200e3).map(|t| (t - trial.next_root) / PER_1MSPS);
-    iii::stop_booking_verdict(trial.admitted, &trial.refusals, iii::run_faults(&trial.manifest), onset, first_delay_samples(&trial.manifest, 100e3), ONSET_TOLERANCE)
+    iii::stop_booking_verdict(
+        trial.admitted,
+        &trial.refusals,
+        iii::without_late_drops(iii::run_faults(&trial.manifest), trial.n2_late.len()),
+        onset,
+        first_delay_samples(&trial.manifest, 100e3),
+        ONSET_TOLERANCE,
+    )
+}
+
+/// The verdict of N2, the booking past the bound of any receipt within the margin: it must play (RM-16), so any refusal is a FAIL; a late N1 (the
+/// margin did not hold) and N2's own late drop are host latency, INCONCLUSIVE (`iii::stop_after_margin_verdict`, `iii::late_arrival_verdict_of`); any other
+/// fault is a FAIL.
+pub fn stop_after_margin_verdict(trial: &StopTrial) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
+    if let Some(late) = iii::late_arrival_verdict_of("N2", &trial.n2_late, &trial.n2_refusals, iii::run_faults(&trial.manifest)) {
+        return late;
+    }
+    let onset = tone_onset_of(&trial.manifest, trial.next2_root - ms(2), 300e3).map(|t| (t - trial.next2_root) / PER_1MSPS);
+    iii::stop_after_margin_verdict(
+        trial.stop_root,
+        trial.n1_stamp,
+        trial.n2_admitted,
+        &trial.n2_refusals,
+        iii::run_faults(&trial.manifest),
+        onset,
+        first_delay_samples(&trial.manifest, 100e3),
+        ONSET_TOLERANCE,
+    )
+}
+
+/// The Fake-only check of N1 (the receipt is a timing row there): the Stop's `tx_stop_applied` row holds the instant the Provider received it, and N1 at
+/// `trial.next_k` is refused below `stop_sample` of that instant and accepted at it, with the Provider's own `bound` left out of the oracle.
+pub fn stop_n1_check(trial: &StopTrial) -> Result<(), String> {
+    let rows: Vec<&Json> = section(&trial.manifest, "timing").as_array().into_iter().flatten().filter(|row| row["what"] == "tx_stop_applied").collect();
+    let [row] = rows[..] else { return Err(format!("expected one tx_stop_applied row, found {rows:?}")) };
+    let receipt = row["at"].as_i64().ok_or("the tx_stop_applied row has no `at`")?;
+    let refused = !trial.refusals.is_empty();
+    match iii::stop_n1_expectation(trial.next_k, receipt, ns_ticks(iii::IN_FLIGHT_NS), |t| sample_at_or_after(trial.origin, trial.per, t)) {
+        iii::StopExpect::Refused if refused && trial.refusals.iter().all(|reason| reason.contains("overlaps an accepted booking")) => Ok(()),
+        iii::StopExpect::Accepted if !refused => Ok(()),
+        expect => Err(format!("N1 at sample {} for a Stop received at {receipt}: expected {expect:?}, refusals {:?}", trial.next_k, trial.refusals)),
+    }
+}
+
+/// The Fake-only check of N2's played path: it is admitted and not refused, the device was sent a timed burst at its booked instant, and acknowledged
+/// one burst from there on.
+pub fn stop_n2_check(trial: &StopTrial) -> Result<(), String> {
+    if !trial.n2_admitted || !trial.n2_refusals.is_empty() {
+        return Err(format!("N2 was admitted {}, refused {:?}", trial.n2_admitted, trial.n2_refusals));
+    }
+    if !data_sends(&trial.probe).iter().any(|row| row["at"] == trial.next2_root) {
+        return Err(format!("no device send at N2's booked instant {}: {:?}", trial.next2_root, data_sends(&trial.probe)));
+    }
+    let acks = section(&trial.manifest, "async")
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["code"] == "BurstAck" && row["tx_flush"] != true && row["tick"].as_i64().is_some_and(|tick| tick >= trial.next2_root))
+        .count();
+    if acks != 1 {
+        return Err(format!("{acks} BurstAck(s) from N2's instant {} on, expected one: {}", trial.next2_root, section(&trial.manifest, "async")));
+    }
+    Ok(())
 }
 
 /// The sample of a clock at or after root tick `root`, on a clock whose sample `k` is at `origin + k * per` (the record's `at_or_after`).
@@ -576,21 +838,25 @@ pub struct StopEnd {
     pub refusals: Vec<String>,
     pub submit_root: i64,
     pub stop_root: i64,
+    pub lateness: iii::Lateness,
     _dir: TempDir,
 }
 
 pub fn stop_end_trial(mut run: Run, dir: TempDir) -> StopEnd {
     let (bytes, _) = waveform_of(&tone_wave(1e6, 1_000, 100e3));
     let at = after_ticks(&run, ms(5));
-    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(100_000))]), None).unwrap()));
-    let repeat = run.submit(verb("start_repeat", resource("radio/tx/s0"), Some(tx_at(&run, ms(15))), &[]), Some(&bytes)).unwrap();
+    let mut lateness = iii::Lateness::default();
+    book_capture(&mut run, &mut lateness, at, 100_000);
+    let repeat_at = tx_at(&run, ms(15));
+    let repeat = book_timed(&mut run, &mut lateness, "repeat", "start_repeat", repeat_at, &[], &bytes);
     let _ = run.advance_to(TimePoint::new(at.domain(), at.ticks_in(at.domain()).unwrap() + ms(70)));
     let submit_root = now_root(&run);
-    let stop = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None).unwrap();
+    let stop = book_stop(&mut run, &mut lateness).unwrap();
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let manifest = run.finish();
-    StopEnd { refusals: refusals_of(&manifest, &repeat), admitted: admitted(&repeat), manifest, submit_root, stop_root: stop.time.ticks_in(stop.time.domain()).unwrap(), _dir: dir }
+    lateness.time_errors = iii::time_error_pairs(&manifest);
+    StopEnd { refusals: refusals_of(&manifest, &repeat), admitted: admitted(&repeat), manifest, submit_root, stop_root: stamp_of(&stop), lateness, _dir: dir }
 }
 
 /// T6's tolerance in root ticks: the 100-sample edge resolution plus the 50-sample loop-delay spread (both INFERRED), at the transmit clock.
@@ -601,5 +867,8 @@ pub fn stop_end_tolerance(manifest: &Manifest) -> i64 {
 /// T6's verdict for one trial: the repeat is admitted and not refused (a FAIL otherwise), and the loop stops hearing it at its recorded end
 /// within the tolerance (`iii::stop_end_verdict`).
 pub fn stop_end_outcome(trial: &StopEnd) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
     iii::all_of(vec![iii::admission_verdict(trial.admitted, &trial.refusals), iii::stop_end_verdict(heard_until(&trial.manifest), recorded_end(&trial.manifest), stop_end_tolerance(&trial.manifest))])
 }

@@ -88,6 +88,33 @@ fn infra_fixture_timing_once() {
     }
 }
 
+/// A rehearsal's trial that carries lateness evidence: a `radio.TIME_ERROR` the Provider reported as host lateness (cause `late`, outcome `drop`).
+fn late_trial() -> iii::Lateness {
+    iii::Lateness { time_errors: vec![("late".to_owned(), "drop".to_owned())], booked: vec![] }
+}
+
+/// T3 (note 51 stage 2c): a `Rehearsal` with one skipped trial, then a trial that fails plainly. The plain failure panics at its trial, so `finish` is never
+/// reached and no `EZSDR-TIMING:` marker is written: the runners count the test as killed, not re-run it.
+#[test]
+fn infra_fixture_trials_plain_failure() {
+    if selected("trials_plain_failure") {
+        let mut rehearsal = Rehearsal::new();
+        rehearsal.trial("late", &late_trial(), || unreachable!("a trial with evidence is not judged"));
+        rehearsal.trial("judged", &iii::Lateness::default(), || panic!("the fixture's plain failure"));
+        rehearsal.finish();
+    }
+}
+
+/// T4 (note 51 stage 2c): a `Rehearsal` whose every trial is skipped. `finish` writes the `EZSDR-TIMING:` marker on every run, so the serial re-runs stay marked.
+#[test]
+fn infra_fixture_trials_all_skipped() {
+    if selected("trials_all_skipped") {
+        let mut rehearsal = Rehearsal::new();
+        rehearsal.trial("late", &late_trial(), || unreachable!("a trial with evidence is not judged"));
+        rehearsal.finish();
+    }
+}
+
 /// A fixture's setup that does not reach the state the fixture needs says so with a marker: the run that follows would otherwise end in
 /// the fixture's own sentinel assertion, which reads as a kill.
 fn setup<T>(what: &str, step: impl FnOnce() -> T) -> T {

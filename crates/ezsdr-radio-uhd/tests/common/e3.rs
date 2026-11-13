@@ -14,24 +14,43 @@ use ezsdr_kernel::time::TimePoint;
 use serde_json::Value as Json;
 
 use super::iii;
-use super::n47s5::{data_sends, transmit_root};
+use super::n47s5::{data_sends, ns_ticks, transmit_root};
 use super::probe_device::ProbeDevice;
 use super::raw::tone_wave;
 use super::tone::Verdict;
 use super::*;
 
+/// Books a transmit send at `at` with its deadline: the instant less the Provider's device lead (`iii::WINDOW_LEAD_NS`).
+fn book_send(run: &mut Run, lateness: &mut iii::Lateness, what: &'static str, at: TimePoint, wave: &[u8]) {
+    let deadline = transmit_root(run, &at) - ns_ticks(iii::WINDOW_LEAD_NS);
+    let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(wave)).unwrap();
+    lateness.book(what, Some(deadline), &entry);
+}
+
+/// What one case of `hw_s1_short_first_sends` read: the Manifest, the samples of the first burst, the acknowledgements before and after the second
+/// burst's instant.
+pub struct ShortFirstTrial {
+    pub manifest: Manifest,
+    pub samples: usize,
+    pub before: usize,
+    pub after: usize,
+    pub lateness: iii::Lateness,
+}
+
 /// `hw_s1_short_first_sends` for one case: a burst of `samples` samples (1 to 4) at 40 ms, then a 10 000-sample burst 10 000 samples later, in
-/// the transmit Session `run`. The verdict is `iii::short_first_send_verdict`.
-pub fn short_first_case(mut run: Run, samples: usize) -> Verdict {
+/// the transmit Session `run`.
+pub fn short_first_trial(mut run: Run, samples: usize) -> ShortFirstTrial {
     let (short, _) = waveform_of(&[(0.4f32, 0.0f32); 4][..samples]);
     let (long, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
     let a = tx_at(&run, ms(40));
     let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + 10_000);
-    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&short)).unwrap()));
-    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&long)).unwrap()));
+    let mut lateness = iii::Lateness::default();
+    book_send(&mut run, &mut lateness, "A", a, &short);
+    book_send(&mut run, &mut lateness, "B", b, &long);
     wait(&mut run, ms(200));
     let long_root = transmit_root(&run, &b);
     let manifest = run.finish();
+    lateness.time_errors = iii::time_error_pairs(&manifest);
     let acks: Vec<i64> =
         section(&manifest, "async").as_array().into_iter().flatten().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] != true).filter_map(|row| row["tick"].as_i64()).collect();
     let (before, after) = (acks.iter().filter(|tick| **tick < long_root).count(), acks.iter().filter(|tick| **tick >= long_root).count());
@@ -42,7 +61,20 @@ pub fn short_first_case(mut run: Run, samples: usize) -> Verdict {
         section(&manifest, "async"),
         section(&manifest, "bursts")
     );
-    iii::short_first_send_verdict(samples, iii::run_faults(&manifest), before, after)
+    ShortFirstTrial { manifest, samples, before, after, lateness }
+}
+
+/// The verdict of a short-first case: `iii::short_first_send_verdict`.
+pub fn short_first_verdict(trial: &ShortFirstTrial) -> Verdict {
+    if let Some(refused) = iii::kernel_refused(&trial.lateness) {
+        return refused;
+    }
+    iii::short_first_send_verdict(trial.samples, iii::run_faults(&trial.manifest), trial.before, trial.after)
+}
+
+/// `hw_s1_short_first_sends` for one case as the bench runs it: the trial and its verdict.
+pub fn short_first_case(run: Run, samples: usize) -> Verdict {
+    short_first_verdict(&short_first_trial(run, samples))
 }
 
 /// `hw_txp_b0_send_sizes` for one rate: a 31 000-sample repeat in the transmit Session `run` (whose profile asked the rate and gain 0 dB at
@@ -101,18 +133,29 @@ pub fn timed_chunks_case(probe: &ProbeDevice, manifest: &Manifest) -> TimedChunk
     TimedChunks { verdict: iii::timed_sends_verdict(faults, &counts), closing }
 }
 
-/// A trial of `hw_p70_one_sample_burst_then_timed_burst` as far as the fake shows it: `samples` samples at 40 ms, a 10 000-sample burst 5 000
-/// samples after it, booked with it. Returns the device sends in order and the root ticks of the two booked instants (the bench's capture and
-/// onset read the tone, which the fake does not show).
-pub fn one_sample_pair(mut run: Run, probe: &ProbeDevice, samples: usize) -> (Vec<Json>, i64, i64) {
+/// What one trial of `hw_p70_one_sample_burst_then_timed_burst` read as far as the fake shows it: the device sends in order, the root ticks of the two
+/// booked instants (the bench's capture and onset read the tone, which the fake does not show), the Manifest and what the trial read of its timing.
+pub struct PairTrial {
+    pub sends: Vec<Json>,
+    pub a_root: i64,
+    pub b_root: i64,
+    pub manifest: Manifest,
+    pub lateness: iii::Lateness,
+}
+
+/// A trial of `hw_p70_one_sample_burst_then_timed_burst`: `samples` samples `a_lead` root ticks from now (40 ms on the bench), a 10 000-sample burst
+/// 5 000 samples after it, booked with it.
+pub fn one_sample_pair(mut run: Run, probe: &ProbeDevice, samples: usize, a_lead: i64) -> PairTrial {
     let (first, _) = waveform_of(&[(0.4f32, 0.0f32); 4][..samples]);
     let (tone, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
-    let a = tx_at(&run, ms(40));
+    let a = tx_at(&run, a_lead);
     let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + 5_000);
-    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&first)).unwrap()));
-    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&tone)).unwrap()));
+    let mut lateness = iii::Lateness::default();
+    book_send(&mut run, &mut lateness, "A", a, &first);
+    book_send(&mut run, &mut lateness, "B", b, &tone);
     let (a_root, b_root) = (transmit_root(&run, &a), transmit_root(&run, &b));
     wait(&mut run, ms(200));
-    let _ = run.finish();
-    (data_sends(probe), a_root, b_root)
+    let manifest = run.finish();
+    lateness.time_errors = iii::time_error_pairs(&manifest);
+    PairTrial { sends: data_sends(probe), a_root, b_root, manifest, lateness }
 }

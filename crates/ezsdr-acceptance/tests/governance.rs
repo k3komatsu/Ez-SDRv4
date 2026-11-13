@@ -685,3 +685,251 @@ fn run_scan_the_diagnostic_door_is_the_only_handle_call() {
     assert_eq!(scan(PROTOCOL, "fn t() { handle(&mut s, r, b); }").len(), 0, "the door itself");
     assert_eq!(scan(FAKE, "fn t() { s.handle(r, b); }").len(), 0, "only protocol.rs");
 }
+
+// ---------------------------------------------------------------- the rehearsals' wiring (note 51 stage 2c)
+//
+// A rehearsal test judges each trial through `Rehearsal::trial` and ends in `Rehearsal::finish`. No load-free run and no mutation row notices a wrapper that
+// was dropped at one trial site (with no lateness evidence the bare assert passes), a `finish()` that is gone (skipped trials then pass silently) or an
+// old assert left beside a wrapper. `rehearsal_findings` counts them in the text of the test file, against a table the reviewed diff carries.
+
+/// What one rehearsal test must contain, outside comments and strings: `Rehearsal::new()` once; `sites` calls of `.trial(`; `.finish()` once, after the last
+/// of them; and, outside every `.trial(…)` span: `direct` occurrences of `Verdict::Inconclusive` (the deliberately late cases, judged by the shared verdict),
+/// `outside` assert-family macros and `calls` calls of a function whose name ends in `_verdict` or `_outcome`.
+struct Site {
+    test: &'static str,
+    sites: usize,
+    direct: usize,
+    outside: usize,
+    calls: usize,
+}
+
+/// The rehearsals that keep their own tolerance and must not go through `Rehearsal` (the stage 2c plan, §2.2).
+const LEFT_ALONE: [&str; 3] = ["rehearsal_b7_refusal_holds_on_a_two_board_layout", "rehearsal_b7_session_loopback", "rehearsal_b7_session_loopback_on_one_obx"];
+
+const ASSERT_MACROS: &[&str] = &["assert", "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq", "debug_assert_ne", "panic", "unreachable"];
+
+/// The token range of the body of `fn name`, braces excluded.
+fn fn_body(toks: &[Tok], name: &str) -> Option<std::ops::Range<usize>> {
+    let at = (0..toks.len()).find(|&i| toks[i].text == "fn" && toks.get(i + 1).is_some_and(|tok| tok.text == name))?;
+    let (mut nest, mut open) = (0usize, None);
+    for (i, tok) in toks.iter().enumerate().skip(at) {
+        match tok.text.as_str() {
+            "(" | "[" => nest += 1,
+            ")" | "]" => nest = nest.saturating_sub(1),
+            "{" if nest == 0 => {
+                open = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let open = open?;
+    let mut depth = 0usize;
+    for (i, tok) in toks.iter().enumerate().skip(open) {
+        match tok.text.as_str() {
+            "{" => depth += 1,
+            "}" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + 1..i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The index of the `)` that closes the `(` at `open`.
+fn paren_close(toks: &[Tok], open: usize) -> usize {
+    let mut depth = 0usize;
+    for (i, tok) in toks.iter().enumerate().skip(open) {
+        match tok.text.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+    }
+    toks.len()
+}
+
+/// Whether token `i` is the name of an assert-family macro call: an exact name (so `debug_assert!` is its own name and `my_assert!` is none), followed by
+/// `!`, and not a method name.
+fn is_assert_macro(toks: &[Tok], i: usize) -> bool {
+    ASSERT_MACROS.contains(&toks[i].text.as_str()) && toks.get(i + 1).is_some_and(|tok| tok.text == "!") && !(i > 0 && toks[i - 1].text == ".")
+}
+
+fn rehearsal_findings(source: &str, table: &[Site]) -> Vec<String> {
+    let toks = tokens(&blank(source));
+    let mut findings = Vec::new();
+    for site in table {
+        let Some(body) = fn_body(&toks, site.test) else {
+            findings.push(format!("{}: no such fn", site.test));
+            continue;
+        };
+        let at = |pattern: &[&str]| -> Vec<usize> { body.clone().filter(|&i| at_pattern(&toks, i, pattern)).collect() };
+        let news = at(&["Rehearsal", ":", ":", "new", "(", ")"]);
+        let spans: Vec<(usize, usize)> = at(&[".", "trial", "("]).into_iter().map(|i| (i, paren_close(&toks, i + 2))).collect();
+        let finishes = at(&[".", "finish", "(", ")"]);
+        let in_span = |i: usize| spans.iter().any(|&(open, close)| open <= i && i <= close);
+        let found_sites = spans.len();
+        let found_direct = at(&["Verdict", ":", ":", "Inconclusive"]).into_iter().filter(|&i| !in_span(i)).count();
+        let found_outside = body.clone().filter(|&i| is_assert_macro(&toks, i) && !in_span(i)).count();
+        let found_calls =
+            body.clone().filter(|&i| (toks[i].text.ends_with("_verdict") || toks[i].text.ends_with("_outcome")) && toks.get(i + 1).is_some_and(|tok| tok.text == "(") && !in_span(i)).count();
+        if news.len() != 1 {
+            findings.push(format!("{}: Rehearsal::new() found {} of 1", site.test, news.len()));
+        }
+        if found_sites != site.sites {
+            findings.push(format!("{}: .trial( sites {found_sites} of {}", site.test, site.sites));
+        }
+        if finishes.len() != 1 {
+            findings.push(format!("{}: .finish() found {} of 1", site.test, finishes.len()));
+        } else if spans.iter().map(|&(_, close)| close).max().is_some_and(|close| finishes[0] < close) {
+            findings.push(format!("{}: .finish() is not after the last .trial(", site.test));
+        }
+        if found_direct != site.direct {
+            findings.push(format!("{}: Verdict::Inconclusive outside the spans {found_direct} of {}", site.test, site.direct));
+        }
+        if found_outside != site.outside {
+            findings.push(format!("{}: assert-family macros outside the spans: outside {found_outside} of {}", site.test, site.outside));
+        }
+        if found_calls != site.calls {
+            findings.push(format!("{}: *_verdict( / *_outcome( calls outside the spans: calls {found_calls} of {}", site.test, site.calls));
+        }
+    }
+    for name in LEFT_ALONE {
+        if let Some(body) = fn_body(&toks, name) {
+            if body.clone().any(|i| at_pattern(&toks, i, &["Rehearsal", ":", ":"])) {
+                findings.push(format!("{name}: a rehearsal that keeps its tolerance goes through Rehearsal"));
+            }
+        }
+    }
+    findings
+}
+
+/// The ten rehearsals of `fake.rs` (note 51 stage 2c, §1.6; the tenth is the Stop's late N2, fix 1), counted in the final text. `outside` counts the
+/// assert-family macros the bodies keep beside their wrappers: p70's cross-trial comparison with its `else` branch's `panic!`, and the late N2's `assert_eq!`
+/// that N2's drop is there (the held tail's two deliberately late cases are wrapped sites too, with a `Lateness` less C's own late drop); `calls` counts `*_verdict(` and `*_outcome(` calls beside the wrappers: none.
+const REHEARSALS: &[Site] = &[
+    Site { test: "n47s5_front_rehearsal_on_the_fake", sites: 1, direct: 0, outside: 0, calls: 0 },
+    Site { test: "n47s5_long_close_rehearsal_on_the_fake", sites: 1, direct: 0, outside: 0, calls: 0 },
+    Site { test: "n47s5_repeat_switch_rehearsal_on_the_fake", sites: 1, direct: 0, outside: 0, calls: 0 },
+    Site { test: "n47s5_untimed_rehearsal_on_the_fake", sites: 2, direct: 0, outside: 0, calls: 0 },
+    Site { test: "n47s5_held_tail_and_stop_rehearsal_on_the_fake", sites: 6, direct: 0, outside: 0, calls: 0 },
+    Site { test: "n47s5_stop_n2_late_drop_is_host_latency_on_both_lines", sites: 1, direct: 0, outside: 1, calls: 0 },
+    Site { test: "n47s5_stop_end_rehearsal_on_the_fake", sites: 1, direct: 0, outside: 0, calls: 0 },
+    Site { test: "n47s5_one_sample_after_a_burst_refusal_rehearsal_on_the_fake", sites: 1, direct: 0, outside: 0, calls: 0 },
+    Site { test: "s1_short_first_sends_rehearsal_on_the_fake", sites: 1, direct: 0, outside: 0, calls: 0 },
+    Site { test: "p70_one_sample_burst_then_timed_burst_rehearsal_on_the_fake", sites: 1, direct: 0, outside: 2, calls: 0 },
+];
+
+#[test]
+fn the_rehearsal_sites_are_wired() {
+    let source = fs::read_to_string(workspace_root().join(FAKE)).unwrap();
+    let found = rehearsal_findings(&source, REHEARSALS);
+    assert!(found.is_empty(), "the rehearsals' wiring (note 51 stage 2c):\n{}", found.join("\n"));
+}
+
+#[cfg(test)]
+mod rehearsal_wiring_tests {
+    use super::*;
+
+    const TRIAL: &str = "rehearsal.trial(\"a\", &t.lateness, || { let o = front_outcome(&t); assert!(!matches!(o, Verdict::Fail(_)), \"{o:?}\"); });";
+    const TWO: Site = Site { test: "two", sites: 2, direct: 0, outside: 0, calls: 0 };
+
+    /// A test `two` with `trials` wrapped sites, `before` between its setup and the sites and `tail` after them.
+    fn source(trials: usize, before: &str, tail: &str) -> String {
+        format!("fn two() {{\n let mut rehearsal = Rehearsal::new();\n let t = trial();\n {before}\n {}\n {tail}\n}}\nfn other() {{ rehearsal.trial(\"x\", &l, || {{}}); }}\n", TRIAL.repeat(trials))
+    }
+
+    fn findings(source: &str, table: &[Site]) -> Vec<String> {
+        rehearsal_findings(source, table)
+    }
+
+    fn one_finding(source: &str, table: &[Site], needle: &str) {
+        let found = findings(source, table);
+        assert!(found.len() == 1 && found[0].contains(needle), "wanted one finding with {needle:?}, got {found:?}");
+    }
+
+    #[test]
+    fn rehearsal_findings_flags_a_site_removed_and_a_site_added() {
+        assert_eq!(findings(&source(2, "", "rehearsal.finish();"), &[TWO]), Vec::<String>::new(), "a conforming source, with a `.trial(` in another fn");
+        one_finding(&source(1, "", "rehearsal.finish();"), &[TWO], "sites 1 of 2");
+        one_finding(&source(3, "", "rehearsal.finish();"), &[TWO], "sites 3 of 2");
+        let table = [Site { sites: 6, direct: 0, outside: 0, calls: 0, test: "held" }];
+        let held = |trials: usize, n7: &str| format!("fn held() {{ let mut rehearsal = Rehearsal::new(); {} {n7} rehearsal.finish(); }}", TRIAL.repeat(trials));
+        assert_eq!(findings(&held(6, ""), &table), Vec::<String>::new(), "the held-tail shape: six wrapped sites, the two late cases among them");
+        let n7 = "let o = held_refused_verdict(&late); assert!(matches!(o, Verdict::Inconclusive(_)));";
+        let found = findings(&held(5, n7), &table);
+        assert!(found.iter().any(|text| text.contains("sites 5 of 6")), "an N7 case left unwrapped is a finding: {found:?}");
+        assert!(found.iter().any(|text| text.contains("Verdict::Inconclusive outside the spans 1 of 0")), "{found:?}");
+        assert!(found.iter().any(|text| text.contains("outside 1 of 0")) && found.iter().any(|text| text.contains("calls 1 of 0")), "{found:?}");
+    }
+
+    #[test]
+    fn rehearsal_findings_flags_finish_and_new() {
+        one_finding(&source(2, "", ""), &[TWO], ".finish() found 0 of 1");
+        one_finding(&source(2, "", "rehearsal.finish(); rehearsal.finish();"), &[TWO], ".finish() found 2 of 1");
+        let early = format!("fn two() {{ let mut rehearsal = Rehearsal::new(); let t = trial(); {TRIAL} rehearsal.finish(); {TRIAL} }}");
+        one_finding(&early, &[TWO], "not after the last .trial(");
+        one_finding(&source(2, "", "rehearsal.finish();").replace("Rehearsal::new()", "Default::default()"), &[TWO], "Rehearsal::new() found 0 of 1");
+        one_finding(&source(2, "let again = Rehearsal::new();", "rehearsal.finish();"), &[TWO], "Rehearsal::new() found 2 of 1");
+    }
+
+    #[test]
+    fn rehearsal_findings_ignores_comments_and_strings_and_checks_the_left_alone_tests() {
+        let one = Site { sites: 1, ..TWO };
+        assert_eq!(findings(&source(1, "// rehearsal.trial(\"c\", &t, || {});\n let s = \"rehearsal.trial(\";", "rehearsal.finish();"), &[one]), Vec::<String>::new(), "text is not a site");
+        let only_text = "fn two() { let mut rehearsal = Rehearsal::new(); // rehearsal.trial(\"c\", &t, || {});\n let s = \"rehearsal.trial(\"; rehearsal.finish(); }";
+        one_finding(only_text, &[Site { sites: 1, ..TWO }], "sites 0 of 1");
+        let left = format!("fn {}() {{ let mut rehearsal = Rehearsal::new(); }}", LEFT_ALONE[1]);
+        let found = findings(&left, &[]);
+        assert!(found.len() == 1 && found[0].contains(LEFT_ALONE[1]), "{found:?}");
+        assert!(findings(&format!("fn {}() {{ let x = 1; }}", LEFT_ALONE[1]), &[]).is_empty(), "a left-alone test without Rehearsal is fine");
+    }
+
+    #[test]
+    fn rehearsal_findings_counts_asserts_outside_the_spans() {
+        let finish = "rehearsal.finish();";
+        assert!(findings(&source(2, "", finish), &[TWO]).is_empty(), "the asserts inside the spans are not counted as outside");
+        one_finding(&source(2, "assert!(!matches!(o, Verdict::Fail(_)));", finish), &[TWO], "outside 1 of 0");
+        for text in ["assert_eq!(a, b);", "assert_ne!(a, b);", "panic!(\"x\");", "unreachable!();"] {
+            one_finding(&source(2, text, finish), &[TWO], "outside 1 of 0");
+        }
+        one_finding(&source(2, "assert!(a);", finish), &[Site { outside: 2, ..TWO }], "outside 1 of 2");
+        assert!(findings(&source(2, "assert!(a); assert!(b);", finish), &[Site { outside: 2, ..TWO }]).is_empty());
+        one_finding(&source(2, "", finish), &[Site { outside: 1, ..TWO }], "outside 0 of 1");
+        assert!(findings(&source(2, "if let [a, b] = trials[..] { assert_eq!(a.1, b.1) }", finish), &[Site { outside: 1, ..TWO }]).is_empty());
+    }
+
+    #[test]
+    fn rehearsal_findings_ignores_assert_names_in_comments_and_strings() {
+        let before = "// assert!(x);\n let s = \"panic!(...)\"; /* assert_eq!(a, b) */ let r = r#\"unreachable!()\"#;";
+        assert!(findings(&source(2, before, "rehearsal.finish();"), &[TWO]).is_empty());
+    }
+
+    #[test]
+    fn rehearsal_findings_matches_names_on_identifier_boundaries() {
+        let finish = "rehearsal.finish();";
+        assert!(findings(&source(2, "debug_assert!(x);", finish), &[Site { outside: 1, ..TWO }]).is_empty(), "debug_assert! is a name of its own, counted once");
+        one_finding(&source(2, "debug_assert!(x);", finish), &[TWO], "outside 1 of 0");
+        for text in ["my_assert!(x);", "reassert!(x);", "r.assert!(x);", "assert_these!(x);"] {
+            assert!(findings(&source(2, text, finish), &[TWO]).is_empty(), "{text} is no assert-family macro");
+        }
+    }
+
+    #[test]
+    fn rehearsal_findings_counts_verdict_calls_outside_the_spans() {
+        one_finding(&source(2, "let o = front_outcome(&t);", "rehearsal.finish();"), &[TWO], "calls 1 of 0");
+        one_finding(&source(2, "let o = held_refused_verdict(&t);", "rehearsal.finish();"), &[TWO], "calls 1 of 0");
+        assert!(findings(&source(2, "let o = held_played_verdict(&t, 2);", "rehearsal.finish();"), &[Site { calls: 1, ..TWO }]).is_empty());
+        one_finding(&source(2, "", "rehearsal.finish();"), &[Site { calls: 1, ..TWO }], "calls 0 of 1");
+        assert!(findings(&source(2, "let o = a_verdict_helper(&t); let p = trial_run(&t);", "rehearsal.finish();"), &[TWO]).is_empty(), "only names ending in _verdict or _outcome");
+    }
+}

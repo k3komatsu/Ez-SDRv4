@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration as Wall;
 
 use ezsdr_kernel::manifest::Manifest;
+use ezsdr_kernel::session::LogEntry;
 use ezsdr_radio_uhd::{Device, Dir, Iq, Settings};
 use serde_json::{Value as Json, json};
 
@@ -16,7 +17,7 @@ use super::measurement::TrialClass;
 use super::n47;
 use super::raw::{TICKS_PER_MS, align_to, d9_channel, drain, iq, pin_slot_a, raw_rx, raw_tx, read, send_burst, tone_wave, wait_burst_ack};
 use super::tone::{PER_1MSPS, Verdict, contiguous_windows_at, first_ms_frequency, window_tone_at};
-use super::{effective_layout, events_of, section, set_selector_override};
+use super::{admitted, effective_layout, events_of, section, set_selector_override};
 use ezsdr_radio::staging::Bookings;
 
 /// The transmit faults a Run reports: its `radio.TIME_ERROR` and `radio.TX_UNDERFLOW` events, and the async section's
@@ -90,9 +91,19 @@ pub fn short_first_send_verdict(samples: usize, faults: Faults, acks_before: usi
     }
 }
 
+/// The `(cause, outcome)` of one `radio.TIME_ERROR` payload (empty text when a field is missing).
+pub fn time_error_pair(payload: &Json) -> (String, String) {
+    (payload["cause"].as_str().unwrap_or_default().to_owned(), payload["outcome"].as_str().unwrap_or_default().to_owned())
+}
+
+/// The `(cause, outcome)` of a Run's `radio.TIME_ERROR` events, in order: the one reader of those payloads.
+pub fn time_error_pairs(manifest: &Manifest) -> Vec<(String, String)> {
+    events_of(manifest, "radio.TIME_ERROR").iter().map(|event| time_error_pair(&event.payload)).collect()
+}
+
 /// The `radio.TIME_ERROR` causes of a Run, in order (the payload's `cause`; empty when it has none).
 pub fn time_error_causes(manifest: &Manifest) -> Vec<String> {
-    events_of(manifest, "radio.TIME_ERROR").iter().map(|event| event.payload["cause"].as_str().unwrap_or_default().to_owned()).collect()
+    time_error_pairs(manifest).into_iter().map(|(cause, _)| cause).collect()
 }
 
 /// `hw_b8_burst_one_sample_after_a_burst`'s negative control: `expected_late` `radio.TIME_ERROR` (0 or 1), each with cause
@@ -418,9 +429,14 @@ pub fn gap_trial_outcome(acks: usize) -> &'static str {
 
 /// T3 (b)'s Session case (S3): the record's first sample after a Stop is the Provider's bound from its own receipt of the Stop, which the
 /// Manifest does not record, so a booking at the Kernel's instant can be refused by the host latency alone (FakeDevice: refused at the
-/// Kernel's bound, accepted 0.2 ms later). Only the overlap refusal is INCONCLUSIVE and printed; any other refusal is a FAIL. The raw case
-/// (b) is the decisive one.
+/// Kernel's bound, accepted 0.2 ms later). Only the overlap refusal is INCONCLUSIVE and printed; any other refusal, and any fault, is a FAIL. The raw
+/// case (b) is the decisive one.
 pub fn stop_booking_verdict(admitted: bool, refusals: &[String], faults: Faults, onset_offset: Option<i64>, delay: Option<i64>, tolerance: i64) -> Verdict {
+    // A fault of the run is no host latency: it is read before the overlap refusal can excuse the case (note 51 §5.3b, Sol M3).
+    let faulted = fault_verdict(faults, 0);
+    if matches!(faulted, Verdict::Fail(_)) {
+        return faulted;
+    }
     if admitted {
         match refusals {
             [] => {}
@@ -441,9 +457,19 @@ pub fn stop_booking_verdict(admitted: bool, refusals: &[String], faults: Faults,
 /// `None` when the branch does not apply (no late drop of the booking, a refusal, or any other fault). The late drop is the same
 /// `TIME_ERROR` at receipt and at dispatch (`control.rs`, `tx.rs`), so the text names both places.
 pub fn late_arrival_verdict(late_by_ns: &[i64], refusals: &[String], faults: Faults) -> Option<Verdict> {
+    late_arrival_verdict_of("C", late_by_ns, refusals, faults)
+}
+
+/// [`late_arrival_verdict`] for the booking called `what` (the Session Stop's N2).
+pub fn late_arrival_verdict_of(what: &str, late_by_ns: &[i64], refusals: &[String], faults: Faults) -> Option<Verdict> {
     let late = *late_by_ns.first()?;
     (refusals.is_empty() && faults.time_errors == late_by_ns.len() && faults.underflows == 0 && faults.async_faults == 0)
-        .then(|| Verdict::Inconclusive(format!("C was late at receipt or at dispatch (late_by {late} ns, after its deadline): host latency or a late dispatch, case not exercised")))
+        .then(|| Verdict::Inconclusive(format!("{what} was late at receipt or at dispatch (late_by {late} ns, after its deadline): host latency or a late dispatch, case not exercised")))
+}
+
+/// The faults of a Run less `own` late drops that belong to another booking's verdict (the Stop's N2 on N1's line): its other faults stay.
+pub fn without_late_drops(faults: Faults, own: usize) -> Faults {
+    Faults { time_errors: faults.time_errors.saturating_sub(own), ..faults }
 }
 
 /// The held tail (`hw_n47s5_held_tail_and_stop`, case f): the device's end-of-burst sends (`data_eobs`, from the ProbeDevice rows;
@@ -463,6 +489,27 @@ pub fn close_verdict(faults: Faults, data_eobs: Option<usize>, expected_eobs: us
         return Verdict::Inconclusive(format!("{acks} BurstAck(s) for {eobs} device burst(s): one each is needed"));
     }
     Verdict::Pass(format!("{eobs} device burst(s) as expected, each acknowledged once, no reported faults"))
+}
+
+/// The long close (`hw_n47s5_a_long_close_at_100_and_200_msps`): the booking at the front is admitted and not refused, no fault, the run took the
+/// long-close shape `shape` (`long_close_shape`), and both bursts were acknowledged once (`acks`). With clean reports a wrong shape is the Provider's
+/// (RM-15, UR-22): a FAIL, not INCONCLUSIVE.
+pub fn long_close_verdict(admitted: bool, refusals: &[String], faults: Faults, shape: Result<(), String>, acks: usize) -> Verdict {
+    let admission = admission_verdict(admitted, refusals);
+    if matches!(admission, Verdict::Fail(_)) {
+        return admission;
+    }
+    let clean = fault_verdict(faults, 0);
+    if matches!(clean, Verdict::Fail(_)) {
+        return clean;
+    }
+    if let Err(why) = shape {
+        return Verdict::Fail(format!("admitted and clean, but the run did not take the long-close shape: {why}"));
+    }
+    match acks {
+        2 => Verdict::Pass("the held tail and one zero closed the first burst, the second started three samples past it; both acknowledged, no late or underflow report".to_owned()),
+        acks => Verdict::Inconclusive(format!("{acks} BurstAck(s) for 2 bursts")),
+    }
 }
 
 /// A booking the record refuses at receipt (RM-15): the Kernel admits the Action, and the Provider refuses it with one
@@ -690,7 +737,8 @@ pub fn armed_record(rate: f64) -> Bookings {
 /// The shape a long close must have for the 3-sample margin check (step F): among the transmit sends `sends` of a probe (`ProbeDevice::rows`,
 /// flushes left out), the send before the last start of burst is the held tail and one zero, two samples on every channel with
 /// end-of-burst and no start, and that start is timed exactly `gap` samples (`per` ticks each) past the close's exclusive end. `Err` says what
-/// differed, so the trial reports INCONCLUSIVE: a delayed turn that sends the last payload with its own end-of-burst closes differently.
+/// differed. With clean reports a wrong shape is the Provider's (RM-15, UR-22), a FAIL ([`long_close_verdict`]): a late Action is a reported
+/// fault, which the verdict reads first.
 pub fn long_close_shape(sends: &[Json], per: i64, gap: i64) -> Result<(), String> {
     let starts: Vec<usize> = sends.iter().enumerate().filter(|(_, row)| row["sob"] == true).map(|(i, _)| i).collect();
     let (Some(&second), true) = (starts.last(), starts.len() >= 2) else {
@@ -1014,6 +1062,137 @@ pub fn cancel_trial_verdict(trial: &CancelTrial) -> Verdict {
             trial.after.len()
         )),
     }
+}
+
+// ---------------------------------------------------------------- note 51 stage 2c (2026-11-13): lateness evidence
+//
+// A rehearsal does not judge a trial that carries evidence of host lateness (note 51 §5.3b); the predicate below only withholds a verdict, it never
+// makes one: `Lateness` holds readings, not faults, refusals or sends.
+
+/// The Provider's device lead, typed here and pinned to `profile::DEVICE_LEAD_NS` by `the_test_side_literals_equal_the_profile`: an Action whose Kernel
+/// stamp is later than its instant less this lead was late at receipt.
+pub const WINDOW_LEAD_NS: i64 = 2_000_000;
+/// The held tail's join point `J(e)` lead (the device lead plus the delivery allowance), likewise pinned.
+pub const JOIN_LEAD_NS: i64 = 5_000_000;
+/// The Stop's in-flight window (`x3xx::timing().tx_in_flight_ns`), likewise pinned.
+pub const IN_FLIGHT_NS: i64 = 10_000_000;
+/// How long after the Stop's instant the next booking may still be submitted for the Provider's bound to be past it (a Fake-measured choice, §3.3).
+pub const STOP_MARGIN_NS: i64 = 5_000_000;
+
+/// What a trial read about its own timing: the `(cause, outcome)` of every `radio.TIME_ERROR` and each Action it booked.
+#[derive(Clone, Debug, Default)]
+pub struct Lateness {
+    pub time_errors: Vec<(String, String)>,
+    pub booked: Vec<Booked>,
+}
+
+/// One Action a trial booked: its instant less the lead (`None` for an untimed Action, a Stop or a switch: never late at receipt), the Kernel's stamp
+/// of its `submit` (the `LogEntry.time`, root ticks), whether the Kernel admitted it, and the error text of a `submit` that returned `Err`.
+#[derive(Clone, Debug)]
+pub struct Booked {
+    pub what: &'static str,
+    pub deadline: Option<i64>,
+    pub stamp: i64,
+    pub admitted: bool,
+    pub detail: Option<String>,
+}
+
+impl Lateness {
+    pub fn book(&mut self, what: &'static str, deadline: Option<i64>, entry: &LogEntry) {
+        self.booked.push(Booked { what, deadline, stamp: entry.time.ticks_in(entry.time.domain()).unwrap(), admitted: admitted(entry), detail: None });
+    }
+
+    /// [`Lateness::book`] for a `submit` result: an `Err` is booked as an Action the Kernel did not take, with its text.
+    pub fn book_submit<E: std::fmt::Display>(&mut self, what: &'static str, deadline: Option<i64>, result: Result<LogEntry, E>) {
+        match result {
+            Ok(entry) => self.book(what, deadline, &entry),
+            Err(error) => self.booked.push(Booked { what, deadline: None, stamp: 0, admitted: false, detail: Some(error.to_string()) }),
+        }
+    }
+}
+
+/// Why this trial must not be judged, or `None` (note 51 §5.3b). Two clauses, both host lateness the spec allows (RM-15): (1) a `radio.TIME_ERROR`
+/// with cause `late` that the Provider did not report as `late_at_device` (that outcome means it handed the burst over in time by its own clock, so
+/// it is judged); (2) an Action whose Kernel stamp is past its deadline (strictly: a receipt exactly at the lead is on time).
+pub fn late_evidence(lateness: &Lateness) -> Option<String> {
+    if let Some((cause, outcome)) = lateness.time_errors.iter().find(|(cause, outcome)| cause == "late" && outcome != "late_at_device") {
+        return Some(format!("a radio.TIME_ERROR with cause {cause}, outcome {outcome}: the Provider reported host lateness"));
+    }
+    for booked in &lateness.booked {
+        let Some(deadline) = booked.deadline else { continue };
+        if booked.stamp > deadline {
+            return Some(format!("{} was submitted {} ticks after its deadline: late at receipt", booked.what, booked.stamp - deadline));
+        }
+    }
+    None
+}
+
+/// The lateness of a trial that books `what` late on purpose (T3 (f)'s N7), less what that booking expects: its deadline (it is submitted past it) and
+/// its own `drops` late drops (`(late, drop)` time errors). Evidence from any other Action stays, so the trial is judged only when `what` alone is late.
+pub fn without_expected_late(lateness: &Lateness, what: &str, drops: usize) -> Lateness {
+    let mut left = drops;
+    let time_errors = lateness
+        .time_errors
+        .iter()
+        .filter(|(cause, outcome)| {
+            let own = left > 0 && cause == "late" && outcome == "drop";
+            left -= usize::from(own);
+            !own
+        })
+        .cloned()
+        .collect();
+    let booked = lateness.booked.iter().map(|booked| if booked.what == what { Booked { deadline: None, ..booked.clone() } } else { booked.clone() }).collect();
+    Lateness { time_errors, booked }
+}
+
+/// A FAIL naming the first Action the Kernel did not admit (or whose `submit` returned `Err`, with that text), `None` when it admitted them all. It is
+/// read before any lateness evidence: a refusal is not host lateness (§5.3 priority 2).
+pub fn kernel_refused(lateness: &Lateness) -> Option<Verdict> {
+    lateness.booked.iter().find(|booked| !booked.admitted).map(|booked| match &booked.detail {
+        Some(error) => Verdict::Fail(format!("{}: the submit returned an error: {error}", booked.what)),
+        None => Verdict::Fail(format!("{}: the Kernel did not admit it", booked.what)),
+    })
+}
+
+/// The root ticks a Stop's next booking may be submitted by, for its bound to be below the booking N2 makes (§3.3).
+pub fn stop_margin_deadline(stop_root: i64) -> i64 {
+    stop_root + super::n47s5::ns_ticks(STOP_MARGIN_NS)
+}
+
+/// N2's sample: the first sample a booking may take after a Stop whose receipt was at most `margin` ticks after `stop_root`.
+pub fn stop_after_margin_sample(stop_root: i64, margin: i64, in_flight: i64, at_or_after: impl Fn(i64) -> i64) -> i64 {
+    ezsdr_radio::staging::stop_sample(stop_root + margin, in_flight, at_or_after)
+}
+
+/// What the Provider must do with the first booking after a Stop, from the Stop's own receipt instant (the `tx_stop_applied` row's `at`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum StopExpect {
+    Refused,
+    Accepted,
+}
+
+/// A booking at sample `next_k` after a Stop received at `receipt` is refused below the record's bound for that receipt and accepted at it (RM-16).
+pub fn stop_n1_expectation(next_k: i64, receipt: i64, in_flight: i64, at_or_after: impl Fn(i64) -> i64) -> StopExpect {
+    if next_k < ezsdr_radio::staging::stop_sample(receipt, in_flight, at_or_after) { StopExpect::Refused } else { StopExpect::Accepted }
+}
+
+/// `hw_n47s5_held_tail_and_stop`'s Session Stop, N2: a booking at [`stop_after_margin_sample`] must play, whatever the Stop's receipt was, as long as N1
+/// was submitted within the margin (the Stop's receipt precedes N1's stamp). A refusal of it, an overlap refusal included, is therefore a FAIL, which is
+/// why it is not `stop_booking_verdict`. Order: a Kernel non-admission, then a fault, are failures nothing excuses; then a late N1 (the guarantee is gone:
+/// host latency, INCONCLUSIVE, as on the bench); then [`booking_verdict`].
+#[allow(clippy::too_many_arguments)]
+pub fn stop_after_margin_verdict(stop_root: i64, n1_stamp: i64, admitted: bool, refusals: &[String], faults: Faults, onset_offset: Option<i64>, delay: Option<i64>, tolerance: i64) -> Verdict {
+    if !admitted {
+        return admission_verdict(admitted, refusals);
+    }
+    let faulted = fault_verdict(faults, 0);
+    if matches!(faulted, Verdict::Fail(_)) {
+        return faulted;
+    }
+    if n1_stamp > stop_margin_deadline(stop_root) {
+        return Verdict::Inconclusive("host latency: N1 was submitted after the margin, so N2's guarantee (past the bound of any receipt within it) does not hold".to_owned());
+    }
+    booking_verdict(admitted, refusals, faults, onset_offset, delay, tolerance)
 }
 
 #[cfg(test)]
@@ -1734,5 +1913,219 @@ mod stage5_tests {
         assert!(matches!(raw_pair_verdict(&[ok(&["BurstAck", "UnderflowInPacket"])]), Verdict::Fail(_)));
         assert!(matches!(raw_pair_verdict(&[ok(&["BurstAck"])]), Verdict::Inconclusive(_)));
         assert!(matches!(raw_pair_verdict(&[]), Verdict::Inconclusive(_)));
+    }
+}
+
+#[cfg(test)]
+mod n51_2c_tests {
+    use super::super::n47s5::{ns_ticks, sample_at_or_after};
+    use super::*;
+
+    const CLEAN: Faults = Faults { time_errors: 0, underflows: 0, async_faults: 0 };
+    const DELAY: i64 = 44;
+    const TOL: i64 = 50;
+    const OVERLAP: &str = "UR-21: the burst overlaps an accepted booking";
+
+    fn with_errors(pairs: &[(&str, &str)]) -> Lateness {
+        Lateness { time_errors: pairs.iter().map(|(cause, outcome)| ((*cause).to_owned(), (*outcome).to_owned())).collect(), booked: vec![] }
+    }
+
+    fn booked(what: &'static str, deadline: Option<i64>, stamp: i64, admitted: bool) -> Booked {
+        Booked { what, deadline, stamp, admitted, detail: None }
+    }
+
+    #[test]
+    fn a_late_arrival_names_its_booking_and_keeps_every_other_fault_a_fail() {
+        let late = Faults { time_errors: 1, ..CLEAN };
+        let verdict = late_arrival_verdict_of("N2", &[500_000], &[], late);
+        assert!(matches!(&verdict, Some(Verdict::Inconclusive(text)) if text.starts_with("N2 was late") && text.contains("host latency")), "{verdict:?}");
+        assert!(matches!(late_arrival_verdict(&[500_000], &[], late), Some(Verdict::Inconclusive(text)) if text.starts_with("C was late")), "C keeps its name");
+        assert!(late_arrival_verdict_of("N2", &[500_000], &[], Faults { time_errors: 2, ..CLEAN }).is_none(), "another TIME_ERROR beside N2's drop stays a FAIL");
+        assert!(late_arrival_verdict_of("N2", &[500_000], &[], Faults { async_faults: 1, ..late }).is_none(), "a device fault beside it stays a FAIL");
+        assert!(late_arrival_verdict_of("N2", &[], &[], late).is_none(), "a TIME_ERROR that is not N2's is not N2's lateness");
+    }
+
+    #[test]
+    fn faults_without_late_drops_leave_the_others() {
+        let faults = Faults { time_errors: 2, underflows: 1, async_faults: 3 };
+        assert_eq!(without_late_drops(faults, 1), Faults { time_errors: 1, underflows: 1, async_faults: 3 });
+        assert_eq!(without_late_drops(faults, 0), faults);
+        assert_eq!(without_late_drops(Faults { time_errors: 1, ..CLEAN }, 5), CLEAN, "never below zero");
+    }
+
+    #[test]
+    fn late_arrivals_read_only_the_late_drops_at_the_booking_s_target() {
+        use super::super::n47s5::late_arrivals_in;
+        let drop_at = |target: i64, by: i64| json!({ "cause": "late", "outcome": "drop", "target": { "ticks": target }, "late_by_ns": by });
+        let payloads = [
+            drop_at(100, 7_000),
+            drop_at(200, 9_000),
+            json!({ "cause": "late", "outcome": "send_asap", "target": { "ticks": 200 }, "late_by_ns": 1 }),
+            json!({ "cause": "unclosed_burst", "outcome": "drop", "target": { "ticks": 200 }, "late_by_ns": 2 }),
+        ];
+        assert_eq!(late_arrivals_in(payloads.iter(), 200), [9_000], "only the drop at the booking's own target, not A's at 100");
+        assert_eq!(late_arrivals_in(payloads.iter(), 100), [7_000]);
+        assert!(late_arrivals_in(payloads.iter(), 300).is_empty());
+    }
+
+    #[test]
+    fn late_evidence_reads_a_time_error_cause_late() {
+        for outcome in ["drop", "send_asap", "plan_violation", "refused"] {
+            assert!(late_evidence(&with_errors(&[("late", outcome)])).is_some(), "cause late, outcome {outcome}");
+        }
+        assert!(late_evidence(&with_errors(&[("unclosed_burst", "drop")])).is_none(), "another cause is no host lateness");
+        assert!(late_evidence(&with_errors(&[])).is_none());
+    }
+
+    #[test]
+    fn late_evidence_ignores_cause_late_with_outcome_late_at_device() {
+        assert!(late_evidence(&with_errors(&[("late", "late_at_device")])).is_none(), "handed over in time by the Provider's own clock: judged");
+        assert!(late_evidence(&with_errors(&[("late", "late_at_device"), ("late", "drop")])).is_some(), "the drop beside it is evidence");
+        assert!(late_evidence(&with_errors(&[("unclosed_burst", "late_at_device")])).is_none());
+    }
+
+    #[test]
+    fn a_time_error_pair_is_its_cause_and_its_outcome() {
+        assert_eq!(time_error_pair(&json!({ "cause": "late", "outcome": "late_at_device", "late_by_ns": 5 })), ("late".to_owned(), "late_at_device".to_owned()));
+        assert_eq!(time_error_pair(&json!({})), (String::new(), String::new()), "a missing field is empty text");
+    }
+
+    #[test]
+    fn late_evidence_reads_a_kernel_stamp_past_its_deadline() {
+        let one = |deadline: Option<i64>, stamp: i64| Lateness { time_errors: vec![], booked: vec![booked("tone", deadline, stamp, true)] };
+        assert!(late_evidence(&one(Some(1_000), 1_000)).is_none(), "a receipt exactly at the lead is on time");
+        assert!(late_evidence(&one(Some(1_000), 1_001)).is_some());
+        assert!(late_evidence(&one(Some(1_000), 999)).is_none());
+        assert!(late_evidence(&one(None, i64::MAX)).is_none(), "an untimed Action is never late at receipt");
+    }
+
+    #[test]
+    fn late_evidence_is_none_for_a_trial_with_no_lateness_reading() {
+        assert!(late_evidence(&Lateness::default()).is_none());
+        let admitted_only = Lateness { time_errors: vec![], booked: vec![booked("capture", Some(10), 1, true), booked("stop", None, 0, true)] };
+        assert!(late_evidence(&admitted_only).is_none());
+    }
+
+    #[test]
+    fn late_evidence_names_its_clause_and_action() {
+        let text = late_evidence(&with_errors(&[("late", "drop")])).unwrap();
+        assert!(text.contains("TIME_ERROR") && text.contains("late") && text.contains("drop"), "{text}");
+        let late = Lateness { time_errors: vec![], booked: vec![booked("capture", Some(10), 5, true), booked("head", Some(10), 12, true)] };
+        let text = late_evidence(&late).unwrap();
+        assert!(text.contains("head") && !text.contains("capture") && text.contains("2 ticks"), "{text}");
+    }
+
+    #[test]
+    fn without_expected_late_leaves_out_only_the_named_actions_own_late() {
+        let c_late = Lateness { time_errors: vec![("late".to_owned(), "drop".to_owned())], booked: vec![booked("A", Some(10), 10, true), booked("C", Some(10), 40, true)] };
+        assert!(late_evidence(&c_late).is_some(), "C alone late is evidence before the exclusion");
+        assert!(late_evidence(&without_expected_late(&c_late, "C", 1)).is_none(), "a clean N7 run, only C late, is judged");
+        let a_late = Lateness { time_errors: vec![("late".to_owned(), "drop".to_owned()); 2], booked: vec![booked("A", Some(10), 30, true), booked("C", Some(10), 40, true)] };
+        assert!(late_evidence(&without_expected_late(&a_late, "C", 1)).is_some(), "A's late drop and stamp stay evidence");
+        let a_stamp = Lateness { booked: a_late.booked.clone(), ..c_late.clone() };
+        assert!(late_evidence(&without_expected_late(&a_stamp, "C", 1)).is_some(), "A's stamp past its deadline stays evidence");
+        let a_drop = Lateness { time_errors: a_late.time_errors.clone(), booked: c_late.booked.clone() };
+        let rest = without_expected_late(&a_drop, "C", 1);
+        assert_eq!(rest.time_errors.len(), 1, "one of two drops left out: {rest:?}");
+        assert!(late_evidence(&rest).is_some(), "the second drop is not C's");
+        let other = Lateness { time_errors: vec![("late".to_owned(), "send_asap".to_owned())], booked: c_late.booked.clone() };
+        assert!(late_evidence(&without_expected_late(&other, "C", 1)).is_some(), "a drop is left out, another outcome is not");
+        assert!(late_evidence(&without_expected_late(&c_late, "C", 0)).is_some(), "no expected drop: nothing is left out");
+    }
+
+    #[test]
+    fn kernel_refused_names_the_first_unadmitted_action() {
+        let refused = |list: Vec<Booked>| kernel_refused(&Lateness { time_errors: vec![], booked: list });
+        assert!(refused(vec![booked("a", None, 0, true), booked("b", None, 0, true)]).is_none());
+        let verdict = refused(vec![booked("a", None, 0, true), booked("calibration", None, 0, false), booked("tone", None, 0, false)]);
+        assert!(matches!(verdict, Some(Verdict::Fail(ref text)) if text.contains("calibration") && !text.contains("tone")), "{verdict:?}");
+        let errored = Booked { detail: Some("boom".to_owned()), ..booked("stop", None, 0, false) };
+        assert!(matches!(refused(vec![errored]), Some(Verdict::Fail(ref text)) if text.contains("stop") && text.contains("boom")));
+    }
+
+    #[test]
+    fn a_stop_booking_with_a_fault_fails_even_beside_a_correct_overlap_refusal() {
+        let refusal = vec![OVERLAP.to_owned()];
+        let underflow = Faults { underflows: 1, ..CLEAN };
+        let verdict = stop_booking_verdict(true, &refusal, underflow, Some(DELAY), Some(DELAY), TOL);
+        assert!(matches!(verdict, Verdict::Fail(ref text) if text.contains("TX_UNDERFLOW")), "{verdict:?}");
+        let verdict = stop_booking_verdict(true, &refusal, Faults { time_errors: 1, ..CLEAN }, Some(DELAY), Some(DELAY), TOL);
+        assert!(matches!(verdict, Verdict::Fail(_)), "{verdict:?}");
+        assert!(matches!(stop_booking_verdict(true, &refusal, CLEAN, Some(DELAY), Some(DELAY), TOL), Verdict::Inconclusive(_)), "clean: the overlap refusal stays INCONCLUSIVE");
+    }
+
+    #[test]
+    fn a_long_close_with_clean_reports_and_no_shape_fails() {
+        let shape = |ok: bool| if ok { Ok(()) } else { Err("the send before the second burst is not a two-sample close".to_owned()) };
+        assert!(matches!(long_close_verdict(true, &[], CLEAN, shape(false), 2), Verdict::Fail(ref text) if text.contains("long-close shape")));
+        assert!(matches!(long_close_verdict(true, &[], CLEAN, shape(true), 2), Verdict::Pass(_)));
+        assert!(matches!(long_close_verdict(true, &[], CLEAN, shape(true), 1), Verdict::Inconclusive(_)));
+        assert!(
+            matches!(long_close_verdict(true, &[], Faults { underflows: 1, ..CLEAN }, shape(false), 2), Verdict::Fail(ref text) if text.contains("TX_UNDERFLOW")),
+            "the fault is read before the shape"
+        );
+        assert!(matches!(long_close_verdict(false, &[], CLEAN, shape(true), 2), Verdict::Fail(_)));
+        assert!(matches!(long_close_verdict(true, &[OVERLAP.to_owned()], CLEAN, shape(true), 2), Verdict::Fail(_)));
+    }
+
+    const ORIGIN: i64 = 1_000;
+    const PER: i64 = 200;
+
+    fn clock(t: i64) -> i64 {
+        sample_at_or_after(ORIGIN, PER, t)
+    }
+
+    #[test]
+    fn the_booking_after_the_margin_is_past_the_bound_of_every_receipt_within_it() {
+        let (stop_root, margin, in_flight) = (50_000, ns_ticks(STOP_MARGIN_NS), ns_ticks(IN_FLIGHT_NS));
+        let after = stop_after_margin_sample(stop_root, margin, in_flight, clock);
+        for within in (0..=margin).step_by(37).chain([margin]) {
+            let bound = ezsdr_radio::staging::stop_sample(stop_root + within, in_flight, clock);
+            assert!(after >= bound, "a receipt {within} ticks after the Stop: N2 at {after}, the bound {bound}");
+        }
+        let past = ezsdr_radio::staging::stop_sample(stop_root + margin + PER, in_flight, clock);
+        assert!(after < past, "a receipt one sample past the margin has a bound above N2: {after} against {past}");
+    }
+
+    #[test]
+    fn the_first_booking_after_a_stop_is_refused_below_the_receipt_bound_and_accepted_at_it() {
+        let (receipt, in_flight) = (60_000, ns_ticks(IN_FLIGHT_NS));
+        let bound = ezsdr_radio::staging::stop_sample(receipt, in_flight, clock);
+        assert_eq!(stop_n1_expectation(bound - 1, receipt, in_flight, clock), StopExpect::Refused);
+        assert_eq!(stop_n1_expectation(bound, receipt, in_flight, clock), StopExpect::Accepted);
+        assert_eq!(stop_n1_expectation(bound + 1, receipt, in_flight, clock), StopExpect::Accepted);
+    }
+
+    #[test]
+    fn the_stop_margin_deadline_is_the_stop_stamp_plus_the_margin() {
+        assert_eq!(stop_margin_deadline(123), 123 + 1_000_000, "5 ms at 200 MHz");
+        let n1 = |stamp: i64| Lateness { time_errors: vec![], booked: vec![booked("n1", Some(stop_margin_deadline(123)), stamp, true)] };
+        assert!(late_evidence(&n1(123 + 1_000_000)).is_none());
+        assert!(late_evidence(&n1(123 + 1_000_001)).is_some());
+    }
+
+    #[test]
+    fn stop_after_margin_verdict_fails_any_refusal_and_is_not_the_stop_branch() {
+        let refusal = vec![OVERLAP.to_owned()];
+        let on_time = stop_margin_deadline(0);
+        let verdict = stop_after_margin_verdict(0, on_time, true, &refusal, CLEAN, Some(DELAY), Some(DELAY), TOL);
+        assert!(matches!(verdict, Verdict::Fail(ref text) if text.contains("overlaps")), "{verdict:?}");
+        assert!(matches!(stop_booking_verdict(true, &refusal, CLEAN, Some(DELAY), Some(DELAY), TOL), Verdict::Inconclusive(_)), "the Stop branch would excuse it");
+        assert!(matches!(stop_after_margin_verdict(0, on_time, true, &[], CLEAN, None, None, TOL), Verdict::Inconclusive(_)), "no onset: nothing shown");
+        assert!(matches!(stop_after_margin_verdict(0, on_time, true, &[], CLEAN, Some(DELAY), Some(DELAY), TOL), Verdict::Pass(_)));
+        assert!(matches!(stop_after_margin_verdict(0, on_time, true, &[], Faults { underflows: 1, ..CLEAN }, Some(DELAY), Some(DELAY), TOL), Verdict::Fail(_)));
+    }
+
+    #[test]
+    fn stop_after_margin_verdict_is_inconclusive_when_n1_is_late_and_fails_first_on_the_independent_checks() {
+        let refusal = vec![OVERLAP.to_owned()];
+        let deadline = stop_margin_deadline(0);
+        let verdict = |stamp: i64, admitted: bool, refusals: &[String], faults: Faults, onset: Option<i64>| stop_after_margin_verdict(0, stamp, admitted, refusals, faults, onset, Some(DELAY), TOL);
+        assert!(matches!(verdict(deadline, true, &refusal, CLEAN, Some(DELAY)), Verdict::Fail(_)), "N1 on time at the deadline: the refusal is the Provider's");
+        assert!(matches!(verdict(deadline + 1, true, &refusal, CLEAN, Some(DELAY)), Verdict::Inconclusive(ref text) if text.contains("host latency")), "late N1: the refusal proves nothing");
+        assert!(matches!(verdict(deadline + 1, true, &[], CLEAN, Some(DELAY)), Verdict::Inconclusive(_)), "a late N1 never becomes a Pass");
+        assert!(matches!(verdict(deadline + 1, true, &[], Faults { underflows: 1, ..CLEAN }, Some(DELAY)), Verdict::Fail(_)), "a fault is read before the lateness");
+        assert!(matches!(verdict(deadline + 1, false, &[], CLEAN, Some(DELAY)), Verdict::Fail(_)), "a Kernel non-admission is read before the lateness");
+        assert!(matches!(verdict(deadline - 1, true, &[], CLEAN, Some(DELAY)), Verdict::Pass(_)));
     }
 }

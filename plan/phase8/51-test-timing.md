@@ -1,6 +1,6 @@
 # 51 — スレッドの走る時点で判定が変わるテストを型ごと止める（`mech:wall-clock-test-oracle`）
 
-**決定済み**（owner 2026-11-11〜12：Q1〜Q17 と (i)，末尾の付録）。下は Fable 5.2 の v3.1 に orchestrator の訂正（§5.3a）を加えたもの．v1〜v3 と各レビュー（Sol 2 回，Opus 2 回）は `~/.cache/ezsdr-fixes/2026-11-11-test-timing/` にあり，段階を閉じる記録で `reviews/` に移す．段階 0（`51-tables.md`）と M（記録 `reviews/n51m-*`，#91 を閉じる）は済（2026-11-12）．1a（記録 `reviews/n51-1a-*`）も 1b（記録 `reviews/n51-1b-*`）も済．1c も済（記録 `reviews/n51-1c-*`，下の「段 1c の後」）．1d も済（記録 `reviews/n51-1d-*`，下の「段 1d の後」）．2a は作業中（`work/n51-2a`，下の「段 2a の後」）．
+**決定済み**（owner 2026-11-11〜12：Q1〜Q17（Q10・Q15 は §5.3b で前提が変わった）。(i) は 2026-11-13 に取り消し，末尾の付録）。下は Fable 5.2 の v3.1 に orchestrator の訂正（§5.3a）を加えたもの．v1〜v3 と各レビュー（Sol 2 回，Opus 2 回）は `~/.cache/ezsdr-fixes/2026-11-11-test-timing/` にあり，段階を閉じる記録で `reviews/` に移す．段階 0（`51-tables.md`）と M（記録 `reviews/n51m-*`，#91 を閉じる）は済（2026-11-12）．1a（記録 `reviews/n51-1a-*`）も 1b（記録 `reviews/n51-1b-*`）も済．1c も済（記録 `reviews/n51-1c-*`，下の「段 1c の後」）．1d も済（記録 `reviews/n51-1d-*`，下の「段 1d の後」）．2a は作業中（`work/n51-2a`，下の「段 2a の後」）．
 
 | 項目 | 内容 |
 |---|---|
@@ -8,7 +8,7 @@
 | 書いた model | Fable 5.2（`claude-fable-5-2`） |
 | 調べた時点 | `fe86629`。`parity.rs` は `git show fe86629:crates/ezsdr-acceptance/tests/parity.rs` の行番号（`parity.rs@fe8`）。tree は読むだけ。(v3.1) 「(v3.1)」の段落が新しく引く行番号は `1371ffa`（今の main）のもの。v3 のままの段落の行番号は `fe86629` のままで，振り直していない。ずれた所：`control.rs:484`→`:491`（受け取りの読み），`:591`→`:600`（`selected_at`）。`parity.rs` は #96（`aa478bc`）で変わった（`wait_for_events` は今も `:444-455`） |
 | 証拠 | コードは `path:line`。probe 1〜6 は sim03 の rdev，リポジトリの外の写し（`probe/`）。**probe 7 は別物**：リポジトリのコードを含まない 20 行の crate を usrp-lnx03 で流した（cargo 1.99.1。`probe/probe7.rs`，`probe7.log`）。libtest と Cargo の挙動だけを見たもので，mutation の image での挙動は §6.4 の試験が通るまで INFERRED |
-| 決まっていること | Q1 = A，Q2 = `Provider::join` を `host.wait` に，Q3 = (c)，Q4 = #96 を先に閉じる（(v3.1) **済み**：`aa478bc`。8 本を手順で直し，14 本をこの設計に預けた：§7.1），Q5 = Kernel の 12 本を含める，Q6 = 待ちの分類を先に，Sol major 4（mutation の正直さ）は #91 と一緒に入れる，**(i) 予行の trial が INCONCLUSIVE になるのは，受け取りそのものが独立に遅いと示せたときだけ** |
+| 決まっていること | Q1 = A，Q2 = `Provider::join` を `host.wait` に，Q3 = (c)，Q4 = #96 を先に閉じる（(v3.1) **済み**：`aa478bc`。8 本を手順で直し，14 本をこの設計に預けた：§7.1），Q5 = Kernel の 12 本を含める，Q6 = 待ちの分類を先に，Sol major 4（mutation の正直さ）は #91 と一緒に入れる，**(i) は取り消し**（owner 2026-11-13，§5.3b）：予行（fake）は，時刻の遅れの証拠（§5.3b の 2 つ）がある trial を判定せず，印 `EZSDR-TIMING:` を書いて単独で流し直す。実機は変えない（遅れは今どおり INCONCLUSIVE） |
 
 ## 0. 結論と，v2 から変わったこと
 
@@ -17,8 +17,8 @@
 **v2 から変わったこと**
 
 1. **上限の分類を `finish()` の前にも置く**（Sol v2 major 1）。Run の rig の包みは，生成と**全部の method の戻り**で Run の終わり方を調べ，実時間の上限で終わっていたら，試験に制御を返す前に marker を出して 1 回だけ panic する（§6.2）。v2 の「`finish` で翻訳する」は生成と途中の assert を通らなかった。
-2. **予行の INCONCLUSIVE を受け取りの記録だけで決める**（Sol v2 major 2，owner (i)）。級ごとの証人と失敗の優先順位を §5.3 に書いた。受け取りの後の遅れ，記録の欠け，phase の間違いは失敗のまま。今の `late_arrival_verdict`（`tests/common/iii.rs:443-447`）は「受け取りか dispatch で遅れた」をまとめて INCONCLUSIVE にしていて，(i) に反する。作り直す。(v3.1) ただし今の guard（`iii.rs:443-447`：その予約自身の late の drop 以外の fault があれば INCONCLUSIVE にしない）は残し，作り直した判定の条件にする（§5.3 の 5）。
-3. **Q10 の推奨が変わる**：受け取りの記録は (i) の前提なので「足す」。置き場所は `bursts` の行ではなく専用の section（受け取りで落とされた予約には `bursts` の行が無い）。
+2. **予行の判定の差し控えを，遅れの証拠だけで決める**（owner 2026-11-13，§5.3b）。証拠は，`TIME_ERROR` の cause が late（`late_at_device` を除く）／Kernel の log の時刻が窓を過ぎている，の 2 つ。差し控えるだけで，判定は作らない。受け取りの後の dispatch での遅れも RM-15 が許す host の遅れなので証拠に入る。`late_arrival_verdict`（`tests/common/iii.rs`）は作り直さず，実機の guard と N7 の判定として今のまま（判定の名前だけを引数に取る `late_arrival_verdict_of(what, …)` に分け，`late_arrival_verdict` は `"C"` を渡す。Session の Stop の N2 自身の late の drop も `"N2"` で通す：fix 1）。N7（わざと遅く受け取らせる 2 case）も述語を通す：C 自身の期待された late の drop と deadline だけを除いた `Lateness`（`iii::without_expected_late`）で `Rehearsal::trial` に入れ，C だけが遅い run は判定し，他の Action に遅れの証拠があれば判定せず印を出す。（v3.1 の「受け取りの記録だけで決める」（Sol v2 major 2，owner (i)）は取り消し。）
+3. **Q10 は取り下げ**：2c は Manifest を変えない（`receipts` を作らない）。（v3.1 の「足す」は (i) の前提だった。）
 4. **marker は libtest の capture を通さずに stderr へ直接書く**（Sol v2 minor 1）。probe 7：capture の下の `eprintln!` は `abort()` で消える。`std::io::stderr().write_all` は残る。判定は終了コードではなく出力の行で決める（Cargo は abort でも panic でも 101 を返す）。Cargo を通した試験を gate に置く（§6.4）。
 5. **二重登録は，登録を作る前に拒否する**（Sol の note。§4.1）。
 6. (v3.1) **主張を狭めた所**：§8 の表と Q13。段 M の後に正直になるのは「mutate.py の timeout，build，signal，watchdog」と，**`session_with` と `UhdRig` の constructor を通る生成**の上限まで。FakeDevice の Run を作る所は `session_with` の他に 12 か所あり（§5.4 の一覧：`ezsdr-acceptance/tests/uhd.rs:51, :66, :264`，`ezsdr-radio-uhd/tests/common/measurement.rs:1904` など），M では分類されず，包み（段 2a）の後。Run の途中の上限（KC-21a），cleanup の上限（RS-8a），join も包み（段 2a）の後。包みの無い rig（Kernel の `device_paced.rs`，Python）は対象外。
@@ -91,13 +91,13 @@ A が後でできなくすること：登録していない別スレッドから
 
 ## 3. 原則と，書き手への契約
 
-- **P1 観測した進み**：「進んだ」と言えるのは Provider か device が残した記録だけ。試験のスレッドが読んだ時刻と，それに足した定数は観測ではない。
+- **P1 観測した進み**：「進んだ」と言えるのは Provider か device が残した記録だけ。試験のスレッドが読んだ時刻と，それに足した定数は観測ではない。遅れの証拠は判定を差し控えるだけで，判定を作ることはない（§5.3b）。
 - **P2 時計の持ち主**：判定に入る時刻の差は，1 つの時計の上で，その時計の参加者だけが作る。
 - **P3 実時間の上限**：使ってよいのは「満了＝失敗」の上限だけ。大きさは秒，通る側の所要の 100 倍以上。ms の上限と「実時間の区間に N 個以上」は判定にしない。
 - **P4 実時間の FakeDevice**：使うテストは印で数えられ，それを filter にする mutation の行は `bound` と宣言する（§6.5）。
 - **P5 狭い窓**：poll 数回ぶんより狭い窓は `Frozen`／stepped の unit rig。
 - **P6 実機**：時計は止められない。予行で規則の境界を固め，実機では P1 だけで判定する。
-- **P7 遅れの帰属（新）**：試験が「場面を作れなかった」と言えるのは，**受け取りの記録**が窓を過ぎていたときだけ。受け取りの後に起きたことは全部 Provider の責任で，失敗である（owner (i)）。
+- **P7 判定の差し控え（改）**：予行で trial を判定しないのは，§5.3b の遅れの証拠があるときだけ。受け取りの後の遅れも証拠に数える（RM-15）。証拠の無い trial は全部そのまま判定する。（旧 P7「受け取りの記録が窓を過ぎたときだけ。受け取りの後は全部 Provider の責任」は取り消し：RM-15 と食い違う。）
 
 契約：
 
@@ -105,7 +105,7 @@ A が後でできなくすること：登録していない別スレッドから
 2. 「T まで進めてから操作する」と書いてよい。操作は **push した時計の時刻**の後の最初の owner の poll（1 ms：`control.rs:250`）で受け取られる。待ちは T の 1 µs 後に返るので，push の時刻は T + 1 µs で，T のすぐ後に poll があればそれが push の時刻に当たり，受け取りはその次の poll になる（例：poll が S + 1 ms と S + 2 ms，T = S + 999 µs なら push は S + 1 ms，受け取りは S + 2 ms。段 1c の Sol の minor）（段 1b・1c の後：rig の，試験が選んだ時刻で終わる待ち（`UhdRig` と `Direct` の `settle`，`wait_until`，`Direct::start`）は 1 µs だけ時計の上で待ち，その時刻に来る参加者を先に走らせる。さらに rig の Action の待ち行列は push の時計の時刻を記録し，時計が**それより後**になるまで渡さない（`common/rig.rs` の `Stamped`）ので，受け取りは push の時刻より後の最初の poll に決まる。`reviews/n51-1b-dispositions.md`）。
 3. 駆動役は owner の進みを時計の待ち以外で待ってはいけない。待つと時計が止まり，**毎回**実時間の上限で落ちる。その失敗は marker を持つ（§6）。
 4. 駆動 rig が示すのは「受け取りの時刻を決めたときの規則」で，「host が間に合う」ことではない。わざと遅れたいときは `rig.settle(d)` と書く。
-5. Run の rig と実機では 1〜2 は成り立たない。窓に依存する判定は書かない（R0 だけ残す）か，P7 の証人で囲う（§5）。
+5. Run の rig と実機では 1〜2 は成り立たない。窓に依存する判定は書かない（R0 だけ残す）か，予行なら §5.3b の遅れの証拠で囲う（証拠があれば判定せず，単独で流し直す）。
 
 ## 4. A の中身
 
@@ -196,78 +196,78 @@ probe 6（`RunHandle` の 3 か所の戻りに実時間の遅延。`fake` binary
 
 **移せないもの**：実機テストと列を共有する予行。`tests/common/{n47s5,n47,d9,measurement,iii}.rs` の trial は `hardware.rs` の `#[ignore]` のテストと `fake.rs` の予行の両方から呼ばれる（VERIFIED：`n47s5.rs:1-3`）。AGENTS §9 の予行の規則は「同じ境界を fake と実機の両方で」なので，直結の rig に移すと予行でなくなる。
 
-### 5.3 予行：証人と，失敗の優先順位（Sol v2 major 2，owner (i)）
+### 5.3 予行：遅れの証拠と，判定の差し控え（§5.3b が置き換えた）
 
 **今の状態（VERIFIED）**
 
 - Provider は受け取りの時刻を読んでいる（`let receipt = self.core.now()`：`control.rs:484`，値の更新は `:283`）が，記録するのは switch の行の `selected_at` だけ（`control.rs:591`）。
 - `TIME_ERROR` は受け取りの所（`control.rs:510-625`）と dispatch の所（`tx.rs:1054-1126`）の両方が同じ outcome（drop，plan_violation，refused，send_asap）で出し，payload に出どころは無い（`control.rs:463-469`，`tx.rs:1048`）。**今の記録では「受け取りで遅れた」と「受け取った後で遅れた」を分けられない。**
-- `late_arrival_verdict`（`iii.rs:443-447`）は late の drop を見て「late at receipt or at dispatch … host latency」と INCONCLUSIVE を返す。Sol の列（Provider の regression が dispatch を遅らせる）はここで隠れる。
+- `late_arrival_verdict`（`iii.rs`）は late の drop を見て「late at receipt or at dispatch … host latency」と INCONCLUSIVE を返す。実機の guard と N7 の判定として今のまま残す（作り直さない：§5.3b）。Session の Stop の N2 自身の late の drop も同じ判定（`late_arrival_verdict_of("N2", …)`，名前だけが違う）を通し，N1 の行は N2 の late の drop の数だけ `TIME_ERROR` を引く（fix 1）。N7 の 2 case では，この関数に入るのは C 以外に遅れの証拠が無い run だけ（`Rehearsal::trial` が先に差し控える：段 2c C3）。
 - fake の予行の assert は 10 か所が「`Fail` でなければよい」，2 か所が「`Pass`」（`fake.rs` の grep）。INCONCLUSIVE は fake でも通っている。
 
-**証人**：UHD Module の Manifest に section `receipts` を足す（Q10）。`uhd-control` が Action を読んだ所で 1 行：`{ action, receipt }`（root tick。`control.rs:484` と Stop，値の更新の同じ読み）。結果（採用，拒否，drop）に依らず書く。`bursts` の行には置けない（受け取りで落とされた予約に行が無い）。`TimeErrorPayload`（Vocabulary）は変えない。記録そのものは unit の stepped test で固定する（受け取りを T に置く → 行が T）。
+**§5.3b への 1 段落**：予行（fake）の trial の判定は，§5.3b の遅れの証拠（`TIME_ERROR` の cause が late，または Kernel の log の時刻が窓を過ぎている）があるかどうかだけで決まる。証拠があれば判定せず，印 `EZSDR-TIMING:` を書いて単独で流し直す。無ければ全部そのまま判定する。級ごとの窓と証人（R1-tx，R2，R1-k），Provider の `receipts`，`receipt_class` の読み飛ばし，優先順位 3〜6，`late_arrival_verdict` の作り直しは作らない（owner 2026-11-13）。
 
-**級ごとの窓と証人**
-
-| 級 | 例（読んだ trial） | 窓 | 「受け取りが遅い」の定義 | 証人 |
-|---|---|---|---|---|
-| R1-tx（予約の lead） | `front_trial` の 3 本，`long_close_trial` の 2 本，`repeat_switch_trial` の最初の repeat，`stop_next_trial` の次の予約，`one_sample_after_a_burst` の +4 | 予約の target T（root） | (v3.1) `receipt + lead > T`。trial が `receipts` の行と**試験側の literal**（`tests/common` に 1 つ，ns）から自分で計算する。Provider の `TIME_ERROR` は使わない。今の `n47s5.rs:16` が import している `DEVICE_LEAD_NS` は本番の `ezsdr_radio_uhd::profile` の定数で，Provider 自身も受け取りの判定に使う（`control.rs:490, :499`）ので，閾値には使わない：その定数を変える mutant では，窓の中の受け取りが両方で「遅い」と出て 5 に当たる。literal と profile の値は 1 本のテストで 1 回だけ突き合わせる（等しいこと。定数を変える mutant はここで assert で死ぬ） | `receipts`（**要 Q10**） |
-| R2（phase） | `held_tail_trial`（J(e) の前／後），`untimed_burst_outcome`（A が鳴っている間），`late_booking`（A の最後の buffer の後） | `[lo, hi)`。端は device か Provider の記録から（J(e) は A の target と profile の定数，「buffer が出た」は `ProbeDevice` の send の行） | `receipt ≥ hi`（R1 も兼ねる予約はその条件も） | `receipts`（**要 Q10**）と端の記録 |
-| R1-k（Kernel が受け取る Action） | capture「今＋1〜10 ms」（`n47s5.rs:184, 267, 348, 375, 457, 526`） | capture の開始 | Kernel の action log の `time` が開始を過ぎている | `LogEntry.time`（今ある：`n47s5.rs:531` が Stop で使っている）。遅い capture を Kernel がどう扱うかは**読んでいない**（INFERRED）。(v3.1) **owner の確認待ち（Q17）**：(i) の文は「Q10 の受け取りの記録から」で，Kernel の action log はその外にある。確認が出るまで，R1-k は 5 の「受け取りが遅い」に入れない（遅い capture は 6 でそのまま判定する） |
-| switch（RM-37） | `repeat_switch_trial` の switch | 無い（受け取りで遅いと判定しない：`control.rs:487`） | — | INCONCLUSIVE にしない |
-
-`receipts` に頼る予行：上の R1-tx と R2 に入る trial 全部。読んだ範囲では `n47s5_*` の 6 本（`untimed_repeat_outcome` は R1-k だけ）。`n47`，`d9`，`measurement` の trial は読んでいない（段階 0）。
-
-**優先順位**（trial ごとに 1 つの純関数 `iii::receipt_class`。上から順に，最初に当たったもの。(v3.1) 3〜5 は Action ごとの条件で，trial の結果は表のとおり trial 全体の証拠で決める）
+**優先順位**（残るのは 1 と 2。上から順に，最初に当たったもの。2 は証拠より先に読む：admit 違反と遅れの証拠が同じ trial にあれば admit 違反が勝つ）
 
 | # | 条件 | 結果 |
 |---|---|---|
-| 1 | (v3.1) Run が実時間の上限に当たった（§6.2 の 2：`KC-12a:`／`KC-21a:` の理由，`cleanup_failures` の `timed_out: true`（RS-8a），`did not join within`） | fake：marker つきの失敗。実機：今のまま失敗 |
-| 2 | Kernel が admit すべき Action を admit しなかった | **FAIL** |
-| 3 | (v3.1) **UHD の Provider に宛てて** dispatch された Action（予約，Stop，値の更新）に `receipts` の行が無い | **FAIL**（記録の欠け）。Sink などに宛てた Action（capture）は `receipts` に行を持たないので，この条件に入れない（入れると capture のある trial が全部 FAIL になる） |
-| 4 | `receipt < lo`（窓より早い） | **FAIL**（trial の誤り。host の遅れでは起きない） |
-| 5 | (v3.1) 受け取りが遅い Action がある（上の表の定義。1 つとは限らない。以下，その 1 つずつを L と書く）**かつ** trial の fault が，遅く受け取った Action それぞれの自身の証拠だけである | **INCONCLUSIVE（timing）**。読み飛ばすのは L 自身が説明する証拠だけ：L の target を名指す `TIME_ERROR`，L の drop（send と ack が無いこと），L の Action id を持つ拒否。message に receipt，窓，Kernel の admit の時刻を入れる（診断） |
-| 6 | (v3.1) それ以外：全部の受け取りが窓の中，**または**遅い L があっても L 自身の証拠でない fault がある | 全部そのまま判定：dispatch での late の drop，`late_at_device`，underflow，async の fault，他の Action の `TIME_ERROR`・拒否・send や ack の欠け，間違った拒否，間違った phase は **FAIL** |
+| 1 | Run が実時間の上限に当たった（§6.2 の 2：`KC-12a:`／`KC-21a:` の理由，`cleanup_failures` の `timed_out: true`（RS-8a），`did not join within`） | fake：marker つきの失敗。実機：今のまま失敗 |
+| 2 | Kernel が admit すべき Action を admit しなかった（trial の全 Action。`submit` が `Err` を返したものを含む） | **FAIL**（印なし） |
 
-(v3.1) **5 の条件は今の guard を引き継ぐ**（M1）。今の `late_arrival_verdict`（`iii.rs:443-447`）は `faults.time_errors == late_by_ns.len() && faults.underflows == 0 && faults.async_faults == 0` のときだけ INCONCLUSIVE を返し，`iii.rs:1234-1235` が固定している（"another TIME_ERROR stays a FAIL"，"an underflow stays a FAIL"）。項ごとに：
+**2c の純関数の test**：`late_evidence` の 2 条（境界つき。`late_at_device` は証拠にしない），`Rehearsal`（判定を飛ばす・印は最後に・plain な失敗には印なし・admit 違反は証拠より先に plain な失敗），`kernel_refused`，予行 9 本の trial の数と `finish()` を見る `governance.rs` の規則（fixture つき），literal と本番の定数の一致，Stop の fault 先行，long close の FAIL，N7（C だけが遅い run は判定される・他の Action の遅れは証拠のまま残る：`iii::without_expected_late`）。
 
-- (v3.1) `time_errors` は全部 L のもの，`underflows == 0`，`async_faults == 0`：**そのまま 5 の条件**。2 つの test も残す。
-- (v3.1) `refusals.is_empty()`：**ここだけ変わる**。今は「拒否が予約を名指す＝間に合って届いた」と推論している（`iii.rs:1233`）。`receipts` があれば遅れは記録で直接示せるので，L 自身を名指す拒否は L の証拠として読み飛ばす。L 以外の Action の拒否は 6 で FAIL。
-- (v3.1) 変わるのは入力の 1 つ：「L は遅い」の根拠が `TIME_ERROR` の `late_by` から `receipts` の行になる。受け取りが窓の中なら，late の drop があっても 5 には入らない（v3 の主旨：Sol の列）。
-
-(v3.1) v3 の 5 は「下流の証拠は読まない」だったので，次の列を隠した（再確認 M1。(i) の「受け取りの後は失敗のまま」に，窓の中の別の Action について反する）：
-
-```text
-held_tail_trial：A（timed，受け取りは窓の中）と C（host の遅れで受け取りが窓の後）
-mutant が A の送信を壊す → TX_UNDERFLOW
-v3：C が遅い → 5 → INCONCLUSIVE（fake：marker → mutation では ERROR，kill にならない。実機：テストは通る）
-v3.1：underflow は C 自身の証拠でない → 6 → FAIL（今のコードと同じ結果）
-```
-
-(v3.1) 残るもの（正直に）：遅い L が**原因で**窓の中の Action に fault が出る場面（L が続きの buffer で，遅れたために A が underflow する，など）は 6 で FAIL になり，fake では marker なしの失敗（mutation では killed）になる。今の guard と同じ向きで，§8 の「予行が負荷で遅れる」の行に入れた。どの trial にこの形があるかは読んでいない（段階 0 の R 表）。
-
-- (v3.1) `late_arrival_verdict` は 5 の形に作り直す（入力は `TIME_ERROR` の `late_by` ではなく `receipt_class`。fault の guard は上のとおり残す）。純関数の test：(a)「受け取りは窓の中，late の drop あり → FAIL」（Sol の列そのもの。今の `iii.rs:1230` の最初の assert は逆を固定している），(b)「C の受け取りが遅く，A に underflow → FAIL」（M1 の列），(c)「C の受け取りが遅く，別の Action の `TIME_ERROR` がある → FAIL」，(d)「C の受け取りが遅く，fault は C の `TIME_ERROR` だけ → INCONCLUSIVE」，(e)「C の受け取りが遅く，C 自身を名指す拒否だけ → INCONCLUSIVE」（今の `iii.rs:1233` から変わる所），(f)「capture の Action に `receipts` の行が無くても 3 に当たらない」（m5）。
-- **fake の予行での出方**：窓の中を狙った case が INCONCLUSIVE（timing）になったら，**marker つきで落とす**（`EZSDR-INFRA: timing missed …`）。通さない。(v3.1) 落とす前に新しい Run でやり直すかどうかは owner の判断（Q16。推奨はやり直す）。今の「`Fail` でなければよい」の 10 か所は，timing の INCONCLUSIVE を通さない形にする。わざと遅く受け取らせる case（`fake.rs:7926-7936`：C を e − 0.5 ms に出すので，受け取りは lead の内側）は「INCONCLUSIVE（timing）であること」を assert し続ける。host が遅れても遅い側に留まるので負荷に依らない（INFERRED）。
-- **timing 以外の INCONCLUSIVE**（capture に onset が見えない，など測定の不成立：`n47.rs` に 50 か所，`iii.rs` に 67 か所の `Inconclusive`）はこの設計の対象外。段階 0 で一覧にし，2c で「timing の前提を理由にしているもの」だけを 5 の形に直す。`long_close_outcome` の「shape を取らなかった」（`n47s5.rs:244-246`）は (i) では phase の間違いなので FAIL になる候補（実機での意味は 2c の fidelity の review で決める）。
-- **実機**：5 は `Verdict::Inconclusive`（`tone.rs:19-25`：INCONCLUSIVE はテストを通す）。
-- **(i) の残り（正直に）**：受け取りの記録は host が原因だとは示さない（Sol）。Kernel の dispatch や `uhd-control` の poll の regression で届くのが遅れても「受け取りが遅い」と出る。fake ではそれは毎回 marker つきで落ちるので gate は止まるが，mutation では `ERROR` で kill にならない。だから受け取りまでの遅れを殺す行は直結か unit を filter にする（規則 M-R）。実機では INCONCLUSIVE が続くだけなので Q15。
-- 退けた案：「Kernel の admit の時刻が窓の中なら，受け取りが遅くても FAIL」。admit の後も Action を queue に置くまで試験のスレッドが走るので，host の遅れを FAIL にしてしまう。
-- 予行は負荷で落ち得る（lead 15〜40 ms は実機と同じ）。**閉じてはいない。**
+- **fake の予行での出方**：証拠のある trial は判定せず，`EZSDR-TIMING:`（`common::timing`）の印を最後に 1 回書いて失敗させる。Q16 b″ のとおり，`mutate.py`（`RERUNS`）と `gate.py`（`excuse_timing`）が単独で 2 回まで流し直す。3 回とも印なら gate は赤，mutation は `ERROR`。わざと遅く受け取らせる case（N7：C を e − 0.5 ms に出す）も `Rehearsal::trial` に入る。`Lateness` から C 自身の late の drop（`late_arrivals` の数だけの `(late, drop)`）と C の deadline を除くので，C だけが遅い run は判定され，共有の判定が「INCONCLUSIVE（host latency）であること」を assert する。C 以外（A や capture）にも遅れの証拠があれば判定せず印を出す（単独で流し直す）。
+- **timing 以外の INCONCLUSIVE**（capture に onset が見えない，など測定の不成立）はこの設計の対象外。
+- **実機**：遅れは変えない。今の guard のまま `Verdict::Inconclusive`（`tone.rs:19-25`：INCONCLUSIVE はテストを通す）。変わるのは，遅れの報告が無いのに長い close の形が欠けた trial が FAIL になること（M4）だけ。Q15（実機で conclusive な trial が 0 の case を FAIL）は作らない：前提（(i) が取り消され，実機に遅れの新しい INCONCLUSIVE の出どころが無い）が無くなった（orchestrator 決定 3）。
+- **失うもの**：§5.3b の「失うもの（正直に）」。
+- 予行は負荷で落ち得る（lead 15〜40 ms は実機と同じ）。**閉じてはいない。囲う**。
 
 ### 5.3a 拒否の扱いの訂正（v3.1-orch，orchestrator 2026-11-12，Opus の再確認 recheck-v3.1.md の N1）
 
 上の優先順位 5 の「遅れた Action 自身の拒否は読み飛ばす」を次に置き換える．
 - **受け取りの時刻を読む前に決まる拒否**（`control.rs` の :419-463，:485-487 の類：waveform，形，重なり等）は遅れと関係がないので，**常に FAIL**（今の `iii.rs:1233` の向きを保つ）．
 - **受け取りの後に決まる拒否**のうち，級ごとに許した理由だけを優先順位 5 で読み飛ばす．許可表（級 × 理由）は段階 2c の R 表で決め，Sol のテスト計画レビューを受ける．表に無い理由は FAIL．
-- `receipts` の行（Q10）は `book_burst` の入口（受け取りの時刻を読んだ直後，`control.rs:416` の後）で書く．
-- 今の `stop_booking_verdict`（`iii.rs:420-433`）は，Stop の受け取りの遅れで後の予約が拒否されたとき INCONCLUSIVE にしている．この規則では，その理由が許可表にある時だけ INCONCLUSIVE のままで，無ければ FAIL に変わる．段階 2c でどちらにするかを表に書く（黙って変えない）．
+- （`receipts` は作らない：§5.3b。この項は取り消し）
+- 今の `stop_booking_verdict`（`iii.rs`）は，Stop の受け取りの遅れで後の予約が拒否されたとき INCONCLUSIVE にしている．許可表は §5.3b が捨てた．2c は N1 の行の overlap の拒否（INCONCLUSIVE，fault が先）を変えず，N2 の行を足した．N1 の行は，N2 自身の late の drop の数だけ run の `TIME_ERROR` から引く（fix 1：N2 だけが host の遅れで late の drop になっても N1 の行を FAIL にしない）．
 
 その他の訂正（N2〜N5）：
 - N2：RS-8a の検査を逃れるのは「Run の終わりの後に包みを一度も呼ばないテスト」だけで，Manifest を読まない．残り得るのは包みを離した後に device の記録を読む形だけ．2a の対策（走査か `#[must_use]`）は段階 0 でその形があるかを見てから決める．
 - N3：`common/mod.rs:460` の helper `spec_run`（`fake.rs` から 39 行）は `session_with` と同じ file にあるので，段階 M に入れる．
 - N4：Q16 の推奨の文から「予行の力も落とさない」を消す（(b) が失うものと食い違う）．
-- N5：Q17 が決まるまで，負荷で遅れた capture は偽の kill になり得る．§8 の予行の行にそう書く．
+- N5：`LogEntry.time` は片側の証人なので，submit の中で遅れた capture は判定され，偽の kill になり得る．§8 の予行の行にそう書く．
 - `measurements.rs` と `x3xx.rs` は Run を作らないので，§5.4 の「読んでいない」から外す．
+
+### 5.3b 遅れの証拠がある予行の trial は判定せず，単独で流し直す（owner 2026-11-13．§5.3 の優先順位 3〜6 と §5.3a を置き換える）
+
+**決定**：予行（FakeDevice で実機と共有する trial）で**時刻の遅れの証拠**が出た trial は，その回は判定しない．timing の印（`infra::timing`，`EZSDR-TIMING:`）を書き，そのテストを**単独で**流し直す（Q16 b″ の仕組み：`mutate.py` の `RERUNS`，`gate.py` の `excuse_timing`．どちらもある）．流し直しで証拠が出なければ，その回の結果で判定する（FAIL は FAIL）．**3 回とも印が出たら**，gate ではその段を赤（「timing-marked」は調べるべき FAIL として扱う）にし，mutation の行は `ERROR` にする（owner 2026-11-13，M1．流し直しの回だと test に知らせる仕組みは置かない：並列の shard で誤った kill が戻るため）．遅れを生む変異は，時計を止めた rig（direct rig）の test で殺す．実機の遅れの扱いは変えない（遅れた trial は今どおり INCONCLUSIVE で数えない：遅れは実機では INCONCLUSIVE のまま）．変わるのは，遅れの報告が無いのに長い close の形が欠けた trial が FAIL になることだけ（Sol の M4）．
+
+**理由**：P7（owner (i)：受け取りの後は全部 Provider の責任）は RM-15（design/07：受け取りの後でも host の遅れや回復で dispatch が遅れた予約は，そこで late policy で判定する）と食い違う．Fake で T − 2.035 ms に受け取った予約が，uhd-tx の手番が 0.2 ms 遅れて drop された（2c の計画の F1）．これは仕様が許す振る舞いである．P7 の上に「遅れた Action 自身の証拠だけを読み飛ばす」規則を組むと，級ごとの窓，Action の結末（drop・送信・拒否）ごとの読み飛ばし，拒否の許可表が要り，Sol の計画レビューと Opus の再確認で major が計 9 件出た（材料は `reviews/n51-2c-*`）．仕組みが規則の数で増え続けるので，仕組みを減らす（AGENTS §6）．
+
+**遅れの証拠**（どれか 1 つ．判定を差し控えるだけで，判定を作ることはない：P1 もそう改める．試験が submit の前に読んだ時刻は，Kernel の stamp がその後に取られるので 2 つ目に含まれ，別の証拠にしない〈orchestrator 2026-11-13〉）：
+- Provider が報告した `TIME_ERROR` で **cause が late** のもの（受け取りでも dispatch でも．どちらも host の遅れとして仕様が許す）．late 以外の `TIME_ERROR`（design/07 の他の用途）と `late_at_device`（Provider は自分の時計で間に合って渡した：手渡しの regression を指す）は証拠にしない．読むのは `iii::time_error_causes` の 1 か所．
+- Kernel の action log の時刻（`LogEntry.time`，Q17 の片側の証人）が，試験が狙った窓を過ぎている Action．窓の端は試験側の literal（本番の定数から計算しない．literal と定数が等しいことは別の test で見る）．
+- （計画値の注意）`stop_root` は Kernel の stamp，`capture_at`／`tx_at` は前に読んだ `now()` から作った計画値で，実際の時刻ではない．
+
+**どこで読むか**：Fake 側の helper 1 つ（上の 3 つを読む）を，共有の判定（`late_arrival_verdict` など）と Fake だけの assert（`fake.rs` の `late_by.is_none()` など）の**前**に呼ぶ．trial の中の `assert!(admitted(..))` も分類の後に回す（遅れた capture も admit される，INFERRED）．Fake の規則は実機の guard より広い（実機は受け取りの遅れと dispatch の遅れを分けられない）．trial を複数持つ test は，印の出た trial を飛ばして残りを流し，最後に失敗させる．対象の test は 2c の計画に列挙する．
+
+**baseline**：mutation の baseline も同じ `judge` を通す（今は exit 0 しか受けず BASELINE FAILED になる．2c が `timing()` を初めて出すので，予行を filter に持つ行 N47S5-177/192/193/194，N47B-19/36 などが巻き込まれる）．
+
+**予行の assert を切り替える前に**：単独の 20 回で印 0 を確かめる．単独でも試験の時計は実時間で進む（`src/host.rs`）ので，余裕の小さい case は単独でも印が出る．held-tail の J(e) 後の case（T_C − 受け取り 1.54〜2.45 ms，12 回中 5 回が 2 ms 未満）は F2（共有 trial の C = 1 000，実機側の点検つき）を，`stop_next_trial`（Stop の受け取りが Kernel の stamp の約 0.9 ms 後．どの証拠にも当たらず毎回拒否）は F3 を 2c に含めて直す．
+
+**残すもの**：§5.3 の優先順位 1（実時間の上限：marker つきの失敗）と 2（Kernel が admit すべき Action を admit しなかった：FAIL．証拠より先に読む：同じ trial に admit 違反と遅れの証拠があれば admit 違反が勝つ）．遅れの証拠の無い trial は全部そのまま判定する（late の drop も underflow も，他の Action の fault も FAIL）．わざと遅らせる case（N7）も述語を通す：C 自身の期待された late の drop と deadline を除いた `Lateness` で `Rehearsal::trial` に入れ，C だけが遅い run は今の共有の判定（`late_arrival_verdict`）で判定する．他の Action の遅れの証拠は除かないので，その run は判定せず印を出す（N7 を述語の外に置くと，注入した遅れが A も遅らせたとき plain に落ちた：段 2c C3）．
+
+**捨てるもの**：§5.3 の優先順位 3〜6，§5.3a の許可表（§5.3a の N2〜N5 は残る），`receipt_class` の読み飛ばし．`receipts`（Q10）は判定に使わない．診断に要るかは別に決める（今は作らない）．
+
+**失うもの（正直に）**：
+- 遅れた回の中で別の Action に故障があっても，その回では捕まえない．単独の流し直しで再現すれば捕まる．
+- 負荷の下でだけ遅れを生む Provider の regression は，単独では再現しないので捕まらない．`gate.json` の timing の流し直しの数が増えることでしか見えない（gate の記録で見る）．
+- Action を遅らせる変異は，予行では `killed` にならず `ERROR` になる．今 guard（`iii.rs` の実機の guard）経由で死んでいる行は，direct rig の test を filter に足す（M-R の範囲が広がる）．
+- `LogEntry.time` は片側の証人なので，submit の中で遅れた capture は判定される（残る誤判定：N5）．
+- 2b の `ea_16` の「窓ちょうど」の義務は，置き場所を 2c で決め直す．
+
+**検査**：遅れの証拠を決める純関数（trial の記録 → 証拠の有無と理由）と，印を書く経路の test．Sol の 2 つの反例（受け取りの後の drop，別の Action の underflow）は「遅れの証拠があれば判定しない／無ければ FAIL」で，それぞれの結果を test に書く．N7 は，C だけが遅い run は判定され（述語が除くのは C の drop と deadline だけ），A も遅い run は証拠のまま残ることを純関数の test に書く（`iii::without_expected_late`）．
+
+**§5.3b に合わせて直した他の本文**（2c で直した。残る古い文は履歴で，上の取り消しが優先する）：冒頭と §0 の (i) の行，項目 2〜3；§3 の P7 と契約の項目 5；§5.3 の表，優先順位 3〜6，tests (a)〜(f)，marker 名 `EZSDR-TIMING`；§7.2 の 2c の行；§8 の 4 行；§9 の 3 行；§11 の receipts の項目；付録の Q10／(i) の取り消し（2026-11-13 に記録），Q14 の範囲，Q15 の前提と F3，Q17 の使われない節．
 
 ### 5.4 rig の境界と遅延注入
 
@@ -398,7 +398,7 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 | 1d | G の 4 か所を guard（`handed_over`），W2 の 3 か所は書き直して guard（済：下の「段 1d の後」）。`join` する helper が残る 3 か所（`tx.rs` の `-deadline`）は W2 の形で `Frozen` が無いので 4 へ | **risky**（小さい） |
 | 2a | (v3.1) Run の rig の包み（共有 trial と `hardware.rs` を含む。`session_with` 以外の生成 12 か所（§5.4 の一覧）も包みの生成に替える），**全 method の検査（§6.2：上限の分類は常に，宣言は 2 種類）と fixture 4・4b・6・7（と 8）**，診断の注入点，`protocol.rs` の `handle`（82 か所を 1 fn に通す），走査（`connect(`／`start_spec_run(`／`RunHandle` を含む）。**作業枝で実装済み**（8 sub-step：包みと純関数，切り替え，acceptance，`protocol.rs`，fixture，走査，注入と sweep，文書。結果は下の「段 2a の後」。gate は orchestrator が閉じる） | **risky**（fake と実機の境界）。audit 表。compile は gate，挙動は次の bench |
 | 2b | R 表のとおり R1・R2 を直結へ移す／assert を外す。rows の filter を付け替え，同じ mutant が死ぬことを確かめる | 場面ごと |
-| 2c | `receipts`（Q10），`receipt_class`，`late_arrival_verdict` の作り直し（(v3.1) 今の fault の guard を残す。閾値は試験側の literal），fake の予行の assert，（Q15，(v3.1) Q16，Q17） | **risky**（本番の記録，実機テストの期待値）。audit 表，fidelity の review，次の bench |
+| 2c | 遅れの証拠の純関数 `iii::late_evidence` と印を書く `Rehearsal`，試験側の literal と本番の定数の一致の test，予行 9 本の trial と assert の組み替え（trial の記録と判定の分離，admit の assert を判定の後へ），held-tail の C = 1 000，`stop_next_trial` の N2（実機は N2 の行を 1 本足す），`stop_booking_verdict` の fault 先行，`long_close` の形の欠けを FAIL に，`mutate.py` の baseline を `judge` に。**production と Manifest は変えない**。**risky**：実機と共有する trial と判定。audit 表，fidelity の review，次の bench |
 | 3 | S2：印のついたテストを 1 本ずつ。S3：Kernel の 12 本（Q5） | 場面ごと |
 | 4 | `Frozen`／`released` の約 75 か所。分類表から（Q6） | 場面ごと |
 
@@ -412,9 +412,9 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 | S1 | 直結，rig が 2 つ | 構造で閉じる | 2 つは同時に進まない。根拠は 1a の unit test |
 | S1 | Run，R1・R2 を移したもの | 構造で閉じる（直結として） | 段階 0 の R 表が正しいこと |
 | S1 | Run，R0 | 該当しない | R0 の判定は review。sweep は見張りで証明ではない |
-| S1 | Run，実機と共有する予行 | **閉じない。囲う** | 負荷で落ち得る。受け取りが遅ければ marker つきの失敗（`receipts` がある所。(v3.1) fault がその Action 自身の証拠だけのとき。やり直すかは Q16）。Kernel が受け取る Action（capture）は `LogEntry.time`，扱いは INFERRED（(v3.1) 証人として使うかは Q17） |
-| (i) の残り | 予行（fake） | **検出はするが kill にしない** | 受け取りまでの遅れを作る regression は marker つきで落ちる（gate は止まる）が，mutation では `ERROR`。M-R の行だけが殺す |
-| (i) の残り | 実機 | **対象外**（Q15 が yes なら検出） | 同じ regression は INCONCLUSIVE が続くだけ |
+| S1 | Run，実機と共有する予行 | **閉じない。囲う** | 負荷で落ち得る。§5.3b の遅れの証拠がある trial は判定せず印を書き，単独で 2 回まで流し直す（3 回とも印なら gate は赤）。証拠の無い trial はそのまま判定する。capture は `LogEntry.time`（片側の証人：submit の中で遅れた capture は判定される，N5） |
+| 遅れの証拠 | 予行（fake） | **検出はするが kill にしない** | Action を遅らせる変異は印が 3 回出て `ERROR`。kill は直結／unit の filter（M-R）。今ある 6 行の filter の予行は，遅れとは別の理由で kill される（2c の計画 §6.2） |
+| 実機 | 実機 | **遅れは変えない** | 遅れた trial は今どおり INCONCLUSIVE（`late_arrival_verdict` ほか）。変わるのは，遅れの報告が無いのに長い close の形が欠けた trial が FAIL になることだけ（M4）。Q15 は 2c で作らない（decision 3） |
 | S1 | `protocol.rs`，Python | **対象外** | 注入点を 1 か所にするだけ |
 | S2 | — | **囲う**（段 3 の後） | 印は constructor が出す。行は `bound` と宣言して数える。default の Real 66 か所は未分類 |
 | S3 | Kernel `device_paced.rs` | **書き直す**（段 3）＋走査 | 残る秒の上限は下の「包みの無い rig」 |
@@ -427,7 +427,7 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 | 偽の kill：上限 | Kernel の test（`device_paced.rs` ほか），Python | **対象外** | 包みが無い。上限が主題の行は `bound` と宣言 |
 | 偽の kill：marker を出さない本番の内部の上限 | Authority の `CLOCK_JOIN` の detach，Kernel `state.rs:65` | **対象外** | — |
 | 偽の kill：`bound` の行 | — | **対象外**（宣言して数えるだけ） | — |
-| 偽の kill：予行が負荷で遅れる | Run | (v3.1) 受け取りが遅く，**fault がその Action 自身の証拠だけ** → `ERROR`（検出）。受け取りが遅くても，他の fault が同じ trial にある → FAIL → **killed と数える**（窓の中の Action の regression は隠さない：§5.3 の 5・6）。受け取りの後の遅れ → FAIL → **killed と数える** | (v3.1) 遅い Action が原因で窓の中の Action に fault が出る場面では，host の遅れが FAIL（偽の kill）になり得る（どの trial にあるかは段階 0）。(i) の帰結：受け取りの後は Provider の責任。host の遅れが Provider のスレッドに入るのは Real の時計だけ（Manual では owner が busy の間，時計は止まる）。受け取りの後の経路に Kernel の非参加者のスレッド（`ezsdr-data`）が入る場面（capture）では host の遅れが FAIL になり得る（INFERRED，段階 0 で見る） |
+| 偽の kill：予行が負荷で遅れる | Run | 証拠あり → 印 → `ERROR`。証拠なし → そのまま判定，FAIL は **killed と数える**（§5.3b） | 遅れた回の中の別の Action の故障は，その回では捕まえない（単独の流し直しで再現すれば捕まる）。負荷の下でだけ遅れる regression は `gate.json` の timing の流し直しの数でしか見えない。submit の中で遅れた capture は判定される（N5：`LogEntry.time` は片側の証人，INFERRED） |
 
 ## 9. 既存の約束との照合
 
@@ -438,11 +438,11 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 | 計画 30 §4.3（`JOIN_BOUND` は実時間） | 保つ。待ち方だけ時計の待ち |
 | 計画 30 D1（smoke set は「実時間に追いつく」を証明しない） | 同じ理想化を駆動役に広げる。envelope は緩めない。**駆動 rig は実機に無い挙動（駆動役の遅れが時刻に現れない）で通る**ので，示すのは受け取りの時刻を決めたときの規則だけ |
 | note 37 §2 の規則，§4（`hold()` の却下），決定 4（`Direct` の例外） | 規則は Run の rig と実機に残る。§4 は改める（probe 2・4）。決定 4 は 1c で不要になった（`Direct` も登録する） |
-| AGENTS §9 実機テストの予行 | 規則は変わらない。**予行は決定的にならない**（Run の rig のまま）。受け取りの記録で囲う（§5.3） |
-| `tests/common/mod.rs:534-556`（timing の前提の失敗は test の失敗のまま） | 保つ。§5.3 の 6 と同じ向き。変わるのは「受け取りが遅い」ときだけ |
-| `tone.rs:19`（INCONCLUSIVE は通す） | 実機では保つ。fake の予行では timing の INCONCLUSIVE を通さない（§5.3） |
-| AGENTS §3（Kernel は小さく） | Kernel の変更なし。`receipts` は UHD Module の Manifest の section（Extension） |
-| KNOWN_LIMITATIONS，EA，RM | 試験の時刻に触れる記述は無い（`grep -n -i "manual clock\|test thread\|participant" KNOWN_LIMITATIONS.md design/16-easy-api.md design/07-radio-model.md`：0 件）。`receipts` が UR の Manifest の記述に触れるかは 2c の diff で |
+| AGENTS §9 実機テストの予行 | 規則は変わらない。**予行は決定的にならない**（Run の rig のまま）。遅れの証拠で囲う（§5.3b） |
+| `tests/common/mod.rs:534-556`（timing の前提の失敗は test の失敗のまま） | 保つ。`require_stream_timing` の失敗は失敗のまま。差し控えるのは予行の trial だけ |
+| `tone.rs:19`（INCONCLUSIVE は通す） | 実機では保つ。fake の予行では，遅れの証拠がある trial は INCONCLUSIVE でなく印つきの失敗（単独の流し直しで通れば通る：§5.3b） |
+| AGENTS §3（Kernel は小さく） | Kernel の変更なし。`receipts` は作らない（§5.3b） |
+| KNOWN_LIMITATIONS，EA，RM | 試験の時刻に触れる記述は無い（`grep -n -i "manual clock\|test thread\|participant" KNOWN_LIMITATIONS.md design/16-easy-api.md design/07-radio-model.md`：0 件）。`receipts` は作らない |
 | design/18 UR-33 | M1 の文を改める（実装の diff で） |
 
 ## 10. owner の判断
@@ -452,13 +452,13 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 - **Q7 同じ時計への二重登録**：拒否（panic）か refcount か。推奨：**拒否**（変わらず）。拒否は登録を作る前（§4.1）。
 - **Q8 上限で落ちたときの扱い**：(a) 行が `"kill": "bound"` と宣言，(b) その場で流し直す，(c) 両方。推奨：**(a)**（変わらず）。判定は出力の行で決める（§6.3）。
 - **Q9 実時間のテストの見分け方**：(a) `FakeDevice::new` が出す印を baseline の出力で見る，(b) 名前の表。推奨：**(a)**（変わらず）。`--show-output` と module path の filter は probe 7 で確かめた。
-- **★ Q10 受け取りの記録**：UHD Module の Manifest に section `receipts`（Action ごとの受け取りの root tick）を足すか。本番の変更（Extension の層）。推奨：**足す**（v2 は「証人が作れない phase があれば」）。(i) は受け取りの記録が無いと実装できない：今の記録は受け取りの遅れと dispatch の遅れを分けられない（§5.3）。足さないなら，予行に timing の INCONCLUSIVE は無くなり，遅れは全部 FAIL になる（負荷で落ちた予行は kill に数えられる）。頼るのは R1-tx と R2 の予行（読んだ範囲で `n47s5_*` の 6 本の trial）。
+- **Q10 受け取りの記録（2026-11-13 取り下げ：2c は Manifest を変えない。以下は当時の文）**：UHD Module の Manifest に section `receipts`（Action ごとの受け取りの root tick）を足すか。本番の変更（Extension の層）。推奨：**足す**（v2 は「証人が作れない phase があれば」）。(i) は受け取りの記録が無いと実装できない：今の記録は受け取りの遅れと dispatch の遅れを分けられない（§5.3）。足さないなら，予行に timing の INCONCLUSIVE は無くなり，遅れは全部 FAIL になる（負荷で落ちた予行は kill に数えられる）。頼るのは R1-tx と R2 の予行（読んだ範囲で `n47s5_*` の 6 本の trial）。
 - **Q11 実機と共有する trial の包み**：(a) 実機のコードも包みに替える，(b) raw `RunHandle` を渡し続ける。推奨：**(a)**（変わらず。理由が増えた：§6.2 の検査は包みにしか置けない）。
 - **Q12 (b′)**：採らない（変わらず）。
 - **★ Q13 段 M を最初に置く**：推奨：**置く**（順序は変わらず）。ただし「以後の gate が正直になる」は言い過ぎだった。(v3.1) M の後に正直になるのは timeout，build，signal，watchdog と，`session_with`・`UhdRig` を通る生成の上限まで。`session_with` 以外の生成 12 か所（§5.4 の一覧），Run の途中の上限（KC-21a），cleanup の上限（RS-8a），join は 2a の後，包みの無い rig は対象外（§8）。「直結の rig が gate を落としている」は #96 の後も成り立つ（14 本が残っている：§7.1）。2a を 1a より前に置けば窓は縮むが，今 gate を落としている直結の rig（#96 の型）の修正が遅れる。推奨は今の順。（2a は作業枝で実装済み：下の「段 2a の後」。）
-- **★ Q14 規則 M-R**：推奨：**採る**。範囲が広がった：遅れ・phase に加えて「受け取りまでの遅れ」を殺す行も直結か unit を filter にする（§5.3 の残り）。
-- **Q15（新）実機で conclusive な trial が 0 の case**：timing の INCONCLUSIVE が全 trial で続いた case を「未実施」として FAIL にするか。推奨：**する**。(i) の残り（受け取りまでの regression）が実機で通り続けるのを止める唯一の手で，1 行の規則で済む。今の `hardware.rs` に同じ規則が既にあるかは見ていない（(v3.1) 再確認が `hardware.rs` と `tests/common` を `conclusive` などで grep した範囲では，見つからなかった）。
-- **(v3.1) Q16（新。再確認 m7）fake の予行で timing の INCONCLUSIVE が出たとき**：(i) が決めたのは trial の判定で，gate がどう振る舞うかは決めていない。
+- **★ Q14 規則 M-R**：推奨：**採る**。範囲：遅れ・phase を殺す行は直結か unit を filter にする。予行で遅れを作る変異は `ERROR`（印が 3 回：§5.3b）。
+- **Q15（新。2026-11-13 前提が変わり 2c では作らない：(i) が取り消され，実機に遅れの新しい INCONCLUSIVE の出どころが無い。F3（Session の Stop の case が実機で毎回 INCONCLUSIVE）は `stop_next_trial` の N2 で直す）実機で conclusive な trial が 0 の case**：timing の INCONCLUSIVE が全 trial で続いた case を「未実施」として FAIL にするか。推奨：**する**。(i) の残り（受け取りまでの regression）が実機で通り続けるのを止める唯一の手で，1 行の規則で済む。今の `hardware.rs` に同じ規則が既にあるかは見ていない（(v3.1) 再確認が `hardware.rs` と `tests/common` を `conclusive` などで grep した範囲では，見つからなかった）。
+- **(v3.1) Q16（新。再確認 m7。2026-11-13：b″ のとおり単独で 2 回まで流し直す。3 回とも印なら gate は赤，mutation は `ERROR`）fake の予行で timing の INCONCLUSIVE が出たとき**：(i) が決めたのは trial の判定で，gate がどう振る舞うかは決めていない。
   - (v3.1) (a) **marker つきで落とす**（v3 の §5.3）。コードは足さない。負荷の下では予行が gate を赤くする（test の段は marker つきでも失敗）。gate の流し直しが要る。
   - (v3.1) (b) **新しい Run で K 回までやり直し，全部遅いときだけ marker つきで落とす**。判定に使うのは，受け取りが窓の中に入った回の結果である。
   - (v3.1) 推奨：**(b)，K = 3**。理由：今の fake の予行は timing の INCONCLUSIVE を通している（10 か所が「`Fail` でなければよい」）ので，(a) は負荷の下の gate に**新しい赤**を足す。(b) は赤を足さず，予行の力も落とさない：やり直すのは 5（遅い Action 自身の証拠しか無い trial）だけで，FAIL（6）は 1 回目でそのまま失敗になり，やり直さない。
@@ -466,13 +466,13 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
   - (v3.1) 条件：わざと遅く受け取らせる case（`fake.rs:7926-7936`）はやり直さない（INCONCLUSIVE が期待値）。やり直した回数は出力の行に出し（`EZSDR-RETRY: <テスト名>: <n>`），`gate.json` で数える：黙ってやり直さない。mutation では変わらない：受け取りを毎回遅らせる mutant は K 回とも遅く，marker → `ERROR`（M-R の行が殺す）。
   - (v3.1) (b) が失うもの：受け取りを**ときどき**遅らせる regression は，やり直しで通る（(a) なら marker つきで赤くなり，人が見る）。(i) の残りと同じ型で，M-R の行と `EZSDR-RETRY` の数で見る。
   - (v3.1) 確かめていないこと：負荷の下で予行の受け取りがどれだけ遅れるかは測っていない（K = 3 は根拠のある数ではない）。trial を新しい Run で作り直す費用は trial ごとに読んでいない。小さく始めるなら (a) で入れ，gate が実際に赤くなったら (b) を足す，でもよい。
-- **(v3.1) Q17（新。再確認 m5）R1-k の証人**：Kernel が受け取る Action（capture）の「受け取りが遅い」を，Kernel の action log の `LogEntry.time` で決めてよいか。(i) の文は「Q10 の受け取りの記録から」で，Kernel の action log はその外にある。推奨：**認める**。P7 の「受け取った側が残した記録」に当たり（capture を受け取るのは Kernel），今ある記録で，本番の変更が要らない。認めないなら，capture の遅れに timing の INCONCLUSIVE は無く，遅い capture は全部 6 で判定する（負荷で落ちた予行は FAIL になる）。確認が出るまで v3.1 は後者で書いてある（§5.3 の表）。注意：§5.3 で退けた「Kernel の admit の時刻が窓の中なら，受け取りが遅くても FAIL」とは別の話で，あれは Provider に宛てた Action に Kernel の時刻を使う案である。遅い capture を Kernel がどう扱うかは読んでいない（INFERRED）。
+- **(v3.1) Q17（新。再確認 m5。2026-11-13：Kernel の log の片側の証人のまま，Provider に宛てた Action の `receipts` の節は削除）R1-k の証人**：Kernel が受け取る Action（capture）の「受け取りが遅い」を，Kernel の action log の `LogEntry.time` で決めてよいか。(i) の文は「Q10 の受け取りの記録から」で，Kernel の action log はその外にある。推奨：**認める**。P7 の「受け取った側が残した記録」に当たり（capture を受け取るのは Kernel），今ある記録で，本番の変更が要らない。認めないなら，capture の遅れに timing の INCONCLUSIVE は無く，遅い capture は全部 6 で判定する（負荷で落ちた予行は FAIL になる）。確認が出るまで v3.1 は後者で書いてある（§5.3 の表）。注意：§5.3 で退けた「Kernel の admit の時刻が窓の中なら，受け取りが遅くても FAIL」とは別の話で，あれは Provider に宛てた Action に Kernel の時刻を使う案である。遅い capture を Kernel がどう扱うかは読んでいない（INFERRED）。
 
 ## 11. 確かめていないこと
 
 - A の登録（時計ごと）は実装も probe もしていない。`Direct` と，その試験が使う fault つきの FakeConfig 2 つは 1c で VERIFIED（41 本が登録の下で通る）。W2 の書き直しは 1d で VERIFIED（3 か所 9 本が通り，20 回 0 失敗）。
 - R 表は無い。読んだ trial は `n47s5.rs` と `fake.rs` の 4 本だけ。`n47`，`d9`，`measurement` の trial，`tests/common/` の 142 本，probe 6 で新しく落ちた 2 本は読んでいない。
-- `receipts` は設計だけ。Stop と値の更新の受け取りを同じ section に書けるか，遅い capture を Kernel がどう扱うか（R1-k）は読んでいない。
+- `receipts` は作らない（§5.3b）。遅い capture を Kernel がどう扱うか（R1-k）は読んでいない（INFERRED）。
 - (v3.1) §6.2：背景で切れる Kernel の上限が無いことは INFERRED（段階 0 の表：lease の期限だけ。Policy の終わりの `stop_early` 内の join は M3 の読みで，2a の `Drop` が受ける。流した試験は無い）。`protocol.rs` の生成の経路は読んでいない。（v3 がここに置いていた 2 つは消えた：`ending::request` は state を変えず，`settle()` が戻りの前に `CleanedUp` まで進める。`finish()` は `CleanedUp` の後は何もしない。`uhd.rs` の生成は読んだ：§5.4。）
 - (v3.1) RS-8a の step が負荷の下で実際に 5 s を超えるかは INFERRED（KC-21a と同じ度合い）。UHD の Provider が cleanup の deadline を自分で宣言しているか（`run.rs:538` の既定を上書きするか）は読んでいない。
 - (v3.1) M1 の列（C が遅く A に underflow）と，遅い L が原因で窓の中の Action に fault が出る列は，テストとして流していない。
@@ -518,25 +518,25 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 - Sol major 4 (mutation honesty: real-time bounds still yield false kills; `mutate.py` counts timeouts as kills) joins this work together with #91.
 
 ### After Sol's re-review of v2 (sol-v2.md: FAIL, 2 majors) — owner 2026-11-11
-- Rehearsal exception to Q3(c) (Sol v2 major 2): **(i)** a hardware rehearsal's trial is INCONCLUSIVE (infra) only when its receipt itself is independently shown late (the booking reached the Provider already past its window, from the receipt record of Q10); lateness after receipt, missing records and wrong phase transitions stay failures (the Provider's responsibility). Such rehearsals are not mutation filters for lateness (rule M-R, Q14).
+- Rehearsal exception to Q3(c) (Sol v2 major 2): **(i)** a hardware rehearsal's trial is INCONCLUSIVE (infra) only when its receipt itself is independently shown late (the booking reached the Provider already past its window, from the receipt record of Q10); lateness after receipt, missing records and wrong phase transitions stay failures (the Provider's responsibility). Such rehearsals are not mutation filters for lateness (rule M-R, Q14). → withdrawn 2026-11-13 (it conflicts with RM-15: a delay at dispatch after receipt is host lateness the spec permits; §5.3b).
 
 ### Owner decisions on v3.1 (2026-11-12)
 - Q7 = reject (panic) a second registration of the same thread on the same clock, before allocating it; refcount only if a test ever needs it (nested helpers, two rigs on one clock — none today).
 - Q8 = (a): a row whose only kill is a bound declares `"kill": "bound"`; declared rows are counted and kept few.
 - Q9 = (a): `FakeDevice::new` on the real clock emits a marker (off by default, env-gated), read from the baseline output; report-only in stage M, enforced after stage 3 classifies the 66 sites.
-- Q10 = add: a UHD Module Manifest section `receipts` (each Action's receipt root tick, written at `book_burst`'s entry) — the witness rule (i) needs.
+- Q10 = add: a UHD Module Manifest section `receipts` (each Action's receipt root tick, written at `book_burst`'s entry) — the witness rule (i) needs. → withdrawn 2026-11-13 (2c does not change the Manifest; whether diagnosis needs it is decided separately).
 - Q11 = (a): the trial code shared by hardware tests and their rehearsals moves to the wrapper too (forwarding only); compile checked at the gate, behaviour at the next bench.
 - Q12 = not now: (b′) rejected; reconsider only if stage 0's R table finds many tests that cannot move to direct rigs yet fail on delays inside a Kernel call (observed so far: the two ur_25 tests of 2026-10-27, fixed in stage 3e).
 - Q13 = stage M first (after #96), then 1a; M makes honest only timeout/build/signal/watchdog and session_with/UhdRig creation bounds — the rest after 2a.
 - Q14 = adopt rule M-R: rows that kill lateness, a phase, or lateness before receipt use a direct rig or a unit test as their filter, never a Run rehearsal; the rows to retarget come from stage M's full run.
-- Q15 = yes: on hardware, a case with zero conclusive trials FAILs as 'not exercised'.
+- Q15 = yes: on hardware, a case with zero conclusive trials FAILs as 'not exercised'. → not built in 2c (its premise is gone: (i) is withdrawn and hardware has no new source of lateness INCONCLUSIVE; orchestrator decision 3, 2026-11-13).
 - Q16 = (b″) (owner's refinement): a fake rehearsal whose trial is timing-INCONCLUSIVE fails with a timing marker; gate.py and mutate.py, after the whole run, re-run exactly those tests one at a time (--test-threads=1, exact filter), at most 2 times; pass if a re-run is conclusive and passes; counts in gate.json; manual cargo test shows a hint to re-run serially. No in-test retry.
-- Q17 = yes: a capture's (an Action the Kernel itself receives) receipt lateness is judged from the Kernel action log's LogEntry.time; Provider-addressed Actions still use the receipts section only.
+- Q17 = yes: a capture's (an Action the Kernel itself receives) receipt lateness is judged from the Kernel action log's LogEntry.time; a capture's lateness is judged from the Kernel action log's LogEntry.time (one-sided witness). → 2026-11-13: the Provider-addressed `receipts` clause is deleted.
 
 ### 段階 0 の表の後（2026-11-12，`51-tables.md` と Opus の再確認 `~/.cache/ezsdr-fixes/2026-11-12-n51s0/recheck.md`）
-- Q17（owner 了承，2026-11-12）：Kernel の action log の `LogEntry.time` は `submit` の入口で打たれる（`pipeline.rs:939`）ので受け取りの下限であり，「遅い」は示せるが「間に合った」は示せない．Q17 はそのまま（安全側）．`submit` の中で遅れた capture は FAIL のまま残る．段階 2c で capture の記録した最初のサンプルを証人に使えるかを調べ，使えれば置き換える．
+- Q17（owner 了承，2026-11-12）：Kernel の action log の `LogEntry.time` は `submit` の入口で打たれる（`pipeline.rs:939`）ので受け取りの下限であり，「遅い」は示せるが「間に合った」は示せない．Q17 はそのまま（安全側）．`submit` の中で遅れた capture は FAIL のまま残る．段階 2c で capture の最初のサンプルを証人に使えるかを調べて退けた（Sink は最初の適格サンプルを選ぶだけで受け取りの時刻を持たない：`ezsdr-sink-capture/src/lib.rs:208-245, 451-463`）．Q17 は Kernel の log の片側の証人のまま．
 - Q16 の文言：「判定できた」は「流し直しで時刻の印が出なかった」の意味．わざと遅く受け取らせる case は印を case ごとに出さない（段階 M と 2c）．
-- 表の食い違い 2〜7 は各段の実装の細部（2a：fixture 4b は target つきの Spec `stop`，`protocol.rs` の `ea_15` の入口．2c：`receipts` は `control.rs:491` の 1 回の読みから書く，R2 の窓の端 `J(e)` も試験側の literal に．M：fixture 3 は実時間の fake に長い `apply_delay` をまず試す）．
+- 表の食い違い 2〜7 は各段の実装の細部（2a：fixture 4b は target つきの Spec `stop`，`protocol.rs` の `ea_15` の入口．2c：`receipts` は作らない（§5.3b）．R2 の窓の端 `J(e)` も試験側の literal に．M：fixture 3 は実時間の fake に長い `apply_delay` をまず試す）．
 
 ### 段 1b の後（2026-11-12，記録 `reviews/n51-1b-dispositions.md`）
 - 受け取りの時刻：駆動役を登録すると，`wait_until` は owner の poll の格子の上で終わり，試験のスレッドと uhd-control のどちらが先かで受け取りが T か T＋1 poll になった（`s14_…` の S3 が負荷の下で落ちた）．`wait_until` の最後に 1 µs の時計の待ちを足し，受け取りは T の後の最初の poll に決まる（上の契約 2）．S3 の値は 71 ms のまま．
@@ -567,3 +567,11 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 - 試験側だけの変更（production code は変えない）。A：走査に `assemble_on` の規則（`ezsdr-acceptance` の試験 file のうち `uhd.rs` 以外に `assemble_on` が出たら違反：`support::session_run_with` の raw `connect` に FakeDevice の assembly を渡せないようにする），`ur_29_a_silent_stream_is_a_lost_device` と `ur_33_a_shutdown_with_a_report_read_that_fails_at_once_still_joins_uhd_tx` の時刻読み（device 時計と実時間の assert）を消して許可表の 2 行（24 → 22）を外した，`bounded()` と `ur_21_a_descheduled…` の `entered.recv_timeout` が切れたら `EZSDR-INFRA:` を書く（表 §4.3 のとおり。行の kill が hang だけのものは `"kill": "bound"` か付け替え）。B：`ur_21_s18…`（最初の repeat を untimed），`ur_23_a_burst_after_a_stop…`（`start_repeat`。`rejections().is_empty()` は N47S4-41 の唯一の killer なので残す），`ur_29_a_loss_found…`（untimed の `send`），`ea_16_untimed_repeat_after_stop…`（Stop 自身の log の時刻を使う）。C：`ur_21_a_refused_configure_refuses_its_burst_through_the_kernel` を Run の半分（id の対応と corrected 値。untimed，60 ms の待ち）と `Direct` の窓の試験 `ur_21_a_refused_configure_keeps_its_burst_s_span_until_its_booked_end_on_the_direct_rig`（行 N51-2B-06）に分けた。
 - 2c へ送ったもの 13 本：`n47s5_*` の予行 7 本，`s1_short_first_sends…`，`p70_one_sample_burst_then_timed_burst…`，`rx_start_lead_group_runs_on_the_fake`（R2。`restart_trial` の `start_rx` が値の `set` の apply の窓の中で受け取られる必要がある），`rehearsal_b7_*` 3 本。どれも共有の trial で，直結に移すと予行でなくなり，期待は受け取りの時刻を要る（多くは Provider の `receipts`。`n47s5_stop_end_rehearsal_on_the_fake` は Kernel の log で，2a の sweep では落ちなかった。sweep で落ちたのは 13 本のうち 9 本）。`ur_21_a_descheduled…` は 3 段へ。
 - sweep（2a の注入 12 点）を moved の 6 本（`ur_21_a_refused_configure_refuses_its_burst…`，`ur_21_s18…`，`ur_23_a_burst_after_a_stop…`，`ur_29_a_loss_found…`，`ur_29_a_silent…`，`ur_33_a_shutdown…`）と `ea_16_…` に流して全部通る。`ea_16` の下限（`gap ≥ 9 900`）は Stop の log の時刻（Kernel が compile と dispatch の前に打つ，`pipeline.rs:939`）を基準にするので，その後でスレッドが止まれば Provider の受け取りとの差は上限なく開き，実際の受け取りからの間隔は示さない。正確な窓は 2c の `receipts` の義務として残す。
+
+### 段 2c の後（2026-11-13，`work/n51-2c`；記録は gate を閉じる commit の `reviews/n51-2c-*`）
+- 試験側と tooling だけの変更（production code と Manifest は変えない。`src/` は `control.rs` の `#[cfg(test)]` だけ）。A：`mutate.py` の baseline を `judge` に通す。B：`iii::late_evidence`（§5.3b の証拠 2 つ），`iii::kernel_refused`，`Rehearsal`（admit 違反を証拠より先に plain な失敗に，印は `finish` で 1 回），`governance.rs` の走査（予行 9 本（fix 1 で N2 の late の 1 本が足され 10 本）の `.trial(` と `finish()`，span の外の assert 系の macro と `_verdict(`／`_outcome(` の呼びを表と照合），実機と共有する判定の `kernel_refused` 先行，long close の形の欠けを FAIL に。C1：共有 trial が `Lateness` を持つ，held-tail の C = 1 000（F2），`stop_next_trial` の N2（実機は N2 の行を 1 本足す：`stop_after_margin_verdict`，N1 の stamp が margin を過ぎていれば INCONCLUSIVE，N2 自身の late の drop も INCONCLUSIVE（fix 1：`late_arrival_verdict_of("N2", …)`））。C2：予行 9 本を report-only から差し控えに切り替え（`report_only` は消えた），README を書き直した。
+- 単独の 20 回（9 本，180 回）は印 0，plain な失敗 0。8 並列 3 回（各 24 回）は front の 24 回中 4 回が印（すべて `T2 2 samples at 10000000 S/s` の `TIME_ERROR` cause late）で，plain な失敗は 0。印の回は単独で流し直す（§5.3b）。
+- 診断の sweep（2a の注入 12 点を，予行 9 本と `rx_start_lead_group_runs_on_the_fake` と `rehearsal_b7_*` 3 本の 13 本に流す。注入なしは 13 本とも通る）：予行が落ちる config は 12 点すべてで，落ちた回の**印つき**は 点ごとに 1〜8 本（`now` 5・6・8・8，`advance` 1・2・2・2，`submit` 1・2・2・5），plain な失敗は次の 2 種だけ。(a) `rx_start_lead_group_runs_on_the_fake`（`submit` 20・60・200）は 2a のときと同じ（段 3 へ送ったもの：§3.4）。(b)（C3 で直した：下の C3 の行）`n47s5_held_tail_and_stop_rehearsal_on_the_fake` は `now` 60・200 と `submit` 60・200 の 4 点で plain に落ちる：わざと遅らせる case N7（印を出さない，共有の判定のまま）の 1 つ目で，**C 以外の Action（A と capture）も host の遅れで drop される**（`TIME_ERROR` が 2 本：A の target と C の target。`now` 60 で A の stamp が deadline を過ぎているのを確かめた。ほかの 3 点は同じ形の INFERRED）ので `late_arrival_verdict` の guard（`time_errors == C の late の drop の数`）に入らず FAIL になる。2c の前から同じ形（2a の sweep の同じ test）で，N7 を述語の外に置く決定（§2.4）の帰結である。直し方は orchestrator の判断（N7 の 2 case も C の late の drop を除いた `Lateness` で `Rehearsal::trial` に通す案が最小）。
+- C3（N7 を述語に通す）：上の (b) の直し。N7 の 2 case を `iii::without_expected_late`（C の late の drop と deadline だけを除く）の `Lateness` で `Rehearsal::trial` に通した。guard の表は held-tail が sites 4→6，`direct` 2→0，`outside` 2→0，`calls` 2→0。再実行：`now` 60・200，`submit` 60・200 の held-tail は印だけで plain な失敗 0（6 trial が印，N7 の 2 case は A の遅れで判定されず），注入なしの単独 20 回は印 0・失敗 0 で N7 の 2 case は判定され INCONCLUSIVE（host latency）。
+- Sol のコード review の直し（fix 1）：(M1) `one_sample_pair` の test（`one_sample_pair_returns_the_manifest_its_time_errors_were_read_from`）が `Rehearsal` を通らず「burst が 2 本」を assert していたので，注入した遅れで plain に落ちた（`now` 60：0 本，`submit` 60：1 本）。A を 1 ms 先（deadline を過ぎる）に booking して A の late の drop を作りだし，Manifest の読みの同一性（`time_errors == time_error_pairs(manifest)`）と drop が 1 本以上あることだけを assert する（どの遅れでも成り立つ）。(M2) 実機の Session の Stop で，N1 は margin の中，N2 だけが host の遅れで late の drop になると，どちらの判定行も run 全体の `TIME_ERROR` を plain な FAIL にしていた。N2 の判定は自分の late の drop を `iii::late_arrival_verdict_of("N2", …)`（INCONCLUSIVE，host latency）に通し，N1 の判定は N2 の late の drop の数だけ `TIME_ERROR` を引く（`iii::without_late_drops`）。ほかの fault（別の TIME_ERROR，underflow，device の fault）は今までどおり FAIL。`stop_next_trial` は `n2_lag`（実機は `None`）で N2 を deadline の後に出せる：fake の `n47s5_stop_n2_late_drop_is_host_latency_on_both_lines`（N2 の deadline と late の drop だけを除いた `Lateness` で `Rehearsal::trial`）が両方の行を，`n47s5_stop_n2_late_case_leaves_out_only_n2s_own_late_drop`（Rehearsal を通さず件数だけ）が除外を決める。Provider は N2 の stamp が自分の `T − 3 ms` 以降のとき late で drop した（`n2_lag` を −3.0〜+1.0 ms で測った：−1.5 ms までは drop 無し，−1.0 ms 以降は drop）：1.5 ms の余裕で `n2_lag = 0.5 ms` を使う（fake の manual clock，INFERRED：実機では同じ値を測っていない）。(minor) `late_arrivals` の本体を `late_arrivals_in`（payload の列）に分け，A と C の drop が別の target にある合成の payload で target の選び方を決める（N47S5-192 の killer）。
+- 流していない・限界：実機の bench（N2 の行，N2 の late の drop の行（fix 1 で足した。fake の `n47s5_stop_n2_late_drop_is_host_latency_on_both_lines` だけで，実機では流していない），C = 1 000 の onset，long close の FAIL）は次の bench。`rx_start_lead_group_runs_on_the_fake` は段 3。

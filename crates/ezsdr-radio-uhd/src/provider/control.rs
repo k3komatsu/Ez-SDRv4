@@ -810,7 +810,9 @@ mod tests {
         // RM-15, RM-16 (#83), on the controlled clock: a Stop at 5 ms bounds the stream at 10 ms of samples past it, plus five (the bound,
         // 15 ms here). An untimed repeat received inside that region (7 ms) starts at the bound; one received after it (20 ms) starts at
         // its ordinary start, which the device lead after its receipt sets. The test sets the instants, so no thread timing moves either.
-        for (receipt_ms, inside) in [(7, true), (20, false)] {
+        // The switch between the two is pinned at its edge: the smallest receipt whose ordinary start reaches the bound (found by search, with
+        // the same `ordinary_k` the test uses), the tick before it and the tick after it each start at the later of the two.
+        let held_at = |receipt: i64| {
             let (core, mut control, time, _events) = tx_rig();
             book_tx_burst(&mut control, &core, 1, 10_000, true, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
             let stop = core.ticks(5_000_000);
@@ -818,7 +820,6 @@ mod tests {
             control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(crate::provider::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
             let clock = tx_clock(&core);
             let bound = clock.at_or_after(stop + core.tx_in_flight()) + 5;
-            let receipt = core.ticks(receipt_ms * 1_000_000);
             time.advance_to(core.at(receipt)).unwrap();
             let ordinary =
                 ezsdr_radio::staging::ordinary_k(ezsdr_radio::timeline::decided_at(receipt, clock.origin, core.device_lead()), core.device_lead(), |t| clock.at_or_after(t), |k| clock.instant(k));
@@ -826,9 +827,33 @@ mod tests {
             // The Kernel stamps an untimed burst at its receipt; the Provider takes the later of that and the ordinary start.
             control.book(tx_burst_dispatch(&core, 3, clock.at_or_after(receipt), true, ezsdr_kernel::stream::LatePolicy::DropAndFlag, true));
             let held = next_booking(&core).expect("the untimed repeat is handed to uhd-tx");
+            (held.k, bound, ordinary)
+        };
+        let (probe, ..) = tx_rig();
+        let ms = |n: i64| probe.ticks(n * 1_000_000);
+        for (receipt_ms, inside) in [(7, true), (20, false)] {
+            let (k, bound, ordinary) = held_at(ms(receipt_ms));
             let expected = if inside { bound } else { ordinary };
-            assert_eq!(held.k, expected, "received at {receipt_ms} ms: the bound is {bound}, the ordinary start {ordinary}");
+            assert_eq!(k, expected, "received at {receipt_ms} ms: the bound is {bound}, the ordinary start {ordinary}");
         }
+        let clock = tx_clock(&probe);
+        let bound = clock.at_or_after(probe.ticks(5_000_000) + probe.tx_in_flight()) + 5;
+        let ordinary_at = |receipt: i64| {
+            ezsdr_radio::staging::ordinary_k(ezsdr_radio::timeline::decided_at(receipt, clock.origin, probe.device_lead()), probe.device_lead(), |t| clock.at_or_after(t), |k| clock.instant(k))
+        };
+        let (mut low, mut high) = (ms(7), ms(20));
+        assert!(ordinary_at(low) < bound && ordinary_at(high) >= bound, "the switch lies between 7 and 20 ms");
+        while high - low > 1 {
+            let mid = low + (high - low) / 2;
+            if ordinary_at(mid) >= bound { high = mid } else { low = mid }
+        }
+        let switch = high;
+        for receipt in [switch - 1, switch, switch + 1] {
+            let (k, held_bound, ordinary) = held_at(receipt);
+            assert_eq!(held_bound, bound, "the bound does not depend on the receipt");
+            assert_eq!(k, bound.max(ordinary), "received at tick {receipt} (the switch is {switch}): the bound is {bound}, the ordinary start {ordinary}");
+        }
+        assert!(ordinary_at(switch) >= bound && ordinary_at(switch - 1) < bound, "{switch} is the smallest receipt whose ordinary start reaches the bound");
     }
 
     #[test]

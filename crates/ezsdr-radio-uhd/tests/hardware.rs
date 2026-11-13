@@ -3797,7 +3797,7 @@ fn stop_next(device: Arc<dyn Device>) -> StopTrial {
     let dir = TempDir::new();
     let probe = Arc::new(probe_device::ProbeDevice::new(device));
     let run = tx_session(probe.clone(), &dir);
-    n47s5::stop_next_trial(run, probe, dir)
+    n47s5::stop_next_trial(run, probe, dir, None)
 }
 
 #[test]
@@ -3819,6 +3819,7 @@ fn hw_n47s5_held_tail_and_stop() {
     let closes: Vec<Json> = n47s5::data_sends(&stop.probe).into_iter().filter(|row| row["eob"] == true).collect();
     println!("T3 (b) Session: the Stop at root {}; the next burst at root {}; the device's end-of-burst sends {closes:?}", stop.stop_root, stop.next_root);
     record(&mut failures, "Session: next burst at the record's stop sample (RM-16, the first sample after the Stop with the in-flight window)", n47s5::stop_next_verdict(&stop));
+    record(&mut failures, "Session: the booking past the bound of any receipt within the margin plays (RM-16)", n47s5::stop_after_margin_verdict(&stop));
     for rate in n47s5::FRONT_RATES {
         raw_tx_ready(&*device, rate);
         let close_rows = raw_close_rows(&*device, rate, &[3, 4, 5], 4);
