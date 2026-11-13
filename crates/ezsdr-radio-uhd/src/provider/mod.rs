@@ -55,6 +55,14 @@ fn open_refusal(error: crate::device::DeviceError) -> String {
     if error.message.starts_with("UR-13:") { error.message } else { format!("UR-13: {}", error.message) }
 }
 
+/// `arm`'s refusal of a failed receive open, after a loss it found is published (UR-29): `cleanup` then closes no streamer.
+fn refuse_open(core: &Core, error: crate::device::DeviceError) -> ModuleError {
+    if error.lost {
+        core.device_lost(&error.message);
+    }
+    rejected(open_refusal(error))
+}
+
 /// `ezsdr.radio.uhd.<suffix>`; the Kernel files it under the instance's source root (RS-39).
 fn section(suffix: &str) -> Namespace {
     Namespace::parse(&format!("ezsdr.radio.uhd.{suffix}")).expect("a section name")
@@ -557,7 +565,7 @@ impl Provider for UhdRadio {
                 continue;
             }
             // UR-13: the record says what the streamer now holds; a failed open or rate check holds none.
-            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;
+            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| refuse_open(&core, e))?;
         }
         for stream in &mut prepared.tx {
             if stream.channels.is_empty() {
@@ -994,6 +1002,41 @@ mod tests {
     }
 
     #[test]
+    fn ur_29_a_loss_found_by_the_stop_on_open_at_arm_is_published_once_and_cleanup_closes_nothing() {
+        // UR-16, UR-29 (#67, Sol M1): `arm`'s receive open succeeds and its untimed stop reports the
+        // device lost; the loss is published before `arm` refuses, so `cleanup` frees no streamer.
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": [] }
+        }))
+        .unwrap();
+        let spy = Arc::new(test_support::LockSpy::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let mut radio = UhdRadio::from_binding(&binding, spy.clone()).unwrap();
+        let (core, _time, events) = test_support::rig_on_description(spy.clone(), vec![Arc::new(NoLink)], BTreeMap::new(), radio.description.clone());
+        spy.watch(&core);
+        radio.prepared = Some(Prepared {
+            core: core.clone(),
+            actions: Arc::new(NoActions),
+            config: BTreeMap::new(),
+            rx: vec![PreparedStream { k: 0, handle: None, channels: Channels::first(1), clock: None }],
+            tx: Vec::new(),
+        });
+        spy.refuse_rx_stop(crate::DeviceError { lost: true, message: "test: lost at the open's stop".to_owned() });
+
+        let error = radio.arm().unwrap_err();
+        assert!(error.message.starts_with("UR-13: UR-16: the untimed stop on open:"), "{}", error.message);
+        assert!(core.is_lost());
+        radio.cleanup();
+
+        let order = spy.order();
+        let stop = order.iter().position(|name| *name == "rx_stop").expect("the stop on open");
+        assert!(order[stop + 1..].iter().all(|name| *name == "mark_lost"), "no device call but the loss's follows the lost stop: {order:?}");
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{delivered:?}");
+    }
+
+    #[test]
     fn ur_36_a_successful_open_moves_the_generation_on_even_when_its_check_refuses() {
         // UR-36: every successful open is a new streamer, so the generation moves on; the rate
         // comparison that follows is refused by the direction's stored outcome, and then the set
@@ -1050,7 +1093,11 @@ mod tests {
         let inner = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let device: Arc<dyn Device> = inner.clone();
         let mut radio = UhdRadio::from_binding(&binding, device).unwrap();
-        let (core, _, _) = test_support::rig_on_description_links(inner.clone(), vec![vec![Arc::new(NoLink)], Vec::new()], BTreeMap::new(), radio.description.clone());
+        let (core, time, _) = test_support::rig_on_description_links(inner.clone(), vec![vec![Arc::new(NoLink)], Vec::new()], BTreeMap::new(), radio.description.clone());
+        // A start queued seconds ahead on a held clock: the radio keeps it until something cancels it.
+        let frozen = test_support::Frozen::of(&inner);
+        test_support::device_at(&core, &time, &inner, 0);
+        let origin = core.ticks(5_000_000_000);
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
         core.device.rx_open(0, &[0]).unwrap();
         lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(Channels::first(1)));
@@ -1063,13 +1110,13 @@ mod tests {
         });
         radio.fail_next_rx_spawn = true;
 
-        let error = radio.start(None).unwrap_err();
+        let error = radio.start(Some(core.at(origin))).unwrap_err();
 
         assert!(error.message.contains("scripted thread spawn failure"), "{error:?}");
         assert!(radio.stopped, "start failure ran Provider::stop");
         // UR-30: uhd-control was never spawned, so the refused start has no plan row.
         assert!(!lock(&core.rec).timing.iter().any(|row| row["what"] == "plan"), "{:?}", lock(&core.rec).timing);
-        let started = inner.calls().iter().position(|call| call == "rx_start 0 0").expect("the initial RX start succeeded");
+        let started = inner.calls().iter().position(|call| *call == format!("rx_start 0 {origin}")).expect("the initial RX start succeeded");
         let chain = core.rx_chain[0].lock();
         assert_eq!(chain.device(), core::RxDevice::Uncertain);
         assert_eq!(chain.segment(), None);
@@ -1084,6 +1131,17 @@ mod tests {
         assert_eq!(calls[close + 1..].len(), 0, "close_streams is the final device call: {calls:?}");
         assert_eq!(calls.iter().filter(|call| *call == "close_streams").count(), 1);
         assert_eq!(core.rx_chain[0].lock().device(), core::RxDevice::Uncertain, "cleanup leaves the documented uncertain state");
+
+        // The queued start outlives the close; the next open of the streamer stops it before the streamer is used (UR-16), and nothing arrives at its origin.
+        core.open_streamer(Dir::Rx, 0, Channels::first(1)).unwrap();
+        let calls = inner.calls();
+        assert_eq!(&calls[close + 1..][..2], ["rx_open 0 [0]", "rx_stop 0 now"], "{calls:?}");
+        test_support::device_at(&core, &time, &inner, origin - core.ticks(50_000_000));
+        let _driver = test_support::handed_over(frozen, &inner.host());
+        for _ in 0..6 {
+            assert_eq!(inner.rx_recv(0, 2_000, Wall::from_millis(100), false), crate::device::RxRecv::Timeout, "the orphaned start delivered: {:?}", inner.calls());
+        }
+        assert!(inner.time_now().unwrap() >= origin + core.ticks(500_000_000));
     }
 
     /// A layout with two receive front ends and one transmit one (P1b).

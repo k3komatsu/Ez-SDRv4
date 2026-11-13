@@ -1519,7 +1519,10 @@ impl Core {
         }
         let list = channel_list(set);
         let opened = match dir {
-            Dir::Rx => self.device.rx_open(k, &list),
+            // An untimed stop before the streamer's first start cancels a start an earlier close left queued on the radio (UR-16).
+            Dir::Rx => {
+                self.device.rx_open(k, &list).and_then(|()| self.device.rx_stop(k).map_err(|e| DeviceError { lost: e.lost, message: format!("UR-16: the untimed stop on open: {}", e.message) }))
+            }
             Dir::Tx => self.device.tx_open(k, &list),
         };
         if dir == Dir::Tx && opened.is_ok() {

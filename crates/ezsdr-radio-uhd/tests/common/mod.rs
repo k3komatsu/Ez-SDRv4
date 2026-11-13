@@ -488,9 +488,7 @@ pub fn spec_run_ended(spec: &Json, profile: &Json, device: Arc<dyn Device>, inpu
         Err(ended) => *ended,
         Ok(run) => {
             let state = run.state();
-            // The test fails here, so the Run it did not expect to start is torn down without #67's join judging it: that marker would make the
-            // failure read as a bound that expired.
-            drop(run.rx_join_issue_67().finish());
+            drop(run.finish());
             panic!("expected the Run to end at creation: {state:?}");
         }
     }
@@ -678,8 +676,27 @@ pub fn bursts(manifest: &Manifest) -> Vec<BurstRecord> {
     serde_json::from_value(section(manifest, "bursts").clone()).unwrap()
 }
 
+/// The device's calls that start with `prefix`, without the untimed stop each receive open makes before its first start (UR-16): that stop is setup, not
+/// experiment traffic, as T3's four-zero send is (`tx_experiment_sends`). Only a stop that follows its stream's open with no other call of that stream
+/// between is setup, so a stop after a start stays, and a refused open's own `rx_open` call stays (the Module makes no stop for an open that failed). A test of the open itself reads `device.calls()`.
 pub fn calls(device: &FakeDevice, prefix: &str) -> Vec<String> {
-    device.calls().into_iter().filter(|c| c.starts_with(prefix)).collect()
+    let mut just_opened: std::collections::BTreeSet<String> = Default::default();
+    let mut kept = Vec::new();
+    for call in device.calls() {
+        let mut words = call.split(' ');
+        let (name, stream) = (words.next().unwrap_or_default(), words.next().unwrap_or_default().to_owned());
+        if name == "close_streams" {
+            just_opened.clear();
+        } else if name == "rx_open" {
+            just_opened.insert(stream);
+        } else if name.starts_with("rx_") && just_opened.remove(&stream) && name == "rx_stop" {
+            continue;
+        }
+        if call.starts_with(prefix) {
+            kept.push(call);
+        }
+    }
+    kept
 }
 
 /// T3's untimed four-zero SOB/EOB send is setup, not experiment traffic.

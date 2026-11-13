@@ -477,8 +477,8 @@ struct RxStreamer {
     /// A stopped stream's end: its samples before it are still delivered (the device's
     /// in-flight tail), ahead of the next stream's.
     end: Option<i64>,
-    /// A start issued while a stopped stream's tail is still being delivered.
-    then: Option<i64>,
+    /// A start issued while a stopped stream's tail is still being delivered: its origin and its ticks a sample.
+    then: Option<(i64, i64)>,
     /// Where the running stream's packets begin: its start (UHD's packets are the
     /// stream's, not a request's; Review O, N-2).
     origin: i64,
@@ -534,6 +534,19 @@ fn freq_constant(st: &Fake, dir: Dir, chan: usize, from: i64, to: i64) -> Option
         None => st.settings[dir as usize].get(chan).map(|channel| channel.freq),
         Some(chain) if chain.log.iter().any(|(tick, _)| *tick > from && *tick <= to) => None,
         Some(_) => Some(freq_of(st, dir, chan, from)),
+    }
+}
+
+/// A closed streamer's start that has not reached its origin stays queued on each of its channels
+/// (`Fake::orphans`).
+fn orphan_queued_start(st: &mut Fake, old: Option<RxStreamer>, now: i64) {
+    let Some(old) = old else { return };
+    // A start behind a stopped stream's unread tail is queued too (`then`).
+    let queued = old.next.filter(|at| *at == old.origin && *at >= now).map(|at| (at, old.ratio)).or(old.then.filter(|(at, _)| *at >= now));
+    if let Some(start) = queued {
+        for chan in old.channels {
+            st.orphans.insert(chan, start);
+        }
     }
 }
 
@@ -848,6 +861,11 @@ struct Fake {
     /// Each chain's DSP state, by direction and front end (UR-33).
     dsp: BTreeMap<(usize, (usize, u32)), Dsp>,
     rx: BTreeMap<usize, RxStreamer>,
+    /// A timed start a closed streamer left queued, by device channel: `(origin, ratio)`. The
+    /// radio's command FIFO outlives the streamer, so a streamer opened later on the channel
+    /// delivers it at its origin (VERIFIED on the bench 2026-11-13, #67); only an untimed stop
+    /// on that streamer cancels it.
+    orphans: BTreeMap<usize, (i64, i64)>,
     tx: BTreeMap<usize, TxStreamer>,
     /// The shortest timeout an `rx_recv` was given.
     rx_min_timeout: Duration,
@@ -926,6 +944,7 @@ impl FakeDevice {
                 opened: [std::collections::BTreeSet::new(), std::collections::BTreeSet::new()],
                 dsp: BTreeMap::new(),
                 rx: BTreeMap::new(),
+                orphans: BTreeMap::new(),
                 tx: BTreeMap::new(),
                 rx_min_timeout: Duration::MAX,
                 tx_samples: BTreeMap::new(),
@@ -1195,7 +1214,7 @@ impl FakeDevice {
             }
             None if at < now => st.rx.get_mut(&stream).expect("checked").late = Some(at),
             // Behind the stopped stream's tail, which is delivered first.
-            None if st.rx[&stream].end.is_some() => st.rx.get_mut(&stream).expect("checked").then = Some(at),
+            None if st.rx[&stream].end.is_some() => st.rx.get_mut(&stream).expect("checked").then = Some((at, ratio)),
             None => {
                 let streamer = st.rx.get_mut(&stream).expect("checked");
                 streamer.next = Some(at);
@@ -1259,7 +1278,10 @@ impl Device for FakeDevice {
         // `multi_usrp_rfnoc.cpp:2822-2834`; the other direction's stay). No thread holds one
         // (the trait's precondition).
         match dir {
-            Dir::Rx => st.rx.clear(),
+            Dir::Rx => {
+                st.rx.clear();
+                st.orphans.clear();
+            }
             Dir::Tx => st.tx.clear(),
         }
         // A rebuilt channel map's chains are new: its channels count as unconnected again
@@ -1324,6 +1346,7 @@ impl Device for FakeDevice {
             streamer.duc.eob_lost = false;
         }
         st.tx_samples.clear();
+        st.orphans.clear();
         for streamer in st.rx.values_mut() {
             streamer.next = None;
             streamer.end = None;
@@ -1459,7 +1482,9 @@ impl Device for FakeDevice {
         let channels: &[usize] = if channels.is_empty() { &[0] } else { channels };
         // UR-25, as `UhdDevice` does: this stream's old streamer goes before the new one is
         // made, so a refused reopen leaves the stream with none.
-        st.rx.remove(&stream);
+        let now = self.now(&st);
+        let old = st.rx.remove(&stream);
+        orphan_queued_start(&mut st, old, now);
         if let Some(index) = self.config.faults.iter().position(|f| *f == FakeFault::RxOpenFails).filter(|i| !st.fired[*i]) {
             st.fired[index] = true;
             return Err(DeviceError::failed("fake: uhd_usrp_get_rx_stream: scripted refusal of the first open"));
@@ -1481,7 +1506,16 @@ impl Device for FakeDevice {
             }
             seen.push(*chan);
         }
-        st.rx.insert(stream, RxStreamer::new(channels.to_vec()));
+        let mut streamer = RxStreamer::new(channels.to_vec());
+        // The pending starts of this streamer's own channels, whatever its number and channel
+        // order (INFERRED: the bench reopened one channel); the earliest sets the streamer's.
+        let adopted: Vec<(i64, i64)> = channels.iter().filter_map(|chan| st.orphans.remove(chan)).filter(|(at, _)| *at >= now).collect();
+        if let Some(&(at, ratio)) = adopted.iter().min() {
+            streamer.next = Some(at);
+            streamer.origin = at;
+            streamer.ratio = ratio;
+        }
+        st.rx.insert(stream, streamer);
         st.opened[Dir::Rx as usize].extend(channels.iter().copied());
         Ok(())
     }
@@ -1552,7 +1586,7 @@ impl Device for FakeDevice {
                 // The stopped stream's tail is delivered; the next stream, if one was started.
                 streamer.end = None;
                 streamer.next = None;
-                if let Some(at) = streamer.then.take() {
+                if let Some((at, _)) = streamer.then.take() {
                     if at < now {
                         streamer.late = Some(at);
                     } else {
@@ -2001,7 +2035,9 @@ impl Device for FakeDevice {
     fn rx_close(&self, stream: usize) {
         let mut st = self.lock();
         st.calls.push(format!("rx_close {stream}"));
-        st.rx.remove(&stream);
+        let now = self.now(&st);
+        let old = st.rx.remove(&stream);
+        orphan_queued_start(&mut st, old, now);
     }
 
     fn tx_close(&self, stream: usize) {
@@ -2016,7 +2052,10 @@ impl Device for FakeDevice {
         // UR-2, UR-16: every streamer of both directions, as UHD frees each of a device's.
         let mut st = self.lock();
         st.calls.push("close_streams".to_owned());
-        st.rx.clear();
+        let now = self.now(&st);
+        for streamer in std::mem::take(&mut st.rx).into_values() {
+            orphan_queued_start(&mut st, Some(streamer), now);
+        }
         let tx_channels: Vec<Vec<usize>> = st.tx.values().map(|streamer| streamer.channels.clone()).collect();
         for channels in tx_channels {
             stale_tx_header(&mut st, &channels);
@@ -3597,5 +3636,173 @@ mod tests {
             device.set_time(start);
             assert!(device.tx_async(0, Duration::ZERO).unwrap().is_none(), "the one-sample EOB loses its acknowledgement");
         });
+    }
+    // A timed receive start queued on the radio's command FIFO outlives its streamer: a close and a
+    // reopen do not cancel it, an untimed stop does (UR-33; the bench of 2026-11-13, #67). Each
+    // scenario runs on participants of the manual clock, 50 ms ahead of an origin on a 1 MS/s grid.
+
+    /// Opens `channels` as stream `stream` (channel 0's rate is 1 MS/s on both), starts it 50 ms
+    /// ahead and returns the origin.
+    fn queue_start(device: &FakeDevice, stream: usize, channels: &[usize]) -> i64 {
+        device.set_time_zero(false).unwrap();
+        for chan in [0, 1] {
+            device.apply(Dir::Rx, chan, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
+        }
+        device.rx_open(stream, channels).unwrap();
+        let origin = device.time_now().unwrap() / 200 * 200 + ms(50);
+        device.rx_start(stream, origin).unwrap();
+        origin
+    }
+
+    /// Reads `stream` until the device's time passes `tick`, returning every block's first tick.
+    fn first_ticks_until(device: &FakeDevice, stream: usize, tick: i64) -> Vec<i64> {
+        let mut ticks = Vec::new();
+        while device.time_now().unwrap() <= tick {
+            if let RxRecv::Samples { first_tick, .. } = device.rx_recv(stream, 2_000, Duration::from_millis(10), false) {
+                ticks.push(first_tick);
+            }
+        }
+        ticks
+    }
+
+    #[test]
+    fn ur_33_an_untimed_stop_before_a_queued_origin_cancels_it() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let origin = queue_start(&device, 0, &[0]);
+            device.rx_stop(0).unwrap();
+            assert_eq!(first_ticks_until(&device, 0, origin + ms(100)), Vec::<i64>::new(), "nothing of the cancelled start");
+            let fresh = device.time_now().unwrap() / 200 * 200 + ms(5);
+            device.rx_start(0, fresh).unwrap();
+            assert_eq!(first_ticks_until(&device, 0, fresh + ms(10)).first(), Some(&fresh), "a fresh start delivers from its own origin");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_close_and_reopen_does_not_cancel_a_queued_start() {
+        for variant in ["close_streams", "rx_close", "a replacing rx_open"] {
+            let device = manual(FakeConfig::default());
+            participant(&device, move |device| {
+                let origin = queue_start(&device, 0, &[0]);
+                match variant {
+                    "close_streams" => device.close_streams(),
+                    "rx_close" => device.rx_close(0),
+                    _ => {}
+                }
+                device.rx_open(0, &[0]).unwrap();
+                let ticks = first_ticks_until(&device, 0, origin + ms(10));
+                assert_eq!(ticks.first(), Some(&origin), "{variant}: the old start's first block arrives on the reopened streamer at its origin");
+            });
+        }
+    }
+
+    #[test]
+    fn ur_33_a_stop_before_the_close_or_on_the_reopened_streamer_cancels_the_orphan() {
+        for stop_first in [true, false] {
+            let device = manual(FakeConfig::default());
+            participant(&device, move |device| {
+                let origin = queue_start(&device, 0, &[0]);
+                if stop_first {
+                    device.rx_stop(0).unwrap();
+                }
+                device.close_streams();
+                device.rx_open(0, &[0]).unwrap();
+                if !stop_first {
+                    device.rx_stop(0).unwrap();
+                    // The stop took the start out of the radio's queue: a later close and reopen finds none.
+                    device.close_streams();
+                    device.rx_open(0, &[0]).unwrap();
+                }
+                assert_eq!(first_ticks_until(&device, 0, origin + ms(100)), Vec::<i64>::new(), "stop before the close: {stop_first}");
+            });
+        }
+    }
+
+    #[test]
+    fn ur_33_an_orphan_is_adopted_per_channel_whatever_the_stream_number() {
+        // A start on channels 0 and 1, the streamer closed: each channel's pending start goes to
+        // the streamer that opens that channel (INFERRED: the bench reopened one channel), by
+        // channel, not by stream number, and an adopted start used up or stopped leaves the other's.
+        for stop_the_first in [false, true] {
+            let device = manual(FakeConfig::default());
+            participant(&device, move |device| {
+                let origin = queue_start(&device, 0, &[0, 1]);
+                device.close_streams();
+                device.rx_open(5, &[0]).unwrap();
+                if stop_the_first {
+                    device.rx_stop(5).unwrap();
+                }
+                device.rx_open(6, &[1]).unwrap();
+                assert_eq!(first_ticks_until(&device, 6, origin + ms(10)).first(), Some(&origin), "channel 1 still has its start (stop of channel 0's: {stop_the_first})");
+                assert_eq!(!first_ticks_until(&device, 5, origin + ms(20)).is_empty(), !stop_the_first, "channel 0's start, on a stream of another number, unless stopped");
+            });
+        }
+    }
+
+    #[test]
+    fn ur_33_a_start_queued_behind_an_unread_tail_survives_a_close_and_reopen() {
+        // A runs past its origin and is stopped with samples unread; B is queued behind that tail and
+        // the streamer is closed before B's origin: B is the radio's pending start, and arrives at
+        // its origin on the reopened streamer, none of A's tail with it.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let origin = queue_start(&device, 0, &[0]);
+            device.host().sleep(Duration::from_millis(60));
+            device.rx_stop(0).unwrap();
+            let queued = device.time_now().unwrap() / 200 * 200 + ms(50);
+            device.rx_start(0, queued).unwrap();
+            device.close_streams();
+            device.rx_open(0, &[0]).unwrap();
+            let ticks = first_ticks_until(&device, 0, queued + ms(10));
+            assert!(origin < queued && ticks.first() == Some(&queued), "B's first block is at its origin {queued}: {ticks:?}");
+            assert_eq!(ticks[1] - ticks[0], 2_000 * 200, "at B's own rate, 1 MS/s: {ticks:?}");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_close_of_a_stream_that_has_begun_leaves_no_start_for_a_reopen() {
+        // The fake's model of a close after the origin (INFERRED for the hardware): a stream that already delivers leaves nothing queued.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let origin = queue_start(&device, 0, &[0]);
+            assert_eq!(first_ticks_until(&device, 0, origin + ms(10)).first(), Some(&origin), "the stream begins");
+            device.close_streams();
+            device.rx_open(0, &[0]).unwrap();
+            assert_eq!(first_ticks_until(&device, 0, device.time_now().unwrap() + ms(100)), Vec::<i64>::new(), "nothing from the closed stream");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_reopen_on_other_channels_inherits_nothing() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let origin = queue_start(&device, 0, &[0]);
+            device.close_streams();
+            device.rx_open(0, &[1]).unwrap();
+            assert_eq!(first_ticks_until(&device, 0, origin + ms(100)), Vec::<i64>::new(), "channel 1 had no start");
+        });
+    }
+
+    #[test]
+    fn ur_33_an_orphan_does_not_outlive_its_origin_a_time_zero_or_a_spec_change() {
+        // INFERRED limits (the bench reopened before the origin): a reopen after the origin, a new
+        // time base or a rebuilt channel map inherits nothing.
+        for variant in ["after the origin", "set_time_zero", "set_subdev_spec"] {
+            let device = manual(FakeConfig::default());
+            participant(&device, move |device| {
+                let origin = queue_start(&device, 0, &[0]);
+                device.close_streams();
+                match variant {
+                    "after the origin" => device.host().sleep(Duration::from_millis(70)),
+                    "set_time_zero" => device.set_time_zero(false).unwrap(),
+                    _ => device.set_subdev_spec(Dir::Rx, "A:0 B:0").unwrap(),
+                }
+                // A rebuilt channel map starts its channels at their defaults again.
+                device.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
+                device.rx_open(0, &[0]).unwrap();
+                let until = if variant == "after the origin" { device.time_now().unwrap() + ms(100) } else { origin + ms(100) };
+                assert_eq!(first_ticks_until(&device, 0, until), Vec::<i64>::new(), "{variant}");
+            });
+        }
     }
 }

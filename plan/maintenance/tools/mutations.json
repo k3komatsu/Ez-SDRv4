@@ -406,13 +406,13 @@
  },
  {
   "id": "G60",
-  "name": "VG-1: uhd-rx's shutdown under abort does not stop a segment it has not ended (note 23 round 2: one whose queued start's origin has not passed)",
+  "name": "VG-1: uhd-rx's shutdown under abort does not stop a segment it has not ended (a segment being delivered when the provider is gone; #67: a queued start is ended when uhd-rx reads the plan)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
         "old": "        self.core.rx_chain[self.k].lock().request_terminate(mode);\n        if mode == StopMode::Abort {",
         "new": "        self.core.rx_chain[self.k].lock().request_terminate(mode);\n        if false && mode == StopMode::Abort {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_26_an_abort_stops_a_queued_start_at_shutdown"
+  "filter": "ur_26_uhd_rx_aborts_when_its_provider_is_gone"
  },
  {
   "id": "J01",
@@ -3276,8 +3276,8 @@
   "id": "J327",
   "name": "a receive start issued during a stopped stream's tail is not held behind it, so the tail and the next stream are lost (UR-33)",
   "file": "crates/ezsdr-radio-uhd/src/device.rs",
-  "old": "None if st.rx[&stream].end.is_some() => st.rx.get_mut(&stream).expect(\"checked\").then = Some(at),",
-  "new": "None if false => st.rx.get_mut(&stream).expect(\"checked\").then = Some(at),",
+  "old": "None if st.rx[&stream].end.is_some() => st.rx.get_mut(&stream).expect(\"checked\").then = Some((at, ratio)),",
+  "new": "None if false => st.rx.get_mut(&stream).expect(\"checked\").then = Some((at, ratio)),",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_33_a_stopped_stream_s_tail_comes_before_the_next_stream"
@@ -4893,7 +4893,7 @@
    "id": "P219",
    "name": "a refused reopen leaves the stream's old streamer open (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        st.rx.remove(&stream);\n        if let Some(index) = self.config.faults.iter().position(|f| *f == FakeFault::RxOpenFails).filter(|i| !st.fired[*i]) {",
+   "old": "        let old = st.rx.remove(&stream);\n        orphan_queued_start(&mut st, old, now);\n        if let Some(index) = self.config.faults.iter().position(|f| *f == FakeFault::RxOpenFails).filter(|i| !st.fired[*i]) {",
    "new": "        let _ = stream;\n        if let Some(index) = self.config.faults.iter().position(|f| *f == FakeFault::RxOpenFails).filter(|i| !st.fired[*i]) {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -4963,7 +4963,7 @@
    "id": "P226",
    "name": "a spec change leaves that direction's streamers open (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "Dir::Rx => st.rx.clear(),",
+   "old": "Dir::Rx => {\n                st.rx.clear();\n                st.orphans.clear();\n            }",
    "new": "Dir::Rx => {}",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -5563,8 +5563,8 @@
     "id": "P372",
     "name": "arm leaves the receive streamer's record unknown, so the first segment opens it again (UR-25, S12)",
     "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-    "old": "            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;",
-    "new": "            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;\n            lock(&core.streams).record_open(self::core::stream_key(Dir::Rx, stream.k), None);",
+    "old": "            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| refuse_open(&core, e))?;",
+    "new": "            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| refuse_open(&core, e))?;\n            lock(&core.streams).record_open(self::core::stream_key(Dir::Rx, stream.k), None);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
     "filter": "ur_25_a_receive_session_follows_its_recorded_plan"
@@ -5877,7 +5877,7 @@
   "new": "        if lock(&self.core.streams).stop.is_some() {\n            return true;\n        }\n        let channels = next.set();",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_26_a_receive_start_queued_by_the_stop_is_issued_and_ends_at_its_origin"
+  "filter": "ur_26_a_receive_start_queued_by_the_stop_is_issued_and_stopped_at_once"
  },
  {
   "id": "P475",
@@ -5895,6 +5895,7 @@
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
   "old": "                    if error.lost {\n                        core.device_lost(&error.message);\n                    }",
   "new": "",
+  "scope": "fn start",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_29_a_lost_later_start_is_published_before_the_owners_are_stopped"
@@ -19849,36 +19850,6 @@
   "filter": "run_judge_end_a_subject_exempts_only_join"
  },
  {
-  "id": "N51-2A-02",
-  "name": "the #67 declaration exempts the join of every Provider thread, not only the receive ones (note 51 stage 2a)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
-  "old": "declared.rx_join_issue_67 && thread.starts_with(\"uhd-rx-\")",
-  "new": "declared.rx_join_issue_67",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "run_judge_end_issue_67_exempts_the_join_of_a_receive_thread_only"
- },
- {
-  "id": "N51-2A-03",
-  "name": "the #67 exemption applies without its declaration: a receive join before T0 passes undeclared (note 51 stage 2a)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
-  "old": "declared.rx_join_issue_67 && thread.starts_with(\"uhd-rx-\")",
-  "new": "thread.starts_with(\"uhd-rx-\")",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "run_judge_end_a_join_is_a_bound_unless_it_is_the_subject"
- },
- {
-  "id": "N51-2A-04",
-  "name": "the #67 declaration also hides a cleanup step abandoned on its deadline (RS-8a) (note 51 stage 2a)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
-  "old": "creation_limit(\"\", timed_out, &reasons)",
-  "new": "creation_limit(\"\", timed_out && !declared.rx_join_issue_67, &reasons)",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "run_judge_end_issue_67_exempts_no_other_bound"
- },
- {
   "id": "N51-2A-05",
   "name": "a Refused declaration accepts a failure at the Run stage (note 51 stage 2a)",
   "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
@@ -23146,5 +23117,305 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "n47s5_stop_n1_line_keeps_n1s_own_late_drop_beside_n2s"
+ },
+ {
+  "id": "N67F-01",
+  "name": "uhd-rx waits for a queued start's origin before it stops a cut at or before it (#67)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
+  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_cut_at_a_queued_origin_stops_the_stream_at_once"
+ },
+ {
+  "id": "N67F-02",
+  "name": "uhd-rx stops a segment for any cut, including one that leaves samples of a queued segment (#67)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
+  "new": "chain.cut().is_some();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_cut_after_a_queued_origin_keeps_the_stream"
+ },
+ {
+  "id": "N67F-03",
+  "name": "uhd-rx waits for a queued start's origin before it stops a cut at or before it (#67): a Stop and Provider::stop in one turn",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
+  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stop_and_provider_stop_in_one_turn_stop_a_queued_start_once"
+ },
+ {
+  "id": "N67F-04",
+  "name": "uhd-rx waits for a queued start's origin before it stops a cut at or before it (#67): an abort",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
+  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_an_abort_stops_a_queued_start_when_uhd_rx_reads_the_plan"
+ },
+ {
+  "id": "N67F-05",
+  "name": "uhd-rx waits for a queued start's origin before it stops a cut at or before it (#67): a start after the cancelled one",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
+  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_start_after_a_cancelled_queued_start_delivers_at_its_own_origin"
+ },
+ {
+  "id": "N67F-06",
+  "name": "uhd-rx waits for a queued start's origin before it stops a cut at or before it (#67): Provider::stop before a distant T0",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
+  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_26_provider_stop_before_a_distant_t0_stops_before_it_closes"
+ },
+ {
+  "id": "N67F-07",
+  "name": "the scripted device leaves a queued start standing after an untimed stop (layer 3, #67)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "world.runs.retain(|run| run.end.is_some());",
+  "new": "world.runs.retain(|_| true);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "N67F-08",
+  "name": "layer 3 allows an early stop of a segment the plan keeps (#67)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "!kept && cancelled.is_some_and(|arrival| at >= arrival)",
+  "new": "cancelled.is_some_and(|arrival| at >= arrival)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "n67_an_early_stop_is_legal_only_for_a_cancelled_segment_after_its_plan"
+ },
+ {
+  "id": "N67F-09",
+  "name": "layer 3 allows an early stop before the plan that cancelled the segment arrived (#67)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "!kept && cancelled.is_some_and(|arrival| at >= arrival)",
+  "new": "!kept && cancelled.is_some()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "n67_an_early_stop_is_legal_only_for_a_cancelled_segment_after_its_plan"
+ },
+ {
+  "id": "N67F-10",
+  "name": "uhd-rx stops a lost device's queued start (UR-29, #67)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if self.core.is_lost() || matches!(chain.device(), RxDevice::Lost) { chain.lose(); self.finish_locked(&mut chain); return; }",
+  "new": "if false { chain.lose(); self.finish_locked(&mut chain); return; }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_found_before_the_stop_of_a_queued_start_makes_no_stop_call"
+ },
+ {
+  "id": "N67F-11",
+  "name": "uhd-rx swallows the error of a queued start's stop (UR-29, #67)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "Err(error) => self.core.device_failed(None, \"stop\", &error),",
+  "new": "Err(_error) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_stop_of_a_queued_start_that_finds_the_loss_publishes_it_once"
+ },
+ {
+  "id": "N67F-12",
+  "name": "the Run wrapper drops the Provider's join notes: a join no longer a bound (#67 declaration gone)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/run.rs",
+  "old": "let reasons: Vec<&str> = rejected.iter().map(|(_, reason)| *reason).collect();",
+  "new": "let reasons: Vec<&str> = rejected.iter().skip(rejected.len()).map(|(_, reason)| *reason).collect();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "run_judge_end_a_join_is_a_bound_unless_it_is_the_subject"
+ },
+ {
+  "id": "N67F-13",
+  "name": "an untimed rx_stop leaves a queued start on the FakeDevice (the bench: it cancels it)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "            _ => {\n                streamer.next = None;\n                streamer.end = None;\n            }",
+  "new": "            _ => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_an_untimed_stop_before_a_queued_origin_cancels_it"
+ },
+ {
+  "id": "N67F-14",
+  "name": "a closed streamer's queued start is dropped by the FakeDevice (the bench: a close does not cancel it)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "old.next.filter(|at| *at == old.origin && *at >= now)",
+  "new": "old.next.filter(|_| false)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_close_and_reopen_does_not_cancel_a_queued_start"
+ },
+ {
+  "id": "N67F-15",
+  "name": "a reopened streamer adopts channel 0's orphan whatever its own channels",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "channels.iter().filter_map(|chan| st.orphans.remove(chan))",
+  "new": "channels.iter().filter_map(|_| st.orphans.remove(&0))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_reopen_on_other_channels_inherits_nothing"
+ },
+ {
+  "id": "N67F-16",
+  "name": "an adopted orphan stays queued after the adopting streamer's stop",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "channels.iter().filter_map(|chan| st.orphans.remove(chan))",
+  "new": "channels.iter().filter_map(|chan| st.orphans.get(chan).copied())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_stop_before_the_close_or_on_the_reopened_streamer_cancels_the_orphan"
+ },
+ {
+  "id": "N67F-17",
+  "name": "an orphan survives set_time_zero",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "st.tx_samples.clear();\n        st.orphans.clear();",
+  "new": "st.tx_samples.clear();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_an_orphan_does_not_outlive_its_origin_a_time_zero_or_a_spec_change"
+ },
+ {
+  "id": "N67F-18",
+  "name": "an orphan survives a receive spec change",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "st.rx.clear();\n                st.orphans.clear();",
+  "new": "st.rx.clear();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_an_orphan_does_not_outlive_its_origin_a_time_zero_or_a_spec_change"
+ },
+ {
+  "id": "N67F-19",
+  "name": "a reopen after its origin adopts the orphan",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": ".filter(|(at, _)| *at >= now).collect()",
+  "new": ".collect()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_an_orphan_does_not_outlive_its_origin_a_time_zero_or_a_spec_change"
+ },
+ {
+  "id": "N67F-20",
+  "name": "a close of a stream that has begun leaves an orphan",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "old.next.filter(|at| *at == old.origin && *at >= now)",
+  "new": "old.next.filter(|at| *at >= now)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_close_of_a_stream_that_has_begun_leaves_no_start_for_a_reopen"
+ },
+ {
+  "id": "N67F-21",
+  "name": "an open of a receive streamer makes no untimed stop (UR-16)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "self.device.rx_stop(k).map_err(|e| DeviceError",
+  "new": "Ok::<(), DeviceError>(()).map_err(|e| DeviceError",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_16_an_open_stops_the_streamer_before_its_first_start_and_cancels_an_orphaned_start"
+ },
+ {
+  "id": "N67F-22",
+  "name": "an open swallows the failure of its stop (UR-16, UR-24)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "self.device.rx_stop(k).map_err(|e| DeviceError",
+  "new": "{ let _ = self.device.rx_stop(k); Ok::<(), DeviceError>(()) }.map_err(|e| DeviceError",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_16_a_failed_stop_on_open_refuses_the_segment_and_starts_nothing"
+ },
+ {
+  "id": "N67F-23",
+  "name": "an open's stop that finds the loss is a plain failure (UR-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "DeviceError { lost: e.lost, message: format!(\"UR-16: the untimed stop on open: {}\", e.message) }",
+  "new": "DeviceError { lost: false, message: format!(\"UR-16: the untimed stop on open: {}\", e.message) }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_found_by_the_stop_on_open_is_published_once_and_nothing_follows"
+ },
+ {
+  "id": "N67F-24",
+  "name": "the bench's close finding is read as a PASS (expected_cancel(CloseBefore))",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "Cancel::CloseBefore => Some(\"block(s) after the cancel\"),",
+  "new": "Cancel::CloseBefore => None,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_close_is_expected_to_leave_the_start_queued_and_a_stop_to_cancel_it"
+ },
+ {
+  "id": "N67F-25",
+  "name": "the fake's rehearsal of the probe no longer sees a close leave the start queued (a close drops the orphan)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "old.next.filter(|at| *at == old.origin && *at >= now)",
+  "new": "old.next.filter(|_| false)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "iii_n67_cancel_probe_rehearses_on_the_fake"
+ },
+ {
+  "id": "N67F-26",
+  "name": "the fake's rehearsal of the probe no longer sees an untimed stop cancel a queued start",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "            _ => {\n                streamer.next = None;\n                streamer.end = None;\n            }",
+  "new": "            _ => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "iii_n67_cancel_probe_rehearses_on_the_fake"
+ },
+ {
+  "id": "N67F-27",
+  "name": "a start queued behind a stopped stream's unread tail is dropped by a close (the orphan reads only `next`)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": ".or(old.then.filter(|(at, _)| *at >= now))",
+  "new": ".or(None)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_start_queued_behind_an_unread_tail_survives_a_close_and_reopen"
+ },
+ {
+  "id": "N67F-28",
+  "name": "the orphan of a start behind a tail loses its rate (the `then` start keeps no ratio)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": ".then = Some((at, ratio)),",
+  "new": ".then = Some((at, 1)),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_start_queued_behind_an_unread_tail_survives_a_close_and_reopen"
+ },
+ {
+  "id": "N67F-29",
+  "name": "a loss found by the open's stop at arm is not published before the refusal (UR-29)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "fn refuse_open(core: &Core, error: crate::device::DeviceError) -> ModuleError { if error.lost { core.device_lost(&error.message); }",
+  "new": "fn refuse_open(core: &Core, error: crate::device::DeviceError) -> ModuleError { if error.lost && false { core.device_lost(&error.message); }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_found_by_the_stop_on_open_at_arm_is_published_once_and_cleanup_closes_nothing"
+ },
+ {
+  "id": "N67F-30",
+  "name": "calls() hides any stop after an open, not only the one that follows it",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+  "old": "name.starts_with(\"rx_\") && just_opened.remove(&stream) && name == \"rx_stop\"",
+  "new": "name == \"rx_stop\"",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_16_calls_drops_only_the_stop_that_follows_its_stream_s_open"
  }
 ]

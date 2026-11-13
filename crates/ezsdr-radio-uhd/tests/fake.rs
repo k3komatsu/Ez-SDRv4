@@ -38,6 +38,24 @@ use common::*;
 // ---------------------------------------------------------------- identity (UR-1…UR-5)
 
 #[test]
+fn ur_16_calls_drops_only_the_stop_that_follows_its_stream_s_open() {
+    // The helper behind the experiment-traffic assertions: a refused open before the real one, and a stop after a start, do not hide an experiment stop.
+    let device = FakeDevice::new(FakeConfig { clock: ClockMode::Manual, faults: vec![FakeFault::RxOpenFails], ..FakeConfig::default() });
+    assert!(device.rx_open(0, &[0]).is_err());
+    device.rx_open(0, &[0]).unwrap();
+    device.rx_stop(0).unwrap();
+    device.rx_start(0, 4_000_000).unwrap();
+    device.rx_stop(0).unwrap();
+    assert_eq!(calls(&device, "rx_"), ["rx_open 0 [0]", "rx_open 0 [0]", "rx_start 0 4000000", "rx_stop 0 now"], "{:?}", device.calls());
+    // No open before it: a stop with a start between is not setup, and another stream's calls do not decide.
+    let device = FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() });
+    device.rx_open(0, &[0]).unwrap();
+    device.rx_start(0, 4_000_000).unwrap();
+    device.rx_stop(0).unwrap();
+    assert_eq!(calls(&device, "rx_stop"), ["rx_stop 0 now"], "{:?}", device.calls());
+}
+
+#[test]
 fn ur_01_the_descriptor_registers() {
     let mut registry = ModuleRegistry::new();
     let (mut checks, mut kinds) = (AdmissionCheckRegistry::new(), EventKindRegistry::with_kernel_kinds());
@@ -1683,8 +1701,7 @@ fn ur_13_arm_cases() {
     let manifest = spec_run_ended(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), unlocked, BTreeMap::new());
     assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Arm, .. }));
     assert!(failure(&manifest).contains("UR-13: the external reference is not locked"));
-    // #67: the receive segment is begun ahead of its origin, and the Run is finished before T0.
-    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), fake(FakeConfig::default()), BTreeMap::new()).rx_join_issue_67();
+    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({ "clock_source": "external" }), json!({}), false), fake(FakeConfig::default()), BTreeMap::new());
     running(&run);
     let _ = run.finish();
 }
@@ -2393,8 +2410,7 @@ fn ur_26_an_abort_publishes_nothing_after_the_stop_instant() {
     let end = origin + end.expect("blocks were published") * 200;
     assert!(end < stop, "published up to {end}, stopped at {stop}");
     // One stop, recorded once: not again when the tail reaches the cut (Review N, N4).
-    let calls = direct.device.calls();
-    assert_eq!(calls.iter().filter(|c| c.starts_with("rx_stop")).count(), 1, "{calls:?}");
+    assert_eq!(calls(&direct.device, "rx_stop").len(), 1, "{:?}", direct.device.calls());
     let applied = &section_of(&instance, "applied");
     assert_eq!(applied.as_array().unwrap().iter().filter(|r| r["key"] == "rx_stop").count(), 1, "{applied}");
 }
@@ -3916,8 +3932,7 @@ fn ur_26_a_second_stop_does_nothing() {
     direct.settle(Wall::from_millis(30));
     direct.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
     direct.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
-    let calls = direct.device.calls();
-    assert_eq!(calls.iter().filter(|c| c.starts_with("rx_stop")).count(), 1, "{calls:?}");
+    assert_eq!(calls(&direct.device, "rx_stop").len(), 1, "{:?}", direct.device.calls());
     let instance = direct.finish();
     let timing = &section_of(&instance, "timing");
     let stops: Vec<_> = timing.as_array().unwrap().iter().filter(|r| r["what"] == "stop").collect();
@@ -4913,8 +4928,7 @@ fn ur_13_arm_compares_the_rate_set_after_the_streamer_opens() {
     let dir = TempDir::new();
     let inner = fake(FakeConfig { rates_before_open: true, serial: "ur13-arm-reads".to_owned(), ..FakeConfig::default() });
     let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: None, tx: None, failing: None });
-    // #67: the receive segment is begun ahead of its origin, and the Run is finished before T0.
-    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new()).rx_join_issue_67();
+    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
     running(&run);
     let log = inner.calls();
     let position = |call: &str| log.iter().position(|c| c == call).unwrap_or_else(|| panic!("{call} missing in {log:?}"));
@@ -4996,8 +5010,7 @@ fn ur_13_arm_takes_the_rate_set_in_any_order() {
     let mut reversed: Vec<(f64, f64, f64)> = ezsdr_radio::x3xx::rates(200_000_000).into_iter().rev().map(|rate| (rate, rate, 0.0)).collect();
     reversed.dedup();
     let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: Some(reversed), tx: None, failing: None });
-    // #67: the receive segment is begun ahead of its origin, and the Run is finished before T0.
-    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new()).rx_join_issue_67();
+    let run = spec_run(&receive_spec(1, 1e6, 1e9, None), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
     running(&run);
     let manifest = run.finish();
     assert_eq!(section(&manifest, "device")["rates_checked"], json!({ "rx": true, "tx": false }));
@@ -5013,8 +5026,7 @@ fn ur_13_a_transmit_stream_is_compared_with_the_whole_device_grid() {
     let mut reversed: Vec<(f64, f64, f64)> = ezsdr_radio::x3xx::rates(200_000_000).into_iter().rev().map(|rate| (rate, rate, 0.0)).collect();
     reversed.dedup();
     let device: Arc<dyn Device> = Arc::new(RatesMisreported { inner: inner.clone(), rx: None, tx: Some(reversed), failing: None });
-    // #67: the receive segment is begun ahead of its origin, and the Run is finished before T0.
-    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new()).rx_join_issue_67();
+    let run = spec_run(&with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &profile(&dir, json!({}), json!({}), false), device, BTreeMap::new());
     running(&run);
     assert_eq!(section(&run.finish(), "device")["rates_checked"], json!({ "rx": true, "tx": true }));
 
@@ -5279,7 +5291,7 @@ fn ur_26_d14_a_layout_instance_names_its_streams() {
     direct.stop_at("usrp/rx/s0");
     direct.settle(Wall::from_millis(120));
     let log = direct.device.calls();
-    assert_eq!(log.iter().filter(|call| call.as_str() == "rx_stop 0 now").count(), 1, "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_stop 0 now").len(), 1, "{log:?}");
     assert_eq!(direct.clocks.sample_clock_records().len(), records, "{log:?}");
     let cancelled: Vec<String> = direct.of("radio.COMMAND_REJECTED").iter().map(|event| event.payload["reason"].as_str().unwrap_or_default().to_owned()).collect();
     assert!(cancelled.iter().all(|reason| !reason.contains("cancelled by Stop")), "a receive stream's Stop cancels no transmit burst: {cancelled:?}");
@@ -5806,6 +5818,131 @@ fn ur_25_a_stopped_stream_ends_at_its_cut_and_its_late_tail_stays_off_the_new_cl
     assert!(first_tick >= stopped, "the new clock's first block at {first_tick} precedes the old stream's stop at {stopped}: {timing}");
 }
 
+impl Direct {
+    /// Starts the armed Provider at a T0 `lead` ticks ahead, without waiting for it (a queued start for a distant origin, #67).
+    fn start_ahead(&mut self, lead: i64) -> i64 {
+        let t0 = self.now() + lead;
+        self.radio.start(Some(TimePoint::new(self.root, t0))).unwrap();
+        t0
+    }
+
+    /// `Provider::stop(mode)` and cleanup, and the instance they leave.
+    fn end(&mut self, mode: ezsdr_kernel::module_api::StopMode) -> ezsdr_kernel::module_api::ProviderInstance {
+        self.radio.stop(mode).unwrap();
+        self.radio.cleanup();
+        self.radio.instance().clone()
+    }
+}
+
+/// Every `rejected` row that is a join that timed out, or a leak of streamers (UR-16).
+fn join_failures(instance: &ezsdr_kernel::module_api::ProviderInstance) -> Vec<Json> {
+    section_of(instance, "rejected")
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row.get("leaked").is_some() || row["reason"].as_str().is_some_and(|reason| reason.contains("did not join")))
+        .cloned()
+        .collect()
+}
+
+/// The start the device holds at `t0`, reopened on a fresh streamer and read through `t0` + 300 ms: only timeouts mean the stop cancelled it and
+/// the close did not hand it on (#67; UR-33).
+fn assert_no_start_survives(device: &FakeDevice, t0: i64, case: &str) {
+    device.rx_open(0, &[0]).unwrap();
+    while device.time_now().unwrap() < t0 + ms(300) {
+        assert_eq!(device.rx_recv(0, 2_000, Wall::from_millis(100), false), ezsdr_radio_uhd::device::RxRecv::Timeout, "{case}: the cancelled start delivered: {:?}", device.calls());
+    }
+}
+
+#[test]
+fn ur_26_provider_stop_before_a_distant_t0_stops_before_it_closes() {
+    // UR-16, UR-17, UR-26 (#67): `Provider::stop` meets a start queued for T0 — 2.1 s ahead, past the 1 s join; 400 ms ahead, inside it — and
+    // uhd-rx stops the stream untimed at once: it joins, nothing is left detached or leaked, the stop comes before the close, no sample of
+    // the start is delivered, and what the device held is gone. With T0 passed, the stop is after it, as before. (The profile's start lead
+    // is 2 s, so a T0 nearer than that is reached by waiting.)
+    use ezsdr_kernel::module_api::StopMode;
+    for (mode, lead, passed) in [(StopMode::Orderly, 2_100, false), (StopMode::Abort, 2_100, false), (StopMode::Orderly, 400, false), (StopMode::Orderly, 0, true)] {
+        let case = format!("{mode:?}, T0 {lead} ms ahead, passed {passed}");
+        let (port, link) = attached_reading("rx0");
+        let mut direct = Direct::armed(FakeConfig::default(), &[], vec![port], json!({}));
+        let t0 = direct.start_ahead(ms(2_100));
+        direct.settle(Wall::from_millis(if passed { 2_150 } else { 2_100 - lead as u64 + 20 }));
+        let instance = direct.end(mode);
+        assert_eq!(join_failures(&instance), Vec::<Json>::new(), "{case}");
+        let calls = direct.device.calls();
+        let at = |prefix: &str| calls.iter().position(|call| call.starts_with(prefix)).unwrap_or_else(|| panic!("{case}: no {prefix} in {calls:?}"));
+        // The open's own stop (UR-16) precedes the start; the one this case is about follows it.
+        let start = at("rx_start");
+        let stop = start + calls[start..].iter().position(|call| call.starts_with("rx_stop")).unwrap_or_else(|| panic!("{case}: no stop after the start in {calls:?}"));
+        assert!(stop < at("close_streams"), "{case}: {calls:?}");
+        let stops: Vec<_> = section_of(&instance, "timing").as_array().unwrap().iter().filter(|row| row["what"] == "rx_stop_untimed").map(|row| row["at"].as_i64().unwrap()).collect();
+        assert_eq!(stops.len(), 1, "{case}");
+        if passed {
+            assert!(stops[0] >= t0, "{case}: {stops:?}");
+        } else {
+            assert!(stops[0] < t0, "{case}: the stop at {} is not before T0 {t0}", stops[0]);
+            assert!(link.receive().is_none(), "{case}: a sample of the cancelled start");
+            assert_no_start_survives(&direct.device, t0, &case);
+        }
+    }
+}
+
+#[test]
+fn ur_25_a_stop_between_start_rx_and_its_origin_leaves_no_trace() {
+    // UR-25, UR-26, RM-25 (#67; the Session twin of `hw_56_stop_between_starts`): streaming, `Stop`, `start_rx`, a second `Stop` before that start's
+    // origin, a third `start_rx`. The second segment's start is stopped: it has no clock and no block, and the third segment's first block
+    // is its own first sample. uhd-rx reads the second `Stop` between receive calls, and the call it is in when the `Stop` comes ends at
+    // the origin (the profile's 50 ms lead is shorter than the 100 ms timeout), so the stop of a segment this near is not observably before
+    // its origin here; that it is, is `ur_26_a_cut_at_a_queued_origin_stops_the_stream_at_once` and layer 3's.
+    let (port, link) = attached_reading("rx0");
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![port], json!({}));
+    direct.settle(Wall::from_millis(100));
+    direct.stop_at("usrp/rx/s0");
+    direct.start_rx_at("usrp/rx/s0", None);
+    direct.settle(Wall::from_millis(4));
+    direct.stop_at("usrp/rx/s0");
+    direct.start_rx_at("usrp/rx/s0", None);
+    direct.settle(Wall::from_millis(800));
+    let clocks = direct.clocks.sample_clock_records();
+    let device = direct.device.clone();
+    let instance = direct.finish();
+    let calls = device.calls();
+    let starts: Vec<(usize, i64)> = calls.iter().enumerate().filter_map(|(i, call)| Some((i, call.strip_prefix("rx_start 0 ")?.parse().ok()?))).collect();
+    assert_eq!(starts.len(), 3, "the first stream's start, the cancelled one and the third: {calls:?}");
+    for pair in starts.windows(2) {
+        assert!(calls[pair[0].0 + 1..pair[1].0].iter().any(|call| call == "rx_stop 0 now"), "a start follows one that was not stopped: {calls:?}");
+    }
+    let timing = section_of(&instance, "timing");
+    let stops: Vec<i64> = timing.as_array().unwrap().iter().filter(|row| row["what"] == "rx_stop_untimed").map(|row| row["at"].as_i64().unwrap()).collect();
+    assert!(stops.len() >= 3, "the second segment is stopped: {stops:?}");
+    let rx: Vec<_> = clocks.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
+    assert_eq!(rx.len(), 2, "no clock for the cancelled segment: {rx:?}");
+    let third = rx[1];
+    assert_eq!(third.origin.ticks_in(third.root).unwrap(), starts[2].1);
+    let headers: Vec<_> = std::iter::from_fn(|| link.receive()).map(|(block, _)| block.header().clone()).collect();
+    let first = headers.iter().find(|header| header.first_sample_time.domain() == third.domain).expect("a block on the third clock");
+    assert_eq!(first.first_sample_time.ticks_in(third.domain).unwrap(), 0, "the third segment's first block is its first sample");
+    assert!(!headers.iter().any(|header| header.first_sample_time.domain() != third.domain && header.first_sample_time.domain() != rx[0].domain), "a block on no clock of the plan");
+}
+
+#[test]
+fn ur_29_a_loss_while_the_start_is_queued_makes_stop_stop_nothing_more() {
+    // UR-29 (#67): the device is lost while the start is queued for T0 2.1 s ahead; `Provider::stop` then ends the Provider without a device
+    // stop call after the loss. The loss is published once, and the join stays inside its bound.
+    use ezsdr_kernel::module_api::StopMode;
+    let (port, _link) = attached_reading("rx0");
+    let mut direct = Direct::armed(FakeConfig { faults: vec![FakeFault::Lost(Wall::from_millis(200))], ..FakeConfig::default() }, &[], vec![port], json!({}));
+    direct.start_ahead(ms(2_100));
+    direct.settle(Wall::from_millis(400));
+    let lost = direct.of(EventKind::DEVICE_LOST).len();
+    let instance = direct.end(StopMode::Orderly);
+    assert_eq!(lost, 1, "the loss is published once");
+    assert_eq!(join_failures(&instance), Vec::<Json>::new());
+    let calls = direct.device.calls();
+    let marked = calls.iter().position(|call| call == "mark_lost").expect("the device was marked lost");
+    assert!(!calls[marked..].iter().any(|call| call.starts_with("rx_stop")), "a stop call after the loss: {calls:?}");
+}
+
 #[test]
 fn the_overflow_gap_adds_a_condition_with_the_other_direction_running() {
     // The overflow gap has a companion group with a 10 MS/s stream of the other direction running. It is an
@@ -6254,10 +6391,10 @@ impl ezsdr_radio_uhd::Device for HoldAfterApply {
 }
 
 #[test]
-fn ur_26_a_receive_start_queued_by_the_stop_is_issued_and_ends_at_its_origin() {
-    // UR-26 (S16a): the owner does not re-read `Provider::stop` after its configuration;
+fn ur_26_a_receive_start_queued_by_the_stop_is_issued_and_stopped_at_once() {
+    // UR-26 (S16a, #67): the owner does not re-read `Provider::stop` after its configuration;
     // the start it queued is issued, and the plan's end cuts the segment at its origin: no
-    // block, and an untimed stop after the origin (VH-6).
+    // block, and the untimed stop at once.
     let inner = fake(FakeConfig::default());
     let spy = Arc::new(HoldAfterApply::new(inner.clone()));
     let (r0, _l0) = attached_reading("rx0");
@@ -6284,7 +6421,7 @@ fn ur_26_a_receive_start_queued_by_the_stop_is_issued_and_ends_at_its_origin() {
     let log = direct.device.calls();
     assert_eq!(calls(&direct.device, "rx_start 1").len(), 2, "the owner still issues its timed start: {log:?}");
     assert!(link1.receive().is_none(), "the end at the origin publishes nothing: {log:?}");
-    assert_eq!(calls(&direct.device, "rx_stop 1 now").len(), 2, "the old segment's cut and the queued start's origin: {log:?}");
+    assert_eq!(calls(&direct.device, "rx_stop 1 now").len(), 2, "the old segment's cut and the queued start's: {log:?}");
     let records = direct.clocks.sample_clock_records();
     assert_eq!(records.iter().filter(|record| record.stream.path() == "usrp/rx/s1").count(), 1, "no clock is registered without a block: {records:?}");
     assert!(log.iter().any(|call| call.starts_with("apply rx 1 ")), "{log:?}");
@@ -6849,8 +6986,7 @@ fn the_candidate_ceiling_admits_what_the_profiles_link_limit_refuses() {
     assert!(matches!(refused.termination.reason, Termination::Failed { stage: Stage::Validate, .. }), "the profile's own limit refuses it: {:?}", refused.termination.reason);
     let raised = ezsdr_radio::x3xx::performance(10);
     let candidate = ezsdr_radio::PerformanceEnvelope { rx_bytes_per_s: 1_250_000_000, tx_bytes_per_s: 1_250_000_000, wire_bytes_per_sample: raised.wire_bytes_per_sample };
-    // #67: the receive segment is begun ahead of its origin, and the Run is finished before T0.
-    let admitted = Run::start_spec(&spec, &doc, assembly(&doc, device, BTreeMap::new(), |radio| radio.with_measurement_performance(candidate)), Declared::default()).unwrap().rx_join_issue_67();
+    let admitted = Run::start_spec(&spec, &doc, assembly(&doc, device, BTreeMap::new(), |radio| radio.with_measurement_performance(candidate)), Declared::default()).unwrap();
     assert!(admitted.start_instant().is_some(), "the candidate ceiling admits it: {:?}", admitted.state());
     admitted.finish();
 }
@@ -7932,6 +8068,31 @@ fn iii_restart_fill_probe_rehearses_on_the_fake() {
         if fill.rate == 1e6 {
             let outcome = common::iii::restart_rate_verdict(fill.rate, &fill.trials, common::iii::RESTART_TONE_HZ, common::n47::TONE_TOLERANCE_HZ);
             assert!(matches!(outcome, common::tone::Verdict::Pass(_)), "{outcome:?}");
+        }
+    }
+}
+
+#[test]
+fn iii_n67_cancel_probe_rehearses_on_the_fake() {
+    // #67's probe trial (`common::iii::cancel_trial`, the bench's `hw_67_stop_before_origin`) on a manual-clock FakeDevice at its three rates,
+    // one trial a cell, against `iii::expected_cancel`: a rule change in the fake's start/stop/close model turns it red without hardware. The
+    // test thread is a participant of the device's clock (so no host delay can make the fresh start late) and the clock runs at real speed
+    // while it waits (M5), so the 12 trials take about 30 s of wall time. Every verdict is exact: an INCONCLUSIVE one fails the rehearsal.
+    use common::iii::{Cancel, cancel_trial, cancel_trial_verdict, expected_cancel};
+    use common::tone::Verdict;
+    let (device, _driver) = common::iii::driven_fake(common::one_obx());
+    device.set_time_zero(false).unwrap();
+    for rate in [1e6, 10e6, 100e6] {
+        common::raw::raw_rx(&*device, rate, 1e9);
+        for cancel in [Cancel::Control, Cancel::StopBefore, Cancel::CloseBefore, Cancel::CloseThenStop] {
+            let done = cancel_trial(&*device, cancel, rate);
+            let outcome = cancel_trial_verdict(&done);
+            let as_expected = match (&outcome, expected_cancel(cancel)) {
+                (Verdict::Pass(_), None) => true,
+                (Verdict::Fail(reason), Some(text)) => reason.contains(text),
+                _ => false,
+            };
+            assert!(as_expected, "{} at {rate} S/s: {outcome:?} (expected {:?})\n{}", cancel.name(), expected_cancel(cancel), done.trace());
         }
     }
 }

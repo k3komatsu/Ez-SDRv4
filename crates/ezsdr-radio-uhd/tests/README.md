@@ -110,8 +110,7 @@ step cut at RS-8a, a Provider join that timed out) writes the `EZSDR-INFRA:` mar
 hide it; an end the test did not declare is a panic with no marker (a failure the code under test caused). A test declares what it
 expects: `Expect::Refused` (refused at validate, prepare or arm), `Expect::Policy("<event>")` (ended by that Policy event) or, for a named
 bench loop that only records how its Run ended, `Expect::Any`; none of them exempts a bound. `join_is_subject()` exempts the Provider join
-and nothing else, for a test whose subject is the join; `rx_join_issue_67()` exempts the join of a `uhd-rx-*` thread and nothing else, for
-a test that finishes a receive Run before its origin (issue #67), and goes with the fix. A Run a checked call found ended is kept as its
+and nothing else, for a test whose subject is the join. A Run a checked call found ended is kept as its
 Manifest, and answers from it (`Err(Ended)`, `state`, `events`, `finish`). A Run dropped without `finish()` is finished and judged like
 `finish`; while the thread is unwinding it only writes the marker of a bound and never panics again (a second panic aborts). A bound is
 read from the primary end and from every later end the Kernel kept in `termination.also`. A test that provokes a bound on purpose wraps the call

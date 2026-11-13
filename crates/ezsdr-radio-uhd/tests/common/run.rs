@@ -37,16 +37,12 @@ pub enum Expect {
     Any,
 }
 
-/// What a test declares about its Run. A bound is never declared away except these two: the test whose subject is the Provider's join, and the
-/// known product defect #67.
+/// What a test declares about its Run. A bound is never declared away except one: the test whose subject is the Provider's join.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Declared {
     pub end: Option<Expect>,
     /// The test is about the Provider threads' join: a thread that does not join is its subject. No other bound is exempt.
     pub join_is_subject: bool,
-    /// #67: a receive segment begun ahead of its origin outlives its 1 s join when the Run is stopped before the origin. Exempts the join of a
-    /// `uhd-rx-*` thread and nothing else. Remove it, with its declarations, when #67 is fixed.
-    pub rx_join_issue_67: bool,
 }
 
 /// How a Run's end reads against a declaration.
@@ -61,11 +57,10 @@ pub enum Judged {
 
 /// The pure decision: `rejected` is the Provider's `(thread, reason)` notes. A bound comes first, whatever the test expects, in the primary reason
 /// and in every later end the Kernel kept in `also` (KC-32: a bound that cut after a Policy end is recorded there, and no declaration covers it);
-/// the declaration exempts only the join, only for the subject test or, for a `uhd-rx-*` thread, #67.
+/// the declaration exempts only the join, only for the subject test.
 pub fn judge_end(section: &TerminationSection, rejected: &[(&str, &str)], declared: Declared) -> Judged {
     let termination = &section.reason;
-    // `creation_limit` reads only join notes from the list, so dropping a thread's notes drops only its join.
-    let reasons: Vec<&str> = rejected.iter().filter(|(thread, _)| !(declared.rx_join_issue_67 && thread.starts_with("uhd-rx-"))).map(|(_, reason)| *reason).collect();
+    let reasons: Vec<&str> = rejected.iter().map(|(_, reason)| *reason).collect();
     let timed_out = section.cleanup_failures.iter().any(|step| step.timed_out);
     let mut end_reasons = std::iter::once(termination).chain(&section.also).map(|end| match end {
         Termination::Failed { reason, .. } => reason.as_str(),
@@ -174,11 +169,6 @@ impl Run {
 
     pub fn join_is_subject(mut self) -> Run {
         self.declared.join_is_subject = true;
-        self
-    }
-
-    pub fn rx_join_issue_67(mut self) -> Run {
-        self.declared.rx_join_issue_67 = true;
         self
     }
 
@@ -340,7 +330,7 @@ fn section(reason: &Termination, also: &[Termination], timed_out: bool) -> Termi
 }
 
 const JOIN: &str = "did not join within 1 s; left detached";
-const NONE: Declared = Declared { end: None, join_is_subject: false, rx_join_issue_67: false };
+const NONE: Declared = Declared { end: None, join_is_subject: false };
 
 #[test]
 fn run_judge_end_a_completed_or_client_stopped_run_needs_no_declaration() {
@@ -408,28 +398,6 @@ fn run_judge_end_a_subject_exempts_only_join() {
 }
 
 #[test]
-fn run_judge_end_issue_67_exempts_the_join_of_a_receive_thread_only() {
-    let known = Declared { rx_join_issue_67: true, ..NONE };
-    let client = Termination::Stopped { cause: StopCause::Client {} };
-    assert_eq!(judge_end(&section(&client, &[], false), &[("uhd-rx-s0", JOIN)], known), Judged::Fine);
-    assert_eq!(judge_end(&section(&client, &[], false), &[("uhd-rx-s0", JOIN), ("uhd-rx-s1", JOIN)], known), Judged::Fine);
-    assert_eq!(judge_end(&section(&client, &[], false), &[("uhd-tx-s0", JOIN)], known), Judged::Limit("join"), "a transmit thread's join is not #67");
-    assert_eq!(judge_end(&section(&client, &[], false), &[("uhd-rx-s0", JOIN), ("uhd-tx-s0", JOIN)], known), Judged::Limit("join"));
-    assert_eq!(judge_end(&section(&client, &[], false), &[("uhd-control", JOIN)], known), Judged::Limit("join"));
-    assert_eq!(judge_end(&section(&client, &[], false), &[("uhd-rx-s0", JOIN)], NONE), Judged::Limit("join"), "undeclared, the receive join is a bound");
-}
-
-#[test]
-fn run_judge_end_issue_67_exempts_no_other_bound() {
-    let known = Declared { rx_join_issue_67: true, ..NONE };
-    let rx = [("uhd-rx-s0", JOIN)];
-    assert_eq!(judge_end(&section(&Termination::Completed {}, &[], true), &rx, known), Judged::Limit("RS-8a"));
-    assert_eq!(judge_end(&section(&failed(Stage::Run, "KC-21a: late"), &[], false), &rx, known), Judged::Limit("KC-21a"));
-    assert_eq!(judge_end(&section(&failed(Stage::Prepare, "KC-12a: late"), &[], false), &rx, known), Judged::Limit("KC-12a"));
-    assert_eq!(judge_end(&section(&failed(Stage::Run, "ezsdr.DEVICE_LOST: gone"), &[], false), &rx, known), Judged::Unexpected, "and it declares no end");
-}
-
-#[test]
 fn run_effects_a_bound_is_marked_and_panics_unless_the_thread_is_unwinding() {
     assert_eq!(effects(&Judged::Fine, false), (false, false));
     assert_eq!(effects(&Judged::Limit("join"), false), (true, true));
@@ -456,13 +424,11 @@ fn run_judge_end_a_bound_in_also_is_named_whatever_the_primary_end_declares() {
 }
 
 #[test]
-fn run_judge_end_a_subject_or_issue_67_does_not_exempt_a_bound_in_also() {
+fn run_judge_end_a_subject_does_not_exempt_a_bound_in_also() {
     let primary = policy("ezsdr.DEVICE_LOST");
     let late = [failed(Stage::Run, "KC-21a: late")];
-    let subject = Declared { end: Some(Expect::Policy("ezsdr.DEVICE_LOST")), join_is_subject: true, ..NONE };
+    let subject = Declared { end: Some(Expect::Policy("ezsdr.DEVICE_LOST")), join_is_subject: true };
     assert_eq!(judge_end(&section(&primary, &late, false), &[("uhd-tx-s0", JOIN)], subject), Judged::Limit("KC-21a"));
-    let known = Declared { end: Some(Expect::Policy("ezsdr.DEVICE_LOST")), rx_join_issue_67: true, ..NONE };
-    assert_eq!(judge_end(&section(&primary, &late, false), &[("uhd-rx-s0", JOIN)], known), Judged::Limit("KC-21a"));
 }
 
 #[test]

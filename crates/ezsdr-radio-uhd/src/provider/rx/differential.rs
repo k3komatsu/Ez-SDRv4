@@ -5,7 +5,7 @@
 //! receipt (maintenance note 23); uhd-rx books its refusals, the thread that finds the device
 //! lost the loss, and `Provider::stop` the stream's end, at once. A scripted device stands for
 //! the X3x0's receive side: a timed start queued, an untimed stop at once with what it
-//! produced before still delivered, a queued start that a stop does not cancel (#56), one
+//! produced before still delivered and a start still queued cancelled (#67), one
 //! packet a request, delivered at the instant after its last sample plus a latency, and the
 //! sequence's overruns, sequence errors and loss. It moves the rig's time while a receive call
 //! waits, booking on the way, so that a booking can come during a wait. Every field is gated.
@@ -173,7 +173,7 @@ struct Observed {
     abort: bool,
     /// The device still streams at the end, unstopped.
     streaming: bool,
-    /// Timed starts of segments the plan dropped before their origin (VH-6).
+    /// Timed starts of segments the plan dropped before their origin (#67).
     dropped: usize,
     /// A command was booked while a receive call waited for the packet it returned.
     straddled: bool,
@@ -254,6 +254,8 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     };
     let mut floor = false;
     let mut cuts: Vec<Option<i64>> = vec![None; all.len()];
+    // The arrival of the first plan that takes a segment uhd-rx has seen away or cuts it at its first sample: no stop of it can be earlier (#67).
+    let mut cancelled: Vec<Option<i64>> = vec![None; all.len()];
     let mut seen = vec![false; all.len()];
     for (arrival, plan) in &plans {
         for (index, segment) in all.iter().enumerate() {
@@ -268,11 +270,17 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
                 None => {
                     // Replanned away before uhd-rx began it: it has no cut of its own.
                     cuts[index] = None;
+                    if seen[index] {
+                        cancelled[index].get_or_insert(*arrival);
+                    }
                     continue;
                 }
             };
             seen[index] = true;
             let floored = cut.max(delivered(index, *arrival));
+            if floored == 0 {
+                cancelled[index].get_or_insert(*arrival);
+            }
             floor |= floored > cut;
             cuts[index] = Some(cuts[index].map_or(floored, |cut| cut.min(floored)));
         }
@@ -331,8 +339,14 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
         problems.push(format!("clocks {:?}, the plan's {clocks:?}", observed.clocks));
     }
     // The device's stream commands: a timed start ahead of each origin, checked as it was
-    // issued; untimed stops, one after each start, at or after its origin unless an abort
-    // stopped it at once (VH-6); a streamer reopened only for another channel count.
+    // issued; untimed stops, one after each start, before its origin only when the plan had
+    // taken the segment away or cut it at its first sample by then (#67); a streamer reopened
+    // only for another channel count.
+    let early = |origin: i64, at: i64| {
+        let index = all.iter().position(|s| s.origin == origin);
+        index.is_some_and(|index| early_stop_legal(kept.contains(&index), cancelled[index], at))
+    };
+    let mut stop_origins = Vec::new();
     let (mut started, mut opened): (Option<i64>, usize) = (None, 0);
     for (at, call) in &observed.calls {
         let value = call.split(' ').nth(1).unwrap_or_default();
@@ -343,8 +357,12 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
             started = value.parse().ok();
         } else if call.starts_with("rx_stop ") {
             match started.take() {
-                Some(origin) if *at < origin && abort_at.is_none_or(|abort| *at < abort) => problems.push(format!("{call} at {at}: before the origin {origin} (VH-6)")),
-                Some(_) => {}
+                Some(origin) => {
+                    stop_origins.push(origin);
+                    if *at < origin && !early(origin, *at) {
+                        problems.push(format!("{call} at {at}: before the origin {origin} of a segment the plan keeps, or before the plan took it away"));
+                    }
+                }
                 None => problems.push(format!("{call} at {at}: no stream to stop")),
             }
             if value != "now" {
@@ -362,7 +380,9 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     if observed.stops.len() != stopped_calls {
         problems.push(format!("{} rx_stop rows for {stopped_calls} stops", observed.stops.len()));
     }
-    if let Some((at, issued)) = observed.stops.iter().find(|(at, issued)| issued < at && abort_at.is_none_or(|abort| *issued < abort)) {
+    if let Some((at, issued)) =
+        observed.stops.iter().zip(&stop_origins).find(|((at, issued), origin)| issued < at && abort_at.is_none_or(|abort| *issued < abort) && !early(**origin, *issued)).map(|(row, _)| row)
+    {
         problems.push(format!("an rx_stop row issued at {issued}, before its cut {at}"));
     }
     let open = clocks.last().is_some_and(|(_, end)| end.is_none());
@@ -405,6 +425,22 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
         problems.push(format!("{} late starts", observed.late));
     }
     (problems, floor)
+}
+
+/// A stop before its start's origin is legal only for a segment the plan does not keep, once
+/// the plan that took it away or cut it at its first sample (`cancelled`, its arrival) had
+/// arrived (#67).
+fn early_stop_legal(kept: bool, cancelled: Option<i64>, at: i64) -> bool {
+    !kept && cancelled.is_some_and(|arrival| at >= arrival)
+}
+
+#[test]
+fn n67_an_early_stop_is_legal_only_for_a_cancelled_segment_after_its_plan() {
+    assert!(early_stop_legal(false, Some(10), 10));
+    assert!(early_stop_legal(false, Some(10), 11));
+    assert!(!early_stop_legal(false, Some(10), 9), "before the plan that cancelled it arrived");
+    assert!(!early_stop_legal(false, None, 11), "no plan cancelled it");
+    assert!(!early_stop_legal(true, Some(10), 11), "the plan keeps the segment: its samples are lost");
 }
 
 /// One segment's blocks: a packet of `block_len` samples a request, the last before the cut
@@ -719,8 +755,8 @@ impl Device for Scripted {
         0
     }
 
-    /// The X3x0 stops a running stream at once (design-notes §11 F1); a start still queued is
-    /// not cancelled (#56).
+    /// The X3x0 stops a running stream at once (design-notes §11 F1) and cancels a start still
+    /// queued (#67).
     fn rx_stop(&self, _stream: usize) -> Result<(), DeviceError> {
         let mut world = lock(&self.world);
         if world.lost {
@@ -731,6 +767,7 @@ impl Device for Scripted {
         for run in world.runs.iter_mut().filter(|run| run.end.is_none() && run.origin <= now) {
             run.end = Some(now);
         }
+        world.runs.retain(|run| run.end.is_some());
         Ok(())
     }
 

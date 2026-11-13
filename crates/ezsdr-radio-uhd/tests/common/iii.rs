@@ -15,7 +15,7 @@ use serde_json::{Value as Json, json};
 use super::MCR;
 use super::measurement::TrialClass;
 use super::n47;
-use super::raw::{TICKS_PER_MS, align_to, d9_channel, drain, iq, pin_slot_a, raw_rx, raw_tx, read, send_burst, tone_wave, wait_burst_ack};
+use super::raw::{Read, TICKS_PER_MS, align_to, d9_channel, drain, iq, pin_slot_a, raw_rx, raw_tx, read, read_with, send_burst, tone_wave, wait_burst_ack};
 use super::tone::{PER_1MSPS, Verdict, contiguous_windows_at, first_ms_frequency, window_tone_at};
 use super::{admitted, effective_layout, events_of, section, set_selector_override};
 use ezsdr_radio::staging::Bookings;
@@ -233,6 +233,14 @@ pub fn restart_fill_probe(device: Arc<dyn Device>, rates: &[f64], restarts: usiz
     device.rx_stop(0).ok();
     let _ = drain(&*device);
     fills
+}
+
+/// A manual-clock fake with the calling thread a participant of its clock, which then runs at real speed while the thread waits on it (M5):
+/// the rehearsal of a bench probe whose waits are real time (`cancel_trial`), without a host delay able to make a start late.
+pub fn driven_fake(config: ezsdr_radio_uhd::FakeConfig) -> (Arc<ezsdr_radio_uhd::FakeDevice>, ezsdr_radio_uhd::host::Driver) {
+    let device = super::fake(config);
+    let driver = device.host().drive();
+    (device, driver)
 }
 
 /// min, median and max of `values` (sorted in place), `None` when empty.
@@ -947,12 +955,14 @@ pub fn repeat_sizes_verdict(sizes: &[usize], closing: &[usize], chunk: usize, wa
 /// What #67's probe (`hw_67_stop_before_origin`) calls a start it cancels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cancel {
-    /// Control: the start is near, the untimed stop comes after its origin (spec 22 VH-6's path today).
+    /// Control: the start is near, the untimed stop comes after its origin.
     Control,
     /// A start for a distant origin, the untimed stop before it.
     StopBefore,
     /// A start for a distant origin, `close_streams` before it and a fresh streamer opened.
     CloseBefore,
+    /// As `CloseBefore`, then an untimed stop on the fresh streamer (UR-16's stop on open).
+    CloseThenStop,
 }
 
 impl Cancel {
@@ -961,7 +971,27 @@ impl Cancel {
             Cancel::Control => "stop_after_origin",
             Cancel::StopBefore => "stop_before_origin",
             Cancel::CloseBefore => "close_before_origin",
+            Cancel::CloseThenStop => "close_then_stop_before_origin",
         }
+    }
+}
+
+/// What the bench found of each cancel (2026-11-13; `CloseThenStop` INFERRED until it runs): `None` is PASS, `Some(text)` a FAIL whose
+/// reason contains `text`. A close and a fresh streamer do not cancel the queued start, an untimed stop does, before the close or on the
+/// fresh streamer.
+pub fn expected_cancel(cancel: Cancel) -> Option<&'static str> {
+    match cancel {
+        Cancel::Control | Cancel::StopBefore | Cancel::CloseThenStop => None,
+        Cancel::CloseBefore => Some("block(s) after the cancel"),
+    }
+}
+
+/// Whether `outcome` contradicts `expected_cancel(cancel)`; an INCONCLUSIVE trial contradicts nothing.
+pub fn cancel_unexpected(cancel: Cancel, outcome: &Verdict) -> bool {
+    match (outcome, expected_cancel(cancel)) {
+        (Verdict::Inconclusive(_), _) => false,
+        (Verdict::Pass(_), expected) => expected.is_some(),
+        (Verdict::Fail(reason), expected) => expected.is_none_or(|text| !reason.contains(text)),
     }
 }
 
@@ -1195,6 +1225,73 @@ pub fn stop_after_margin_verdict(stop_root: i64, n1_stamp: i64, admitted: bool, 
     booking_verdict(admitted, refusals, faults, onset_offset, delay, tolerance)
 }
 
+/// One trial of `hw_67_stop_before_origin` at `rate`: a timed start for a near (control) or a distant origin, its cancel (an untimed stop after
+/// the control's origin; before the others': an untimed stop, `close_streams` plus a fresh streamer, or that and an untimed stop on the fresh streamer), a read through the origin plus 500 ms,
+/// then a fresh start 100 ms ahead on the same streamer. Receive only; nothing is transmitted.
+pub fn cancel_trial(device: &dyn Device, cancel: Cancel, rate: f64) -> CancelTrial {
+    use Cancel::{CloseBefore, CloseThenStop, Control};
+    fn note<E: std::fmt::Debug>(errors: &mut Vec<String>, what: &str, result: Result<(), E>) {
+        if let Err(error) = result {
+            errors.push(format!("{what}: {error:?}"));
+        }
+    }
+    let (per, n) = ((200e6 / rate) as i64, (rate / 200.0) as usize);
+    let mut errors = Vec::new();
+    let others = |phase: &str, got: &Read| got.other.iter().filter(|(_, outcome)| outcome != "Timeout").map(|(at, outcome)| format!("{phase}: {outcome} at {at}")).collect::<Vec<_>>();
+    let (reached, clock_failed) = (std::cell::Cell::new(0), std::cell::Cell::new(false));
+    let read_until = |end: i64| {
+        reached.set(0);
+        read_with(device, 0, n, Wall::from_secs(6), None, |_| match device.time_now() {
+            Ok(now) => {
+                reached.set(now);
+                now >= end
+            }
+            Err(_) => {
+                clock_failed.set(true);
+                true
+            }
+        })
+    };
+    let now = device.time_now().unwrap();
+    let origin = align_to(now + if cancel == Control { 300 } else { 2_000 } * TICKS_PER_MS, per);
+    note(&mut errors, "rx_start", device.rx_start(0, origin));
+    let before = read_until(if cancel == Control { origin + 100 * TICKS_PER_MS } else { now + 100 * TICKS_PER_MS });
+    errors.extend(others("before the cancel", &before));
+    let cancel_entered = device.time_now().unwrap();
+    match cancel {
+        CloseBefore | CloseThenStop => {
+            device.close_streams();
+            note(&mut errors, "rx_open", device.rx_open(0, &[d9_channel()]));
+            if cancel == CloseThenStop {
+                note(&mut errors, "rx_stop (on the reopened streamer)", device.rx_stop(0));
+            }
+        }
+        _ => note(&mut errors, "rx_stop", device.rx_stop(0)),
+    }
+    let cancel_returned = device.time_now().unwrap();
+    let after = read_until(origin + OBSERVE_TICKS);
+    let observed_to = reached.get();
+    errors.extend(others("after the cancel", &after));
+    let new_origin = align_to(device.time_now().unwrap() + 100 * TICKS_PER_MS, per);
+    note(&mut errors, "rx_start (fresh)", device.rx_start(0, new_origin));
+    let got = read_with(device, 0, n, Wall::from_secs(2), Some(per), |r| !r.blocks.is_empty() || r.other.iter().any(|(_, outcome)| outcome != "Timeout"));
+    errors.extend(others("fresh start", &got));
+    let next = got.blocks.first().map(|(first, count)| {
+        let samples = || got.samples.iter().take(*count).map(|(_, s)| s);
+        (*first, *count, samples().all(|s| s[0].is_finite() && s[1].is_finite()) && samples().any(|s| *s != [0.0, 0.0]))
+    });
+    note(&mut errors, "rx_stop (cleanup)", device.rx_stop(0));
+    let drained = read_with(device, 0, n, Wall::from_secs(3), None, |r| n47::drain_quiet(&r.events));
+    errors.extend(others("cleanup", &drained));
+    if !n47::drain_quiet(&drained.events) {
+        errors.push("cleanup: the stream did not go quiet within 3 s".to_owned());
+    }
+    if clock_failed.get() {
+        errors.push("time_now failed while observing".to_owned());
+    }
+    CancelTrial { cancel, rate, origin, cancel_entered, cancel_returned, before: before.blocks.len(), after: after.blocks, observed_to, new_origin, next, errors }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tone::PER_1MSPS;
@@ -1411,7 +1508,7 @@ mod tests {
         assert!(stage_trial(TrialClass::Success, &per_stream(1)).is_err());
     }
 
-    fn cancel_trial(cancel: Cancel) -> CancelTrial {
+    fn trial_of(cancel: Cancel) -> CancelTrial {
         CancelTrial {
             cancel,
             rate: 1e6,
@@ -1429,14 +1526,14 @@ mod tests {
 
     #[test]
     fn a_cancel_with_no_late_block_and_a_fresh_start_at_its_origin_passes() {
-        for cancel in [Cancel::Control, Cancel::StopBefore, Cancel::CloseBefore] {
-            assert!(matches!(cancel_trial_verdict(&cancel_trial(cancel)), Verdict::Pass(_)), "{cancel:?}");
+        for cancel in [Cancel::Control, Cancel::StopBefore, Cancel::CloseBefore, Cancel::CloseThenStop] {
+            assert!(matches!(cancel_trial_verdict(&trial_of(cancel)), Verdict::Pass(_)), "{cancel:?}");
         }
     }
 
     #[test]
     fn the_stopped_streams_tail_is_not_late_but_a_block_past_it_is() {
-        let mut trial = cancel_trial(Cancel::Control);
+        let mut trial = trial_of(Cancel::Control);
         trial.after = vec![(trial.cancel_returned + TAIL_TICKS, 5_000)];
         assert!(matches!(cancel_trial_verdict(&trial), Verdict::Pass(_)));
         trial.after.push((trial.cancel_returned + TAIL_TICKS + 1, 5_000));
@@ -1445,22 +1542,39 @@ mod tests {
 
     #[test]
     fn a_block_at_the_cancelled_origin_fails_a_distant_variant() {
-        let mut trial = cancel_trial(Cancel::CloseBefore);
+        let mut trial = trial_of(Cancel::CloseBefore);
         trial.after = vec![(trial.origin, 5_000), (trial.origin + 1_000, 5_000)];
         assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(text) if text.contains("2 block(s) after the cancel")));
     }
 
     #[test]
     fn a_stop_that_returns_after_the_origin_is_not_excused_by_its_own_tail_allowance() {
-        let mut trial = cancel_trial(Cancel::StopBefore);
+        let mut trial = trial_of(Cancel::StopBefore);
         trial.cancel_returned = trial.origin + 50 * TICKS_PER_MS;
         trial.after = vec![(trial.origin, 5_000), (trial.origin + 25 * TICKS_PER_MS, 5_000), (trial.origin + 50 * TICKS_PER_MS, 5_000)];
         assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(_)));
     }
 
     #[test]
+    fn a_close_is_expected_to_leave_the_start_queued_and_a_stop_to_cancel_it() {
+        // The bench of 2026-11-13: after a close and a fresh streamer the old start's blocks arrive (FAIL), and an untimed stop cancels
+        // whichever way it is made (PASS); a verdict that contradicts that is the finding, an INCONCLUSIVE one is not.
+        let all = [Cancel::Control, Cancel::StopBefore, Cancel::CloseBefore, Cancel::CloseThenStop];
+        for cancel in all {
+            let silent = trial_of(cancel);
+            let mut leaked = trial_of(cancel);
+            leaked.after = vec![(leaked.origin, 5_000)];
+            let (silent, leaked) = (cancel_trial_verdict(&silent), cancel_trial_verdict(&leaked));
+            assert_eq!(cancel_unexpected(cancel, &silent), cancel == Cancel::CloseBefore, "{cancel:?} silent: {silent:?}");
+            assert_eq!(cancel_unexpected(cancel, &leaked), cancel != Cancel::CloseBefore, "{cancel:?} leaked: {leaked:?}");
+            assert!(!cancel_unexpected(cancel, &Verdict::Inconclusive(String::new())));
+        }
+        assert!(cancel_unexpected(Cancel::CloseBefore, &Verdict::Fail("a call failed".to_owned())), "a FAIL for another reason is not the finding");
+    }
+
+    #[test]
     fn a_distant_cancel_that_returns_at_or_after_its_origin_fails_even_without_a_block() {
-        let mut trial = cancel_trial(Cancel::StopBefore);
+        let mut trial = trial_of(Cancel::StopBefore);
         trial.cancel_returned = trial.origin - 1;
         assert!(matches!(cancel_trial_verdict(&trial), Verdict::Pass(_)));
         trial.cancel_returned = trial.origin;
@@ -1469,21 +1583,21 @@ mod tests {
 
     #[test]
     fn a_controls_stop_returns_after_its_origin_as_a_matter_of_course() {
-        let mut trial = cancel_trial(Cancel::Control);
+        let mut trial = trial_of(Cancel::Control);
         trial.cancel_returned = trial.origin + 100 * TICKS_PER_MS;
         assert!(matches!(cancel_trial_verdict(&trial), Verdict::Pass(_)));
     }
 
     #[test]
     fn a_block_just_after_a_cancelled_starts_cancel_is_not_a_tail() {
-        let mut trial = cancel_trial(Cancel::StopBefore);
+        let mut trial = trial_of(Cancel::StopBefore);
         trial.after = vec![(trial.cancel_returned + 1, 5_000)];
         assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(text) if text.contains("1 block(s) after the cancel")));
     }
 
     #[test]
     fn an_observation_that_stops_short_of_the_origin_plus_500_ms_is_inconclusive() {
-        let mut trial = cancel_trial(Cancel::CloseBefore);
+        let mut trial = trial_of(Cancel::CloseBefore);
         trial.observed_to = trial.origin + OBSERVE_TICKS - 1;
         assert!(matches!(cancel_trial_verdict(&trial), Verdict::Inconclusive(text) if text.contains("short of the origin")));
         trial.after = vec![(trial.origin, 5_000)];
@@ -1492,17 +1606,17 @@ mod tests {
 
     #[test]
     fn a_block_before_a_distant_cancel_fails_and_none_before_the_controls_stop_is_inconclusive() {
-        let mut trial = cancel_trial(Cancel::StopBefore);
+        let mut trial = trial_of(Cancel::StopBefore);
         trial.before = 1;
         assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(_)));
-        let mut control = cancel_trial(Cancel::Control);
+        let mut control = trial_of(Cancel::Control);
         control.before = 0;
         assert!(matches!(cancel_trial_verdict(&control), Verdict::Inconclusive(_)));
     }
 
     #[test]
     fn the_fresh_starts_first_block_must_exist_sit_at_its_origin_and_hold_samples() {
-        let mut trial = cancel_trial(Cancel::StopBefore);
+        let mut trial = trial_of(Cancel::StopBefore);
         trial.next = None;
         assert!(matches!(cancel_trial_verdict(&trial), Verdict::Inconclusive(_)));
         trial.next = Some((trial.new_origin - 2, 5_000, true));
@@ -1515,7 +1629,7 @@ mod tests {
 
     #[test]
     fn an_error_fails_before_anything_else_is_read() {
-        let mut trial = cancel_trial(Cancel::StopBefore);
+        let mut trial = trial_of(Cancel::StopBefore);
         trial.errors = vec!["LateCommand".to_owned()];
         trial.next = None;
         assert!(matches!(cancel_trial_verdict(&trial), Verdict::Fail(text) if text.contains("LateCommand")));
@@ -1523,7 +1637,7 @@ mod tests {
 
     #[test]
     fn the_trace_names_the_late_blocks_and_the_fresh_starts_offset() {
-        let mut trial = cancel_trial(Cancel::StopBefore);
+        let mut trial = trial_of(Cancel::StopBefore);
         trial.after = vec![(trial.origin, 5_000)];
         trial.next = Some((trial.new_origin + 7, 5_000, true));
         let trace = trial.trace();

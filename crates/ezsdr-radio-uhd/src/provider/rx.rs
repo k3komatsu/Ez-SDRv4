@@ -180,7 +180,8 @@ impl Rx {
         let mut chain = self.core.rx_chain[self.k].lock();
         let streams = lock(&self.core.streams);
         refresh_intent(&mut chain, &streams, key, stream);
-        let done = chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;
+        // UR-17 (#67): a cut at or before the first undelivered sample ends the stream at once, before the origin of a start the device holds too: the untimed stop cancels it.
+        let done = chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);
         let end_now = chain.end_now();
         drop(streams);
         drop(chain);
@@ -1010,6 +1011,79 @@ mod tests {
         assert_eq!(refused[0].payload["kind"], "stop");
     }
 
+    /// A manual-clock fake behind the spy, its rig and the held clock, for the open of a receive streamer.
+    fn spied_open_rig() -> (Arc<super::super::test_support::LockSpy>, Arc<Core>, Arc<ezsdr_kernel::event::EventCollector>, super::super::test_support::Frozen) {
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+        let (core, _time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        spy.watch(&core);
+        let frozen = super::super::test_support::Frozen::on(spy.host());
+        spy.set_time(core.now());
+        (spy, core, events, frozen)
+    }
+
+    #[test]
+    fn ur_16_an_open_stops_the_streamer_before_its_first_start_and_cancels_an_orphaned_start() {
+        // UR-16, UR-33 (#67): a start an earlier close left queued on the radio — a failed owner
+        // spawn, a stop that failed, a process that died — is cancelled by the untimed stop the
+        // next open makes before anything is started; the device log reads open, stop, then the
+        // start, and the reopened streamer is silent through the old origin.
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
+        let (core, time, _events) = super::super::test_support::rig_on(device.clone(), vec![link()], 2_000);
+        let frozen = super::super::test_support::Frozen::of(&device);
+        super::super::test_support::device_at(&core, &time, &device, 0);
+        let origin = core.ticks(5_000_000_000);
+        core.open_streamer(Dir::Rx, 0, Channels::first(1)).unwrap();
+        device.rx_start(0, origin).unwrap();
+        device.close_streams();
+        core.open_streamer(Dir::Rx, 0, Channels::first(1)).unwrap();
+        let calls = device.calls();
+        let position = |name: &str, nth: usize| calls.iter().enumerate().filter(|(_, call)| call.starts_with(name)).map(|(i, _)| i).nth(nth).unwrap_or_else(|| panic!("{name} #{nth}: {calls:?}"));
+        assert!(position("rx_start", 0) < position("close_streams", 0) && position("close_streams", 0) < position("rx_open", 1) && position("rx_open", 1) < position("rx_stop", 1), "{calls:?}");
+        assert_eq!(calls.iter().filter(|call| call.starts_with("rx_stop")).count(), 2, "one untimed stop on each open: {calls:?}");
+        super::super::test_support::device_at(&core, &time, &device, origin - core.ticks(50_000_000));
+        let _driver = super::super::test_support::handed_over(frozen, &device.host());
+        for _ in 0..6 {
+            assert_eq!(device.rx_recv(0, 2_000, Wall::from_millis(100), false), RxRecv::Timeout, "the orphaned start delivered: {:?}", device.calls());
+        }
+        assert!(device.time_now().unwrap() >= origin + core.ticks(500_000_000));
+    }
+
+    #[test]
+    fn ur_16_a_failed_stop_on_open_refuses_the_segment_and_starts_nothing() {
+        // UR-16, UR-24, UR-25: the open's stop refused (not a loss) is the open's refusal: the
+        // owner makes no start, the refusal is the segment's, and the streamer is recorded as not open.
+        let (spy, core, events, frozen) = spied_open_rig();
+        let (mut rx, _) = rx_unopened(&core, 1);
+        plan(&core, &[(core.ticks(5_000_000_000), None, Some(1))]);
+        spy.refuse_rx_stop(crate::DeviceError::failed("test: scripted rx_stop refusal"));
+        assert!(rx.begin());
+        drop(frozen);
+        assert_eq!((spy.seen("rx_open"), spy.seen("rx_stop"), spy.seen("rx_start")), (1, 1, 0), "{:?}", spy.order());
+        let refused: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).collect();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].payload["reason"].as_str().unwrap().starts_with("UR-16: the untimed stop on open:"), "{refused:?}");
+        assert!(rx.stream.is_none());
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Off, "no start was issued");
+        assert!(matches!(lock(&core.streams).stream(stream_key(Dir::Rx, 0)).set, super::super::core::DeviceSet::Unknown), "the streamer is not recorded as open");
+    }
+
+    #[test]
+    fn ur_29_a_loss_found_by_the_stop_on_open_is_published_once_and_nothing_follows() {
+        let (spy, core, events, frozen) = spied_open_rig();
+        let (mut rx, _) = rx_unopened(&core, 1);
+        plan(&core, &[(core.ticks(5_000_000_000), None, Some(1))]);
+        spy.refuse_rx_stop(crate::DeviceError { lost: true, message: "test: lost at the open's stop".to_owned() });
+        assert!(rx.begin());
+        drop(frozen);
+        assert!(core.is_lost());
+        let order = spy.order();
+        let stop = order.iter().position(|name| *name == "rx_stop").expect("the stop on open");
+        assert!(order[stop + 1..].iter().all(|name| *name == "mark_lost"), "no device call but the loss's follows the lost stop: {order:?}");
+        assert_eq!(spy.seen("rx_start"), 0);
+        let lost = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count();
+        assert_eq!(lost, 1);
+    }
+
     #[test]
     fn ur_24_a_loss_during_rx_receive_finishes_without_recovery_calls() {
         let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
@@ -1440,63 +1514,67 @@ mod tests {
 
     #[test]
     fn ur_26_a_receive_start_queued_by_the_stop_ends_its_owner_without_detaching() {
-        // UR-26 (S16a): the owner does not re-read `Provider::stop` after its configuration;
+        // UR-26 (S16a, #67): the owner does not re-read `Provider::stop` after its configuration;
         // the start it queued at its origin is issued, the plan cuts the segment there — no
-        // block, and an untimed stop once the origin has passed —, and the owner leaves
-        // through its own turn, so a stop joins it inside the 1 s bound instead of leaving it
-        // detached.
-        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
-        let holder = Arc::new(super::super::test_support::HoldApply::new(inner.clone(), Dir::Rx, Some(0)));
-        let link = link();
-        let (core, time, _events) = super::super::test_support::rig_on(holder.clone(), vec![link.clone()], 2_000);
-        let origin = core.ticks(10_000_000);
-        // The stream's first segment is cut with no sample, so that the plan's one segment is the
-        // `start_rx`'s, at `origin`.
-        lock(&core.streams).lines.insert(
-            stream_key(Dir::Rx, 0),
-            Line::new(ezsdr_radio::timeline::Stream {
-                direction: Direction::Rx,
-                origin: 0,
-                config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
-                lead: 0,
-                call: 2_000,
-                allowance: 0,
-            }),
-        );
-        book(&core, 0, 1, Kind::Stop);
-        book(&core, origin, 2, Kind::Start);
-        let (to_rx, cmds) = std::sync::mpsc::channel();
-        let mut rx = Rx::new(core.clone(), 0, cmds, None, None);
-        let (reached, release) = holder.arm();
-        let (done, finished) = std::sync::mpsc::channel();
-        let running = std::thread::spawn(move || {
-            let began = rx.begin();
-            let _ = done.send((began, rx));
-        });
-        reached.recv_timeout(Wall::from_secs(10)).expect("the owner's configure");
-        {
-            // As `Provider::stop(orderly)` books it, before the segment's origin.
-            let mut streams = lock(&core.streams);
-            let at = core.now();
-            streams.stop = Some((at, StopMode::Orderly));
-            streams.end(&core, at, false, false);
-            core.release_streams(streams);
+        // block, and an untimed stop at once, before the origin or after it —, and the owner
+        // leaves through its own turn, so a stop joins it inside the 1 s bound instead of
+        // leaving it detached.
+        for passed in [false, true] {
+            let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+            let holder = Arc::new(super::super::test_support::HoldApply::new(inner.clone(), Dir::Rx, Some(0)));
+            let link = link();
+            let (core, time, _events) = super::super::test_support::rig_on(holder.clone(), vec![link.clone()], 2_000);
+            let origin = if passed { core.ticks(10_000_000) } else { core.ticks(5_000_000_000) };
+            // The stream's first segment is cut with no sample, so that the plan's one segment is the
+            // `start_rx`'s, at `origin`.
+            lock(&core.streams).lines.insert(
+                stream_key(Dir::Rx, 0),
+                Line::new(ezsdr_radio::timeline::Stream {
+                    direction: Direction::Rx,
+                    origin: 0,
+                    config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
+                    lead: 0,
+                    call: 2_000,
+                    allowance: 0,
+                }),
+            );
+            book(&core, 0, 1, Kind::Stop);
+            book(&core, origin, 2, Kind::Start);
+            let (to_rx, cmds) = std::sync::mpsc::channel();
+            let mut rx = Rx::new(core.clone(), 0, cmds, None, None);
+            let (reached, release) = holder.arm();
+            let (done, finished) = std::sync::mpsc::channel();
+            let running = std::thread::spawn(move || {
+                let began = rx.begin();
+                let _ = done.send((began, rx));
+            });
+            reached.recv_timeout(Wall::from_secs(10)).expect("the owner's configure");
+            {
+                // As `Provider::stop(orderly)` books it, before the segment's origin.
+                let mut streams = lock(&core.streams);
+                let at = core.now();
+                streams.stop = Some((at, StopMode::Orderly));
+                streams.end(&core, at, false, false);
+                core.release_streams(streams);
+            }
+            if passed {
+                time.advance_to(core.at(origin)).unwrap();
+            }
+            release.send(()).unwrap();
+            let (began, mut rx) = finished.recv_timeout(Wall::from_secs(1)).expect("the owner's begin returned within the join bound");
+            assert!(began, "passed {passed}: the owner found its segment");
+            assert!(inner.calls().iter().any(|call| call.starts_with("rx_start 0 ")), "the queued start is issued: {:?}", inner.calls());
+            assert!(link.receive().is_none(), "nothing is delivered at the origin: {:?}", inner.calls());
+            let stop = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_stop_untimed").cloned().expect("the untimed stop at the origin");
+            assert_eq!((stop["cut"].as_i64().unwrap(), stop["at"].as_i64().unwrap()), (origin, if passed { origin } else { 0 }), "passed {passed}: {stop}");
+            to_rx.send(RxCmd::Shutdown(StopMode::Orderly)).unwrap();
+            assert_eq!(rx.turn(), Turn::Exit, "the owner ends through its own loop");
+            {
+                let streams = lock(&core.streams);
+                assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), None, "the ended segment leaves no delivered floor");
+            }
+            running.join().expect("the owner's begin thread");
         }
-        time.advance_to(core.at(origin)).unwrap();
-        release.send(()).unwrap();
-        let (began, mut rx) = finished.recv_timeout(Wall::from_secs(1)).expect("the owner's begin returned within the join bound");
-        assert!(began, "the owner found its segment");
-        assert!(inner.calls().iter().any(|call| call.starts_with("rx_start 0 ")), "the queued start is issued: {:?}", inner.calls());
-        assert!(link.receive().is_none(), "nothing is delivered at the origin: {:?}", inner.calls());
-        let stop = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_stop_untimed").cloned().expect("the untimed stop at the origin");
-        assert_eq!((stop["cut"].as_i64().unwrap(), stop["at"].as_i64().unwrap()), (origin, origin), "{stop}");
-        to_rx.send(RxCmd::Shutdown(StopMode::Orderly)).unwrap();
-        assert_eq!(rx.turn(), Turn::Exit, "the owner ends through its own loop");
-        {
-            let streams = lock(&core.streams);
-            assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), None, "the ended segment leaves no delivered floor");
-        }
-        running.join().expect("the owner's begin thread");
     }
 
     #[test]
@@ -1885,10 +1963,10 @@ mod tests {
     }
 
     #[test]
-    fn ur_26_an_abort_stops_a_queued_start_at_shutdown() {
-        // UR-26, RM-16: under `abort`, a segment whose timed start uhd-rx has queued and whose
-        // origin has not passed is not stopped when uhd-rx reads the abort (#56), but at its
-        // shutdown, once, before uhd-rx exits; it has no sample, so no clock.
+    fn ur_26_an_abort_stops_a_queued_start_when_uhd_rx_reads_the_plan() {
+        // UR-26, RM-16 (#67): under `abort`, a segment whose timed start uhd-rx has queued and
+        // whose origin has not passed is stopped when uhd-rx reads the plan, once; its shutdown
+        // stops nothing again; it has no sample, so no clock.
         let (core, device, time, _) = super::super::test_support::rig_with_links(vec![link()]);
         let (mut rx, clock) = rx(&core, 1);
         let ms = |n: i64| core.ticks(n * 1_000_000);
@@ -1905,10 +1983,10 @@ mod tests {
         }
         rx.poll();
         let stops = || device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count();
-        assert_eq!(stops(), 1, "only the first stream's stop yet");
-        rx.command(RxCmd::Shutdown(StopMode::Abort));
         assert!(rx.stream.is_none());
-        assert_eq!(stops(), 2);
+        assert_eq!(stops(), 2, "the first stream's and the queued start's");
+        rx.command(RxCmd::Shutdown(StopMode::Abort));
+        assert_eq!(stops(), 2, "the shutdown stops nothing again");
         assert_eq!(clocks(&core), [(0, Some(clock.instant(10_000)))]);
     }
 
@@ -2210,42 +2288,239 @@ mod tests {
         assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_start ")).count(), 1, "no successor start: {:?}", device.calls());
     }
 
-    #[test]
-    fn ur_26_a_stop_before_a_queued_start_stops_after_its_origin() {
-        // UR-17 (spec 22, VH-6; #56): a `Stop` that cancels a segment whose timed start uhd-rx
-        // has already queued leaves that start standing, so the stream is stopped untimed only
-        // once its origin has passed — at its first samples, or silent past it — and what
-        // arrives is discarded: nothing on a new clock.
-        for silent in [false, true] {
-            let link = link();
-            let (core, device, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
-            let (mut rx, _) = rx(&core, 1);
-            let ms = |n: i64| core.ticks(n * 1_000_000);
-            plan(&core, &[(0, Some(10_000), None), (ms(65), None, Some(1))]);
-            rx.poll();
-            rx.receive(samples(0, 10_000));
-            assert!(rx.begin());
-            assert!(device.calls().contains(&format!("rx_start 0 {}", ms(65))));
-            // The `Stop` at 20 ms cuts the planned segment at its origin: the plan drops it.
-            time.advance_to(core.at(ms(20))).unwrap();
-            plan(&core, &[(0, Some(10_000), None)]);
-            rx.poll();
-            assert_eq!(device.calls().iter().filter(|c| c.starts_with("rx_stop ")).count(), 1, "only the first stream's stop yet");
-            time.advance_to(core.at(ms(80))).unwrap();
-            if silent {
-                rx.last_samples = rx.host.now();
-                rx.host.sleep(Wall::from_millis(10));
-                rx.receive(RxRecv::Timeout);
-            } else {
-                rx.receive(samples(ms(65), 2_000));
-            }
-            assert!(rx.stream.is_none(), "silent {silent}");
-            let stops: Vec<_> = lock(&core.rec).timing.iter().filter(|r| r["what"] == "rx_stop_untimed").map(|r| r["at"].as_i64().unwrap()).collect();
-            assert_eq!(stops.len(), 2, "silent {silent}");
-            assert!(stops[1] >= ms(65), "the second stop after the origin: {stops:?}");
-            assert_eq!(received(&link).len(), 1, "silent {silent}: nothing on a new clock");
-            assert_eq!(core.clocks.sample_clock_records().len(), 1, "silent {silent}");
+    /// uhd-rx whose first stream delivered samples 0..10 000 (10 ms) and ended at its cut, then
+    /// began the planned second segment: its timed start is queued in the device for `origin`.
+    /// The device's clock and the Core's are held at 0 (a manual clock).
+    struct Queued {
+        core: Arc<Core>,
+        device: Arc<crate::device::FakeDevice>,
+        time: Arc<ezsdr_kernel::time::ManualTimeAuthority>,
+        events: Arc<ezsdr_kernel::event::EventCollector>,
+        link: Arc<dyn ezsdr_kernel::stream::DataLink>,
+        rx: Rx,
+        frozen: super::super::test_support::Frozen,
+    }
+
+    fn queued(origin: i64, faults: Vec<crate::device::FakeFault>) -> Queued {
+        let link = link();
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, faults, ..crate::device::FakeConfig::default() }));
+        let (core, time, events) = super::super::test_support::rig_on(device.clone(), vec![link.clone()], 2_000);
+        let frozen = super::super::test_support::Frozen::of(&device);
+        super::super::test_support::device_at(&core, &time, &device, 0);
+        let (mut rx, _) = rx(&core, 1);
+        plan(&core, &[(0, Some(10_000), None), (origin, None, Some(1))]);
+        rx.poll();
+        rx.receive(samples(0, 10_000));
+        assert!(rx.begin());
+        assert!(device.calls().contains(&format!("rx_start 0 {origin}")), "the second start is queued: {:?}", device.calls());
+        Queued { core, device, time, events, link, rx, frozen }
+    }
+
+    impl Queued {
+        /// The device calls after the queued start.
+        fn after_start(&self, origin: i64) -> Vec<String> {
+            let calls = self.device.calls();
+            let at = calls.iter().position(|call| *call == format!("rx_start 0 {origin}")).expect("the queued start");
+            calls[at + 1..].to_vec()
         }
+
+        /// The device's clock moved to just before `origin` and read through `origin` + 500 ms:
+        /// only timeouts, so the queued start is gone.
+        fn assert_silent_through(self, origin: i64) {
+            super::super::test_support::device_at(&self.core, &self.time, &self.device, origin - self.core.ticks(50_000_000));
+            let _driver = super::super::test_support::handed_over(self.frozen, &self.device.host());
+            for _ in 0..6 {
+                assert_eq!(self.device.rx_recv(0, 2_000, Wall::from_millis(100), false), RxRecv::Timeout, "the cancelled start delivered: {:?}", self.device.calls());
+            }
+            assert!(self.device.time_now().unwrap() >= origin + self.core.ticks(500_000_000));
+        }
+
+        fn untimed_stops(&self) -> Vec<serde_json::Value> {
+            lock(&self.core.rec).timing.iter().filter(|row| row["what"] == "rx_stop_untimed").cloned().collect()
+        }
+    }
+
+    #[test]
+    fn ur_26_a_cut_at_a_queued_origin_stops_the_stream_at_once() {
+        // UR-17, UR-26 (#67): a plan that drops the queued segment (a `Stop`) or cuts it at its
+        // first sample (`Provider::stop`, orderly or abort) is followed at once, whatever the
+        // distance to the origin: one untimed stop, before the origin, which cancels the start
+        // the device holds — no sample of it, no clock for it.
+        for origin_ms in [300, 900, 1_100, 5_000] {
+            for cut in ["stop", "provider stop", "provider abort"] {
+                let case = format!("origin {origin_ms} ms, {cut}");
+                let origin = lock_ticks(origin_ms);
+                let mut q = queued(origin, Vec::new());
+                match cut {
+                    "stop" => plan(&q.core, &[(0, Some(10_000), None)]),
+                    _ => {
+                        let at = q.core.now();
+                        let mut streams = lock(&q.core.streams);
+                        streams.stop = Some((at, if cut == "provider abort" { StopMode::Abort } else { StopMode::Orderly }));
+                        streams.end(&q.core, at, cut == "provider abort", false);
+                        q.core.release_streams(streams);
+                    }
+                }
+                q.rx.poll();
+                assert!(q.rx.stream.is_none(), "{case}");
+                assert_eq!(q.after_start(origin), ["rx_stop 0 now"], "{case}");
+                let stops = q.untimed_stops();
+                assert_eq!(stops.len(), 2, "{case}: the first stream's and the queued one's");
+                assert_eq!((stops[1]["cut"].as_i64().unwrap(), stops[1]["at"].as_i64().unwrap()), (origin, 0), "{case}: {}", stops[1]);
+                assert_eq!(q.core.rx_chain[0].lock().device(), RxDevice::Off, "{case}");
+                assert_eq!(received(&q.link).len(), 1, "{case}: nothing of the queued start");
+                assert_eq!(clocks(&q.core).len(), 1, "{case}: no clock for it");
+                q.assert_silent_through(origin);
+            }
+        }
+    }
+
+    fn lock_ticks(ms: i64) -> i64 {
+        ms * 200_000
+    }
+
+    #[test]
+    fn ur_26_a_cut_after_a_queued_origin_keeps_the_stream() {
+        // UR-17: a cut that leaves samples of the queued segment (index 5 000) does not stop it
+        // before its origin; the stream waits and is stopped at the cut as before.
+        let origin = lock_ticks(900);
+        let mut q = queued(origin, Vec::new());
+        plan(&q.core, &[(0, Some(10_000), None), (origin, Some(5_000), Some(1))]);
+        q.rx.poll();
+        assert!(q.rx.stream.is_some());
+        assert!(q.after_start(origin).is_empty(), "no stop: {:?}", q.device.calls());
+        assert_eq!(q.untimed_stops().len(), 1, "only the first stream's");
+    }
+
+    #[test]
+    fn ur_26_a_cut_after_the_origin_of_a_silent_start_stops_at_once() {
+        // UR-17: the plan drops the segment once its origin has passed and nothing came: the
+        // stream is stopped at that poll (`at` at or after the origin), and what arrives later
+        // is not published.
+        let link = link();
+        let (core, device, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, _) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        plan(&core, &[(0, Some(10_000), None), (ms(65), None, Some(1))]);
+        rx.poll();
+        rx.receive(samples(0, 10_000));
+        assert!(rx.begin());
+        assert!(device.calls().contains(&format!("rx_start 0 {}", ms(65))));
+        time.advance_to(core.at(ms(80))).unwrap();
+        plan(&core, &[(0, Some(10_000), None)]);
+        rx.poll();
+        assert!(rx.stream.is_none());
+        let stops: Vec<_> = lock(&core.rec).timing.iter().filter(|r| r["what"] == "rx_stop_untimed").map(|r| r["at"].as_i64().unwrap()).collect();
+        assert_eq!(stops.len(), 2);
+        assert!(stops[1] >= ms(65), "the second stop after the origin: {stops:?}");
+        rx.receive(samples(ms(65), 2_000));
+        assert_eq!(received(&link).len(), 1, "nothing on a new clock");
+        assert_eq!(core.clocks.sample_clock_records().len(), 1);
+    }
+
+    #[test]
+    fn ur_26_a_stop_and_provider_stop_in_one_turn_stop_a_queued_start_once() {
+        // UR-26: the plan drops the queued segment and `Provider::stop` cuts it, both before uhd-rx
+        // reads: one stop, one row of each kind, the chain off, and the shutdown that follows
+        // (orderly or abort) stops nothing again.
+        for mode in [StopMode::Orderly, StopMode::Abort] {
+            let origin = lock_ticks(900);
+            let mut q = queued(origin, Vec::new());
+            plan(&q.core, &[(0, Some(10_000), None)]);
+            let at = q.core.now();
+            {
+                let mut streams = lock(&q.core.streams);
+                streams.stop = Some((at, mode));
+                streams.end(&q.core, at, mode == StopMode::Abort, false);
+                q.core.release_streams(streams);
+            }
+            q.rx.poll();
+            q.rx.command(RxCmd::Shutdown(mode));
+            assert!(q.rx.stream.is_none());
+            assert_eq!(q.after_start(origin), ["rx_stop 0 now"], "{mode:?}");
+            assert_eq!(q.untimed_stops().len(), 2, "{mode:?}");
+            assert_eq!(lock(&q.core.rec).applied.iter().filter(|row| row["key"] == "rx_stop").count(), 2, "{mode:?}");
+            assert_eq!(q.core.rx_chain[0].lock().device(), RxDevice::Off, "{mode:?}");
+            assert_eq!(clocks(&q.core).len(), 1, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn ur_26_a_start_after_a_cancelled_queued_start_delivers_at_its_own_origin() {
+        // RM-25, UR-17 (#67): a `Stop` that drops the queued segment B, then a `start_rx` C: B's
+        // start is stopped before its origin, C's start is issued at C's origin — not before B's
+        // origin and its ready term — and the first block the device delivers is C's first
+        // sample, on a clock of its own; B has no clock.
+        let link = link();
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
+        let (core, time, _events) = super::super::test_support::rig_on(device.clone(), vec![link.clone()], 2_000);
+        let _frozen = super::super::test_support::Frozen::of(&device);
+        super::super::test_support::device_at(&core, &time, &device, 0);
+        let (mut rx, _) = rx(&core, 1);
+        let key = stream_key(Dir::Rx, 0);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book(&core, ms(10), 1, Kind::Stop);
+        book(&core, ms(10), 2, Kind::Start);
+        rx.poll();
+        rx.receive(samples(0, 10_000));
+        assert!(rx.begin());
+        let origin_b = lock(&core.streams).planned(key).iter().find(|planned| planned.segment.by == Some(2)).expect("B is planned").segment.origin;
+        assert!(device.calls().contains(&format!("rx_start 0 {origin_b}")), "B is queued: {:?}", device.calls());
+        super::super::test_support::device_at(&core, &time, &device, ms(20));
+        assert!(ms(20) < origin_b);
+        book(&core, ms(20), 3, Kind::Stop);
+        book(&core, ms(20), 4, Kind::Start);
+        rx.poll();
+        assert!(rx.stream.is_none(), "B is stopped before its origin");
+        let origin_c = lock(&core.streams).planned(key).iter().find(|planned| planned.segment.by == Some(4)).expect("C is planned").segment.origin;
+        assert!(origin_c >= origin_b, "RM-25: C starts at or after B's origin ({origin_c}, {origin_b})");
+        assert!(rx.begin());
+        let streams: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("rx_st")).collect();
+        let (start_b, start_c) = (format!("rx_start 0 {origin_b}"), format!("rx_start 0 {origin_c}"));
+        assert_eq!(streams[streams.len() - 3..], [start_b, "rx_stop 0 now".to_owned(), start_c], "B's start, its stop, C's start: {streams:?}");
+        super::super::test_support::device_at(&core, &time, &device, origin_c + 1_000 * 200);
+        let got = device.rx_recv(0, 1_000, Wall::from_millis(100), false);
+        assert!(matches!(got, RxRecv::Samples { first_tick, .. } if first_tick == origin_c), "the device's first block is C's: {got:?}");
+        rx.receive(got);
+        let blocks = received(&link);
+        assert_eq!(blocks.len(), 2, "A's block and C's: {blocks:?}");
+        assert_ne!(blocks[0].0, blocks[1].0);
+        assert_eq!((blocks[1].1, blocks[1].2), (0, 1_000), "C's first sample is index 0 on its own clock: {blocks:?}");
+        assert_eq!(clocks(&core), [(0, Some(core.at(ms(10)).ticks_in(core.root).unwrap())), (origin_c, None)], "A and C, none for B");
+    }
+
+    #[test]
+    fn ur_29_a_loss_found_before_the_stop_of_a_queued_start_makes_no_stop_call() {
+        // UR-29: the loss is published while the start is queued; the plan uhd-rx reads then
+        // ends the stream with no device call.
+        let origin = lock_ticks(900);
+        let mut q = queued(origin, Vec::new());
+        q.core.device_lost("test: loss while a start is queued");
+        let calls = q.device.calls().len();
+        q.rx.poll();
+        assert!(q.rx.stream.is_none());
+        assert_eq!(q.device.calls().len(), calls, "no device call after the loss: {:?}", q.device.calls());
+        assert_eq!(q.core.rx_chain[0].lock().device(), RxDevice::Lost);
+        assert_eq!(clocks(&q.core).len(), 1, "no clock for the queued start");
+    }
+
+    #[test]
+    fn ur_29_a_stop_of_a_queued_start_that_finds_the_loss_publishes_it_once() {
+        // UR-29: the device is lost between the plan read and the stop call: the stop's error
+        // publishes the loss, once, and ends the stream with no clock.
+        let origin = lock_ticks(900);
+        let mut q = queued(origin, vec![crate::device::FakeFault::Lost(Wall::from_millis(5))]);
+        plan(&q.core, &[(0, Some(10_000), None)]);
+        // `device_at` reads the device's time back, which a lost device refuses.
+        q.device.set_time(lock_ticks(6));
+        q.time.advance_to(q.core.at(lock_ticks(6))).unwrap();
+        q.rx.poll();
+        assert!(q.rx.stream.is_none());
+        assert!(q.core.is_lost());
+        assert_eq!(q.core.rx_chain[0].lock().device(), RxDevice::Lost);
+        assert_eq!(clocks(&q.core).len(), 1);
+        let lost = q.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count();
+        assert_eq!(lost, 1);
     }
 
     /// The transmit stream's line, as `Control::new` makes it for a transmit stream with one
