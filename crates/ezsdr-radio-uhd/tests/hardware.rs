@@ -3969,3 +3969,138 @@ fn hw_75_open_flush_sweep() {
         print_and_assert_no_fail("open flush", &verdicts);
     });
 }
+
+/// The values of the named environment variables that are set.
+fn env_values(names: &[&str]) -> std::collections::BTreeMap<String, String> {
+    names.iter().filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value))).collect()
+}
+
+/// The 2026-11-15 stage-4 tools open the device on a guarded handle with slot A alone as the layout (a CBX in slot B is never transmitted on), refusing
+/// anything but a UBX or an OBX at 1 GHz, and return the handle and its guard.
+fn slot_a_guarded() -> (Arc<measurement::GuardedDevice>, Arc<dyn Device>) {
+    let guard = measurement::open_record_guard(|| ezsdr_radio_uhd::open(&args()).expect("the USRP opens"));
+    let device: Arc<dyn Device> = guard.clone();
+    iii::pin_to_slot_a(&*device).expect("slot A alone is the receive and transmit channel");
+    pin_slot_a(&*device);
+    (guard, device)
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_s2_throughput_repeats() {
+    // S2 (stage 4, D1 and D2): one-channel throughput repeated through the record's own stage runner (`run_stage`): RX and TX at 100 and 200 MS/s, `EZSDR_S2_TRIALS` (10)
+    // Runs of `EZSDR_S2_SECONDS` (60) each, and the duplex pairs RX 200 + TX 100 and RX 100 + TX 100, `EZSDR_S2_DUPLEX_TRIALS` (5) each; `EZSDR_S2_CELLS` runs some. A row per
+    // trial and a decision line per cell (`s4bench`); a device failure is a row, not a failed test. Transmits on slot A at 1 GHz (attenuator in the loopback; owner's
+    // confirmation first). The device's whole life is bounded.
+    let env = env_values(&[&["EZSDR_S2_TRIALS", "EZSDR_S2_DUPLEX_TRIALS", "EZSDR_S2_SECONDS", "EZSDR_S2_CELLS"][..], &measurement::MeasurementPlan::ENV_NAMES[..]].concat());
+    let count = |name: &str, default: u64| measurement::env_count(&env, name, default).unwrap_or_else(|error| panic!("{error}"));
+    let seconds = count("EZSDR_S2_SECONDS", 60);
+    let plan = measurement::MeasurementPlan { throughput_seconds: seconds, ..measurement::MeasurementPlan::from_env(&env).expect("the measurement plan's values are valid before opening the USRP") };
+    let cells = common::s4bench::s2_select(
+        common::s4bench::s2_cells(common::s4bench::S2_RATES, count("EZSDR_S2_TRIALS", 10) as usize, count("EZSDR_S2_DUPLEX_TRIALS", 5) as usize),
+        env.get("EZSDR_S2_CELLS").map(String::as_str),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let limit = common::s4bench::s2_planned_seconds(&cells, seconds) * 5 / 4 + 900;
+    println!("S2: slot A, {seconds} s a trial, waveform {} samples, cells {:?}, bound {limit} s", plan.tx_waveform_samples, cells.iter().map(|cell| (&cell.id, cell.trials)).collect::<Vec<_>>());
+    bounded(Wall::from_secs(limit), "hw_s2_throughput_repeats", move || {
+        let (guard, device) = slot_a_guarded();
+        let dir = TempDir::new();
+        let doc = bench_profile(&*device, &dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+        let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
+        let described = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).expect("the bound layout");
+        let wire_bytes = u64::try_from(described.performance.wire_bytes_per_sample).expect("wire bytes per sample is positive");
+        let run = common::s4bench::s2_run(&cells, |stage| measurement::run_stage(device.clone(), &plan, stage, wire_bytes), || guard.latched());
+        for line in common::s4bench::s2_decisions(&run, seconds) {
+            println!("{line}");
+        }
+        drop(device);
+        drop(guard);
+        assert!(run.stopped.is_none(), "S2 stopped early: {:?}", run.stopped);
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_t200_record_stage() {
+    // T200 (stage 4, D2 and KL-5): the record suite's 200 MS/s transmit stage (`measure_tx_throughput`: its Spec, its waveform, its judgement) alone, `EZSDR_T200_RUNS` (3) times
+    // on one handle, with the record's plan (`EZSDR_MEASURE_THROUGHPUT_SECS` 60 s, `EZSDR_TX_WAVEFORM_SAMPLES` 1 000). Compare with `hw_tx200_hot_path_probe` at
+    // EZSDR_TX200_SECONDS=300 and the bare-UHD script `plan/phase8/tools/t200-bare-uhd.sh`. Transmits on slot A at 1 GHz (attenuator in the loopback; owner's confirmation first).
+    let env = env_values(&[&["EZSDR_T200_RUNS"][..], &measurement::MeasurementPlan::ENV_NAMES[..]].concat());
+    let runs = measurement::env_count(&env, "EZSDR_T200_RUNS", 3).unwrap_or_else(|error| panic!("{error}")) as usize;
+    let plan = measurement::MeasurementPlan::from_env(&env).expect("the measurement plan's values are valid before opening the USRP");
+    let limit = runs as u64 * (plan.throughput_seconds + 60) + 900;
+    println!("T200: slot A, {runs} runs of {} s, waveform {} samples, bound {limit} s", plan.throughput_seconds, plan.tx_waveform_samples);
+    bounded(Wall::from_secs(limit), "hw_t200_record_stage", move || {
+        let (guard, device) = slot_a_guarded();
+        let plan = measurement::MeasurementPlan { tx_throughput_rates_hz: vec![common::s4bench::T200_RATE_HZ], ..plan };
+        let (done, stopped) = common::s4bench::t200_runs(&device, &plan, runs, || guard.latched());
+        println!("{}", common::s4bench::t200_decision(&done, runs, &plan, stopped.as_deref()));
+        drop(device);
+        drop(guard);
+        assert!(stopped.is_none(), "T200 stopped early: {stopped:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_s5_lead_rungs() {
+    // S5 (stage 4, D3 and D4): the record's command-lead group at TX 1, 10 and 100 MS/s with rungs 3.5/4/4.5/5 ms, and its receive start-lead group at 10 and 100 MS/s
+    // (`restart-same`, `restart-retune`) with rungs 3/4/5/7.5/10 ms, 100 trials a rung, then the receive group again on two channels when the layout has two UBX/OBX channels
+    // (receive only). Every value is the plan's: `EZSDR_MEASURE_*` names override them (`s4bench::s5_plan`). Transmits on slot A at 1 GHz only in the command-lead pass
+    // (attenuator in the loopback; owner's confirmation first); the two-channel pass transmits nothing.
+    let env = env_values(&measurement::MeasurementPlan::ENV_NAMES);
+    let plan = common::s4bench::s5_plan(&env).expect("the S5 plan's values are valid before opening the USRP");
+    let limit = common::s4bench::s5_planned_seconds(&plan) + 900;
+    println!(
+        "S5: command leads {:?} ns at TX {:?} Hz; start leads {:?} ns at RX {:?} Hz; {} trials a rung; bound {limit} s",
+        plan.timed_command_leads_ns, plan.timed_command_tx_rates_hz, plan.rx_start_leads_ns, plan.rx_start_rates_hz, plan.step_trials
+    );
+    bounded(Wall::from_secs(limit), "hw_s5_lead_rungs", move || {
+        let (guard, device) = slot_a_guarded();
+        let mut stopped = None;
+        // A pass runs only when the ones before it ended without an error: a wedged device is not driven further.
+        let mut pass = |run: &dyn Fn() -> common::s4bench::LeadLines| {
+            if stopped.is_none() {
+                let (lines, error) = run();
+                lines.iter().for_each(|line| println!("{line}"));
+                stopped = error;
+            }
+        };
+        pass(&|| common::s4bench::s5_command_lead(&device, &plan));
+        pass(&|| common::s4bench::s5_rx_start_lead(&device, &measurement::MeasurementPlan { rx_start_channels: 1, ..plan.clone() }));
+        // The two-channel pass needs the layout's second receive channel: slot A alone is lifted, and nothing is transmitted.
+        set_selector_override(None);
+        pass(&|| common::s4bench::s5_rx_start_lead(&device, &measurement::MeasurementPlan { rx_start_channels: 2, ..plan.clone() }));
+        let latched = guard.latched();
+        drop(device);
+        drop(guard);
+        assert!(stopped.is_none() && latched.is_none(), "S5 stopped early: {stopped:?}, latch {latched:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_s4_overflow_gap() {
+    // S4 (stage 4, D5): the record's overflow Run (`overflow_trial`: a reader stall, then the restart) at 1/10/25/50/100/200 MS/s with the record's stall for each rate, `EZSDR_S4_TRIALS` (20)
+    // each, then the stall-length sweep at `EZSDR_S4_STALL_RATE_HZ` (100 MS/s): `EZSDR_S4_STALLS_MS` (100,500,2000) ms. A row per trial with its restart-after-resume time (the record's
+    // INFERRED high-side estimate) and a decision line per cell against the owner's stability criterion, then D5's bound and the stall figures. Receive only: no attenuator.
+    // A Run's capture is a file of the receive samples in /tmp: the container's tmpfs must hold it (about 1 GB at 100 MS/s).
+    let env = env_values(&[&["EZSDR_S4_TRIALS", "EZSDR_S4_STALL_RATE_HZ", "EZSDR_S4_STALLS_MS"][..], &measurement::MeasurementPlan::ENV_NAMES[..]].concat());
+    let plan = measurement::MeasurementPlan::from_env(&env).expect("the measurement plan's values are valid before opening the USRP");
+    let stalls = measurement::env_list(&env, "EZSDR_S4_STALLS_MS", &common::s4bench::S4_STALL_SWEEP_MS).unwrap_or_else(|error| panic!("{error}"));
+    let sweep_rate = measurement::env_count(&env, "EZSDR_S4_STALL_RATE_HZ", common::s4bench::S4_STALL_SWEEP_RATE_HZ).unwrap_or_else(|error| panic!("{error}"));
+    let cells = common::s4bench::s4_cells(common::s4bench::s4_trials(&env).unwrap_or_else(|error| panic!("{error}")), sweep_rate, &stalls);
+    let limit = common::s4bench::s4_planned_seconds(&cells, plan.overflow_after_ms) * 5 / 4 + 900;
+    println!("S4: {} cells, {} ms before the stall, bound {limit} s", cells.len(), plan.overflow_after_ms);
+    bounded(Wall::from_secs(limit), "hw_s4_overflow_gap", move || {
+        let (guard, device) = slot_a_guarded();
+        let run = common::s4bench::s4_run(&device, &cells, plan.overflow_after_ms, || guard.latched());
+        for line in common::s4bench::s4_decisions(&run, sweep_rate) {
+            println!("{line}");
+        }
+        drop(device);
+        drop(guard);
+        assert!(run.stopped.is_none(), "S4 stopped early: {:?}", run.stopped);
+    });
+}

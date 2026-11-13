@@ -7904,7 +7904,7 @@
    "id": "P761",
    "name": "step-trial count override is ignored",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "step_trials: usize::try_from(count(values, \"EZSDR_MEASURE_STEP_TRIALS\", 100)?).map_err(|_| \"EZSDR_MEASURE_STEP_TRIALS is too large\".to_owned())?,",
+   "old": "step_trials: usize::try_from(env_count(values, \"EZSDR_MEASURE_STEP_TRIALS\", 100)?).map_err(|_| \"EZSDR_MEASURE_STEP_TRIALS is too large\".to_owned())?,",
    "new": "step_trials: MeasurementPlan::default().step_trials,",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -8255,8 +8255,8 @@
    "id": "P805",
    "name": "overflow environment default remains twenty",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "count(values, \"EZSDR_MEASURE_OVERFLOW_TRIALS\", 5)?",
-   "new": "count(values, \"EZSDR_MEASURE_OVERFLOW_TRIALS\", 20)?",
+   "old": "env_count(values, \"EZSDR_MEASURE_OVERFLOW_TRIALS\", 5)?",
+   "new": "env_count(values, \"EZSDR_MEASURE_OVERFLOW_TRIALS\", 20)?",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
@@ -23417,5 +23417,517 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_16_calls_drops_only_the_stop_that_follows_its_stream_s_open"
+ },
+ {
+  "id": "S4B-01",
+  "name": "bench 2026-11-15 stage-4 tools: an underflow at exactly the window's end is not inside it (window_held)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "ns <= window_ns",
+  "new": "ns < window_ns",
+  "scope": "pub fn window_held",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_transmit_window_is_judged_on_both_sides_of_ten_seconds"
+ },
+ {
+  "id": "S4B-02",
+  "name": "bench 2026-11-15 stage-4 tools: the window's accepted samples must exceed, not reach, the window's count (window_held)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "u128::from(*accepted) >= needed",
+  "new": "u128::from(*accepted) > needed",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_transmit_window_is_judged_on_both_sides_of_ten_seconds"
+ },
+ {
+  "id": "S4B-03",
+  "name": "bench 2026-11-15 stage-4 tools: a spread of exactly half fails the stability criterion (Stability::met)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "(self.max - self.min) * S4_STABILITY_NUM_DEN.1 <= self.max * S4_STABILITY_NUM_DEN.0",
+  "new": "(self.max - self.min) * S4_STABILITY_NUM_DEN.1 < self.max * S4_STABILITY_NUM_DEN.0",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_stability_criterion_is_met_at_exactly_half_and_not_above_it"
+ },
+ {
+  "id": "S4B-04",
+  "name": "bench 2026-11-15 stage-4 tools: D5's bound excludes the value itself (s4_decisions)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "max <= S4_D5_VALUE_NS",
+  "new": "max < S4_D5_VALUE_NS",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_decisions_state_the_spread_the_bound_and_the_stall_figures"
+ },
+ {
+  "id": "S4B-05",
+  "name": "bench 2026-11-15 stage-4 tools: an S4 trial counts without a restart-after-resume time (S4Trial::complete)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "self.class == TrialClass::Success && self.restart_ns.is_some()",
+  "new": "self.class == TrialClass::Success",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "an_s4_trial_counts_only_with_one_overflow_and_a_restart_time"
+ },
+ {
+  "id": "S4B-06",
+  "name": "bench 2026-11-15 stage-4 tools: a TX cell whose window cannot be told still gives a decision (s2_decision)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "inconclusive == 0 && !window_unknown",
+  "new": "inconclusive == 0",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "an_s2_decision_reports_what_was_observed_and_is_inconclusive_when_trials_are_missing"
+ },
+ {
+  "id": "S4B-07",
+  "name": "bench 2026-11-15 stage-4 tools: D1 fires only on a second failure (s2_decision)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "S2Rule::D1 if fail > 0",
+  "new": "S2Rule::D1 if fail > 1",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "an_s2_decision_reports_what_was_observed_and_is_inconclusive_when_trials_are_missing"
+ },
+ {
+  "id": "S4B-08",
+  "name": "bench 2026-11-15 stage-4 tools: 99 of 100 Success counts as clean (lead_decision)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "stage.total >= planned_trials && stage.success == stage.total",
+  "new": "stage.total >= planned_trials && stage.success + 1 >= stage.total",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_decisions_name_the_claimed_rung_in_every_condition"
+ },
+ {
+  "id": "S4B-09",
+  "name": "bench 2026-11-15 stage-4 tools: a rung is the edge when any rung above it is clean, not all (lead_decision)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": ".all(|stage| clean(stage))",
+  "new": ".any(|stage| clean(stage))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_decisions_name_the_claimed_rung_in_every_condition"
+ },
+ {
+  "id": "S4B-10",
+  "name": "bench 2026-11-15 stage-4 tools: one short stage no longer makes a lead decision INCONCLUSIVE (lead_decision)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "stages.iter().any(|stage| stage.total < planned_trials)",
+  "new": "stages.iter().all(|stage| stage.total < planned_trials)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_decisions_name_the_claimed_rung_in_every_condition"
+ },
+ {
+  "id": "S4B-11",
+  "name": "bench 2026-11-15 stage-4 tools: the S5 plan loses its 4.5 ms command-lead rung (s5_plan)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "\"3500000,4000000,4500000,5000000\"",
+  "new": "\"3500000,4000000,5000000\"",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_plan_fills_the_rungs_and_a_named_value_wins"
+ },
+ {
+  "id": "S4B-12",
+  "name": "bench 2026-11-15 stage-4 tools: the S5 plan overwrites a value the environment names (s5_plan)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "values.entry(name.to_owned()).or_insert_with(|| default.to_owned());",
+  "new": "values.insert(name.to_owned(), default.to_owned());",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_plan_fills_the_rungs_and_a_named_value_wins"
+ },
+ {
+  "id": "S4B-13",
+  "name": "bench 2026-11-15 stage-4 tools: the stall sweep repeats the rate cell that has its stall (s4_cells)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "!cells.iter().any(|cell| (cell.rate_hz, cell.stall_ms) == (sweep_rate_hz, *stall_ms))",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_cells_do_not_repeat_the_rate_cell_in_the_sweep"
+ },
+ {
+  "id": "S4B-14",
+  "name": "bench 2026-11-15 stage-4 tools: a cell filter keeps the cells it does not name (s2_select)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "wanted.contains(&cell.id.as_str())",
+  "new": "!wanted.contains(&cell.id.as_str())",
+  "scope": "pub fn s2_select",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_cells_are_the_briefs_and_a_filter_names_them"
+ },
+ {
+  "id": "S4B-15",
+  "name": "bench 2026-11-15 stage-4 tools: the first duplex pair transmits at the high rate (s2_cells)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "msps(high), msps(low)), Some(high), Some(low), duplex_trials",
+  "new": "msps(high), msps(low)), Some(high), Some(high), duplex_trials",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_cells_are_the_briefs_and_a_filter_names_them"
+ },
+ {
+  "id": "S4B-16",
+  "name": "bench 2026-11-15 stage-4 tools: an underflow with no time is placed in the window (window_held)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "self.tx_underflow_events > 0 && self.first_tx_underflow_ns.is_none()",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_transmit_window_is_judged_on_both_sides_of_ten_seconds"
+ },
+ {
+  "id": "S4B-17",
+  "name": "bench 2026-11-15 stage-4 tools: the start-lead group accepts three channels (validate)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "(1..=2).contains(&self.rx_start_channels)",
+  "new": "(1..=3).contains(&self.rx_start_channels)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "every_environment_name_the_plan_reads_is_listed_and_lists_are_checked"
+ },
+ {
+  "id": "S4B-18",
+  "name": "bench 2026-11-15 stage-4 tools: process_env no longer reads the waveform length (ENV_NAMES)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "\"EZSDR_MEASURE_OVERFLOW_AFTER_MS\", \"EZSDR_TX_WAVEFORM_SAMPLES\",",
+  "new": "\"EZSDR_MEASURE_OVERFLOW_AFTER_MS\", \"EZSDR_BENCH_NIC\",",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "every_environment_name_the_plan_reads_is_listed_and_lists_are_checked"
+ },
+ {
+  "id": "S4B-19",
+  "name": "bench 2026-11-15 stage-4 tools: the start-lead stream never asks for its rate (rx_start_asking)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "if rate_hz != 1_000_000 {",
+  "new": "if rate_hz != 1_000_000 && false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels"
+ },
+ {
+  "id": "S4B-20",
+  "name": "bench 2026-11-15 stage-4 tools: the command-lead stream never asks for its rate (tx_asking_at)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "if rate_hz == 1_000_000 {",
+  "new": "if true {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels"
+ },
+ {
+  "id": "S4B-21",
+  "name": "bench 2026-11-15 stage-4 tools: a two-channel start-lead stream carries one channel (rx_start_asking)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "if channels > 1 {",
+  "new": "if channels > 2 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels"
+ },
+ {
+  "id": "S4B-22",
+  "name": "bench 2026-11-15 stage-4 tools: a restart's values reach only channel 0 (restart_trial)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "(0..channels).flat_map(",
+  "new": "(0..1).flat_map(",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels"
+ },
+ {
+  "id": "S4B-23",
+  "name": "bench 2026-11-15 stage-4 tools: a CBX passes the two-channel gate (rx_two_channel_gate)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "Some(ezsdr_radio::x3xx::Board::Ubx | ezsdr_radio::x3xx::Board::Obx)",
+  "new": "Some(ezsdr_radio::x3xx::Board::Ubx | ezsdr_radio::x3xx::Board::Obx | ezsdr_radio::x3xx::Board::Cbx)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels"
+ },
+ {
+  "id": "S4B-24",
+  "name": "bench 2026-11-15 stage-4 tools: the first overflow's time is counted from the wrong side of T0 (run_stage)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+  "old": "(i128::from(tick) - i128::from(start))",
+  "new": "(i128::from(tick) + i128::from(start))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_s2_rehearses_on_the_fake_and_reads_a_scripted_overflow_and_underflow"
+ },
+ {
+  "id": "S4B-25",
+  "name": "bench 2026-11-15 stage-4 tools: the first underflow's time is counted from the wrong side of the burst's start (tx_throughput_evidence)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "(i128::from(underflow) - i128::from(start))",
+  "new": "(i128::from(underflow) + i128::from(start))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_t200_runs_the_record_stage_alone_and_reads_a_scripted_underflow"
+ },
+ {
+  "id": "S4B-26",
+  "name": "bench 2026-11-15 stage-4 tools: every start-lead condition keeps its legacy id (rx_start_lead_group)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "(*shape_rate_hz, *shape_channels) == (1_000_000, 1)",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels"
+ },
+ {
+  "id": "S4B-27",
+  "name": "bench 2026-11-15 stage-4 tools: the command-lead group runs only the first transmit rate (measure_min_timed_command_lead)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "for rate in &plan.timed_command_tx_rates_hz {",
+  "new": "for rate in plan.timed_command_tx_rates_hz.iter().take(1) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels"
+ },
+ {
+  "id": "S4B-28",
+  "name": "bench 2026-11-15 stage-4 tools: an S4 cell with a missing trial is decided (s4_cell_decision)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "times.len() < cell.trials",
+  "new": "times.is_empty()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_decisions_state_the_spread_the_bound_and_the_stall_figures"
+ },
+ {
+  "id": "S4B-29",
+  "name": "bench 2026-11-15 stage-4 tools: D5's bound ignores an incomplete rate cell (s4_decisions)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "let complete = rate_cells.iter().all(",
+  "new": "let complete = rate_cells.iter().any(",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "d5s_bound_is_inconclusive_while_a_rate_cell_is_incomplete"
+ },
+ {
+  "id": "S4B-30",
+  "name": "bench 2026-11-15 stage-4 tools: the stall sweep drops the rate cell at the sweep's rate (s4_decisions)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "cell.rate_hz == sweep_rate_hz",
+  "new": "cell.rate_hz == sweep_rate_hz && cell.sweep",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_decisions_state_the_spread_the_bound_and_the_stall_figures"
+ },
+ {
+  "id": "S4B-31",
+  "name": "bench 2026-11-15 stage-4 tools: a DeviceFailure no longer counts as a failed lead trial (lead_stages)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "count(\"ProviderFailure\") + count(\"DeviceFailure\")",
+  "new": "count(\"ProviderFailure\")",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "lead_stages_and_rows_are_read_from_a_groups_observation"
+ },
+ {
+  "id": "S4B-32",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): an underflow reported without a device time leaves the window held (window_held)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "self.tx_underflow_untimed > 0 ||",
+  "new": "false ||",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "the_transmit_window_is_judged_on_both_sides_of_ten_seconds"
+ },
+ {
+  "id": "S4B-33",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): a report with a device time counts as untimed (untimed_tx_underflow_reports)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+  "old": "row[\"tick\"].is_null()",
+  "new": "!row[\"tick\"].is_null()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "only_a_report_that_raises_tx_underflow_without_a_device_time_is_untimed"
+ },
+ {
+  "id": "S4B-34",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): only a plain underflow counts as an untimed underflow report (untimed_tx_underflow_reports)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+  "old": "Some(\"Underflow\" | \"UnderflowInPacket\" | \"SeqError\" | \"SeqErrorInBurst\")",
+  "new": "Some(\"Underflow\")",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "only_a_report_that_raises_tx_underflow_without_a_device_time_is_untimed"
+ },
+ {
+  "id": "S4B-35",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): the stall figures follow the 100 MS/s default, not the sweep's own rate (s4_decisions)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "cell.rate_hz == sweep_rate_hz",
+  "new": "cell.rate_hz == S4_STALL_SWEEP_RATE_HZ",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_decisions_state_the_spread_the_bound_and_the_stall_figures"
+ },
+ {
+  "id": "S4B-36",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): the stall-length line names the 100 MS/s default, not the sweep's rate (s4_decisions)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "sweep_rate_hz as f64 / 1e6",
+  "new": "S4_STALL_SWEEP_RATE_HZ as f64 / 1e6",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_decisions_state_the_spread_the_bound_and_the_stall_figures"
+ },
+ {
+  "id": "S4B-37",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): the S2 decision hides that an underflow report had no device time (s2_decision)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "if untimed > 0 {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_s2_an_untimestamped_underflow_does_not_make_a_window_held"
+ },
+ {
+  "id": "S4B-38",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): the bare run's volume check accepts exactly 99 % as short (t200_verdict)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "((${v[handed]} * 100 < ${v[expected]} * 99))",
+  "new": "((${v[handed]} * 100 <= ${v[expected]} * 99))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-39",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): the bare run's counted failures are not collected (t200_verdict)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "fail+=(\"$key ${v[$key]}\")",
+  "new": ":",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-40",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): a non-zero exit of tx_repro with no failure counted is clean (t200_verdict)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "if ((status != 0)); then",
+  "new": "if false; then",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-41",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): a missing summary field is read as present (t200_verdict)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "[[ ${v[$key]} == '?' ]] && missing+=(\"$key\")",
+  "new": "[[ ${v[$key]} == '?' ]] && :",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-42",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): the RF read-back is not required (t200_verdict)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "grep -q '^t200 RF read back: freq ' \"$log\" ||",
+  "new": ": ||",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-43",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): a run past its bound is neither killed nor logged (run_one)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "if ((RUN_STATUS == 124 || RUN_STATUS == 137)); then",
+  "new": "if false; then",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-44",
+  "name": "bench 2026-11-15 stage-4 tools (fix 1): the container of a run past its bound is left running (run_one)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "timeout 30 docker kill \"$1\" >/dev/null 2>&1",
+  "new": ":",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-45",
+  "name": "bench 2026-11-15 stage-4 tools (fix 2): a signal does not kill the running container (stop_on_signal)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "[[ -z $RUN_NAME ]] || timeout 30 docker kill \"$RUN_NAME\" >/dev/null 2>&1",
+  "new": ":",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-46",
+  "name": "bench 2026-11-15 stage-4 tools (fix 2): an expired run does not end the series (main loop)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "[[ $RUN_STATUS == 124 || $RUN_STATUS == 137 ]] &&",
+  "new": "false &&",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-47",
+  "name": "bench 2026-11-15 stage-4 tools (fix 2): the container runs without --init, so a TERM does not reach tx_repro (run_one)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": " --rm --init --name",
+  "new": " --rm --name",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-48",
+  "name": "bench 2026-11-15 stage-4 tools (fix 2): Ctrl-C / TERM is not trapped, so the container keeps transmitting (main)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "trap stop_on_signal INT TERM",
+  "new": ":",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-49",
+  "name": "bench 2026-11-15 stage-4 tools (fix 3): a signal before the container exists leaves the docker client running (stop_on_signal)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "kill $(jobs -p) 2>/dev/null",
+  "new": ":",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-50",
+  "name": "bench 2026-11-15 stage-4 tools (fix 3): a container created after the signal is not removed by name (stop_on_signal)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "[[ -z $RUN_NAME ]] || timeout 30 docker rm -f \"$RUN_NAME\" >/dev/null 2>&1",
+  "new": ":",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "S4B-51",
+  "name": "bench 2026-11-15 stage-4 tools (fix 3): HUP and QUIT are not trapped, so the container keeps transmitting (main)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "stop_on_signal INT TERM HUP QUIT",
+  "new": "stop_on_signal INT TERM",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
  }
 ]

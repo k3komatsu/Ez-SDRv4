@@ -7570,6 +7570,14 @@ fn h4_load_self_test_reaps_pid_owned_workers_and_checks_the_memory_budget() {
 }
 
 #[test]
+fn t200_bare_uhd_script_judges_a_run_and_bounds_it() {
+    let script = format!("{}/../../plan/phase8/tools/t200-bare-uhd.sh", env!("CARGO_MANIFEST_DIR"));
+    let self_check = std::process::Command::new("bash").arg(&script).arg("--self-check").output().unwrap();
+    assert!(self_check.status.success(), "{}", String::from_utf8_lossy(&self_check.stderr));
+    assert!(String::from_utf8_lossy(&self_check.stdout).contains("all cases pass"));
+}
+
+#[test]
 fn an_open_of_channels_another_open_stream_holds_is_refused_before_the_device() {
     // Two candidates in a row: the first Run leaves stream 0's streamer open on channel 0, and stream 1 opened on channel 0 never reaches the device.
     let device = fake(obx_and_cbx());
@@ -9499,4 +9507,241 @@ fn bench1115_open_flush_sweep_rehearses_on_the_fake_and_a_dropped_ack_fails() {
     let verdicts = open_flush_sweep(&*dropped, &[1e6], 1, true);
     assert!(matches!(&verdicts[0].1, Verdict::Fail(text) if text.contains("missing on positions [0]")), "{verdicts:?}");
     assert!(open_flush_decision(&verdicts, &[1e6], 1, false).contains("ask the owner again"));
+}
+
+// ---- the stage-4 bench tools of 2026-11-15 (`common::s4bench`), once on the fake: the record's own code with other plan values; their pure judgements are unit-tested there.
+
+/// Three of `s2_cells` at 1 and 2 MS/s (the fake's own link would refuse 100 and 200), one trial each: the runner and its decision lines on the real `run_stage`.
+#[test]
+fn s4bench_s2_rehearses_on_the_fake_and_reads_a_scripted_overflow_and_underflow() {
+    use common::s4bench::*;
+    let faults = vec![FakeFault::Overflow(Wall::from_millis(3_000)), FakeFault::TxReport(Wall::from_millis(3_000), TxCode::Underflow)];
+    let (device, description, _) = raw_group_fixture(FakeConfig { faults, ..one_obx() });
+    let wire_bytes = u64::try_from(description.performance.wire_bytes_per_sample).unwrap();
+    let plan = measurement::MeasurementPlan { throughput_seconds: 2, tx_waveform_samples: 2_000, ..measurement::MeasurementPlan::rehearsal() };
+    common::iii::pin_to_slot_a(&*device).unwrap();
+    let cells = s2_select(s2_cells((1_000_000, 2_000_000), 1, 1), Some("rx-1msps, tx-1msps, tx-2msps")).unwrap();
+    let run = s2_run(&cells, |stage| measurement::run_stage(device.clone(), &plan, stage, wire_bytes), || None);
+    assert_eq!(run.stopped, None);
+    assert_eq!(run.cells.iter().map(|(_, trials)| trials.len()).collect::<Vec<_>>(), [1; 3]);
+    let trial = |id: &str| &run.cells.iter().find(|(cell, _)| cell.id == id).unwrap().1[0];
+    // Each scripted fault fires once, in the first Run that reaches its instant: the first receive cell and the first transmit cell.
+    let rx = trial("rx-1msps");
+    assert!(rx.rx_overflow_events >= 1 && rx.first_rx_overflow_ns.is_some_and(|ns| ns > 0 && ns < 2_000_000_000), "{rx:?}");
+    let tx = trial("tx-1msps");
+    assert!(tx.tx_underflow_events >= 1 && tx.first_tx_underflow_ns.is_some_and(|ns| ns > 0 && ns < 2_000_000_000), "{tx:?}");
+    assert_eq!(tx.window_held(S2_TX_WINDOW_NS), Some(false), "an underflow inside the first 10 s");
+    assert_eq!(trial("tx-2msps").window_held(S2_TX_WINDOW_NS), None, "a clean 2 s Run cannot show the 10 s window: its samples fall short");
+    let lines = s2_decisions(&run, plan.throughput_seconds);
+    assert_eq!(lines.len(), 3);
+    assert!(lines.iter().all(|line| line.starts_with("S2 decision ")));
+    assert!(lines.iter().any(|line| line.contains("rx-1msps") && line.contains("1 failed") && line.contains("RX_OVERFLOW in 1 of 1")), "{lines:?}");
+    assert!(lines.iter().any(|line| line.contains("tx-1msps") && line.contains("underflow within it: 1")), "{lines:?}");
+    assert!(lines.iter().any(|line| line.contains("tx-2msps") && line.contains("INCONCLUSIVE")), "the clean TX cell cannot show the window in 2 s: {lines:?}");
+}
+
+/// A `FakeDevice` whose underflow reports carry no device time, as an async message with no time spec does.
+struct UntimedUnderflows {
+    inner: Arc<FakeDevice>,
+}
+
+impl Device for UntimedUnderflows {
+    fn describe(&self) -> Json {
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity {
+        self.inner.fidelity()
+    }
+    fn host(&self) -> ezsdr_radio_uhd::HostClock {
+        self.inner.host()
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.inner.master_clock_rate()
+    }
+    fn channels(&self, dir: ezsdr_radio_uhd::Dir) -> usize {
+        self.inner.channels(dir)
+    }
+    fn front_end(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<String, ezsdr_radio_uhd::DeviceError> {
+        self.inner.front_end(dir, chan)
+    }
+    fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> {
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, d: ezsdr_radio_uhd::Dir, m: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.set_subdev_spec(d, m)
+    }
+    fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> {
+        self.inner.rates(d, c)
+    }
+    fn set_sources(&self, c: &str, t: &str) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.set_sources(c, t)
+    }
+    fn set_time_zero(&self, p: bool) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.set_time_zero(p)
+    }
+    fn time_now(&self) -> Result<i64, ezsdr_radio_uhd::DeviceError> {
+        self.inner.time_now()
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
+        self.inner.ref_locked()
+    }
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        self.inner.apply(d, c, s)
+    }
+    fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_open(s, c)
+    }
+    fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_start(s, at)
+    }
+    fn rx_packet_samples(&self, s: usize) -> usize {
+        self.inner.rx_packet_samples(s)
+    }
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
+    }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
+        self.inner.rx_recv(s, n, t, one_packet)
+    }
+    fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.tx_open(s, c)
+    }
+    fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> {
+        self.inner.tx_send(s, b, at, sob, eob, t)
+    }
+    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> {
+        let report = self.inner.tx_async(s, t)?;
+        Ok(report.map(|report| if matches!(report.code, TxCode::Underflow) { ezsdr_radio_uhd::TxReport { tick: None, ..report } } else { report }))
+    }
+    fn rx_close(&self, s: usize) {
+        self.inner.rx_close(s)
+    }
+    fn tx_close(&self, s: usize) {
+        self.inner.tx_close(s)
+    }
+    fn close_streams(&self) {
+        self.inner.close_streams()
+    }
+    fn mark_lost(&self) {
+        self.inner.mark_lost()
+    }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.raise_thread_priority()
+    }
+}
+
+#[test]
+fn s4bench_s2_an_untimestamped_underflow_does_not_make_a_window_held() {
+    use common::s4bench::*;
+    let run_cell = |untimed: bool| {
+        let (device, description, _) = raw_group_fixture(FakeConfig { faults: vec![FakeFault::TxReport(Wall::from_millis(3_000), TxCode::Underflow)], ..one_obx() });
+        let wire_bytes = u64::try_from(description.performance.wire_bytes_per_sample).unwrap();
+        let plan = measurement::MeasurementPlan { throughput_seconds: 2, tx_waveform_samples: 2_000, ..measurement::MeasurementPlan::rehearsal() };
+        common::iii::pin_to_slot_a(&*device).unwrap();
+        let stage_device: Arc<dyn Device> = if untimed { Arc::new(UntimedUnderflows { inner: device }) } else { device };
+        let cells = s2_select(s2_cells((1_000_000, 2_000_000), 1, 1), Some("tx-1msps")).unwrap();
+        let run = s2_run(&cells, |stage| measurement::run_stage(stage_device.clone(), &plan, stage, wire_bytes), || None);
+        assert_eq!(run.stopped, None);
+        (run.cells[0].1[0].clone(), s2_decisions(&run, plan.throughput_seconds).remove(0))
+    };
+    let (timed, _) = run_cell(false);
+    assert_eq!((timed.tx_underflow_events, timed.tx_underflow_untimed), (1, 0), "{timed:?}");
+    let at = timed.first_tx_underflow_ns.filter(|ns| *ns > 1).expect("a timed underflow has a time after T0");
+    assert_eq!(timed.window_held(at - 1), Some(true), "a timed underflow just after the window leaves the window held");
+    let (untimed, line) = run_cell(true);
+    assert_eq!((untimed.tx_underflow_events, untimed.tx_underflow_untimed), (1, 1), "{untimed:?}");
+    // The window ends just before this run's own read-time date of the report (two runs' dates differ by host timing, so not `at` of the timed run).
+    let untimed_at = untimed.first_tx_underflow_ns.filter(|ns| *ns > 1).expect("the untimed underflow is dated at its read time");
+    assert_eq!(untimed.window_held(untimed_at - 1), None, "the same report without a device time cannot be placed outside the window");
+    assert!(line.contains("1 underflow reports had no device time"), "the decision line says so: {line}");
+}
+
+#[test]
+fn s4bench_t200_runs_the_record_stage_alone_and_reads_a_scripted_underflow() {
+    use common::s4bench::*;
+    let (device, _, _) = raw_group_fixture(FakeConfig { faults: vec![FakeFault::TxReport(Wall::from_millis(3_000), TxCode::Underflow)], ..one_obx() });
+    let device: Arc<dyn Device> = device;
+    common::iii::pin_to_slot_a(&*device).unwrap();
+    let plan = measurement::MeasurementPlan { throughput_seconds: 2, tx_throughput_rates_hz: vec![1_000_000], ..measurement::MeasurementPlan::rehearsal() };
+    let (runs, stopped) = t200_runs(&device, &plan, 2, || None);
+    assert_eq!(stopped, None);
+    assert_eq!(runs.len(), 2);
+    assert!(runs[0].underflow_events >= 1 && runs[0].first_underflow_ns.is_some_and(|ns| ns > 0 && ns < 2_000_000_000), "{:?}", runs[0]);
+    let line = t200_decision(&runs, 2, &plan, stopped.as_deref());
+    assert!(line.starts_with("T200 decision (record-suite shape, 1 MS/s, 2 s, waveform 1000 samples)"), "{line}");
+    let two_rates = measurement::MeasurementPlan { tx_throughput_rates_hz: vec![1_000_000, 2_000_000], ..plan.clone() };
+    assert!(t200_runs(&device, &two_rates, 1, || None).1.is_some_and(|reason| reason.contains("one transmit rate")));
+    let (_, latched) = t200_runs(&device, &plan, 2, || Some("a control timeout".to_owned()));
+    assert!(latched.is_some_and(|reason| reason.contains("run 0") && reason.contains("a control timeout")), "a latched handle stops the next run");
+}
+
+#[test]
+fn s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels() {
+    use common::s4bench::*;
+    let (fake_device, _, _) = raw_group_fixture(FakeConfig { front_ends: vec!["OBX", "OBX"], ..FakeConfig::default() });
+    let device: Arc<dyn Device> = fake_device.clone();
+    let plan = measurement::MeasurementPlan {
+        timed_command_leads_ns: vec![D3_LEAD_NS],
+        timed_command_tx_rates_hz: vec![1_000_000, 2_000_000],
+        rx_start_leads_ns: vec![D4_LEAD_NS],
+        rx_start_rates_hz: vec![1_000_000, 2_000_000],
+        step_trials: 2,
+        ..measurement::MeasurementPlan::rehearsal()
+    };
+    let calls_since = |before: usize| -> Vec<String> { fake_device.calls().into_iter().skip(before).collect() };
+    let before = fake_device.calls().len();
+    let (lines, error) = s5_command_lead(&device, &plan);
+    assert_eq!(error, None);
+    let calls = calls_since(before);
+    assert!(calls.iter().any(|call| call.starts_with("apply tx 0 rate=2000000")), "the transmit stream ran at the plan's second rate: {calls:?}");
+    assert_eq!(lines.iter().filter(|line| line.starts_with("S5 command-lead trial ")).count(), 2 * 2);
+    let decision = lines.last().unwrap();
+    assert!(decision.starts_with("S5 decision command-lead: ") && decision.contains("5.000 ms: every trial Success in 2 of 2 conditions") && decision.contains("tx-2msps"), "{decision}");
+    // One channel at the record's 1 MS/s keeps the record's own condition ids; another rate or two channels name theirs.
+    let before = fake_device.calls().len();
+    let (lines, error) = s5_rx_start_lead(&device, &plan);
+    assert_eq!(error, None);
+    let calls = calls_since(before);
+    assert!(calls.iter().any(|call| call.starts_with("apply rx 0 rate=2000000")) && calls.iter().any(|call| call.starts_with("apply rx 0 rate=1000000")), "both rates ran: {calls:?}");
+    assert!(!calls.iter().any(|call| call.starts_with("apply rx 1")), "one channel touches no second channel: {calls:?}");
+    let decision = lines.last().unwrap();
+    assert!(decision.starts_with("S5 decision rx-start-lead-1ch: "), "{decision}");
+    assert!(["restart-same:", "restart-retune:", "restart-same-rx-2msps-1ch:", "restart-retune-rx-2msps-1ch:"].iter().all(|condition| decision.contains(condition)), "{decision}");
+    assert_eq!(lines.iter().filter(|line| line.starts_with("S5 rx-start-lead-1ch trial ")).count(), 2 * 2 * 2, "one rung, both conditions, two rates, two trials");
+    let two = measurement::MeasurementPlan { rx_start_channels: 2, rx_start_rates_hz: vec![2_000_000], ..plan.clone() };
+    let before = fake_device.calls().len();
+    let (lines, error) = s5_rx_start_lead(&device, &two);
+    let calls = calls_since(before);
+    let applies = |channel: usize| -> Vec<String> { calls.iter().filter_map(|call| call.strip_prefix(&format!("apply rx {channel} ")).map(str::to_owned)).collect() };
+    assert!(calls.contains(&"rx_open 0 [0, 1]".to_owned()), "{calls:?}");
+    assert!(!applies(0).is_empty() && applies(0) == applies(1), "every receive apply reaches both channels with the same values: {calls:?}");
+    assert!(
+        applies(1).iter().any(|call| call.contains("freq=1000500000")) && applies(1).iter().all(|call| call.starts_with("rate=2000000 ")),
+        "the retune crosses 1 GHz at the plan's rate: {calls:?}"
+    );
+    assert_eq!(error, None);
+    let decision = lines.last().unwrap();
+    assert!(decision.starts_with("S5 decision rx-start-lead-2ch: ") && decision.contains("restart-retune-rx-2msps-2ch") && !decision.contains("not runnable"), "{decision}");
+    // A CBX in slot B cannot carry the 1 GHz retune: the two-channel pass reports it and runs nothing.
+    let (cbx, _, _) = raw_group_fixture(obx_and_cbx());
+    let cbx: Arc<dyn Device> = cbx;
+    let (lines, error) = with_selector(two_channel_selector(), || s5_rx_start_lead(&cbx, &two));
+    assert_eq!((error, lines.len()), (None, 1));
+    assert!(lines[0].contains("INCONCLUSIVE: not runnable") && lines[0].contains("0:B:cbx:0"), "{lines:?}");
+}
+
+#[test]
+fn s4bench_s4_runs_the_overflow_trials_and_prints_the_restart_after_resume() {
+    use common::s4bench::*;
+    let device: Arc<dyn Device> = fake(one_obx());
+    let cells = vec![S4Cell { rate_hz: 1_000_000, stall_ms: 300, trials: 2, sweep: false }, S4Cell { rate_hz: 1_000_000, stall_ms: 400, trials: 2, sweep: true }];
+    let run = s4_run(&device, &cells, 200, || None);
+    assert_eq!(run.stopped, None);
+    assert_eq!(run.cells.iter().map(|(_, trials)| trials.len()).collect::<Vec<_>>(), [2, 2]);
+    let lines = s4_decisions(&run, 1_000_000);
+    assert!(lines[0].starts_with("S4 decision 1 MS/s stall 300 ms: ") && lines[1].starts_with("S4 decision 1 MS/s stall 400 ms: "), "{lines:?}");
+    assert!(lines.iter().any(|line| line.starts_with("S4 decision D5 bound: ")), "{lines:?}");
+    assert!(lines.iter().any(|line| line.starts_with("S4 decision stall length at 1 MS/s: ") && line.contains("stall 300 ms") && line.contains("stall 400 ms")), "{lines:?}");
+    let (_, stopped) = (0, s4_run(&device, &cells, 200, || Some("a control timeout".to_owned())).stopped);
+    assert!(stopped.is_some_and(|reason| reason.contains("a control timeout")));
 }

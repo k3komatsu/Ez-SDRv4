@@ -601,6 +601,12 @@ pub struct MeasurementPlan {
     pub timed_command_leads_ns: Vec<u64>,
     /// The candidates of the `start_rx` start-lead group, which note 47 stage 3 adds.
     pub rx_start_leads_ns: Vec<u64>,
+    /// The receive rates the start-lead group runs at (default 1 MS/s: the record's own conditions), one condition per rate.
+    pub rx_start_rates_hz: Vec<u64>,
+    /// How many receive channels the start-lead group's stream carries: 1, or 2 where the layout has two UBX/OBX channels.
+    pub rx_start_channels: usize,
+    /// The transmit rates the command-lead group runs at (default 1 MS/s: the record's own condition), one condition per rate.
+    pub timed_command_tx_rates_hz: Vec<u64>,
     pub rx_rates_hz: Vec<u64>,
     pub tx_throughput_rates_hz: Vec<u64>,
     pub overflow_rates_hz: Vec<u64>,
@@ -621,11 +627,36 @@ pub struct MeasurementPlan {
     pub tx_waveform_samples: usize,
 }
 
+/// A positive count from `values[name]`, `default` when the name is absent.
+pub fn env_count(values: &BTreeMap<String, String>, name: &str, default: u64) -> Result<u64, String> {
+    let Some(value) = values.get(name) else { return Ok(default) };
+    let parsed = value.parse::<u64>().map_err(|_| format!("{name} must be a positive integer"))?;
+    if parsed == 0 {
+        return Err(format!("{name} must be positive"));
+    }
+    Ok(parsed)
+}
+
+/// A comma-separated list of positive integers from `values[name]` (the bench's candidate sweeps), `default` when the name is absent.
+pub fn env_list(values: &BTreeMap<String, String>, name: &str, default: &[u64]) -> Result<Vec<u64>, String> {
+    let Some(value) = values.get(name) else { return Ok(default.to_vec()) };
+    value
+        .split(',')
+        .map(|part| match part.trim().parse::<u64>() {
+            Ok(0) | Err(_) => Err(format!("{name} must be comma-separated positive integers, got {part:?}")),
+            Ok(parsed) => Ok(parsed),
+        })
+        .collect()
+}
+
 impl Default for MeasurementPlan {
     fn default() -> Self {
         MeasurementPlan {
             timed_command_leads_ns: vec![500_000, 1_000_000, 1_500_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
             rx_start_leads_ns: vec![3_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000],
+            rx_start_rates_hz: vec![1_000_000],
+            rx_start_channels: 1,
+            timed_command_tx_rates_hz: vec![1_000_000],
             rx_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
             tx_throughput_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
             overflow_rates_hz: vec![1_000_000, 10_000_000, 25_000_000, 50_000_000],
@@ -657,6 +688,9 @@ impl MeasurementPlan {
         MeasurementPlan {
             timed_command_leads_ns: vec![1_000_000, 2_000_000],
             rx_start_leads_ns: vec![3_000_000, 5_000_000],
+            rx_start_rates_hz: vec![1_000_000],
+            rx_start_channels: 1,
+            timed_command_tx_rates_hz: vec![1_000_000],
             rx_rates_hz: vec![390_625],
             // Transmit starts at 1 MS/s on `x3xx` (KL-40); receive keeps 390.625 kS/s.
             tx_throughput_rates_hz: vec![1_000_000],
@@ -680,6 +714,8 @@ impl MeasurementPlan {
         let candidates = [
             ("timed command lead", &self.timed_command_leads_ns),
             ("receive start lead", &self.rx_start_leads_ns),
+            ("receive start rate", &self.rx_start_rates_hz),
+            ("command lead transmit rate", &self.timed_command_tx_rates_hz),
             ("receive rate", &self.rx_rates_hz),
             ("transmit throughput rate", &self.tx_throughput_rates_hz),
             ("overflow rate", &self.overflow_rates_hz),
@@ -688,6 +724,9 @@ impl MeasurementPlan {
             if values.is_empty() || values.contains(&0) || values.windows(2).any(|pair| pair[0] >= pair[1]) {
                 return Err(format!("{name} candidates must be nonempty, positive and strictly ascending"));
             }
+        }
+        if !(1..=2).contains(&self.rx_start_channels) {
+            return Err("the receive start-lead group runs on 1 or 2 channels".to_owned());
         }
         if self.overflow_stall_ms.len() != self.overflow_rates_hz.len() || self.overflow_stall_ms.contains(&0) || self.overflow_after_ms == 0 {
             return Err("overflow rates need one positive stall duration each and a positive pre-stall interval".to_owned());
@@ -702,7 +741,10 @@ impl MeasurementPlan {
         {
             return Err("measurement counts, the raw group limit and the inter-trial interval must be positive, with at least 4 frequency points".to_owned());
         }
-        let step_observations = [self.timed_command_leads_ns.len(), self.rx_start_leads_ns.len().checked_mul(2).ok_or("receive-start stage count overflow")?];
+        let step_observations = [
+            self.timed_command_leads_ns.len().checked_mul(self.timed_command_tx_rates_hz.len()).ok_or("command-lead stage count overflow")?,
+            self.rx_start_leads_ns.len().checked_mul(2).and_then(|stages| stages.checked_mul(self.rx_start_rates_hz.len())).ok_or("receive-start stage count overflow")?,
+        ];
         for stages in step_observations {
             if stages.checked_mul(self.step_trials).is_none_or(|trials| trials > u32::MAX as usize) {
                 return Err("measurement observation exceeds the record's u32 trial limit".to_owned());
@@ -725,21 +767,20 @@ impl MeasurementPlan {
 
     /// Parses the supported count overrides without consulting global state.
     pub fn from_env(values: &BTreeMap<String, String>) -> Result<MeasurementPlan, String> {
-        fn count(values: &BTreeMap<String, String>, name: &str, default: u64) -> Result<u64, String> {
-            let Some(value) = values.get(name) else { return Ok(default) };
-            let parsed = value.parse::<u64>().map_err(|_| format!("{name} must be a positive integer"))?;
-            if parsed == 0 {
-                return Err(format!("{name} must be positive"));
-            }
-            Ok(parsed)
-        }
+        let defaults = MeasurementPlan::default();
         let plan = MeasurementPlan {
-            step_trials: usize::try_from(count(values, "EZSDR_MEASURE_STEP_TRIALS", 100)?).map_err(|_| "EZSDR_MEASURE_STEP_TRIALS is too large".to_owned())?,
-            overflow_trials: usize::try_from(count(values, "EZSDR_MEASURE_OVERFLOW_TRIALS", 5)?).map_err(|_| "EZSDR_MEASURE_OVERFLOW_TRIALS is too large".to_owned())?,
-            throughput_seconds: count(values, "EZSDR_MEASURE_THROUGHPUT_SECS", 60)?,
-            loopback_trials: usize::try_from(count(values, "EZSDR_MEASURE_LOOPBACK_TRIALS", 20)?).map_err(|_| "EZSDR_MEASURE_LOOPBACK_TRIALS is too large".to_owned())?,
+            timed_command_leads_ns: env_list(values, "EZSDR_MEASURE_TIMED_LEADS_NS", &defaults.timed_command_leads_ns)?,
+            timed_command_tx_rates_hz: env_list(values, "EZSDR_MEASURE_TIMED_LEAD_TX_RATES_HZ", &defaults.timed_command_tx_rates_hz)?,
+            rx_start_leads_ns: env_list(values, "EZSDR_MEASURE_RX_START_LEADS_NS", &defaults.rx_start_leads_ns)?,
+            rx_start_rates_hz: env_list(values, "EZSDR_MEASURE_RX_START_RATES_HZ", &defaults.rx_start_rates_hz)?,
+            rx_start_channels: usize::try_from(env_count(values, "EZSDR_MEASURE_RX_START_CHANNELS", 1)?).map_err(|_| "EZSDR_MEASURE_RX_START_CHANNELS is too large".to_owned())?,
+            overflow_after_ms: env_count(values, "EZSDR_MEASURE_OVERFLOW_AFTER_MS", defaults.overflow_after_ms)?,
+            step_trials: usize::try_from(env_count(values, "EZSDR_MEASURE_STEP_TRIALS", 100)?).map_err(|_| "EZSDR_MEASURE_STEP_TRIALS is too large".to_owned())?,
+            overflow_trials: usize::try_from(env_count(values, "EZSDR_MEASURE_OVERFLOW_TRIALS", 5)?).map_err(|_| "EZSDR_MEASURE_OVERFLOW_TRIALS is too large".to_owned())?,
+            throughput_seconds: env_count(values, "EZSDR_MEASURE_THROUGHPUT_SECS", 60)?,
+            loopback_trials: usize::try_from(env_count(values, "EZSDR_MEASURE_LOOPBACK_TRIALS", 20)?).map_err(|_| "EZSDR_MEASURE_LOOPBACK_TRIALS is too large".to_owned())?,
             nics: values.get("EZSDR_MEASUREMENT_NICS").or(values.get("EZSDR_BENCH_NIC")).map(|text| text.split_whitespace().map(str::to_owned).collect()).unwrap_or_default(),
-            tx_waveform_samples: usize::try_from(count(values, "EZSDR_TX_WAVEFORM_SAMPLES", 1_000)?)
+            tx_waveform_samples: usize::try_from(env_count(values, "EZSDR_TX_WAVEFORM_SAMPLES", 1_000)?)
                 .ok()
                 .filter(|samples| *samples > 0)
                 .ok_or_else(|| "EZSDR_TX_WAVEFORM_SAMPLES must be a positive count".to_owned())?,
@@ -749,10 +790,26 @@ impl MeasurementPlan {
         Ok(plan)
     }
 
+    /// The environment variables [`MeasurementPlan::from_env`] reads.
+    pub const ENV_NAMES: [&'static str; 13] = [
+        "EZSDR_MEASURE_STEP_TRIALS",
+        "EZSDR_MEASURE_OVERFLOW_TRIALS",
+        "EZSDR_MEASURE_THROUGHPUT_SECS",
+        "EZSDR_MEASURE_LOOPBACK_TRIALS",
+        "EZSDR_MEASUREMENT_NICS",
+        "EZSDR_BENCH_NIC",
+        "EZSDR_MEASURE_TIMED_LEADS_NS",
+        "EZSDR_MEASURE_TIMED_LEAD_TX_RATES_HZ",
+        "EZSDR_MEASURE_RX_START_LEADS_NS",
+        "EZSDR_MEASURE_RX_START_RATES_HZ",
+        "EZSDR_MEASURE_RX_START_CHANNELS",
+        "EZSDR_MEASURE_OVERFLOW_AFTER_MS",
+        "EZSDR_TX_WAVEFORM_SAMPLES",
+    ];
+
     /// Reads only the documented environment variables and validates before opening a device.
     pub fn process_env() -> Result<MeasurementPlan, String> {
-        let names = ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS", "EZSDR_MEASUREMENT_NICS", "EZSDR_BENCH_NIC"];
-        let values = names.iter().filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value))).collect();
+        let values = Self::ENV_NAMES.iter().filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value))).collect();
         MeasurementPlan::from_env(&values)
     }
 }
@@ -1898,7 +1955,7 @@ fn candidate_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelop
 }
 
 /// A Session that asks for what `asking` names at `connect` (RM-30: no channel is in a stream unless asked).
-fn candidate_session_asking(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope, asking: fn(&Json) -> ezsdr_kernel::session::InitialRequests) -> Result<(Run, super::TempDir), String> {
+fn candidate_session_asking(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope, asking: impl Fn(&Json) -> ezsdr_kernel::session::InitialRequests) -> Result<(Run, super::TempDir), String> {
     let dir = super::TempDir::new();
     let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), super::bench_envelope(&*device), true);
     let run = Run::connect(&doc, &asking(&doc), super::assembly(&doc, device, Default::default(), |radio| radio.with_measurement_timing(timing)), Lease::attached(), Declared::default())
@@ -2041,52 +2098,63 @@ fn duplex_condition(id: &str) -> Condition {
     }
 }
 
-fn tx_only_condition(id: &str) -> Condition {
-    Condition { id: id.to_owned(), streams: vec![stream_condition(Direction::Tx, 0, vec![0], 1e6)], concurrent: vec![], reopened: false }
-}
-
 fn rx_condition(id: &str, rate: f64) -> Condition {
     Condition { id: id.to_owned(), streams: vec![stream_condition(Direction::Rx, 0, vec![0], rate)], concurrent: vec![], reopened: false }
 }
 
-/// Provider-path `radio.timing.min_timed_command_lead_ns` sweep (UR-21).
+/// `profile`'s transmit-only asking with transmit stream 0 at `rate_hz`; the profile's own default rate (1 MS/s) asks for nothing more.
+fn tx_asking_at(profile: &Json, rate_hz: u64) -> ezsdr_kernel::session::InitialRequests {
+    let initial = super::tx_only(profile);
+    if rate_hz == 1_000_000 {
+        return initial;
+    }
+    super::with_initial(initial, &[("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Scalar::try_from(rate_hz as f64).expect("a transmit rate"))])
+}
+
+/// Provider-path `radio.timing.min_timed_command_lead_ns` sweep (UR-21), one condition per transmit rate of the plan
+/// (the record's own run is 1 MS/s alone, condition `tx-1msps`).
 pub fn measure_min_timed_command_lead(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
     plan.validate()?;
-    let condition = "tx-1msps";
     let (bytes, _) = super::waveform_of(&super::pn(100));
-    let mut stages = Vec::new();
+    let mut candidates = BTreeMap::new();
+    let mut conditions = Vec::new();
     let mut rows = Vec::new();
     let mut total = 0usize;
-    for value in &plan.timed_command_leads_ns {
-        let (mut run, _dir) = candidate_session_asking(device.clone(), candidate_timing("min_timed_command_lead_ns", *value)?, super::tx_only)?;
-        await_tx(&mut run);
-        let mut trials: Vec<TrialPlan> = Vec::new();
-        let mut effective = Vec::new();
-        for _ in 0..plan.step_trials {
-            let (trial, lead) = tx_trial(&mut run, &*device, &bytes, 100, *value, plan.interval_ns)?;
-            if let Some(previous) = trials.last_mut() {
-                previous.end_tick = trial.start_tick;
+    for rate in &plan.timed_command_tx_rates_hz {
+        let condition = tx_rate_id(*rate);
+        let mut stages = Vec::new();
+        for value in &plan.timed_command_leads_ns {
+            let (mut run, _dir) = candidate_session_asking(device.clone(), candidate_timing("min_timed_command_lead_ns", *value)?, |profile| tx_asking_at(profile, *rate))?;
+            await_tx(&mut run);
+            let mut trials: Vec<TrialPlan> = Vec::new();
+            let mut effective = Vec::new();
+            for _ in 0..plan.step_trials {
+                let (trial, lead) = tx_trial(&mut run, &*device, &bytes, 100, *value, plan.interval_ns)?;
+                if let Some(previous) = trials.last_mut() {
+                    previous.end_tick = trial.start_tick;
+                }
+                trials.push(trial);
+                effective.push(Some(lead));
             }
-            trials.push(trial);
-            effective.push(Some(lead));
+            let manifest = run.finish();
+            let evidence = evidence_from_manifest(&manifest, &trials)?;
+            let classes: Vec<_> = evidence.iter().map(classify_trial).collect();
+            rows.push(tx_candidate_stage_json(&condition, *value, &classes, &effective, &evidence));
+            stages.push(CandidateStage { value: *value, trials: classes });
+            total += plan.step_trials;
         }
-        let manifest = run.finish();
-        let evidence = evidence_from_manifest(&manifest, &trials)?;
-        let classes: Vec<_> = evidence.iter().map(classify_trial).collect();
-        rows.push(tx_candidate_stage_json(condition, *value, &classes, &effective, &evidence));
-        stages.push(CandidateStage { value: *value, trials: classes });
-        total += plan.step_trials;
+        candidates.insert(condition.clone(), stages);
+        conditions.push(tx_rate_condition(&condition, *rate));
     }
-    let candidates = BTreeMap::from([(condition.to_owned(), stages)]);
     let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, plan.step_trials)?;
     let measured = numeric_value("radio.timing.min_timed_command_lead_ns", &summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
     Ok(MeasurementGroup {
-        conditions: vec![tx_only_condition(condition)],
+        conditions,
         values: vec![measured],
         observations: vec![observation(
             "provider_min_timed_command_lead",
             "tests/hardware.rs::hw_measurements_record",
-            Some(condition.to_owned()),
+            (candidates.len() == 1).then(|| candidates.keys().next().cloned()).flatten(),
             observation_trials(total)?,
             json!({ "interval_ns": plan.interval_ns, "candidates": rows }),
         )?],
@@ -2152,13 +2220,15 @@ fn advance_until(run: &mut Run, limit_ms: i64, mut done: impl FnMut(&Run) -> boo
 
 /// One restart: a stream-scoped `Stop`, the condition's values (when `set_values`), then an untimed `start_rx`; waits
 /// until the start's first sample or the device time bound, then for the SampleClock the Module registered for the restart.
-fn restart_trial(run: &mut Run, probe: &super::probe_device::ProbeDevice, lead_ns: u64, values: Option<(f64, f64)>) -> Result<RxStartTrial, String> {
+fn restart_trial(run: &mut Run, probe: &super::probe_device::ProbeDevice, lead_ns: u64, values: Option<(f64, f64)>, channels: usize) -> Result<RxStartTrial, String> {
     let stop = run.submit(SessionAction::Stop { target: Some(super::resource("radio/rx/s0")) }, None).map_err(|error| error.to_string())?;
     if !super::admitted(&stop) {
         return Err(format!("the receive Stop was not admitted: {:?}", stop.outcome));
     }
     if let Some((frequency, gain)) = values {
-        for (key, value) in [("radio.rx.c0.frequency_hz", frequency), ("radio.rx.c0.gain_db", gain)] {
+        let keys: Vec<(String, f64)> = (0..channels).flat_map(|channel| [(format!("radio.rx.c{channel}.frequency_hz"), frequency), (format!("radio.rx.c{channel}.gain_db"), gain)]).collect();
+        for (key, value) in keys {
+            let key = key.as_str();
             let entry = run.submit(super::set(key, ezsdr_kernel::spec::Value::num(value).ok_or("invalid receive value")?), None).map_err(|error| error.to_string())?;
             if !super::admitted(&entry) {
                 return Err(format!("{key} was not admitted on the stopped stream: {:?}", entry.outcome));
@@ -2252,11 +2322,55 @@ pub fn measure_rx_start_lead_with_tx(device: Arc<dyn Device>, plan: &Measurement
     rx_start_lead_group(device, plan, true)
 }
 
+/// `profile`'s receive asking with the stream at `rate_hz` and carrying `channels` channels (the default 1 MS/s and one channel ask for nothing more).
+fn rx_start_asking(profile: &Json, rate_hz: u64, channels: usize) -> ezsdr_kernel::session::InitialRequests {
+    let mut extra = Vec::new();
+    if channels > 1 {
+        extra.push(("radio.rx.c1.stream", ezsdr_kernel::spec::Scalar::from(0)));
+    }
+    if rate_hz != 1_000_000 {
+        extra.push(("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Scalar::try_from(rate_hz as f64).expect("a receive rate")));
+    }
+    super::with_initial(super::rx0(profile), &extra)
+}
+
+/// Why the layout cannot carry a two-channel receive stream across the bench's 1 GHz retune: both of its first two receive channels must be a UBX or an OBX.
+fn rx_two_channel_gate(device: &dyn Device) -> Result<(), String> {
+    let (rx, _) = super::effective_layout(device);
+    let elements: Vec<&str> = rx.as_array().into_iter().flatten().filter_map(Json::as_str).collect();
+    if elements.len() < 2 {
+        return Err(format!("the layout has {} receive channel(s)", elements.len()));
+    }
+    for (channel, element) in elements.iter().take(2).enumerate() {
+        let board = element.split(':').nth(2).and_then(ezsdr_radio::x3xx::FrontEnd::parse).and_then(ezsdr_radio::x3xx::FrontEnd::board);
+        if !matches!(board, Some(ezsdr_radio::x3xx::Board::Ubx | ezsdr_radio::x3xx::Board::Obx)) {
+            return Err(format!("receive channel {channel} is `{element}`: the retune across 1 GHz needs a UBX or an OBX"));
+        }
+    }
+    Ok(())
+}
+
 fn rx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companion_group: bool) -> Result<MeasurementGroup, String> {
     plan.validate()?;
     if companion_group {
         if let Some(skipped) = companion_inapplicable(&device, "provider_rx_start_lead_with_tx")? {
             return Ok(skipped);
+        }
+    }
+    // The companion group keeps the record's own shape (1 MS/s, one channel); the rates and channels are the solo group's.
+    let shapes: Vec<(u64, usize)> = if companion_group { vec![(1_000_000, 1)] } else { plan.rx_start_rates_hz.iter().map(|rate| (*rate, plan.rx_start_channels)).collect() };
+    if plan.rx_start_channels == 2 && !companion_group {
+        if let Err(reason) = rx_two_channel_gate(&*device) {
+            return Ok(MeasurementGroup {
+                observations: vec![observation(
+                    "provider_rx_start_lead",
+                    "tests/hardware.rs::hw_measurements_record",
+                    None,
+                    1,
+                    json!({ "status": "skipped_two_channels_not_runnable", "reason": reason }),
+                )?],
+                ..MeasurementGroup::default()
+            });
         }
     }
     let mut condition_rows = Vec::new();
@@ -2265,83 +2379,95 @@ fn rx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companio
     let mut total = 0usize;
     let (companion_bytes, _) = super::transmit_waveform(1_000);
     let mut companion_rate = COMPANION_RATE_HZ;
-    for (retune, id) in [(false, "restart-same"), (true, "restart-retune")] {
-        let condition = if companion_group { format!("{id}-with-tx") } else { id.to_owned() };
-        let mut stages = Vec::new();
-        for value in &plan.rx_start_leads_ns {
-            let probe = Arc::new(super::probe_device::ProbeDevice::new(device.clone()));
-            probe.keep_rx_blocks();
-            let timing = candidate_timing("rx_start_lead_ns", *value)?;
-            let (mut run, _dir, rate) = if companion_group {
-                let (run, dir, rate) = companion_session(probe.clone(), timing)?;
-                (run, dir, rate)
+    for (shape_rate_hz, shape_channels) in &shapes {
+        for (retune, id) in [(false, "restart-same"), (true, "restart-retune")] {
+            let shape = if (*shape_rate_hz, *shape_channels) == (1_000_000, 1) { id.to_owned() } else { format!("{id}-{}-{shape_channels}ch", rate_condition(*shape_rate_hz)) };
+            let condition = if companion_group { format!("{shape}-with-tx") } else { shape };
+            let mut stages = Vec::new();
+            for value in &plan.rx_start_leads_ns {
+                let probe = Arc::new(super::probe_device::ProbeDevice::new(device.clone()));
+                let timing = candidate_timing("rx_start_lead_ns", *value)?;
+                let (mut run, _dir, rate) = if companion_group {
+                    let (run, dir, rate) = companion_session(probe.clone(), timing)?;
+                    (run, dir, rate)
+                } else {
+                    let (run, dir) = candidate_session_asking(probe.clone(), timing, |profile| rx_start_asking(profile, *shape_rate_hz, *shape_channels))?;
+                    (run, dir, 0)
+                };
+                if companion_group {
+                    companion_rate = rate;
+                }
+                super::past_t0(&mut run, super::ms(100));
+                if companion_group {
+                    super::past_tx_origin(&mut run);
+                    start_repeat(&mut run, &companion_bytes)?;
+                }
+                // The setup restart puts the stream on the condition's first values; the trials then restart it.
+                let first_frequency = RX_START_LEAD_RETUNE_HZ.0;
+                let mut frequency = first_frequency;
+                let mut gain = 6.0;
+                let setup = restart_trial(&mut run, &probe, *value, Some((frequency, gain)), *shape_channels)?;
+                if !setup.started {
+                    return Err(format!("{condition} {value}: the setup restart did not begin"));
+                }
+                let mut trials = Vec::new();
+                for index in 0..plan.step_trials {
+                    if retune {
+                        frequency = if frequency == RX_START_LEAD_RETUNE_HZ.0 { RX_START_LEAD_RETUNE_HZ.1 } else { RX_START_LEAD_RETUNE_HZ.0 };
+                        gain = if index % 2 == 0 { 3.0 } else { 6.0 };
+                    }
+                    let values = retune.then_some((frequency, gain));
+                    trials.push(restart_trial(&mut run, &probe, *value, values, *shape_channels)?);
+                }
+                let manifest = run.finish();
+                let late: Vec<i64> = super::events_of(&manifest, "radio.LATE_COMMAND").iter().filter_map(requested_tick).collect();
+                let short: Vec<(i64, i64)> =
+                    super::events_of(&manifest, "radio.START_LEAD_SHORT").iter().filter_map(|event| requested_tick(event).zip(event.payload["lead_left_ns"].as_i64())).collect();
+                let master_clock_hz = device.master_clock_rate();
+                for trial in &mut trials {
+                    let short_event = trial.origin.and_then(|origin| short.iter().filter(|(at, _)| *at == origin).map(|(_, lead)| *lead).min());
+                    if let Some(origin) = trial.origin {
+                        trial.late = late.contains(&origin);
+                    }
+                    trial.short = short_event.is_some();
+                    // The remaining lead is recorded for every candidate, warning or not: from the configure record first,
+                    // and from the warning's payload when the record holds no row.
+                    trial.lead_left_ns = configure_lead_left(&manifest, trial.expected, trial.origin, master_clock_hz).or(short_event);
+                }
+                let classes: Vec<TrialClass> = trials.iter().map(rx_start_trial_class).collect();
+                let mut stage = candidate_stage_json(&condition, *value, &classes, &[]);
+                if let Some(rows) = stage["trials"].as_array_mut() {
+                    for (row, trial) in rows.iter_mut().zip(&trials) {
+                        row["expected_origin"] = json!(trial.expected);
+                        row["origin"] = json!(trial.origin);
+                        row["first_tick"] = json!(trial.first_tick);
+                        row["started"] = json!(trial.started);
+                        row["late_command"] = json!(trial.late);
+                        row["start_lead_short"] = json!(trial.short);
+                        row["lead_left_ns"] = json!(trial.lead_left_ns);
+                    }
+                }
+                stage["smallest_lead_left_ns"] = json!(trials.iter().filter_map(|trial| trial.lead_left_ns).min());
+                if companion_group {
+                    stage["companion"] = companion_observation(&manifest, Direction::Tx, companion_rate);
+                    stage["companion_rate_hz"] = json!(companion_rate);
+                }
+                observation_stages.push(stage);
+                stages.push(CandidateStage { value: *value, trials: classes });
+                total += plan.step_trials;
+            }
+            candidates.insert(condition.clone(), stages);
+            condition_rows.push(if companion_group {
+                companion_condition_at(&condition, Direction::Rx, 1_000_000, Direction::Tx, companion_rate)
             } else {
-                let (run, dir) = candidate_session_asking(probe.clone(), timing, super::rx0)?;
-                (run, dir, 0)
-            };
-            if companion_group {
-                companion_rate = rate;
-            }
-            super::past_t0(&mut run, super::ms(100));
-            if companion_group {
-                super::past_tx_origin(&mut run);
-                start_repeat(&mut run, &companion_bytes)?;
-            }
-            // The setup restart puts the stream on the condition's first values; the trials then restart it.
-            let first_frequency = RX_START_LEAD_RETUNE_HZ.0;
-            let mut frequency = first_frequency;
-            let mut gain = 6.0;
-            let setup = restart_trial(&mut run, &probe, *value, Some((frequency, gain)))?;
-            if !setup.started {
-                return Err(format!("{condition} {value}: the setup restart did not begin"));
-            }
-            let mut trials = Vec::new();
-            for index in 0..plan.step_trials {
-                if retune {
-                    frequency = if frequency == RX_START_LEAD_RETUNE_HZ.0 { RX_START_LEAD_RETUNE_HZ.1 } else { RX_START_LEAD_RETUNE_HZ.0 };
-                    gain = if index % 2 == 0 { 3.0 } else { 6.0 };
+                Condition {
+                    id: condition.clone(),
+                    streams: vec![stream_condition(Direction::Rx, 0, (0..*shape_channels as u32).collect(), *shape_rate_hz as f64)],
+                    concurrent: vec![],
+                    reopened: false,
                 }
-                let values = retune.then_some((frequency, gain));
-                trials.push(restart_trial(&mut run, &probe, *value, values)?);
-            }
-            let manifest = run.finish();
-            let late: Vec<i64> = super::events_of(&manifest, "radio.LATE_COMMAND").iter().filter_map(requested_tick).collect();
-            let short: Vec<(i64, i64)> = super::events_of(&manifest, "radio.START_LEAD_SHORT").iter().filter_map(|event| requested_tick(event).zip(event.payload["lead_left_ns"].as_i64())).collect();
-            let master_clock_hz = device.master_clock_rate();
-            for trial in &mut trials {
-                let short_event = trial.origin.and_then(|origin| short.iter().filter(|(at, _)| *at == origin).map(|(_, lead)| *lead).min());
-                if let Some(origin) = trial.origin {
-                    trial.late = late.contains(&origin);
-                }
-                trial.short = short_event.is_some();
-                // The remaining lead is recorded for every candidate, warning or not: from the configure record first,
-                // and from the warning's payload when the record holds no row.
-                trial.lead_left_ns = configure_lead_left(&manifest, trial.expected, trial.origin, master_clock_hz).or(short_event);
-            }
-            let classes: Vec<TrialClass> = trials.iter().map(rx_start_trial_class).collect();
-            let mut stage = candidate_stage_json(&condition, *value, &classes, &[]);
-            if let Some(rows) = stage["trials"].as_array_mut() {
-                for (row, trial) in rows.iter_mut().zip(&trials) {
-                    row["expected_origin"] = json!(trial.expected);
-                    row["origin"] = json!(trial.origin);
-                    row["first_tick"] = json!(trial.first_tick);
-                    row["started"] = json!(trial.started);
-                    row["late_command"] = json!(trial.late);
-                    row["start_lead_short"] = json!(trial.short);
-                    row["lead_left_ns"] = json!(trial.lead_left_ns);
-                }
-            }
-            stage["smallest_lead_left_ns"] = json!(trials.iter().filter_map(|trial| trial.lead_left_ns).min());
-            if companion_group {
-                stage["companion"] = companion_observation(&manifest, Direction::Tx, companion_rate);
-                stage["companion_rate_hz"] = json!(companion_rate);
-            }
-            observation_stages.push(stage);
-            stages.push(CandidateStage { value: *value, trials: classes });
-            total += plan.step_trials;
+            });
         }
-        candidates.insert(condition.clone(), stages);
-        condition_rows.push(if companion_group { companion_condition_at(&condition, Direction::Rx, 1_000_000, Direction::Tx, companion_rate) } else { rx_condition(&condition, 1_000_000.0) });
     }
     if companion_group {
         return Ok(MeasurementGroup {
@@ -2406,7 +2532,7 @@ fn companion_inapplicable(device: &Arc<dyn Device>, name: &str) -> Result<Option
 }
 
 #[derive(Clone, Debug)]
-struct OverflowGap {
+pub struct OverflowGap {
     cause: String,
     start_sample: Option<i64>,
     len: u64,
@@ -2415,22 +2541,22 @@ struct OverflowGap {
 }
 
 #[derive(Clone, Debug)]
-struct OverflowRestartEstimate {
+pub struct OverflowRestartEstimate {
     gap_end_sample: Option<i64>,
     reader_resume_sample: Option<i64>,
-    nanoseconds: Option<u64>,
-    reason: Option<String>,
+    pub nanoseconds: Option<u64>,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug)]
-struct OverflowTrialEvidence {
-    class: TrialClass,
-    overflow_count: usize,
+pub struct OverflowTrialEvidence {
+    pub class: TrialClass,
+    pub overflow_count: usize,
     overflow_causes: Vec<String>,
     payload_lost: Vec<Option<u64>>,
     gaps: Vec<OverflowGap>,
-    gap_ns: Option<u64>,
-    restart_after_resume: OverflowRestartEstimate,
+    pub gap_ns: Option<u64>,
+    pub restart_after_resume: OverflowRestartEstimate,
     sample_clock_rate_matches: bool,
 }
 
@@ -2612,7 +2738,7 @@ fn summarize_overflow_gaps(candidates: &BTreeMap<u64, Vec<OverflowTrialEvidence>
     })
 }
 
-fn overflow_wait_ms(after_ms: u64, stall_ms: u64) -> Result<u64, String> {
+pub fn overflow_wait_ms(after_ms: u64, stall_ms: u64) -> Result<u64, String> {
     let stall_recovery_ms = stall_ms.checked_mul(2).ok_or("overflow Run horizon overflow")?;
     2_000u64.checked_add(after_ms).and_then(|ms| ms.checked_add(stall_recovery_ms)).and_then(|ms| ms.checked_add(500)).ok_or_else(|| "overflow Run horizon overflow".to_owned())
 }
@@ -2688,6 +2814,24 @@ pub fn measure_overflow_restart_gap_with_tx(device: Arc<dyn Device>, plan: &Meas
     })
 }
 
+/// One overflow Run at `rate_hz` with the reader stalled for `stall_ms` from `after_ms` after the first block: its evidence, and the reason
+/// validate or prepare refused it (then it never ran, and its class is `AdmissionRejection`).
+pub fn overflow_trial(device: &Arc<dyn Device>, rate_hz: u64, stall_ms: u64, after_ms: u64) -> Result<(OverflowTrialEvidence, Option<String>), String> {
+    let (manifest, rejection) = overflow_manifest(device.clone(), rate_hz, after_ms, stall_ms, false)?;
+    let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
+    let artifacts = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
+    let mut evidence = extract_overflow_trial(&events, &artifacts, &manifest.clocks.sample_clocks, rate_hz, after_ms, stall_ms);
+    if rejection.is_some() {
+        evidence.class = TrialClass::AdmissionRejection;
+    }
+    Ok((evidence, rejection))
+}
+
+/// `trials` of [`overflow_trial`] in a row.
+pub fn overflow_cell(device: &Arc<dyn Device>, rate_hz: u64, stall_ms: u64, after_ms: u64, trials: usize) -> Result<Vec<(OverflowTrialEvidence, Option<String>)>, String> {
+    (0..trials).map(|_| overflow_trial(device, rate_hz, stall_ms, after_ms)).collect()
+}
+
 /// Provider-path overflow restart-gap measurement, retaining non-overflowing trials as failures (RM-17).
 pub fn measure_overflow_restart_gap(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
     plan.validate()?;
@@ -2698,19 +2842,7 @@ pub fn measure_overflow_restart_gap(device: Arc<dyn Device>, plan: &MeasurementP
     for (rate_hz, stall_ms) in plan.overflow_rates_hz.iter().zip(&plan.overflow_stall_ms) {
         let condition = rate_condition(*rate_hz);
         conditions.push(rx_condition(&condition, *rate_hz as f64));
-        let mut trials = Vec::new();
-        let mut rejections = Vec::new();
-        for _ in 0..plan.overflow_trials {
-            let (manifest, rejection) = overflow_manifest(device.clone(), *rate_hz, plan.overflow_after_ms, *stall_ms, false)?;
-            let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
-            let artifacts = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
-            let mut evidence = extract_overflow_trial(&events, &artifacts, &manifest.clocks.sample_clocks, *rate_hz, plan.overflow_after_ms, *stall_ms);
-            if rejection.is_some() {
-                evidence.class = TrialClass::AdmissionRejection;
-            }
-            rejections.push(rejection);
-            trials.push(evidence);
-        }
+        let (trials, rejections): (Vec<_>, Vec<_>) = overflow_cell(&device, *rate_hz, *stall_ms, plan.overflow_after_ms, plan.overflow_trials)?.into_iter().unzip();
         total += plan.overflow_trials;
         by_rate.insert(*rate_hz, trials);
         rejection_by_rate.insert(*rate_hz, rejections);
@@ -2913,6 +3045,8 @@ struct TxThroughputEvidence {
     minimum_samples: Option<u64>,
     tx_samples_minus_ack_elapsed_samples: Option<i64>,
     underflow_events: usize,
+    /// When the first `TX_UNDERFLOW` came, in nanoseconds after the burst's start.
+    first_underflow_ns: Option<i64>,
     async_failures: Vec<String>,
     short_send_rejections: Vec<String>,
 }
@@ -2963,6 +3097,15 @@ fn tx_throughput_evidence(input: TxThroughputInput<'_>) -> TxThroughputEvidence 
     let ack_elapsed_samples = ack_elapsed_ticks.and_then(|ticks| samples_for_root_ticks(ticks, rate_hz, master_clock_hz));
     let tx_samples_minus_ack_elapsed_samples = actual_samples.zip(ack_elapsed_samples).and_then(|(actual, elapsed)| i64::try_from(i128::from(actual) - i128::from(elapsed)).ok());
     let underflow_events = events.as_array().into_iter().flatten().filter(|event| event["kind"] == "radio.TX_UNDERFLOW").count();
+    let first_underflow_tick = events
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|event| event["kind"] == "radio.TX_UNDERFLOW")
+        .filter_map(|event| serde_json::from_value::<TimePoint>(event["time"].clone()).ok().and_then(|time| point_root_tick(time, clocks).ok()))
+        .min();
+    let first_underflow_ns =
+        first_underflow_tick.zip(burst_start_tick).and_then(|(underflow, start)| i64::try_from((i128::from(underflow) - i128::from(start)) * 1_000_000_000 / i128::from(master_clock_hz)).ok());
     let async_failures: Vec<_> = async_reports
         .as_array()
         .into_iter()
@@ -3007,6 +3150,7 @@ fn tx_throughput_evidence(input: TxThroughputInput<'_>) -> TxThroughputEvidence 
         minimum_samples,
         tx_samples_minus_ack_elapsed_samples,
         underflow_events,
+        first_underflow_ns,
         async_failures,
         short_send_rejections,
     }
@@ -3098,7 +3242,7 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
                 "minimum_samples": evidence.minimum_samples, "actual_samples": evidence.actual_samples,
                 "tx_samples_minus_ack_elapsed_samples": evidence.tx_samples_minus_ack_elapsed_samples,
                 "burst_count": evidence.burst_count, "burst_blocks": evidence.burst_blocks, "tx_underflow_events": evidence.underflow_events,
-                "async_failures": evidence.async_failures, "short_send_rejections": evidence.short_send_rejections,
+                "first_underflow_ns_after_burst_start": evidence.first_underflow_ns, "async_failures": evidence.async_failures, "short_send_rejections": evidence.short_send_rejections,
                 "stage": stage }),
         )?);
     }
@@ -3533,7 +3677,7 @@ fn evidence_from_manifest(manifest: &Manifest, plans: &[TrialPlan]) -> Result<Ve
     evidence_from_sections(super::section(manifest, "bursts"), super::section(manifest, "async"), super::section(manifest, "rejected"), &events, &artifacts, &manifest.clocks.sample_clocks, plans)
 }
 
-fn trial_class_name(class: TrialClass) -> &'static str {
+pub fn trial_class_name(class: TrialClass) -> &'static str {
     match class {
         TrialClass::AdmissionRejection => "AdmissionRejection",
         TrialClass::ProviderFailure => "ProviderFailure",
@@ -3591,6 +3735,44 @@ fn numeric_value(key: &str, summary: &CandidateSummary, candidates: &BTreeMap<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_environment_name_the_plan_reads_is_listed_and_lists_are_checked() {
+        let values: BTreeMap<String, String> = [
+            ("EZSDR_MEASURE_STEP_TRIALS", "7"),
+            ("EZSDR_MEASURE_OVERFLOW_TRIALS", "8"),
+            ("EZSDR_MEASURE_THROUGHPUT_SECS", "9"),
+            ("EZSDR_MEASURE_LOOPBACK_TRIALS", "10"),
+            ("EZSDR_MEASUREMENT_NICS", "eth0 eth1"),
+            ("EZSDR_BENCH_NIC", "ignored"),
+            ("EZSDR_MEASURE_TIMED_LEADS_NS", "3500000, 4000000"),
+            ("EZSDR_MEASURE_TIMED_LEAD_TX_RATES_HZ", "1000000,10000000"),
+            ("EZSDR_MEASURE_RX_START_LEADS_NS", "3000000,4000000,5000000"),
+            ("EZSDR_MEASURE_RX_START_RATES_HZ", "10000000,100000000"),
+            ("EZSDR_MEASURE_RX_START_CHANNELS", "2"),
+            ("EZSDR_MEASURE_OVERFLOW_AFTER_MS", "100"),
+            ("EZSDR_TX_WAVEFORM_SAMPLES", "20000"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect();
+        assert_eq!(values.keys().map(String::as_str).collect::<BTreeSet<_>>(), MeasurementPlan::ENV_NAMES.into_iter().collect::<BTreeSet<_>>(), "this test names every variable `process_env` reads");
+        let plan = MeasurementPlan::from_env(&values).unwrap();
+        assert_eq!((plan.step_trials, plan.overflow_trials, plan.throughput_seconds, plan.loopback_trials), (7, 8, 9, 10));
+        assert_eq!(plan.nics, ["eth0", "eth1"]);
+        assert_eq!(plan.timed_command_leads_ns, [3_500_000, 4_000_000]);
+        assert_eq!(plan.timed_command_tx_rates_hz, [1_000_000, 10_000_000]);
+        assert_eq!(plan.rx_start_leads_ns, [3_000_000, 4_000_000, 5_000_000]);
+        assert_eq!(plan.rx_start_rates_hz, [10_000_000, 100_000_000]);
+        assert_eq!((plan.rx_start_channels, plan.overflow_after_ms, plan.tx_waveform_samples), (2, 100, 20_000));
+        let with = |name: &str, value: &str| MeasurementPlan::from_env(&BTreeMap::from([(name.to_owned(), value.to_owned())]));
+        assert!(with("EZSDR_MEASURE_RX_START_RATES_HZ", "10000000,1000000").is_err(), "descending");
+        assert!(with("EZSDR_MEASURE_RX_START_RATES_HZ", "1000000,1000000").is_err(), "repeated");
+        assert!(with("EZSDR_MEASURE_TIMED_LEADS_NS", "0,1").is_err(), "a zero rung");
+        assert!(with("EZSDR_MEASURE_TIMED_LEADS_NS", "1,x").is_err(), "not a number");
+        assert!(with("EZSDR_MEASURE_RX_START_CHANNELS", "3").is_err(), "the group runs on 1 or 2 channels");
+        assert_eq!(MeasurementPlan::from_env(&BTreeMap::new()).unwrap().rx_start_rates_hz, [1_000_000], "the record's own plan is unchanged");
+    }
 
     #[test]
     fn reopened_plan_halves_counts_rounding_up_and_never_zero() {
@@ -4346,7 +4528,7 @@ mod tests {
         let device = super::super::fake(ezsdr_radio_uhd::FakeConfig::default());
         let mut record = build_record(Source::Fake, &binding, &*device, &rehearsal_metadata(), MeasurementGroup::default(), &description).unwrap();
         record.source = Source::Hardware;
-        record.conditions.push(tx_only_condition("tx-1msps"));
+        record.conditions.push(tx_rate_condition("tx-1msps", 1_000_000));
         assert!(description.full_duplex, "the test profile advertises full duplex");
         record.conditions.push(duplex_condition("duplex-1msps"));
         let key = Key::parse("radio.timing.min_timed_command_lead_ns").unwrap();

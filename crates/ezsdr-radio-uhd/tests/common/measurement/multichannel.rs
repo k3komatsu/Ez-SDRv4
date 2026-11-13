@@ -769,6 +769,13 @@ fn candidate_performance(base: &ezsdr_radio::PerformanceEnvelope, link_gbps: i64
     ezsdr_radio::PerformanceEnvelope { rx_bytes_per_s: ceiling, tx_bytes_per_s: ceiling, wire_bytes_per_sample: base.wire_bytes_per_sample }
 }
 
+/// How many of the Provider's raw async rows are a transmit report that raises `TX_UNDERFLOW` (underflow, underflow in a packet, a sequence error) with no device
+/// time. The Provider dates such an event at the instant it read the report, so its time does not place the underflow inside a window.
+pub fn untimed_tx_underflow_reports(async_rows: &Json) -> u64 {
+    let raises_underflow = |code: &Json| matches!(code.as_str(), Some("Underflow" | "UnderflowInPacket" | "SeqError" | "SeqErrorInBurst"));
+    async_rows.as_array().into_iter().flatten().filter(|row| raises_underflow(&row["code"]) && row["tick"].is_null()).count() as u64
+}
+
 /// Runs one stage on `device` for `plan.throughput_seconds` and judges each stream on its own: a receive stream by its
 /// own samples against its SampleClock's interval, a transmit stream by the samples the device accepted, its one burst
 /// and its one acknowledgement; any overflow, underflow, partial send or async failure fails the stage. A Run that
@@ -841,6 +848,12 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
     let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
     let overflow = manifest.events.delivered.iter().any(|event| event.kind.as_str() == "radio.RX_OVERFLOW");
     let underflow = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == "radio.TX_UNDERFLOW").count();
+    let overflow_events = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == "radio.RX_OVERFLOW").count();
+    // When the first event of a kind came, in nanoseconds after T0 (`None` when there is none or its time has no root tick).
+    let first_ns = |kind: &str| {
+        let tick = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == kind).filter_map(|event| point_root_tick(event.time, &manifest.clocks.sample_clocks).ok()).min()?;
+        i64::try_from((i128::from(tick) - i128::from(start)) * 1_000_000_000 / i128::from(master)).ok()
+    };
     let mut streams = Vec::new();
     for (k, stream) in stage.rx.iter().enumerate() {
         let suffix = format!("usrp/rx/s{k}");
@@ -860,6 +873,8 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
     }
     let async_all = manifest.section(&common::usrp(), "ezsdr.radio.uhd.async").ok_or("throughput Run has no async section")?;
     let bursts_all = manifest.section(&common::usrp(), "ezsdr.radio.uhd.bursts").ok_or("throughput Run has no burst section")?;
+    // An underflow the device reported with no time: the Provider dates its event at the moment it read the report, so the event's time is not the device's.
+    let underflow_untimed = untimed_tx_underflow_reports(async_all);
     let rejected = manifest.section(&common::usrp(), "ezsdr.radio.uhd.rejected").ok_or("throughput Run has no rejected section")?;
     for (k, stream) in stage.tx.iter().enumerate() {
         let (domain, target) = scheduled[k];
@@ -912,7 +927,8 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
     }
     let observation = with_head(json!({
         "streams": streams.iter().map(|stream| stream.detail.clone()).collect::<Vec<_>>(),
-        "run_ended_early": ended_early, "tx_underflow_events": underflow, "rx_overflow": overflow, "short_send_rejections": short_send_rejections, "streamers_left_open": open,
+        "run_ended_early": ended_early, "tx_underflow_events": underflow, "rx_overflow": overflow, "rx_overflow_events": overflow_events,
+        "first_rx_overflow_ns_after_t0": first_ns("radio.RX_OVERFLOW"), "first_tx_underflow_ns_after_t0": first_ns("radio.TX_UNDERFLOW"), "tx_underflow_untimed_reports": underflow_untimed, "short_send_rejections": short_send_rejections, "streamers_left_open": open,
         "link_drops": manifest.links.iter().map(|link| link.drops).collect::<Vec<_>>(),
         "streamers_opened_in_order": counted.open_order(), "nic_bytes": nics,
         "link_note": "UHD 4.10 picks a link per channel connection by the number of assignments per direction, not by bytes (graph_stream_manager.cpp:188-219,252-284); a stream's number is not a physical link",

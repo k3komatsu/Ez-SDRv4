@@ -11,18 +11,26 @@
 //   case 3 "p70":    burst A of 2 samples (timed SOB+EOB; the Module pads a one-sample burst) at t, then burst B of 10 000 samples
 //                    at t + 25 us sent in 1 000-sample chunks, (i) every chunk timed, (ii) only the
 //                    first chunk timed. Q: which shape draws TIME_ERROR / late packets / underflow?
+//   case 10 "t200":  continuous TX for `--secs` (300) at `--rate` (set 200e6) in sends of `--spp` samples (1996: benchmark_rate's on 2026-10-28), zeros or the
+//                    100 kHz tone (`--wave zeros|tone`, tone by default), no Ez-SDR code. It prints the tuned frequency and gain it read back before it transmits (and refuses to
+//                    transmit outside 999.5-1000.5 MHz or above 20 dB), counts the async reports by code and the send timeouts in a second thread, and ends with one
+//                    "t200 summary" line: samples handed to send against the samples expected (rate x secs), timeouts, Underflow, UnderflowInPacket, SeqError, SeqErrorInBurst,
+//                    TimeError, BurstAck. plan/phase8/tools/t200-bare-uhd.sh runs it and judges the line. Q: does bare UHD play 200 MS/s for 300 s without an underflow?
 //
 // Output: one line per async report ("report <case> <trial> <code> <tick>") and one summary line
 // per trial. Ticks are device ticks at the master clock rate (200 MHz on X300).
 //
 // Build (in ezsdr-v4-dev:uhd4.10): g++ -O2 -std=c++17 tx_repro.cpp -o tx_repro -luhd -lpthread
-// Run: tx_repro --args addr=192.168.47.37 [--case all|flush|gap|p70|len|split|s1|head|front|sweep] [--trials 5] [--lead seconds] [--rate S/s]
+// Run: tx_repro --args addr=192.168.47.37 [--case all|flush|gap|p70|len|split|s1|head|front|sweep|t200] [--trials 5] [--lead seconds] [--rate S/s]
+//      t200: [--secs 300] [--spp 1996] [--wave tone|zeros] (only with --case t200; "all" does not run it)
 //      sweep grid: [--lens a,b] [--gaps a,b] [--firsts a,b] (samples; each replaces the --lead grid's list)
 
 #include <uhd/usrp/multi_usrp.hpp>
 #include <uhd/types/time_spec.hpp>
 #include <uhd/utils/thread.hpp>
 
+#include <atomic>
+#include <csignal>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -87,6 +95,10 @@ static double g_lead = -1;
 static bool g_lenient = false;   // --lenient 1: an unacknowledged initial flush is printed, not fatal (bench 2026-11-10, 0.25 MS/s)
 static std::vector<long long> g_lens, g_gaps, g_firsts;   // case sweep: --lens/--gaps/--firsts a,b,c replace the --lead grid (bench 2026-11-10)
 static std::vector<long long> csv(const std::string& v) { std::vector<long long> out; size_t p0 = 0; while (p0 <= v.size()) { size_t q = v.find(',', p0); if (q == std::string::npos) q = v.size(); out.push_back(std::stoll(v.substr(p0, q - p0))); p0 = q + 1; } return out; }
+static double g_secs = 300;     // case t200
+static size_t g_spp = 1996;
+static bool g_zeros = false;
+static volatile std::sig_atomic_t g_sig = 0;   // case t200: SIGINT/SIGTERM (Ctrl-C, docker stop, timeout) ends the transmit loop; the burst is still closed
 static std::vector<size_t> g_heads = {4, 8, 28, 100, 2000};   // case head: first-send sizes (--heads a,b,c); --lead is the gap before the rest   // case s1: seconds ahead of B's start when B is sent; < 0 sends at once
 
 // One send; returns the samples accepted. `at` < 0 means untimed.
@@ -172,6 +184,7 @@ static void ack_offsets(const char* name, const std::vector<Report>& r, long lon
 }
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);   // a line survives a kill: the RF read-back must not stay in a buffer
     std::string args, which = "all";
     int trials = 5;
     for (int i = 1; i + 1 < argc; i += 2) {
@@ -181,6 +194,9 @@ int main(int argc, char** argv) {
         else if (k == "--trials") trials = std::atoi(v.c_str());
         else if (k == "--lead") g_lead = std::atof(v.c_str());
         else if (k == "--heads") { g_heads.clear(); size_t p0 = 0; while (p0 <= v.size()) { size_t q = v.find(',', p0); if (q == std::string::npos) q = v.size(); g_heads.push_back(std::stoul(v.substr(p0, q - p0))); p0 = q + 1; } }
+        else if (k == "--secs") g_secs = std::atof(v.c_str());
+        else if (k == "--spp") g_spp = std::strtoul(v.c_str(), nullptr, 10);
+        else if (k == "--wave") g_zeros = v == "zeros";
         else if (k == "--lenient") g_lenient = std::atoi(v.c_str()) != 0;
         else if (k == "--lens") g_lens = csv(v);
         else if (k == "--gaps") g_gaps = csv(v);
@@ -434,6 +450,93 @@ int main(int argc, char** argv) {
             }
         }
     }
+    if (which == "t200") {
+        // case 10 (bench 2026-11-15, T200): bare-UHD continuous transmit, the comparison for the Module's 200 MS/s stage.
+        if (!(g_secs > 0) || g_spp == 0) { std::fprintf(stderr, "t200: --secs and --spp must be positive\n"); return 2; }
+        // The tuned state read back now, after every setting and the stream: nothing transmits unless it is inside bench.md's RF conditions.
+        double tf = u->get_tx_freq(), tg = u->get_tx_gain();
+        std::printf("t200 RF read back: freq %.0f Hz gain %.1f dB rate %.0f antenna %s\n", tf, tg, u->get_tx_rate(), u->get_tx_antenna().c_str());
+        if (!std::isfinite(tf) || !std::isfinite(tg) || tf < 999.5e6 || tf > 1000.5e6 || tg > 20.0) {
+            std::printf("t200 ABORT: not transmitting outside 999.5-1000.5 MHz or above 20 dB\n");
+            return 3;
+        }
+        const size_t period = 20000;   // whole periods of the tone at 200 MS/s
+        std::vector<samp> wave = g_zeros ? std::vector<samp>(period + g_spp, samp(0, 0)) : tone(period + g_spp);
+        std::atomic<bool> stop{false}, async_failed{false};
+        std::atomic<long long> n_underflow{0}, n_underflow_in_packet{0}, n_seq_error{0}, n_seq_error_in_burst{0}, n_time_error{0}, n_ack{0}, n_other{0};
+        // A throw out of this thread would be std::terminate: it ends the monitoring, marks the run failed (exit 8, counts unreliable) and stops the transmit loop.
+        std::thread async_thread([&] {
+            try {
+                uhd::async_metadata_t md;
+                while (!stop.load()) {
+                    if (!tx->recv_async_msg(md, 0.1)) continue;
+                    switch (md.event_code) {
+                        case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW: n_underflow++; break;
+                        case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW_IN_PACKET: n_underflow_in_packet++; break;
+                        case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR: n_seq_error++; break;
+                        case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR_IN_BURST: n_seq_error_in_burst++; break;
+                        case uhd::async_metadata_t::EVENT_CODE_TIME_ERROR: n_time_error++; break;
+                        case uhd::async_metadata_t::EVENT_CODE_BURST_ACK: n_ack++; break;
+                        default: n_other++; break;
+                    }
+                }
+            } catch (...) {
+                async_failed = true;
+            }
+        });
+        std::signal(SIGINT, [](int) { g_sig = 1; });
+        std::signal(SIGTERM, [](int) { g_sig = 1; });
+        long long handed = 0, timeouts = 0;
+        const long long expected = (long long)std::llround(RATE * g_secs);
+        auto t0 = std::chrono::steady_clock::now();
+        auto end = t0 + std::chrono::duration<double>(g_secs);
+        size_t off = 0;
+        bool first = true;
+        bool threw = false;
+        double elapsed = 0;
+        // A throw from send must not leave `async_thread` joinable (std::terminate): the loop and the closing burst are inside a try, then stop and join.
+        try {
+            while (!g_sig && !async_failed && std::chrono::steady_clock::now() < end) {
+                uhd::tx_metadata_t md;
+                md.start_of_burst = first;
+                md.end_of_burst = false;
+                md.has_time_spec = false;
+                size_t got = tx->send(&wave[off], g_spp, md, 1.0);
+                first = false;
+                handed += (long long)got;
+                if (got < g_spp) timeouts++;
+                off = (off + g_spp) % period;
+            }
+            elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            uhd::tx_metadata_t eob;
+            eob.end_of_burst = true;
+            tx->send("", 0, eob, 1.0);
+        } catch (const std::exception& ex) {
+            threw = true;
+            std::printf("t200 EXCEPTION %s\n", ex.what());
+            try {
+                uhd::tx_metadata_t eob;
+                eob.end_of_burst = true;
+                tx->send("", 0, eob, 1.0);
+            } catch (...) {}
+        } catch (...) {
+            threw = true;
+            std::printf("t200 EXCEPTION (not a std::exception)\n");
+            try {
+                uhd::tx_metadata_t eob;
+                eob.end_of_burst = true;
+                tx->send("", 0, eob, 1.0);
+            } catch (...) {}
+        }
+        if (async_failed) { threw = true; std::printf("t200 EXCEPTION in the async thread; the counts are not reliable\n"); }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));   // the last reports and the burst's ACK
+        stop = true;
+        async_thread.join();
+        std::printf("t200 summary rate %.0f secs %.3f spp %zu wave %s freq %.0f gain %.1f handed %lld expected %lld timeouts %lld underflow %lld underflow_in_packet %lld seq_error %lld seq_error_in_burst %lld time_error %lld burst_ack %lld other %lld\n",
+                    RATE, elapsed, g_spp, g_zeros ? "zeros" : "tone", tf, tg, handed, expected, timeouts, n_underflow.load(), n_underflow_in_packet.load(), n_seq_error.load(), n_seq_error_in_burst.load(), n_time_error.load(), n_ack.load(), n_other.load());
+        if (g_sig) { std::printf("t200 interrupted by a signal; the burst was closed\n"); return finish(tx, 130); }
+        if (threw) return finish(tx, 8);
+    }
     if (which == "sweep") {
         // case 9 (bench 2026-11-09, #81): after a closed head of `len` samples (padded to four when <= 3), tone B of
         // 10 000 samples at `gap` samples after A's exclusive transmitted end, sent at once: a first timed SOB send of
@@ -480,6 +583,9 @@ int main(int argc, char** argv) {
     }
     } catch (const std::exception& ex) {
         std::printf("EXCEPTION %s\n", ex.what());
+        return finish(tx, 8);
+    } catch (...) {
+        std::printf("EXCEPTION (not a std::exception)\n");
         return finish(tx, 8);
     }
     return finish(tx, 0);

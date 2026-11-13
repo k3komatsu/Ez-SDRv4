@@ -1259,6 +1259,8 @@ orchestrator に返すもの：`<NEW>` の commit，(i-a)・(i-b)・(ii) の VER
 
 ## 2026-11-15 の手順（#67 の probe に加えて：受信 restart の zeros の掃引，#75 の probe，open-flush の掃引）
 
+> stage 4 の値のための計測（S2・T200・S5・S4）は，この下の「2026-11-15 の手順（stage 4 の値のための計測…）」の節．
+
 出典：`~/.cache/ezsdr-fixes/2026-11-13-rxzeros/options.md` §4（掃引の計画）と末尾の owner の決定（direction D），`~/.cache/ezsdr-fixes/2026-11-13-n75/options.md`（#75）§2.4 と owner の決定（(3) は下の open-flush の掃引の後に enable），`crates/ezsdr-radio-uhd/tests/common/bench1115.rs`（cell の表・summary・verdict・決定の規則はここ，非 device の試験は default の suite と FakeDevice の rehearsal）．**どれも結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．** 4 つの試験は `hw` で単独に流せる（記録 suite には入れていない）．いずれも device の一生全体を 1 本の期限で囲み（`bounded`），過ぎると `EZSDR-INFRA:` の行を書いて abort する．hang の印なので電源を入れ直して owner へ．
 
 - 構成・準備・`hw` の定義・stop の規則は「note 47 段階 5 の後」の節と同じ（#2 UBX slot A → #1 OBX slot A，30 dB，基準は内部，slot A だけ）．順は **#2 → #1**．
@@ -1380,3 +1382,180 @@ orchestrator に返すもの：`<NEW>` の commit，(i-a)・(i-b)・(ii) の VER
 ### 閉じ方と記録
 
 log は `~/.cache/ezsdr-bench/<日付>/<試験名>.<BOARD>.log`。bench の記録は `bench/<日付>-<topic>/`（`conditions.json`，`results/`（log の `RXZ trial`・`P75 … trace`・`OFS trace` の行から機械的に），`README.md`，`raw.txt`）と private repo の release（AGENTS §9）。orchestrator に返すもの：commit，各 log の path，`RXZ class`・`RXZ decision` の行（両 board），`RXZ trial` の dump（`head`），`P75 a/b/c cell` と `decision` の行，`OFS cell` と `OFS decision` の行，電源の入れ直しの有無，att の型番（owner の確認）。
+
+## 2026-11-15 の手順（stage 4 の値のための計測：S2 throughput の繰り返し，T200，S5 の lead の rung，S4 の overflow gap）
+
+出典：stage 4 の owner の決定（2026-11-13，D0〜D13：`~/.cache/ezsdr-fixes/2026-11-13-stage4/decisions.md`），その提案（同じ dir の `proposal.md` §3・§4），T200 の追加（`~/.cache/ezsdr-fixes/2026-11-15-bench/additions.md`），`crates/ezsdr-radio-uhd/tests/common/s4bench.rs`（判定・決定の行はここ．非 device の部分の unit test と，FakeDevice の rehearsal は default の suite）．**結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．** 決定の行は**観測した事実だけ**を言い，計画した証拠が揃わなければ `INCONCLUSIVE`．profile の値はこの日に変えない（4a は bench の後）．
+
+### 流す項目と順（全体で約 4.5 時間の見込み，estimate．必須のあとに任意）
+
+| # | 項目 | 1 台あたり | 要否 | TX |
+|---|---|---|---|---|
+| 0 | (a) host と装置の確認（「note 47 段階 5 の後」の (a)） | 約 10 分 | 必須 | なし |
+| 1 | #67 の `hw_67_stop_before_origin`（下の CloseThenStop の cell を含む） | 約 5 分（cell が増えた分は未見積り） | 必須 | なし |
+| 2 | S5 `hw_s5_lead_rungs` | 約 10〜15 分 | 必須 | あり（command lead の pass だけ） |
+| 3 | S2 `hw_s2_throughput_repeats`（duplex 以外の 4 cell） | 約 45 分 | 必須 | あり |
+| 3b | 同じ，duplex の 2 cell（5 回ずつ） | 約 10 分 | 任意 | あり |
+| 4 | S4 `hw_s4_overflow_gap` | 約 30 分 | 必須 | なし |
+| 5 | T200 の H0：bare UHD ×3，Module の probe ×3，record suite の形 ×3 | 約 50 分（9 run × 約 5.5 分） | #1 は必須，#2 は任意 | あり |
+| 5b | T200 の H1（C-state を POLL/C1 に），H2（NIC の IRQ の向き先）：同じ 9 run | 各 約 50 分 | 任意（H1 は #1 で H0 に underrun が出たとき．H2 は H1 で差が無いとき） | あり |
+| 5c | record suite の形を waveform 20 000 sample で ×3 | 約 17 分 | 任意 | あり |
+
+- 必須だけの合計：(10 + 5 + 12 + 45 + 30) × 2 台 + T200 H0 の #1 50 分 + att の確認と盤の入れ替え約 15 分 ≒ **約 4.3 時間**．3b（+20 分）を足して約 4.6 時間．5b・5c と #2 の T200 は 5 時間に収まる範囲で．時間は estimate で，初回の build（volume が冷たい，数分から十数分）は別．
+- 順は **#1 → #2**（T200 は #1 の slot A OBX が先：R1・R2 が失敗した盤）．board ごとに 0 → 1 → 2 → 3 → 4（S4 は TX なしなので，TX の待ち時間の合間に流してよい）．T200 は 3 のあと，host の設定（H0 → H1 → H2）ごとに board を固定して流す．
+- **送信するのは 2・3・3b・5・5b・5c**．**送信する command ごとの前に owner が「その board の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2」を確かめる**（毎回．command をまたいで続けて流さない．1 つの command の中の複数の run は，その command が最初に求める 1 回の `yes` で流す：`t200-bare-uhd.sh` の 3 run）．1・4 は受信だけで att は要らない．
+- **slot B には送信しない**：どの項目も channel 0（slot A）にだけ送信し，周波数は 1 GHz（`SAFE_TX_HZ`），rate は 200 MS/s まで，gain は Provider の既定（0 dB）のまま触らない（`bench1115::MAX_TONE_GAIN_DB` = 20 dB の上限は，gain を変える probe の規則で，これらは gain を変えない）．`EZSDR_SLOT_B_ATTENUATOR_CONFIRMED` は**付けない**（S5 の 2 channel の pass は slot B で受信するだけ）．bare UHD は UHD 付属の `benchmark_rate` ではなく，`plan/phase8/tools/uhd-repro/tx_repro.cpp` の case `t200`（Ez-SDR のコードなし）で送る：自分で 1 GHz・gain 0 dB・slot A（`A:0`，`TX/RX`）を設定し，**送る直前に周波数と gain を読み戻して表示し，999.5〜1000.5 MHz の外か 20 dB 超なら送らず abort する**（`t200 RF read back: …` の行．`benchmark_rate` は周波数と gain の option を持たず，その値を確かめられなかったので替えた）．
+- 各試験は device の一生全体を 1 本の期限で囲む（`bounded`．過ぎると `EZSDR-INFRA:` の行を書いて abort：hang の印．電源を入れ直して owner へ）．期限は計画した時間の 1.25 倍＋15 分（S5 は計画の見積り＋15 分，T200 の record の形は run 数 ×（T＋60 s）＋15 分）．
+- **FAIL ではなく観測**：これらは device の失敗（overflow・underflow）を試験の失敗にしない．試験が失敗する（exit 1）のは，harness が続けられないとき（group の `Err`，handle の latch，streamer の取り残し：その盤は電源を入れ直し owner へ）だけ．`hw` の exit 0 は PASS ではない：**決定の行（`S2 decision`，`T200 decision`，`S5 decision`，`S4 decision`）を必ず読む**．
+
+### 共通の準備（送信しない）
+
+```sh
+cd <COMMIT の tree>                      # git status が clean であること
+mkdir -p ~/.cache/ezsdr-bench/$(date +%F)
+hw() { # $1 = 試験名．EZSDR_UHD_ARGS と BOARD（36 か 37）と EZSDR_BENCH_NIC は呼ぶ前に機材ごとに export する．失敗なら非 0 を返す
+  local dir=~/.cache/ezsdr-bench/$(date +%F) log status=0 n=1
+  log="$dir/$1.$BOARD.log"
+  while [[ -e $log ]]; do n=$((n + 1)); log="$dir/$1.$BOARD.$n.log"; done # 既存の log は上書きしない（.2，.3）
+  docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(id -u):$(id -g)" \
+    --tmpfs /tmp:rw,size=${EZSDR_BENCH_TMPFS:-4g} ${EZSDR_BENCH_CPUSET:+--cpuset-cpus=$EZSDR_BENCH_CPUSET} \
+    -v "$PWD:/work" -v ezsdr-v4-cargo-target:/cargo-target -w /work \
+    -e CARGO_HOME=/cargo-target/.cargo-home -e EZSDR_UHD_ARGS -e EZSDR_BENCH_NIC \
+    -e EZSDR_S2_TRIALS -e EZSDR_S2_DUPLEX_TRIALS -e EZSDR_S2_SECONDS -e EZSDR_S2_CELLS -e EZSDR_T200_RUNS \
+    -e EZSDR_S4_TRIALS -e EZSDR_S4_STALL_RATE_HZ -e EZSDR_S4_STALLS_MS -e EZSDR_TX_WAVEFORM_SAMPLES -e EZSDR_TX200_LENGTHS -e EZSDR_TX200_SECONDS \
+    -e EZSDR_MEASURE_THROUGHPUT_SECS -e EZSDR_MEASURE_STEP_TRIALS -e EZSDR_MEASURE_TIMED_LEADS_NS -e EZSDR_MEASURE_TIMED_LEAD_TX_RATES_HZ \
+    -e EZSDR_MEASURE_RX_START_LEADS_NS -e EZSDR_MEASURE_RX_START_RATES_HZ -e EZSDR_MEASURE_RX_START_CHANNELS -e EZSDR_MEASURE_OVERFLOW_AFTER_MS \
+    ezsdr-v4-dev:uhd4.10 cargo test -q --release -p ezsdr-radio-uhd --features uhd --test hardware "$1" -- --exact --ignored --nocapture --test-threads=1 \
+    >"$log" 2>&1 || status=$?
+  grep -h 'VERDICT\|test result\|panicked\|EZSDR-INFRA' "$log"
+  ((status == 0)) && [[ $(grep -c '^test result:' "$log") == 1 ]] && grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"
+}
+```
+
+- 前の節の `hw` に足したもの：試験が読む環境変数（上の `-e`．**設定していない変数は渡らない**），`--tmpfs` の大きさ（既定 4 GB．**S4 の Run は受信 sample の file を /tmp に作る**：100 MS/s の stall 0.5 s の Run で約 1 GB，200 MS/s では約 2 GB，100 MS/s の stall 2 s の Run で約 2.2 GB の見込み（INFERRED：sink の capture の長さ `after + stall + 250 ms` × rate × 8 byte．Run ごとに消える）．S4 は `EZSDR_BENCH_TMPFS=12g` を付けて流す），`--cpuset-cpus`（H2 だけ）．
+- host の確認と NIC の export は「note 47 段階 5 の後」の (a) と同じ（#2 `addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0`，#1 `addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1`）．
+- 追加の環境変数（`MeasurementPlan::ENV_NAMES`，既定は record suite の値のまま．record suite を流すときは使わない）：
+
+| 変数 | 意味 | 既定 |
+|---|---|---|
+| `EZSDR_MEASURE_TIMED_LEADS_NS` | command lead の rung（昇順，ns） | record：0.5/1/1.5/2/3/5/10 ms．S5：3.5/4/4.5/5 ms |
+| `EZSDR_MEASURE_TIMED_LEAD_TX_RATES_HZ` | command lead の送信の rate | record：1 MS/s．S5：1/10/100 MS/s |
+| `EZSDR_MEASURE_RX_START_LEADS_NS` | 受信 start lead の rung | record：3/5/10/25/50/100 ms．S5：3/4/5/7.5/10 ms |
+| `EZSDR_MEASURE_RX_START_RATES_HZ` | 受信 start lead の rate | record：1 MS/s．S5：10/100 MS/s |
+| `EZSDR_MEASURE_RX_START_CHANNELS` | 受信 stream の channel 数（1 か 2） | 1（S5 は両方を流す） |
+| `EZSDR_MEASURE_STEP_TRIALS` | rung ごとの trial | 100 |
+| `EZSDR_MEASURE_OVERFLOW_AFTER_MS` | 最初の block から stall までの ms | 500 |
+| `EZSDR_MEASURE_THROUGHPUT_SECS`，`EZSDR_TX_WAVEFORM_SAMPLES` | throughput の Run の秒，送信の波形の sample 数（record suite の形） | 60，1 000 |
+| `EZSDR_S2_TRIALS`，`EZSDR_S2_DUPLEX_TRIALS`，`EZSDR_S2_SECONDS`，`EZSDR_S2_CELLS` | S2 の回数（10），duplex の回数（5），1 Run の秒（60），流す cell の id（コンマ区切り） | 左の括弧 |
+| `EZSDR_T200_RUNS` | T200 の record の形の回数 | 3 |
+| `EZSDR_S4_TRIALS`，`EZSDR_S4_STALL_RATE_HZ`，`EZSDR_S4_STALLS_MS` | S4 の trial（20），stall の掃引の rate（100 MS/s）と stall（100,500,2000 ms） | 左の括弧 |
+
+### 1. #67 の CloseThenStop の cell（受信のみ，#67 の step で追加．この step では足さない）
+
+`hw_67_stop_before_origin` が cell **CloseThenStop**（origin の先の start を積み，close し，開き直し，untimed の stop，古い origin + 500 ms まで静かか）を持つ：受信のみ，期待 PASS，**両 board**，1・10・100 MS/s × 10 trial．流し方と読み方は「2026-11-15 の項目：#67」．
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_67_stop_before_origin   # #1 OBX
+export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_67_stop_before_origin   # #2 UBX
+```
+
+### 2. S5 `hw_s5_lead_rungs`（D3・D4．TX あり：command lead の pass だけ．約 10〜15 分 / 台，estimate．期限は計画 + 15 分）
+
+問い：D3（`min_timed_command_lead_ns` = 5 ms）は TX 1・10・100 MS/s で 100/100 か，D4（`rx_start_lead_ns` = 10 ms）は 10・100 MS/s と 2 channel で 100/100 か．record suite と同じ group（`measure_min_timed_command_lead`，`measure_rx_start_lead`）を，rung と rate を変えて 3 つの pass で流す：(1) command lead：rung 3.5/4/4.5/5 ms × TX 1・10・100 MS/s × 100 trial（1 channel，slot A）；(2) 受信 start lead：`restart-same`・`restart-retune`（1 GHz をまたぐ）× rate 10・100 MS/s × rung 3/4/5/7.5/10 ms × 100 trial（1 channel）；(3) (2) を 2 channel で（receive のみ，layout の最初の 2 つの受信 channel が UBX か OBX のときだけ．CBX だと `not runnable` の行を出して何も流さない：任意）．
+
+```sh
+# --- owner が att を確かめた．次の 1 本だけ ---
+hw hw_s5_lead_rungs
+grep -h 'S5 decision\|S5 .* stage \|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_s5_lead_rungs.$BOARD.log   # 読む行（trial の行は `S5 <group> trial {json}`）
+```
+
+- 出力：trial ごとに `S5 command-lead trial {json}`・`S5 rx-start-lead-1ch trial {json}`・`S5 rx-start-lead-2ch trial {json}`（condition，rung_ns，class，late_command，start_lead_short，expected_origin，origin，first_tick，lead_left_ns…），stage ごとに `S5 <group> stage <condition> <rung> ms: k/n Success, …`，pass ごとに `S5 decision <group>`．
+- 決定の行：各 condition で「その rung と，より大きい rung のすべてが全 trial Success の最小 rung」と，owner の決めた値（command lead 5 ms，受信 start lead 10 ms）が**全 condition で 100 %** か（そうでない condition の名前）．計画した stage か trial が欠ければ `INCONCLUSIVE`．
+- 条件を超えて一般化しない：1 GHz，slot A，この 2 台（board ごとに別に読む），rate は上の 3 つと 2 つ，各 100 trial．`restart-retune` の stage は record の R1 で `START_LEAD_SHORT` の警告で fail した（proposal §0.1 #5）：fail の中身は trial の行の `late_command`・`start_lead_short` で見分ける．
+
+### 3. S2 `hw_s2_throughput_repeats`（D1・D2．TX あり．約 45 分 / 台（duplex を除く 4 cell），estimate．期限は計画の 1.25 倍 + 15 分）
+
+問い：D1（RX 200 MS/s が 1 本ごとに 60 s 通るか：1 台で 1 回でも落ちれば `rx_bytes_per_s` = 4e8），D2（TX 200 MS/s：「device が受け付けて鳴らす」を 10 s の窓で，「どれだけ保つか」を 60 s で，**両方を出す**）．record suite の `run_stage` で，1 channel の RX 100・200 MS/s，TX 100・200 MS/s を各 10 回 × 60 s，duplex（RX 200 + TX 100，RX 100 + TX 100）を各 5 回．cell の id は `rx-100msps`，`rx-200msps`，`tx-100msps`，`tx-200msps`，`duplex-rx200msps-tx100msps`，`duplex-rx100msps-tx100msps`．
+
+```sh
+# --- owner が att を確かめた．次の 1 本だけ（duplex を除く 4 cell）---
+EZSDR_S2_CELLS=rx-100msps,rx-200msps,tx-100msps,tx-200msps hw hw_s2_throughput_repeats
+# --- 任意（owner が att を確かめた．次の 1 本だけ）---
+EZSDR_S2_CELLS=duplex-rx200msps-tx100msps,duplex-rx100msps-tx100msps hw hw_s2_throughput_repeats
+grep -h 'S2 decision\|S2 stop\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_s2_throughput_repeats.$BOARD.log
+grep -h 'S2 trial' ~/.cache/ezsdr-bench/$(date +%F)/hw_s2_throughput_repeats.$BOARD.log                      # trial ごと
+```
+
+（変数を前置きした `hw` は，その 1 回だけに渡る．`export` しない．）
+
+- trial の行（`S2 trial {json}`）：cell，trial，outcome（`Success`／`DeviceFailure`…），受信と送信の sample 数と期待，`rx_overflow_events` と最初の時刻（T0 から ns），`tx_underflow_events` と最初の時刻，async の失敗．
+- 決定の行：cell ごとに Success・failed・inconclusive の数，RX の overflow の数と最初の時刻，TX の「最初の 10 s に TX_UNDERFLOW が無い trial の数」と「60 s の全体が Success の trial の数」と最初の underflow の時刻（**両方を出す**），200 MS/s の cell には owner の規則（D1：RX 200 MS/s が 1 台で 1 回でも落ちれば 4e8．D2：上の読み）が今回の盤で発火したか．計画した trial が揃っていない，Incomplete の trial がある，TX の 10 s の窓が言えない trial がある（Run が 10 s より短い，**device が時刻なしで報告した underflow が窓の後に読まれた**：Provider はその event を読んだ時刻で記録するので，窓の中で起きたかどうかが分からない）と `INCONCLUSIVE`．時刻なしの報告の数は行（`tx_underflow_untimed_reports`）と決定の行に出る．窓の中で読まれた時刻なしの報告は，真の時刻がそれより前なので，窓の中の underflow として数える．
+- D1 の「両 board で 10/10」は，2 台の決定の行を並べて読む（片方だけで決めない）．2 channel の 200+100 MS/s（1.2e9）は CBX が戻るまで**測れない**（今日は流さない）．
+- 条件を超えて一般化しない：1 GHz，slot A，waveform 1 000 sample（`EZSDR_TX_WAVEFORM_SAMPLES`．T200 は waveform 20 000 でも流す），60 s，各 10 回，host は H0（`bench-host.sh` の出力を残す）．
+
+### 4. S4 `hw_s4_overflow_gap`（D5．受信のみ，att 不要．約 30 分 / 台，estimate．期限は計画の 1.25 倍 + 15 分）
+
+問い：overflow からの再開後の時間（restart-after-resume：record の INFERRED の高め側の推定）は rate 1/10/25/50/100/200 MS/s で安定か（owner の基準 (max − min)/max ≤ 0.5），最大は D5 の 140 ms を超えるか，stall の長さ（0.1/0.5/2 s，100 MS/s）に依存するか．各 cell は 20 trial．stall は record と同じ（1 MS/s 20 s，10 MS/s 2 s，25 MS/s 1 s，50・100・200 MS/s 0.5 s）．
+
+```sh
+EZSDR_BENCH_TMPFS=12g hw hw_s4_overflow_gap
+grep -h 'S4 decision\|S4 stop\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_s4_overflow_gap.$BOARD.log
+grep -h 'S4 trial' ~/.cache/ezsdr-bench/$(date +%F)/hw_s4_overflow_gap.$BOARD.log                            # trial ごと
+```
+
+- trial の行：rate，stall，outcome，overflow の数，gap（`gap_ns`：stall 中の損失も含む全体），`restart_after_resume_ns`（無ければ理由）．
+- 決定の行：cell ごとに min・median・max と (max − min)/max と基準を満たしたか；`D5 bound`（rate の cell 全体の最大，整数 ms への切り上げ，140 ms 以下か超えるか）；`stall length at <sweep の rate> MS/s`（既定は 100 MS/s，`EZSDR_S4_STALL_RATE_HZ` で変えるとその rate．その rate の cell ごとの stall の median・max）．計画した 20 trial が complete（overflow がちょうど 1 回，gap が全部読めた，restart の時間がある）でない cell は `INCONCLUSIVE`．**100 MS/s の 0.1 s の stall は socket buffer（INFERRED で 50 MB）の fill 時間（約 125 ms）より短く，overflow しない（Incomplete → INCONCLUSIVE）かもしれない**：それ自体が結果で，stall の長さの行にそう出る．
+- 条件を超えて一般化しない：1 channel，1 GHz，受信のみ，host は H0．**restart-after-resume は stall の始まりを推定で置く高め側の値で，RM-17 の定義（overrun の instant `f` から）ではない**：RM-17 の書き直し（4b）の入力で，値を決める前に design の step が先．
+
+### 5. T200：200 MS/s の送信，bare UHD と Module（D2・KL-5．TX あり．約 50 分 / 設定 / 台，estimate）
+
+問い：bare UHD が 200 MS/s を 300 s underrun 0 で送り，Module（同じ設定）が underflow するなら，Ez-SDR v4 の欠陥（Module を直す．issue）．両方 underflow なら host（その設定を `bench-host.sh --apply` と KL-5 へ）．record suite の 60 s の stage が落ち，probe が 300 s 通った理由（10-29 と R1・R2）も探す．**#1（OBX，slot A）が先**，#2 は任意．att は送信する command ごとの前に owner が確かめる（script の 1 回の呼び出し = 1 回の `yes`．その中の 3 run は続けて流れる）．各設定で 9 run（それぞれ 300 s，約 5.5 分）：
+
+| | 何を | 流し方 | 何回 |
+|---|---|---|---|
+| ① | bare UHD | `plan/phase8/tools/t200-bare-uhd.sh "$EZSDR_UHD_ARGS" ~/.cache/ezsdr-bench/$(date +%F) <ラベル>`（container の中で `tx_repro.cpp` を build して `tx_repro --case t200 --rate 200e6 --secs 300 --spp 1996 --wave tone`．「yes」を求める．run ごとに 1 本の期限（300 s + 180 s．過ぎると container を kill し，残りの run は流さない）．Ctrl-C か TERM は container を kill して終わる（exit 130．以降の run は始まらない）．run ごとに clean / failed / INCONCLUSIVE の行） | 3 |
+| ② | Module の probe | `EZSDR_TX200_LENGTHS=20000,20000,20000 EZSDR_TX200_SECONDS=300 hw hw_tx200_hot_path_probe`（波形 20 000，`run_stage`．1 回の呼び出しで 3 run） | 3 |
+| ③ | record suite の形 | `EZSDR_MEASURE_THROUGHPUT_SECS=300 EZSDR_T200_RUNS=3 hw hw_t200_record_stage`（`measure_tx_throughput`：record の Spec，波形 1 000 sample，record の判定） | 3 |
+| ③' | 任意（5c）：③ の波形を 20 000 に | `EZSDR_TX_WAVEFORM_SAMPLES=20000 EZSDR_MEASURE_THROUGHPUT_SECS=300 EZSDR_T200_RUNS=3 hw hw_t200_record_stage` | 3 |
+
+- ③ と ② の違いは（i）波形の長さ（1 000 と 20 000），（ii）Run の作り方（`measure_tx_throughput` と `run_stage`：Spec，`CountingDevice`，判定の細部）．③' が ③ と ② の間：③' ≈ ② なら長さが原因，③' ≈ ③ なら Run の作り方．record suite の literal な 60 s は `EZSDR_MEASURE_THROUGHPUT_SECS` を省く（既定 60）．
+- 出力：② は `TX200 len=… shape=single rate=200000000` の行と VERDICT（既存），③ は `T200 run {json}`（outcome，tx_samples，minimum_samples，`tx_underflow_events`，`first_underflow_ns_after_burst_start`）と `T200 decision (record-suite shape, 200 MS/s, <T> s, waveform <W> samples)`：Success・failed の run 数，run ごとの underflow の数と最初の時刻．①は `t200 RF read back: freq … gain …`（送る前），`T200 bare run n: clean`／`failed: <数>`／`INCONCLUSIVE: <理由>`（`t200 summary` の数も付く）と `T200 bare summary`．① の判定：underflow・underflow_in_packet・seq_error・seq_error_in_burst・time_error・送信 timeout がすべて 0 で，send に渡した sample が rate × 秒の 99 % 以上，tx_repro の exit が 0 なら clean．どれかの数が非 0 なら failed（数を並べる）．RF の読み戻しか summary の欄が欠ける，渡した sample が足りない，exit が非 0，期限切れ（`EZSDR-INFRA`）は INCONCLUSIVE．計画した run が揃わないと ③ と ① は `INCONCLUSIVE`．
+- 先行の証拠：bench-results.md 2026-10-28（benchmark_rate 200 MS/s：普通の優先度 8 underrun，`--priority high` 0）・2026-10-29（#2：benchmark_rate 300 s underrun 0（spp 2000・10 000），spp 1000 は 5〜6；Module 波形 20 000 は TXS の前に約 150・約 122 s で underflow，TXS の後 300 s ×2 clean）・2026-11-06（600 s：6 回のうち 3 回が 1 underflow）．今日の結果をこれらと並べて読む．
+- 条件を超えて一般化しない：1 GHz，slot A，gain は既定，この 2 台のうち流した盤，各設定 3 run．
+
+#### host の設定（owner が sudo で変える．script は変えない．`bench-host.sh` が状態を記録する）
+
+H0 = 今の状態（C1〜C3 有効，NIC の IRQ は 0〜15，adaptive coalescing）．設定を変える前後に `plan/phase8/tools/bench-host.sh --nic <NIC> --subnet <40|47>` を流して出力を残す（cstates と nic_irq_affinity の欄）．**戻し方を先に保存する．再起動でも戻る**．
+
+```sh
+# --- H1：idle state を POLL と C1 だけにする（owner，sudo）---
+D=~/.cache/ezsdr-bench/$(date +%F); mkdir -p "$D"
+for s in /sys/devices/system/cpu/cpu*/cpuidle/state*; do echo "$s $(cat $s/name) $(cat $s/disable)"; done > "$D/cstate-before.txt"   # 戻すための記録
+for s in /sys/devices/system/cpu/cpu*/cpuidle/state*; do
+  case $(cat "$s/name") in POLL|C1) ;; *) echo 1 | sudo tee "$s/disable" >/dev/null ;; esac
+done
+grep . /sys/devices/system/cpu/cpu0/cpuidle/state*/name /sys/devices/system/cpu/cpu0/cpuidle/state*/disable        # 確かめる
+# --- H1 を戻す：保存した値に書き戻す ---
+while read -r s name disable; do echo "$disable" | sudo tee "$s/disable" >/dev/null; done < "$D/cstate-before.txt"
+
+# --- H2：NIC の IRQ を uhd-tx と別の core に固定する（H1 で差が無いときだけ．H1 の設定は戻さずに重ねてよい）---
+NIC=enp1s0f1np1                                      # #1．#2 は enp1s0f0np0
+IRQS=$(awk -v nic="$NIC" '$0 ~ nic { sub(":", "", $1); print $1 }' /proc/interrupts)
+for i in $IRQS; do echo "$i $(cat /proc/irq/$i/smp_affinity_list)"; done > "$D/irq-before.txt"                      # 戻すための記録
+systemctl is-active irqbalance                       # active なら，止めるか（sudo systemctl stop irqbalance），戻すとき start する
+for i in $IRQS; do echo 0-3 | sudo tee /proc/irq/$i/smp_affinity_list >/dev/null; done                                 # NIC の IRQ を core 0〜3 に
+export EZSDR_BENCH_CPUSET=4-15                       # container（Module と tx_repro の thread）を core 4〜15 に（docker --cpuset-cpus）
+# --- H2 を戻す ---
+unset EZSDR_BENCH_CPUSET
+while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affinity_list >/dev/null; done < "$D/irq-before.txt"
+```
+
+- H2 は「uhd-tx の core から NIC の IRQ を離す」を，core 0〜3（IRQ）と 4〜15（container）に分ける形で行う（owner の「IRQ affinity を 1 core から離す」より強い形．INFERRED で十分．uhd-tx の core を正確に知りたければ，run 中に `ps -eLo tid,psr,comm | grep uhd-tx` で読んで，その core だけを IRQ の集合から外してもよい）．16 core の host を前提：core の数が違えば範囲を変える．
+- 設定ごとに run のあいだに host の他の負荷が無いこと（`uptime`）を確かめ，`bench-host.sh` の出力を ① ② ③ の log と並べて残す．
+- **`irqbalance` が走っていると affinity は戻される**：H2 の前に `systemctl is-active irqbalance`．
+
+### 流した後・stop・記録
+
+- stop：`EZSDR-INFRA`，`Control operation timed out`，`Reference Clock PLL failed to lock`，`S2 stop`／`S4 stop`（handle の latch，streamer の取り残し）→ **電源を入れ直し owner へ**．T200 の ① で INCONCLUSIVE の run（RF 読み戻しの abort，summary の欠け，期限切れ）→ 装置を確かめ直す（期限切れは container を kill してあり，その script は以降の run を流さない．ほかに `docker ps` で `ezsdr-t200-bare-*` が残っていないかを見る）．
+- orchestrator に返すもの：commit，各 log の path（`~/.cache/ezsdr-bench/<日付>/`），**決定の行**（`S2 decision`×cell，`S5 decision`×pass，`S4 decision`（cell ごと，`D5 bound`，`stall length`），`T200 decision`，`T200 bare summary`），2 台分，host の設定（H0/H1/H2）ごとの `bench-host.sh` の出力，電源の入れ直しの有無，att の型番（owner の確認）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．
+- 結果から決まること（orchestrator と owner が決める．**今日は値を変えない**）：D1（`rx_bytes_per_s` 8e8 の確認：#1・#2 の `rx-200msps` が 10/10 か．落ちれば 4e8），D2（TX 200 MS/s の admission：`tx-200msps` の 10 s の窓の figure と T200），D3（command lead 5 ms），D4（受信 start lead 10 ms），D5（gap の 140 ms と RM-17：4b の design の step への入力）．
