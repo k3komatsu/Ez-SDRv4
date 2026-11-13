@@ -794,7 +794,7 @@ impl Tx {
     fn reopen_streamer(&mut self, mut streams: Locked<'_, Streams>) -> bool {
         let core = self.core.clone();
         let key = stream_key(Dir::Tx, self.k);
-        let (claim, id, configured) = {
+        let (claim, id, configured, not_before) = {
             if streams.stop.is_some() || core.is_lost() {
                 let device = &mut streams.stream_mut(key).book.device;
                 if core.is_lost() {
@@ -805,15 +805,22 @@ impl Tx {
                 return false;
             }
             let Some(claim) = streams.claim_owner(key) else { return false };
-            (claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured)
+            // UR-22: a flush ACK older than the old burst's padded end (the front less its close's gap, taken as the smallest) is that burst's own.
+            let not_before = self
+                .clock
+                .zip(streams.stream(key).book.device.front())
+                .filter(|(clock, (domain, _))| clock.domain == *domain)
+                .and_then(|(clock, (_, front))| clock.try_instant(front.saturating_sub(CLOSE_GAP)))
+                .map_or(i64::MIN, |end| end.saturating_add(2));
+            (claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured, not_before)
         };
         drop(streams);
         core.probe("tx_reopen_claimed", None);
-        let result = core.reopen_tx_streamer(self.k, self.channels);
+        let result = core.reopen_tx_streamer(self.k, self.channels, not_before);
         core.probe("tx_reopen_done", None);
         // The flush is a closed short burst (UR-22, UR-33): its exclusive end is the ack's tick less one master tick.
         let flush_front = match (&result, self.clock) {
-            (Ok(flush), Some(clock)) if flush.acknowledged => flush.ack_tick.map(|tick| (clock.domain, close_front(clock.at_or_after(tick.saturating_sub(1)), 0, self.short_gap(clock)))),
+            (Ok(confirmed), Some(clock)) => Some((clock.domain, close_front(clock.at_or_after(confirmed.ack_tick.saturating_sub(1)), 0, self.short_gap(clock)))),
             _ => None,
         };
         let mut halted = false;
@@ -1309,6 +1316,7 @@ mod tests {
     mod e2b;
     mod e3;
     mod e3b;
+    mod n75;
     mod n99;
     mod o1;
 
@@ -1366,6 +1374,7 @@ mod tests {
         lock(&core.streams).give_back(claim);
         assert!(tx.pass(), "the owner retries the reopen after the claim is returned");
         assert!(!tx.chain().needs_reopen());
+        crate::provider::test_support::assert_no_flush_rows(&core);
         assert!(device.calls().iter().any(|call| call == "tx_send 0 n=4 at=- sob=true eob=true"), "the retry runs T3: {:?}", device.calls());
 
         let (stopped_core, stopped_device, _, _) = super::super::test_support::rig();
@@ -1568,6 +1577,7 @@ mod tests {
             }
             assert!(tx.pass(), "the owner did not replace the uncertain streamer");
             assert!(!tx.chain().needs_reopen());
+            crate::provider::test_support::assert_no_flush_rows(&core);
             assert!(device.calls().iter().all(|call| !call.contains(&target_send)), "the reopen turn sent B before its T3 completed: {:?}", device.calls());
             assert!(tx.pass(), "B was not sent after recovery");
             let calls = device.calls();
@@ -1579,66 +1589,216 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3() {
-        for fault in [FakeFault::DropBurstAck, FakeFault::ShortSend(0), FakeFault::FailSend(0)] {
-            let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, faults: vec![fault.clone()], ..FakeConfig::default() }));
-            let (core, _time, mut tx, clock, _events) = recovery_rig(device.clone());
-            let old_front = (clock.domain, 123);
-            tx.chain().advance_front(old_front.0, old_front.1);
-            let old_target = TimePoint::new(clock.domain, 10);
-            tx.remember_burst(old_target);
-            let old_generation = tx.streamer;
-            let target = clock.at_or_after(core.now() + core.ticks(60_000_000));
-            hold(&tx, held(&clock, target, 1, LatePolicy::DropAndFlag));
-            tx.chain().mark_reopen_needed();
+    /// `Tx::pass` run as a participant of the device's host clock (the flush and the reopen wait on it), the owner and a new freeze given back.
+    fn pass_on(tx: Tx, frozen: Frozen, device: &FakeDevice) -> (Tx, bool, Frozen) {
+        let ((tx, worked), frozen) = crate::provider::test_support::released(frozen, &device.host(), move || {
+            let mut tx = tx;
+            let worked = tx.pass();
+            (tx, worked)
+        });
+        (tx, worked, frozen)
+    }
 
-            let host = core.device.host();
-            let clock_host = host.clone();
-            let clock_driver = host.spawn("tx-flush-deadline", move || clock_host.sleep(Wall::from_millis(150))).expect("a manual-clock participant");
-            assert!(tx.pass(), "the owner did not complete its non-lost reopen ({fault:?})");
-            clock_driver.join().unwrap();
-            assert_eq!(tx.chain().recovery(), Recovery::Clean, "Clean retains its current meaning ({fault:?})");
-            assert_eq!(tx.chain().front(), Some(old_front), "an unacknowledged T3 has no tick to advance the front ({fault:?})");
-            assert_ne!(tx.streamer, old_generation, "the replacement generation was adopted ({fault:?})");
-            assert!(tx.unacked.is_empty(), "old-generation correlations are discarded ({fault:?})");
-            assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").count(), 1, "the incomplete T3 is recorded ({fault:?}): {:?}", lock(&core.rec).rejected);
-            assert!(lock(&core.rec).device_async.iter().all(|row| row["tx_flush"] != true || row["code"] != "BurstAck"), "an absent acknowledgement is not recorded as one ({fault:?})");
-            assert!(!device.calls().iter().any(|call| call.contains(&format!("at={} sob=true", clock.instant(target)))), "no experiment payload crossed the reopen turn ({fault:?})");
-
-            assert!(tx.pass(), "Clean recovery did not permit the next owner dispatch ({fault:?})");
-            assert!(
-                device.calls().iter().any(|call| call == &format!("tx_send 0 n=4 at={} sob=true eob=true", clock.instant(target))),
-                "the next timed dispatch follows today's Clean behavior ({fault:?}): {:?}",
-                device.calls()
-            );
-            assert!(tx.unacked.iter().any(|pending| pending.target == TimePoint::new(clock.domain, target)), "the new-generation burst has its own correlation ({fault:?})");
+    /// The rig of a retried recovery flush (UR-22) before its bookings: a manual-clock fake with `faults` and the old front 123 (a padded end at
+    /// 120). With `past_front` both clocks start just past the old front's padded end, so attempt 1's floor is the device time; without, the old
+    /// front leads device time.
+    #[allow(clippy::type_complexity)]
+    fn retry_rig_without_burst(faults: Vec<FakeFault>, past_front: bool) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, Clock, Arc<EventCollector>, Frozen) {
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() }));
+        let frozen = Frozen::of(&device);
+        let (core, time, mut tx, clock, events) = recovery_rig(device.clone());
+        tx.chain().advance_front(clock.domain, 123);
+        tx.remember_burst(TimePoint::new(clock.domain, 10));
+        if past_front {
+            device_at(&core, &time, &device, clock.instant(123) + 1);
         }
+        (core, device, time, tx, clock, events, frozen)
+    }
 
-        let config = FakeConfig { clock: crate::ClockMode::Manual, faults: vec![FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck), FakeFault::DropBurstAck], ..FakeConfig::default() };
-        let (core, device, _time, _) = super::super::test_support::rig_with(config, Vec::new());
-        device.tx_open(0, &[0, 1]).unwrap();
-        let clock = core.register(Dir::Tx, 200, 0).unwrap();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(2));
-        let old_front = (clock.domain, -1);
-        tx.chain().advance_front(old_front.0, old_front.1);
+    /// [`retry_rig_without_burst`] with a burst held 500 ms ahead and the recovery pending.
+    #[allow(clippy::type_complexity)]
+    fn retry_rig(faults: Vec<FakeFault>, past_front: bool) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, Clock, Arc<EventCollector>, Frozen, i64) {
+        let (core, device, time, tx, clock, events, frozen) = retry_rig_without_burst(faults, past_front);
+        let target = clock.at_or_after(core.now() + core.ticks(500_000_000));
+        hold(&tx, held(&clock, target, 1, LatePolicy::DropAndFlag));
         tx.chain().mark_reopen_needed();
-        let host = core.device.host();
-        let clock_host = host.clone();
-        let clock_driver = host.spawn("tx-partial-ack-deadline", move || clock_host.sleep(Wall::from_millis(150))).expect("a manual-clock participant");
+        (core, device, time, tx, clock, events, frozen, target)
+    }
 
-        assert!(tx.pass(), "the owner did not finish the partial-ack reopen");
-        clock_driver.join().unwrap();
+    /// The `COMMAND_REJECTED` events' kinds, in order, and the other event kinds' count of `kind`.
+    fn rejected_kinds(events: &EventCollector) -> Vec<String> {
+        events
+            .drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
+            .into_iter()
+            .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED)
+            .map(|event| event.payload["kind"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    fn flush_ack_ticks(core: &Core) -> Vec<i64> {
+        lock(&core.rec).device_async.iter().filter(|row| row["tx_flush"] == true && row["code"] == "BurstAck").filter_map(|row| row["tick"].as_i64()).collect()
+    }
+
+    #[test]
+    fn ur_22_an_unconfirmed_t3_is_retried_and_recovery_ends_only_on_a_confirmed_one() {
+        for (faults, attempts, waits) in [
+            (vec![FakeFault::DropAckOfSend(0)], 2, 100),
+            (vec![FakeFault::StalledSend(0)], 2, 0),
+            (vec![FakeFault::ShortSend(0)], 2, 0),
+            (vec![FakeFault::FailSend(0)], 2, 0),
+            (vec![FakeFault::DropAckOfSend(0), FakeFault::DropAckOfSend(1)], 3, 200),
+        ] {
+            let (core, device, time, tx, clock, events, frozen, target) = retry_rig(faults.clone(), true);
+            let old_generation = tx.streamer;
+            let before = device.time_now().unwrap();
+            let (tx, worked, frozen) = pass_on(tx, frozen, &device);
+            let elapsed = device.time_now().unwrap() - before;
+            assert!(worked, "the owner did not complete its reopen ({faults:?})");
+            assert_eq!(tx.chain().recovery(), Recovery::Clean, "{faults:?}");
+            let rows = crate::provider::test_support::flush_attempt_rows(&core);
+            assert_eq!(rows.iter().map(|row| row["attempt"].as_u64().unwrap()).collect::<Vec<_>>(), (1..attempts).collect::<Vec<u64>>(), "one row per unconfirmed attempt ({faults:?}): {rows:?}");
+            let ticks = flush_ack_ticks(&core);
+            assert_eq!(ticks.len(), 1, "only the confirmed attempt's ack is the flush's ({faults:?})");
+            assert_eq!(tx.chain().front(), Some((clock.domain, super::close_front(clock.at_or_after(ticks[0] - 1), 0, tx.short_gap(clock)))), "the front is the confirmed ack's ({faults:?})");
+            assert_ne!(tx.chain().front(), Some((clock.domain, 123)), "the old front is not kept ({faults:?})");
+            assert_ne!(tx.streamer, old_generation, "the replacement generation was adopted ({faults:?})");
+            assert!(tx.unacked.is_empty(), "old-generation correlations are discarded ({faults:?})");
+            assert!(elapsed >= core.ticks(waits * 1_000_000) && elapsed < core.ticks((waits + 40) * 1_000_000), "{faults:?}: the attempts cost {} ms of device time", core.ns(elapsed) / 1_000_000);
+            let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+            assert!(
+                events.iter().all(|event| !matches!(event.kind.as_str(), ezsdr_radio::kinds::COMMAND_REJECTED | ezsdr_radio::kinds::TIME_ERROR)),
+                "a recovered stream is not rejected ({faults:?}): {events:?}"
+            );
+            let at_target = format!("at={} sob=true", clock.instant(target));
+            assert!(device.calls().iter().all(|call| !call.contains(&at_target)), "no experiment payload crossed the reopen turn ({faults:?})");
+            assert!(held_keys(&tx).contains(&target), "the burst is still held ({faults:?})");
+            let shape = crate::provider::test_support::t3_calls(&device);
+            assert_eq!(shape.iter().filter(|call| **call == "send").count(), attempts as usize, "{faults:?}: {shape:?}");
+
+            // The Kernel's clock follows the device's, inside the window of the burst: it is sent, once, after the last flush.
+            device_at(&core, &time, &device, clock.instant(target) - core.ticks(100_000_000));
+            let (_tx, worked, frozen) = pass_on(tx, frozen, &device);
+            assert!(worked, "the burst was not dispatched ({faults:?})");
+            let calls = device.calls();
+            let sends: Vec<usize> = calls.iter().enumerate().filter(|(_, call)| call.contains(&at_target)).map(|(index, _)| index).collect();
+            let last_flush = calls.iter().rposition(|call| call.starts_with("tx_send") && call.contains("at=- ")).unwrap();
+            assert!(sends.len() == 1 && sends[0] > last_flush, "the burst follows the last flush ({faults:?}): {calls:?}");
+            drop(frozen);
+        }
+    }
+
+    #[test]
+    fn ur_22_a_flush_ack_below_the_old_burst_s_padded_end_costs_an_attempt() {
+        // The old front leads device time: the fake's genuine ack (a few hundred ticks past device time) is below the floor, so attempt 1 is unconfirmed and attempt 2, 100 ms later, confirms.
+        let (core, device, _time, tx, clock, events, frozen, _target) = retry_rig(Vec::new(), false);
+        let before = device.time_now().unwrap();
+        let (tx, worked, frozen) = pass_on(tx, frozen, &device);
+        assert!(worked);
         assert_eq!(tx.chain().recovery(), Recovery::Clean);
-        assert_eq!(tx.chain().front(), Some(old_front), "one channel ack is not a completed T3 front");
-        let rec = lock(&core.rec);
+        let rows = crate::provider::test_support::flush_attempt_rows(&core);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0]["error"].as_str().unwrap().contains("BurstAck missing"), "{rows:?}");
+        assert!(device.time_now().unwrap() - before >= core.ticks(100_000_000), "attempt 2 starts after attempt 1's 100 ms");
+        let ticks = flush_ack_ticks(&core);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(tx.chain().front(), Some((clock.domain, super::close_front(clock.at_or_after(ticks[0] - 1), 0, tx.short_gap(clock)))));
+        assert!(rejected_kinds(&events).is_empty());
+        drop(frozen);
+    }
+
+    #[test]
+    fn ur_22_the_floor_of_a_flush_ack_is_the_old_burst_s_padded_end_plus_two_ticks() {
+        // The old front 123 is a padded end at sample 120 (tick 24 000) and the gap 3; a burst's own ack is stamped one tick after its padded end.
+        // The fake's ack of the flush is the device time at its send plus 801 ticks (four samples of 200 and one): it is the old burst's own
+        // (end + 1) and refused, or genuine (end + 2) and accepted, depending on where device time stands.
+        for (ack_at, confirmed) in [(24_001, false), (24_002, true)] {
+            let (core, device, time, tx, clock, events, frozen, _target) = retry_rig(Vec::new(), false);
+            assert_eq!(clock.instant(120), 24_000);
+            device_at(&core, &time, &device, ack_at - 801);
+            let (tx, worked, _frozen) = pass_on(tx, frozen, &device);
+            assert!(worked);
+            assert_eq!(tx.chain().recovery(), Recovery::Clean);
+            let rows = crate::provider::test_support::flush_attempt_rows(&core);
+            assert_eq!(rows.len(), usize::from(!confirmed), "an ack at tick {ack_at}: {rows:?}");
+            assert!(rejected_kinds(&events).is_empty());
+        }
+    }
+
+    #[test]
+    fn ur_22_three_unconfirmed_t3s_end_the_transmit_stream() {
+        for faults in [
+            vec![FakeFault::DropBurstAck],
+            vec![FakeFault::StalledSend(0), FakeFault::StalledSend(1), FakeFault::StalledSend(2)],
+            vec![FakeFault::ShortSend(0), FakeFault::ShortSend(1), FakeFault::ShortSend(2)],
+            vec![FakeFault::FailSend(0), FakeFault::FailSend(1), FakeFault::FailSend(2)],
+        ] {
+            let (core, device, _time, tx, clock, events, frozen, target) = retry_rig(faults.clone(), true);
+            let key = stream_key(Dir::Tx, 0);
+            let (mut tx, worked, frozen) = pass_on(tx, frozen, &device);
+            assert!(worked, "{faults:?}");
+            assert!(!tx.chain().needs_reopen(), "{faults:?}");
+            assert!(tx.clock.is_none(), "a failed recovery ends the stream's clock ({faults:?})");
+            assert!(held_keys(&tx).is_empty(), "the held burst was cancelled ({faults:?})");
+            assert_eq!(tx.chain().front(), Some((clock.domain, 123)), "{faults:?}");
+            let rows = crate::provider::test_support::flush_attempt_rows(&core);
+            assert_eq!(rows.iter().map(|row| row["attempt"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3], "{faults:?}: {rows:?}");
+            let rejected = lock(&core.rec).rejected.clone();
+            assert!(rejected.iter().any(|row| row["reason"] == "UR-22: cancelled because the TX streamer could not be reopened"), "{faults:?}: {rejected:?}");
+            assert_eq!(
+                rejected.iter().filter(|row| row["kind"] == "tx_reopen" && row["reason"].as_str().is_some_and(|reason| reason.contains("after 3 attempts"))).count(),
+                1,
+                "{faults:?}: {rejected:?}"
+            );
+            assert_eq!(rejected_kinds(&events), ["tx_burst", "tx_reopen"], "one event for the cancelled burst and one for the failed recovery, none per attempt ({faults:?})");
+            assert!(!core.is_lost(), "{faults:?}");
+            assert_eq!(crate::provider::test_support::t3_calls(&device).last(), Some(&"close"), "the last streamer is closed ({faults:?})");
+            assert!(device.calls().iter().all(|call| !call.contains(&format!("at={} ", clock.instant(target)))), "no payload ({faults:?})");
+            assert_eq!(lock(&core.streams).holder(key), Holder::Free, "{faults:?}");
+            assert_eq!(lock(&core.streams).stream(key).set, crate::provider::core::DeviceSet::Unknown, "{faults:?}");
+
+            give(&mut tx, held(&clock, target + 1_000, 1, LatePolicy::DropAndFlag));
+            tx.pass();
+            let refused = lock(&core.rec).rejected.iter().filter(|row| row["reason"] == "UR-25: its transmit clock ended before the burst could start").count();
+            assert_eq!(refused, 1, "a later burst is refused once ({faults:?})");
+            assert_eq!(rejected_kinds(&events), ["tx_burst"], "{faults:?}");
+            drop(frozen);
+        }
+    }
+
+    #[test]
+    fn ur_22_a_partial_ack_on_every_attempt_is_unconfirmed() {
+        let two_channels = |faults: Vec<FakeFault>| {
+            let config = FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() };
+            let (core, device, _time, _events) = super::super::test_support::rig_with(config, Vec::new());
+            let frozen = Frozen::of(&device);
+            device.tx_open(0, &[0, 1]).unwrap();
+            let clock = core.register(Dir::Tx, 200, 0).unwrap();
+            let (_to_tx, cmds) = std::sync::mpsc::channel();
+            let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(2));
+            tx.chain().advance_front(clock.domain, -1);
+            tx.chain().mark_reopen_needed();
+            (core, device, tx, clock, frozen)
+        };
+        let (core, device, tx, _clock, frozen) = two_channels(vec![FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck), FakeFault::DropBurstAck]);
+        let (tx, worked, _frozen) = pass_on(tx, frozen, &device);
+        assert!(worked);
+        assert!(tx.clock.is_none(), "one channel's ack never confirms a flush");
+        assert_eq!(crate::provider::test_support::flush_attempt_rows(&core).len(), 3);
         assert_eq!(
-            rec.device_async.iter().filter(|row| row["tx_flush"] == true).map(|row| row["channel"].as_u64()).collect::<Vec<_>>(),
+            lock(&core.rec).device_async.iter().filter(|row| row["tx_flush"] == true).map(|row| row["channel"].as_u64()).collect::<Vec<_>>(),
             [Some(0)],
-            "the first channel ack is recorded while the second remains missing"
+            "the first channel's ack is recorded once, never as a completed flush"
         );
-        assert_eq!(rec.rejected.iter().filter(|row| row["call"] == "tx_flush").count(), 1);
+
+        let (core, device, tx, clock, frozen) = two_channels(vec![FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck), FakeFault::DropAckOfSend(0)]);
+        let (tx, worked, _frozen) = pass_on(tx, frozen, &device);
+        assert!(worked);
+        assert_eq!(tx.chain().recovery(), Recovery::Clean);
+        assert_eq!(crate::provider::test_support::flush_attempt_rows(&core).len(), 1);
+        let rows: Vec<_> = lock(&core.rec).device_async.iter().filter(|row| row["tx_flush"] == true).map(|row| (row["channel"].as_u64(), row["tick"].as_i64().unwrap())).collect();
+        assert_eq!(rows.iter().map(|row| row.0).collect::<Vec<_>>(), [Some(0), Some(0), Some(1)], "attempt 1's channel 0, then attempt 2's two: {rows:?}");
+        let largest = rows[1].1.max(rows[2].1);
+        assert_eq!(tx.chain().front(), Some((clock.domain, super::close_front(clock.at_or_after(largest - 1), 0, tx.short_gap(clock)))), "the front is the largest ack tick of the confirmed attempt");
     }
 
     #[test]
@@ -4382,12 +4542,15 @@ mod tests {
             assert_eq!(tx.unacked.len(), 1, "{fault:?}: the old experiment burst stays correlated");
 
             txp_give(&mut tx, txp_burst(&clock, 1_000_000, 1, false, LatePolicy::DropAndFlag));
+            // The flush's ack must be at or after the old front's padded end (UR-22): both clocks are past it before the reopen.
+            device_at(&core, &time, &device, 201);
             // The recovery flush waits for its ack on the device's clock: it runs as a participant, and the clock is held again before it ends.
             let ((mut tx, passed), frozen) = crate::provider::test_support::released(frozen, &device.host(), move || {
                 let passed = tx.pass();
                 (tx, passed)
             });
             assert!(passed, "{fault:?}: the owner did not reopen the uncertain streamer");
+            crate::provider::test_support::assert_no_flush_rows(&core);
             let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
             assert!(sends[2].contains("n=4 at=- sob=true eob=true"), "{fault:?}: recovery flush was not the first send after the failed close: {sends:?}");
             assert_eq!(sends.len(), 3, "{fault:?}: timed experiment data crossed streamer replacement: {sends:?}");
@@ -4454,6 +4617,7 @@ mod tests {
         });
         assert!(recovered, "streamer replacement and recovery flush were not attempted");
         assert!(!tx.chain().needs_reopen());
+        crate::provider::test_support::assert_no_flush_rows(&core);
         let flush_tick =
             lock(&core.rec).device_async.iter().find(|row| row["tx_flush"] == true && row["code"] == "BurstAck").and_then(|row| row["tick"].as_i64()).expect("the recovery flush ack was recorded");
         assert_eq!(tx.chain().front(), Some((clock.domain, clock.at_or_after(flush_tick - 1) + GAP_200MSPS)), "the recovered flush ack establishes the safe front the gap past the flush");
@@ -6565,6 +6729,7 @@ mod tests {
         tx.chain().mark_reopen_needed();
         assert!(tx.pass(), "the reopen runs");
         assert!(!tx.chain().needs_reopen() && device.calls().iter().any(|call| call.starts_with("tx_open")), "{:?}", device.calls());
+        crate::provider::test_support::assert_no_flush_rows(&core);
         assert_eq!(lock(&core.streams).stream(key).configured, Some(1), "a reopen keeps the mark");
         core.device_lost("test: the device is lost");
         assert_eq!(lock(&core.streams).stream(key).configured, None, "a loss clears the mark");

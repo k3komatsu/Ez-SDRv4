@@ -5653,8 +5653,8 @@
    "id": "P403",
    "name": "the owner's open is recorded before the device call (UR-25, S13b)",
    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-   "old": "        let stream = stream_key(dir, k);\n        let opened = if dir == Dir::Tx { self.open_tx_device(k, set).map(|_| ()) } else { self.open_device(dir, k, set) };\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if opened.is_ok() && checked.is_err() && !self.is_lost() {\n            self.close_device(dir, k);\n        }\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
-   "new": "        let stream = stream_key(dir, k);\n        lock(&self.streams).record_opened(stream, set, &Ok(()), &Ok(()));\n        let opened = if dir == Dir::Tx { self.open_tx_device(k, set).map(|_| ()) } else { self.open_device(dir, k, set) };\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if opened.is_ok() && checked.is_err() && !self.is_lost() {\n            self.close_device(dir, k);\n        }\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
+   "old": "let stream = stream_key(dir, k);\n        let opened = match dir {",
+   "new": "let stream = stream_key(dir, k);\n        lock(&self.streams).record_opened(stream, set, &Ok(()), &Ok(()));\n        let opened = match dir {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_an_open_is_recorded_only_after_the_device_returns"
@@ -10452,9 +10452,10 @@
        "id": "P1193",
        "name": "a held owner claim defers streamer reopen to an idle turn (D9b-1a)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "let Some(claim) = streams.claim_owner(key) else { return false }; (claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured)",
-       "new": "let Some(claim) = streams.claim_owner(key) else { return true }; (claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured)",
-       "crate": "ezsdr-radio-uhd",
+       "old": "let Some(claim) = streams.claim_owner(key) else { return false };",
+       "new": "let Some(claim) = streams.claim_owner(key) else { return true };",
+       "scope": "fn reopen_streamer",
+        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_22_uncertain_reopen_waits_for_owner_claim_and_stops_on_stop_or_loss"
       },
@@ -10836,7 +10837,7 @@
         "new": "None",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
-        "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
+        "filter": "ur_22_an_unconfirmed_t3_is_retried_and_recovery_ends_only_on_a_confirmed_one"
       },
       {
         "id": "P1299",
@@ -10896,7 +10897,7 @@
         "new": "            let _ = self.unacked.len();",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
-        "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
+        "filter": "ur_22_an_unconfirmed_t3_is_retried_and_recovery_ends_only_on_a_confirmed_one"
       },
       {
         "id": "P1309",
@@ -10917,16 +10918,6 @@
         "crate": "ezsdr-radio",
         "test_bin": "staging",
         "filter": "e3b_b3_front_domains"
-      },
-      {
-        "id": "P1312",
-        "name": "only a fully acknowledged T3 advances the front (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "(Ok(flush), Some(clock)) if flush.acknowledged =>",
-        "new": "(Ok(flush), Some(clock)) if true =>",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
       },
       {
         "id": "P1313",
@@ -12828,8 +12819,8 @@
       "id": "N48S1-02",
       "name": "the reopen front is the flush end plus the gap, plus two (UR-22, TBD-d2)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "close_front(clock.at_or_after(tick.saturating_sub(1)), 0, self.short_gap(clock))",
-      "new": "close_front(clock.at_or_after(tick.saturating_sub(1)), 2, self.short_gap(clock))",
+      "old": "close_front(clock.at_or_after(confirmed.ack_tick.saturating_sub(1)), 0, self.short_gap(clock))",
+      "new": "close_front(clock.at_or_after(confirmed.ack_tick.saturating_sub(1)), 2, self.short_gap(clock))",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_22_a_failed_one_sample_padded_eob_is_not_safe_until_flush_recovery"
@@ -12888,8 +12879,8 @@
       "id": "N48S1-09",
       "name": "a flush's BurstAck does not acknowledge its channel (UR-22 T3)",
       "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-      "old": "if report.code == TxCode::BurstAck && expected.contains(&report.channel) && acknowledged.insert(report.channel) {",
-      "new": "if report.code == TxCode::BurstAck && expected.contains(&report.channel) && acknowledged.insert(report.channel) && false {",
+      "old": "if report.code == TxCode::BurstAck && expected.contains(&report.channel) && floor.is_none_or(|floor| report.tick.is_some_and(|tick| tick >= floor)) && acknowledged.insert(report.channel) {",
+      "new": "if report.code == TxCode::BurstAck && expected.contains(&report.channel) && floor.is_none_or(|floor| report.tick.is_some_and(|tick| tick >= floor)) && acknowledged.insert(report.channel) && false {",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_22_t3_flush_requires_each_channel_ack_and_device_loss_stays_distinct"
@@ -17775,10 +17766,10 @@
   "id": "E2B-20",
   "name": "E2b: the reopen is issued before the stop, loss and claim checks, so a refused claim leaves it in flight",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let (claim, id, configured) = { if streams.stop.is_some() || core.is_lost() {",
-  "new": "let (claim, id, configured) = { let early = streams.stream_mut(key).book.issue_reopen(); if streams.stop.is_some() || core.is_lost() {",
-  "old2": "(claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured)",
-  "new2": "(claim, early, streams.stream(key).configured)",
+  "old": "let (claim, id, configured, not_before) = { if streams.stop.is_some() || core.is_lost() {",
+  "new": "let (claim, id, configured, not_before) = { let early = streams.stream_mut(key).book.issue_reopen(); if streams.stop.is_some() || core.is_lost() {",
+  "old2": "(claim, streams.stream_mut(key).book.issue_reopen(), streams.stream(key).configured, not_before)",
+  "new2": "(claim, early, streams.stream(key).configured, not_before)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_22_uncertain_reopen_waits_for_owner_claim_and_stops_on_stop_or_loss"
@@ -22076,5 +22067,375 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "a_channel_that_filters_the_pn_does_not_turn_an_unshifted_restart_into_neither"
+ },
+ {
+  "id": "N75-01",
+  "name": "the recovery flush is tried four times (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "const T3_ATTEMPTS: usize = 3;",
+  "new": "const T3_ATTEMPTS: usize = 4;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_three_unconfirmed_attempts_fail_and_close_their_streamer"
+ },
+ {
+  "id": "N75-02",
+  "name": "the recovery flush is tried twice (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "const T3_ATTEMPTS: usize = 3;",
+  "new": "const T3_ATTEMPTS: usize = 2;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_t3_ends_on_the_first_confirmed_attempt_on_a_fresh_streamer"
+ },
+ {
+  "id": "N75-03",
+  "name": "three unconfirmed attempts end the loop in success (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "Err(DeviceError::failed(format!(\"UR-22: the recovery flush was not confirmed after {T3_ATTEMPTS} attempts: {last}\")))",
+  "new": "Ok(Confirmed { ack_tick: 0 })",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_three_unconfirmed_attempts_fail_and_close_their_streamer"
+ },
+ {
+  "id": "N75-04",
+  "name": "the streamer of the last unconfirmed attempt stays open (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "self.close_device(Dir::Tx, k); Err(DeviceError::failed(format!(",
+  "new": "Err(DeviceError::failed(format!(",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_three_unconfirmed_attempts_fail_and_close_their_streamer"
+ },
+ {
+  "id": "N75-05a",
+  "name": "the retry does not check for a Stop or a loss before it closes the streamer (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "self.probe(\"t3_between\", None); self.t3_interrupted()?; self.close_device(Dir::Tx, k);",
+  "new": "self.probe(\"t3_between\", None); self.close_device(Dir::Tx, k);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_stop_and_loss_at_each_boundary_of_the_retry"
+ },
+ {
+  "id": "N75-05b",
+  "name": "the retry does not check for a Stop or a loss between the close and the open (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "retired.extend(lock(&self.tx_report_stash[k]).drain(..)); self.t3_interrupted()?;",
+  "new": "retired.extend(lock(&self.tx_report_stash[k]).drain(..));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_stop_between_the_close_and_the_open_opens_nothing"
+ },
+ {
+  "id": "N75-05c",
+  "name": "the retry does not check for a Stop or a loss between the open and the flush (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "self.open_device_locked(Dir::Tx, k, set)?; self.t3_interrupted()?;",
+  "new": "self.open_device_locked(Dir::Tx, k, set)?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_stop_and_loss_at_each_boundary_of_the_retry"
+ },
+ {
+  "id": "N75-06",
+  "name": "a partial acknowledgement confirms an attempt (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "if flush.acknowledged {",
+  "new": "if flush.ack_tick.is_some() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_whole_send_is_confirmed_only_by_every_channel_position"
+ },
+ {
+  "id": "N75-07",
+  "name": "the confirmed tick is the smallest, not the largest (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "(Some(old), Some(tick)) => Some(old.max(tick)),",
+  "new": "(Some(old), Some(tick)) => Some(old.min(tick)),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_the_confirmed_tick_is_the_largest_ack_tick_across_positions"
+ },
+ {
+  "id": "N75-08a",
+  "name": "an ack at the floor is not the attempt's (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "report.tick.is_some_and(|tick| tick >= floor)",
+  "new": "report.tick.is_some_and(|tick| tick > floor)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_an_ack_older_than_the_floor_is_not_this_attempts"
+ },
+ {
+  "id": "N75-08b",
+  "name": "an ack older than the floor is the attempt's (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "floor.is_none_or(|floor| report.tick.is_some_and(|tick| tick >= floor))",
+  "new": "floor.is_none_or(|_| report.tick.is_some())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_an_ack_older_than_the_floor_is_not_this_attempts"
+ },
+ {
+  "id": "N75-08c",
+  "name": "a tickless ack confirms an attempt (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "report.tick.is_some_and(|tick| tick >= floor)",
+  "new": "report.tick.is_none_or(|tick| tick >= floor)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_an_ack_older_than_the_floor_is_not_this_attempts"
+ },
+ {
+  "id": "N75-09",
+  "name": "a send that put nothing out still waits for an ack (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "(Some(_), Some(text)) = (attempt, &problem)",
+  "new": "(Some(_), Some(text)) = (None::<Attempt>, &problem)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_send_that_is_not_whole_ends_its_attempt_at_once"
+ },
+ {
+  "id": "N75-10",
+  "name": "a strict attempt's failed send is rejected as an event again (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "if attempt.is_none() || error.lost {",
+  "new": "if true || error.lost {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_send_that_is_not_whole_ends_its_attempt_at_once"
+ },
+ {
+  "id": "N75-11",
+  "name": "a report stashed in an attempt is lost with the next open (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "self.close_device(Dir::Tx, k); retired.extend(lock(&self.tx_report_stash[k]).drain(..));",
+  "new": "self.close_device(Dir::Tx, k);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_report_an_unconfirmed_attempt_stashed_makes_its_event_after_the_recovery"
+ },
+ {
+  "id": "N75-13",
+  "name": "the open at arm takes the confirmed loop while the switch is off (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "Dir::Tx => self.open_tx_device(k, set).map(|_| ()),",
+  "new": "Dir::Tx => self.open_tx_confirmed(k, set, i64::MIN).map(|_| ()),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_with_the_switch_off_the_open_flush_is_todays"
+ },
+ {
+  "id": "N75-14",
+  "name": "the open flush switch is read the wrong way round (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "Dir::Tx if OPEN_FLUSH_CONFIRMED =>",
+  "new": "Dir::Tx if !OPEN_FLUSH_CONFIRMED =>",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_with_the_switch_off_the_open_flush_is_todays"
+ },
+ {
+  "id": "N75-15",
+  "name": "a confirmed recovery flush gives no front (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "(Ok(confirmed), Some(clock)) =>",
+  "new": "(Ok(confirmed), Some(clock)) if false =>",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_an_unconfirmed_t3_is_retried_and_recovery_ends_only_on_a_confirmed_one"
+ },
+ {
+  "id": "N75-16",
+  "name": "the fake drops the ack of the wrong send (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "FakeFault::DropAckOfSend(nth)",
+  "new": "FakeFault::DropAckOfSend(nth + 1)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_t3_ends_on_the_first_confirmed_attempt_on_a_fresh_streamer"
+ },
+ {
+  "id": "N75-17",
+  "name": "the 2 s cap on failing pre-send time reads is never reached (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "if host.now().saturating_sub(since) >= T3_READ_CAP {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss_or_the_cap"
+ },
+ {
+  "id": "N75-18",
+  "name": "the floor ignores the old burst's padded end (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "return Ok(now.max(attempt.not_before));",
+  "new": "return Ok(now);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_an_ack_older_than_the_floor_is_not_this_attempts"
+ },
+ {
+  "id": "N75-19",
+  "name": "the open at arm takes the strict ack rule (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "let flush = self.tx_flush_locked(k, channels, None, None);",
+  "new": "let flush = self.tx_flush_locked(k, channels, None, Some(0));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_the_open_flush_at_arm_keeps_todays_ack_rule"
+ },
+ {
+  "id": "N75-20",
+  "name": "a failing pre-send time read ends the recovery at once (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "if host.now().saturating_sub(since) >= T3_READ_CAP {",
+  "new": "if host.now().saturating_sub(since) >= Wall::ZERO {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss_or_the_cap"
+ },
+ {
+  "id": "N75-21",
+  "name": "the floor takes the old front less its gap, plus one tick (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": ".map_or(i64::MIN, |end| end.saturating_add(2));",
+  "new": ".map_or(i64::MIN, |end| end.saturating_add(1));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_the_floor_of_a_flush_ack_is_the_old_burst_s_padded_end_plus_two_ticks"
+ },
+ {
+  "id": "N75-22",
+  "name": "the floor takes the old front itself, not its padded end (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "clock.try_instant(front.saturating_sub(CLOSE_GAP))",
+  "new": "clock.try_instant(front)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_the_floor_of_a_flush_ack_is_the_old_burst_s_padded_end_plus_two_ticks"
+ },
+ {
+  "id": "N75-23",
+  "name": "the recovery ignores the old front (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": ".filter(|(clock, (domain, _))| clock.domain == *domain)",
+  "new": ".filter(|(_, _)| false)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_a_flush_ack_below_the_old_burst_s_padded_end_costs_an_attempt"
+ },
+ {
+  "id": "N75-24",
+  "name": "a refused flush no longer fails the timed-send verdict at a count of one (#75: the p72 verdict rehearsal)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+  "old": "sends.refused > 0",
+  "new": "sends.refused > 1",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_timed_send_run_passes_only_with_all_its_sends_timed_and_acknowledged"
+ },
+ {
+  "id": "N75-25",
+  "name": "the open flush at arm writes its missing-ACK row under another call (#75: the p72 verdict counts it as refused)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "None => json!({ \"call\": \"tx_flush\", \"stream\": stream, \"error\": error }),",
+  "new": "None => json!({ \"call\": \"tx_flushed\", \"stream\": stream, \"error\": error }),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "p72_a_lost_flush_ack_fails_the_verdict_on_the_fake"
+ },
+ {
+  "id": "N75-26",
+  "name": "a recovery that Provider::stop interrupts at a retry boundary is a failed one (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "} else if !core.is_lost() && streams.stop.is_none() { Reopen::Failed }",
+  "new": "} else if !core.is_lost() { Reopen::Failed }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_stop_and_loss_at_the_retry_boundary_release_the_claim"
+ },
+ {
+  "id": "N75-27",
+  "name": "a recovery that Provider::stop interrupts emits the failed-reopen rejection (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "if !core.is_lost() && lock(&core.streams).stop.is_none() { self.core.device_failed(None, \"tx_reopen\", error); }",
+  "new": "if !core.is_lost() { self.core.device_failed(None, \"tx_reopen\", error); }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_stop_and_loss_at_the_retry_boundary_release_the_claim"
+ },
+ {
+  "id": "N75-28",
+  "name": "no Stop or loss check after the back-off, before the next pre-send time read (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "host.sleep(Wall::from_millis(1)); self.t3_interrupted()?;",
+  "new": "host.sleep(Wall::from_millis(1));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss_or_the_cap"
+ },
+ {
+  "id": "N75-29",
+  "name": "no Stop or loss check between the pre-send time read and the T3 send (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "self.t3_interrupted()?; return Ok(now.max(attempt.not_before));",
+  "new": "return Ok(now.max(attempt.not_before));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_stop_or_loss_published_around_a_successful_pre_send_time_read_sends_no_t3"
+ },
+ {
+  "id": "N75-30",
+  "name": "the reports an earlier attempt stashed are not given back to the owner (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "for report in retired.into_iter().rev() { stash.push_front(report); }",
+  "new": "for report in retired.into_iter().rev() { drop(report); }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_reports_stashed_in_an_attempt_survive_the_next_open_for_the_report_owner"
+ },
+ {
+  "id": "N75-31",
+  "name": "the reports an earlier attempt stashed come back in reverse order (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "for report in retired.into_iter().rev() { stash.push_front(report); }",
+  "new": "for report in retired.into_iter() { stash.push_front(report); }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_reports_stashed_in_an_attempt_survive_the_next_open_for_the_report_owner"
+ },
+ {
+  "id": "N75-32",
+  "name": "the cap on failing pre-send time reads is 3 s, not 2 s (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "const T3_READ_CAP: Wall = Wall::from_secs(2);",
+  "new": "const T3_READ_CAP: Wall = Wall::from_secs(3);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss_or_the_cap"
+ },
+ {
+  "id": "N75-33",
+  "name": "an attempt's window after a successful pre-send time read is not its whole 100 ms (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "let until = host.now() + Wall::from_millis(100);",
+  "new": "let until = host.now() + Wall::from_millis(if floor.is_some() { 50 } else { 100 });",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss_or_the_cap"
+ },
+ {
+  "id": "N75-34",
+  "name": "a failing pre-send time read counts its time from the last failure, not the first (#75)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "let since = *failing_since.get_or_insert(begun);",
+  "new": "let since = *failing_since.insert(begun);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss_or_the_cap"
  }
 ]

@@ -205,6 +205,31 @@ pub(super) fn device_at(core: &Core, time: &ManualTimeAuthority, device: &FakeDe
     assert_eq!((core.now(), device.time_now().unwrap()), (ticks, ticks), "the Core's clock and the device's are not at the same instant");
 }
 
+/// The fake's transmit streamer calls as `open | send | close`, in order: the shape of a recovery flush's attempts (UR-22).
+pub(super) fn t3_calls(device: &FakeDevice) -> Vec<&'static str> {
+    device
+        .calls()
+        .iter()
+        .filter_map(|call| match call.split_whitespace().next() {
+            Some("tx_open") => Some("open"),
+            Some("tx_send") => Some("send"),
+            Some("tx_close") => Some("close"),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The rows an unconfirmed recovery flush attempt writes: `tx_flush` rows that carry an `attempt` (the open at `arm` writes none).
+pub(super) fn flush_attempt_rows(core: &Core) -> Vec<serde_json::Value> {
+    super::core::lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush" && row.get("attempt").is_some()).cloned().collect()
+}
+
+/// A recovery whose first attempt is meant to be confirmed wrote no attempt row: a silent second attempt would otherwise only change a
+/// golden nobody reads (the floor of a flush's ACK is the later of the device time and the old burst's padded end, UR-22).
+pub(super) fn assert_no_flush_rows(core: &Core) {
+    assert!(flush_attempt_rows(core).is_empty(), "a recovery flush attempt was unconfirmed: {:?}", flush_attempt_rows(core));
+}
+
 /// A hook `on_next_lock` arms.
 type LockHook = Box<dyn FnOnce()>;
 

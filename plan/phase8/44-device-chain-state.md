@@ -166,7 +166,7 @@ pub(crate) struct TxChain {
 ```
 
 - `DeviceBurst::Open { next, tail }`：device burst が開いていて，次の sample が `next`．今の `continues_at`＋`tail` と，`open` が送り始めた後の状態の両方を表す．新しい Kernel burst（`first`）が前の device burst を続けるかは，この値と uhd-tx の `open` の組で決まる．
-- `Recovery`：`ReopenNeeded` の間は payload を送らない（今の barrier）．普通の Stop は `ReopenNeeded` を消せない．出口は，開き直しと T3 の成功（`Clean`），開き直しの失敗（`Halted`：segment を止めて burst を始末する，今の `halt_failed_reopen`），`Provider::stop`（回復をやめる），loss．`Halted` は次の segment の switch で `Clean` に戻る．
+- `Recovery`：`ReopenNeeded` の間は payload を送らない（今の barrier）．普通の Stop は `ReopenNeeded` を消せない．出口は，開き直しと T3 の成功（`Clean`），開き直しの失敗（`Halted`：segment を止めて burst を始末する，今の `halt_failed_reopen`．T3 が 3 回の試行で確かめられない場合を含む，#75），`Provider::stop`（回復をやめる），loss．`Halted` の stream は `Clean` の送信経路に戻らない：book の `reopen_failed()` は `recovery` を `Clean` にして device burst を閉じるが，stream の clock が終わるので，その stream は Run の終わりまで payload を送らず，後の burst は `UR-25` で断られる（この文は book が今していることを書く）．
 - D9b-1b はここに channel ごとの debt（時刻つきの DUC の値）を足す．§3.1 と同じ考えで，DUC の値を渡す条件を D9b-1b で決める（DUC は burst の間の値を次の burst の最初で取るので，受信とは消費の条件が違う：設計メモ 39 §6.1 F4）．送信の消費の証拠は「装置が受け取った sample」で，送りの submit や物理の出力とは分ける．`Open` から `Closed` へ閉じる遷移は，debt の最も遅い instant の後まで 0 で延ばしてから EOB を出す（送信の R2′）．underflow の後の (a) は `Open → Closed → Open`（新しい時刻）．
 
 ## 5. この見直しで見つかった不具合（Sol が source の上で確かめた）
@@ -197,7 +197,7 @@ RX：
 
 TX：
 10. `DeviceBurst`・`front`・`Recovery` の組と uhd-tx の `open` の組の表．新しい `open`（`first`）が前の device burst を続ける場合，barrier で止まった `open`，開いている burst と残る `front`．
-11. `Recovery` の出口：開き直しの成功，失敗（`Halted`）と次の segment での `Clean`，普通の Stop（消えない），`Provider::stop`，loss．
+11. `Recovery` の出口：開き直しの成功，失敗（`Halted`：clock が終わり，`Clean` の送信経路には戻らない），普通の Stop（消えない），`Provider::stop`，loss．
 12. D9b-1a の既存のテスト（T1〜T3，`tx_close`，開き直し，P5〜P7・D70 の harness）がそのまま通る．
 
 ## 7. 採らない案

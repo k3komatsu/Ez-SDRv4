@@ -585,6 +585,92 @@ fn c2_s15_a_failed_reopen_cancels_even_a_sent_switch() {
     }
 }
 
+/// The owner's turn as the run loop makes it, on a rig whose freeze has been handed to the test thread (so `turn` cannot take the rig whole).
+fn owner_turn(tx: &mut Tx) {
+    for _ in 0..8 {
+        drain_tx(tx);
+        if !tx.step() {
+            break;
+        }
+    }
+}
+
+#[test]
+fn c2_s15b_a_retried_recovery_settles_a_pending_switch_after_the_window_and_a_failed_one_cancels_it() {
+    // UR-22 (F8) with the retried flush: the recovery now takes 100 ms of device time per lost attempt, so device time passes b while it runs. At each
+    // retry boundary (the Kernel's clock moved to the device's, as the run loop's reads would) the switch is still `pending`: the recovery settles
+    // nothing. A recovery that confirms leaves it to the owner's next turn, which applies it (device time is past b and the boundary send was whole), as
+    // the no-retry control does; one that fails after three attempts cancels it, although the boundary sample was on the device and device time passed b.
+    let flush_ordinal = {
+        let mut rig = switched(Vec::new());
+        let mut ms = 3;
+        while !boundary_send_is_on_the_device(&rig) {
+            run(&mut rig, ms, ms);
+            ms += 1;
+            assert!(ms < 12, "{:?}", rig.device.calls());
+        }
+        // The reopen's first flush is the next send that carries samples.
+        rig.device.calls().iter().filter(|call| call.starts_with("tx_send 0 ") && !call.contains(" n=0 ")).count()
+    };
+    let control_row = {
+        let mut rig = switched(Vec::new());
+        let mut ms = 3;
+        while !boundary_send_is_on_the_device(&rig) {
+            run(&mut rig, ms, ms);
+            ms += 1;
+        }
+        let _driver = handed_over(rig._frozen, &rig.device.host());
+        rig.tx.chain().mark_reopen_needed();
+        assert!(rig.tx.pass(), "the reopen runs");
+        assert_ne!(switch_row(&rig.core, 0)["outcome"], "cancelled", "control: a confirmed recovery cancels nothing");
+        device_at(&rig.core, &rig.time, &rig.device, 20 * MS);
+        owner_turn(&mut rig.tx);
+        assert_eq!(switch_row(&rig.core, 0)["outcome"], "applied", "control");
+        switch_row(&rig.core, 0)
+    };
+    let drops = |from: usize, count: usize| (from..from + count).map(FakeFault::DropAckOfSend).collect::<Vec<_>>();
+    // The faults drop the acknowledgements of the first flushes; a retry boundary lies before every attempt but the first.
+    for (case, faults, boundaries, recovers) in
+        [("attempt 2 confirms", drops(flush_ordinal, 1), 1, true), ("attempt 3 confirms", drops(flush_ordinal, 2), 2, true), ("three unconfirmed", drops(flush_ordinal, 3), 2, false)]
+    {
+        let mut rig = switched(faults);
+        let mut ms = 3;
+        while !boundary_send_is_on_the_device(&rig) {
+            run(&mut rig, ms, ms);
+            ms += 1;
+            assert!(ms < 12, "{case}: {:?}", rig.device.calls());
+        }
+        assert_eq!(switch_row(&rig.core, 0)["outcome"], "pending", "{case}: sent, device time short of b");
+        let _driver = handed_over(rig._frozen, &rig.device.host());
+        let gates = Arc::new(Mutex::new(Vec::<(i64, String)>::new()));
+        {
+            let (core, time, device, gates) = (Arc::downgrade(&rig.core), Arc::downgrade(&rig.time), Arc::downgrade(&rig.device), gates.clone());
+            probe(&rig.core, "t3_between", move |_| {
+                let (Some(core), Some(time), Some(device)) = (core.upgrade(), time.upgrade(), device.upgrade()) else { return };
+                let now = device.time_now().unwrap();
+                device_at(&core, &time, &device, now);
+                gates.lock().unwrap().push((now, switch_row(&core, 0)["outcome"].as_str().unwrap().to_owned()));
+            });
+        }
+        rig.tx.chain().mark_reopen_needed();
+        assert!(rig.tx.pass(), "{case}: the reopen runs");
+        let gates = gates.lock().unwrap().clone();
+        assert_eq!(gates.len(), boundaries, "{case}: {gates:?}");
+        for (device_time, outcome) in &gates {
+            assert!(*device_time >= rig.clock.instant(B), "{case}: device time {device_time} is past b at the gate");
+            assert_eq!(outcome, "pending", "{case}: the recovery has not settled the switch");
+        }
+        if recovers {
+            assert_ne!(switch_row(&rig.core, 0)["outcome"], "cancelled", "{case}");
+            owner_turn(&mut rig.tx);
+            assert_eq!(switch_row(&rig.core, 0), control_row, "{case}: the same row as the no-retry control");
+        } else {
+            assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled", "{case}: the failed recovery cancels it");
+            assert!(rig.device.time_now().unwrap() >= rig.clock.instant(B), "{case}: although device time passed b");
+        }
+    }
+}
+
 #[test]
 fn c2_s17b_two_accepted_switches_settle_each_on_its_own_boundary_send() {
     // m2: S1 is taken and device time passes b1: applied. S2 is accepted behind it; S1's next send (its repeat's continuation) completes

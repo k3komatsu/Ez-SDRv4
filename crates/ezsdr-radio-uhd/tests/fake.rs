@@ -8158,6 +8158,20 @@ fn p72_timed_tx_chunks_rehearsal_on_the_fake() {
     assert_eq!(trial.closing, [json!([2])], "the held tail closes the burst with one send of two samples, not a direct close");
 }
 
+/// `hw_p72_…`'s verdict on a Session whose first flush (the open flush at `arm`, the first send that carries samples) is not acknowledged: a flush
+/// without its `BurstAck` is a refused flush (UR-22), so T3 fails by name, whatever the retry rule does above it (#75: the open flush at `arm` is one
+/// attempt while `OPEN_FLUSH_CONFIRMED` is off, and a recovery's retried flush rows would still count as refused).
+#[test]
+fn p72_a_lost_flush_ack_fails_the_verdict_on_the_fake() {
+    let dir = TempDir::new();
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig { faults: vec![FakeFault::DropAckOfSend(0)], ..FakeConfig::default() })));
+    let (spec, inputs) = common::e3::timed_chunks_spec(1e9);
+    let manifest = captured(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), probe.clone(), inputs));
+    let trial = common::e3::timed_chunks_case(&probe, &manifest);
+    println!("rehearsal #72 1a, a lost flush acknowledgement: {:?}", trial.verdict);
+    assert!(matches!(&trial.verdict, common::tone::Verdict::Fail(why) if why.contains("T3: 1 flush(es) refused")), "{:?}", trial.verdict);
+}
+
 // ------------------------------------------------ #92: a uhd-control panic is a DEVICE_LOST (UR-16)
 
 /// A device whose `time_now` panics on uhd-control's thread once armed: the panic is put there by the test (UHD does not panic in `time_now`),

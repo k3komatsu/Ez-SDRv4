@@ -292,6 +292,9 @@ pub enum FakeFault {
     TxReport(Duration, TxCode),
     /// Suppress every TX BurstAck, to exercise the bounded open-time flush.
     DropBurstAck,
+    /// Suppress the BurstAck of the `nth` `tx_send` carrying samples (0-based, `ShortSend`'s ordinal), once: a lost report
+    /// on a whole send (the recovery flush's retry, #75).
+    DropAckOfSend(usize),
     /// Every call fails with `lost: true`.
     Lost(Duration),
     /// `tx_async` fails from this instant on, with this `lost` (UR-28).
@@ -1810,19 +1813,19 @@ impl Device for FakeDevice {
         let samples = if eob && samples.first().is_none_or(|s| s.is_empty()) { &padded[..] } else { samples };
         let n = samples.first().map_or(0, |s| s.len());
         // `ShortSend`, `FailSend`, `StalledSend`: what this send takes, if it is cut.
-        let cut = if n >= 1 {
+        let nth = (n >= 1).then(|| {
             let mut st = self.lock();
             st.tx_sends += 1;
-            let nth = st.tx_sends - 1;
+            st.tx_sends - 1
+        });
+        let cut = nth.and_then(|nth| {
             self.config.faults.iter().find_map(|fault| match fault {
                 FakeFault::ShortSend(k) if *k == nth => Some((n / 2, false)),
                 FakeFault::FailSend(k) if *k == nth => Some((n / 2, true)),
                 FakeFault::StalledSend(k) if *k == nth => Some((0, false)),
                 _ => None,
             })
-        } else {
-            None
-        };
+        });
         let (short, fail, took) = match cut {
             Some((took, fail)) => (true, fail, took),
             None => (false, false, n),
@@ -1862,7 +1865,14 @@ impl Device for FakeDevice {
             // The DUC consumes samples and its EOB before the downstream radio applies packet
             // policy. A rejected packet still advances or ends this upstream burst.
             let packet = streamer.duc.packet(at, sob, eob, n, ratio, stale_header);
-            let radio_interval = streamer.radio.packet(&packet, now, channels.len(), self.config.faults.contains(&FakeFault::DropBurstAck), unended, restarts);
+            let radio_interval = streamer.radio.packet(
+                &packet,
+                now,
+                channels.len(),
+                self.config.faults.contains(&FakeFault::DropBurstAck) || nth.is_some_and(|nth| self.config.faults.contains(&FakeFault::DropAckOfSend(nth))),
+                unended,
+                restarts,
+            );
             if let Some((start, _)) = radio_interval {
                 if n > 0 {
                     for (position, chan) in channels.iter().enumerate() {

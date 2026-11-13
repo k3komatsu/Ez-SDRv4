@@ -448,10 +448,11 @@ fn e3b_c3_the_chain_through_its_lifecycles() {
     }
 
     // The failed padded EOB (a one-sample burst at 200 MS/s whose two-sample send the device cuts) and how its recovery ends.
-    for (name, faults) in [
-        ("failed EOB, acknowledged flush", vec![FakeFault::ShortSend(0)]),
-        ("failed EOB, flush not acknowledged", vec![FakeFault::ShortSend(0), FakeFault::DropBurstAck]),
-        ("failed EOB, reopen refused", vec![FakeFault::ShortSend(0), FakeFault::TxOpenFails(1)]),
+    for (name, faults, unconfirmed) in [
+        ("failed EOB, acknowledged flush", vec![FakeFault::ShortSend(0)], 0),
+        ("failed EOB, flush not acknowledged", vec![FakeFault::ShortSend(0), FakeFault::DropBurstAck], 3),
+        ("failed EOB, flush acknowledged on the second attempt", vec![FakeFault::ShortSend(0), FakeFault::DropAckOfSend(1)], 1),
+        ("failed EOB, reopen refused", vec![FakeFault::ShortSend(0), FakeFault::TxOpenFails(1)], 0),
     ] {
         let (core, device, time, _events, clock, mut tx, frozen) = txp_high_rate_rig(1, faults, BTreeMap::new());
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 500_000, 1, false, LatePolicy::DropAndFlag));
@@ -460,6 +461,7 @@ fn e3b_c3_the_chain_through_its_lifecycles() {
         device_at(&core, &time, &device, 500_003);
         let (tx, worked, _frozen) = pass_released(tx, frozen, &device);
         lines.push(format!("recovered ({worked}): {}; clock {}", state_line(&tx, &device), tx.clock.is_some()));
+        assert_eq!(crate::provider::test_support::flush_attempt_rows(&core).len(), unconfirmed, "{name}");
         cases.check(name, lines);
     }
 
@@ -468,7 +470,8 @@ fn e3b_c3_the_chain_through_its_lifecycles() {
     for (name, how) in [("reopen succeeds", 0), ("Stop before the reopen", 1), ("loss before the reopen", 2), ("reopen refused, Stop in flight", 3), ("reopen refused, loss in flight", 4)] {
         let faults = if how >= 3 { vec![FakeFault::TxOpenFails(1)] } else { Vec::new() };
         let (core, device, time, _events, clock, mut tx, frozen) = txp_rig_faults(None, 2_000, 1e6, 200, faults);
-        device_at(&core, &time, &device, 10);
+        // A reopen that succeeds is confirmed by an ack at or after the poked front's padded end (UR-22): device time starts past it.
+        device_at(&core, &time, &device, if how == 0 { clock.instant(5_000) + 10 } else { 10 });
         poke_open_device(&mut tx, 1_000_000, 5_100, true);
         poke_front(&mut tx, clock, 5_000);
         poke_reopen_needed(&mut tx);
@@ -484,6 +487,10 @@ fn e3b_c3_the_chain_through_its_lifecycles() {
         }
         let (tx, worked, _frozen) = pass_released(tx, frozen, &device);
         lines.push(format!("passed ({worked}): {}", state_line(&tx, &device)));
+        if how == 0 {
+            crate::provider::test_support::assert_no_flush_rows(&core);
+            assert!(tx.chain().front().is_some_and(|(_, front)| front > 5_000), "the confirmed flush's front replaces the poked one");
+        }
         cases.check(name, lines);
     }
 
@@ -553,7 +560,14 @@ const C3: Expected = &[
         "failed EOB, flush not acknowledged",
         &[
             "failed: burst false first None next None tail false front None recovery true; open next None; sends [(2, true, false)]",
-            "recovered (true): burst false first None next None tail false front None recovery false; open next None; sends [(2, true, false), (4, true, true)]; clock true",
+            "recovered (true): burst false first None next None tail false front None recovery false; open next None; sends [(2, true, false), (4, true, true), (4, true, true), (4, true, true)]; clock false",
+        ],
+    ),
+    (
+        "failed EOB, flush acknowledged on the second attempt",
+        &[
+            "failed: burst false first None next None tail false front None recovery true; open next None; sends [(2, true, false)]",
+            "recovered (true): burst false first None next None tail false front Some(20503007) recovery false; open next None; sends [(2, true, false), (4, true, true), (4, true, true)]; clock true",
         ],
     ),
     (
@@ -567,7 +581,7 @@ const C3: Expected = &[
         "reopen succeeds",
         &[
             "pending: burst true first Some(1000000) next Some(5100) tail true front Some(5000) recovery true; open next None; sends []",
-            "passed (true): burst true first Some(1000000) next Some(5100) tail true front Some(5000) recovery false; open next None; sends [(4, true, true)]",
+            "passed (true): burst true first Some(1000000) next Some(5100) tail true front Some(5020) recovery false; open next None; sends [(4, true, true)]",
         ],
     ),
     (
@@ -705,7 +719,7 @@ const C4: Expected = &[
     ("end_open: a Stop with a tail", &["4"]),
     ("end_open: a Stop of a repeat", &["4"]),
     ("a failed padded EOB", &["[(true, 13), (false, 3)]"]),
-    ("reopen_streamer: a recovery", &["(true, 7)"]),
+    ("reopen_streamer: a recovery", &["(true, 10)"]),
 ];
 
 // ------------------------------------------------------------------------------------------------------------ C3b: the seams between sections

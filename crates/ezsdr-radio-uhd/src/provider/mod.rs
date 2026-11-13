@@ -882,6 +882,32 @@ mod tests {
     }
 
     #[test]
+    fn ur_75_arm_does_not_refuse_an_unacknowledged_open_flush_while_the_switch_is_off() {
+        // UR-22, KL-12: the open at `arm` keeps its single flush attempt; a flush nobody acknowledges is a row, and the streamer stays open.
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
+        }))
+        .unwrap();
+        let config = FakeConfig { clock: crate::ClockMode::Manual, faults: vec![crate::device::FakeFault::DropBurstAck], ..FakeConfig::default() };
+        let (core, device, _time, _events) = test_support::rig_with(config, Vec::new());
+        let mut radio = UhdRadio::from_binding(&binding, device.clone()).unwrap();
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Tx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
+        radio.prepared = Some(Prepared {
+            core: core.clone(),
+            actions: Arc::new(NoActions),
+            config: BTreeMap::new(),
+            rx: Vec::new(),
+            tx: vec![PreparedStream { k: 0, handle: Some(handle), channels: Channels::first(1), clock: None }],
+        });
+        radio.arm().expect("arm");
+        assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush" && row.get("attempt").is_none()).count(), 1);
+        assert_eq!(device.calls().iter().filter(|call| call.starts_with("tx_open")).count(), 1, "one open, no retry: {:?}", device.calls());
+        assert!(device.calls().iter().all(|call| !call.starts_with("tx_close")), "the streamer stays open: {:?}", device.calls());
+    }
+
+    #[test]
     fn measurement_timing_candidate_updates_every_surface_and_the_start_boundary() {
         use ezsdr_kernel::spec::{CapabilityValue, Scalar};
 

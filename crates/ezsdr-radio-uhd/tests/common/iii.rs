@@ -1546,6 +1546,11 @@ mod stage5_tests {
         assert!(matches!(timed_sends_verdict(Verdict::Pass(String::new()), &TimedSends { short_closing: 1, ..sends }), Verdict::Fail(_)));
         assert!(matches!(timed_sends_verdict(Verdict::Pass(String::new()), &TimedSends { acked: 0, ..sends }), Verdict::Inconclusive(_)));
         assert!(matches!(timed_sends_verdict(Verdict::Fail(String::new()), &sends), Verdict::Fail(_)));
+        // A refused flush fails whatever else was acknowledged, and a retried one (refused once, sent twice, acknowledged once) too: the boundary
+        // between the refusal and the acknowledgement count is the refusal's.
+        assert!(matches!(timed_sends_verdict(Verdict::Pass(String::new()), &TimedSends { refused: 1, ..sends }), Verdict::Fail(_)));
+        assert!(matches!(timed_sends_verdict(Verdict::Pass(String::new()), &TimedSends { refused: 1, flushes: 2, acked: 1, ..sends }), Verdict::Fail(_)));
+        assert!(matches!(timed_sends_verdict(Verdict::Pass(String::new()), &TimedSends { flushes: 2, acked: 1, ..sends }), Verdict::Inconclusive(_)));
     }
 
     #[test]
