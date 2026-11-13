@@ -1,10 +1,13 @@
 //! Spec 19's Kernel amendments for the device-paced classes (KG-1…KG-12), through the
 //! real coordinator with the §0 doubles `WallAuthority` and `ThreadedProvider`.
-//! Wall-clock margins: a factor of two on durations, counts read while the Run runs.
+//! No positive verdict is a wall interval: a wake test releases its event only after the waiting call is seen parked, and a count is waited for as a condition;
+//! every positive expiry left is an expiry that fails a test, at least 3 s long and meant to be 100 times what the right behaviour takes (note 51, P3). The negative
+//! waits (a count that must not move) are pinned, each with its reason, in `ezsdr-acceptance`'s `governance.rs` (P3a).
 
 mod support;
 
 use std::collections::BTreeMap;
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration as Wall, Instant};
 
@@ -19,7 +22,9 @@ use ezsdr_kernel::run::{CleanupMode, CleanupStep, Lease, RunState, Stage, StopCa
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::{ClockRegistry, Duration, TimePoint};
-use support::{Probe, RecordingSink, SimAuthority, SteppedProvider, TestLinkModule, TestProvider, ThreadedProvider, WallAuthority, mref, ns, run_checks, run_kinds, run_registry};
+use support::{
+    Probe, RecordingSink, SimAuthority, SteppedProvider, TestLinkModule, TestProvider, ThreadedProvider, WallAuthority, WallPark, mref, ns, release, release_one, run_checks, run_kinds, run_registry,
+};
 
 // ---------------------------------------------------------------- fixtures
 
@@ -43,6 +48,16 @@ fn paced_with(adjust: impl FnOnce(WallAuthority) -> WallAuthority) -> Paced {
     let authority = adjust(authority);
     let relations = authority.measured_relations();
     Paced { root, relations, assembly: assembly_with(Box::new(authority), clocks) }
+}
+
+/// `paced_with`, plus the probe that sees the control loop park in `next_wakeup`.
+fn paced_parked(adjust: impl FnOnce(WallAuthority) -> WallAuthority) -> (Paced, WallPark) {
+    let mut park = None;
+    let rig = paced_with(|authority| {
+        park = Some(authority.park_probe());
+        adjust(authority)
+    });
+    (rig, park.unwrap())
 }
 
 fn paced() -> Paced {
@@ -245,11 +260,9 @@ fn publishing_spec_run(probe: &Probe, sink_double: RecordingSink) -> RunHandle {
 fn kg_02_the_data_thread_drains_a_sink_while_no_call_runs() {
     let probe = Probe::new();
     let run = publishing_spec_run(&probe, RecordingSink::new("rec", &probe));
-    std::thread::sleep(Wall::from_millis(100));
+    // The test thread makes no call to the Run while it waits, so only the data thread can drain the Sink.
     let first = count(&probe, "rec:block:");
-    std::thread::sleep(Wall::from_millis(100));
-    let second = count(&probe, "rec:block:");
-    assert!(second >= first + 50, "{first} then {second}");
+    assert!(probe.wait_until(|lines| lines.iter().filter(|line| line.starts_with("rec:block:")).count() >= first + 50, Wall::from_secs(10)), "{first} blocks, then {}", count(&probe, "rec:block:"));
     let manifest = manifest_of(run);
     assert_eq!(manifest.links[0].drops, Some(0));
 }
@@ -258,7 +271,7 @@ fn kg_02_the_data_thread_drains_a_sink_while_no_call_runs() {
 fn kg_02_every_step_before_finish_runs_on_the_data_thread() {
     let probe = Probe::new();
     let run = publishing_spec_run(&probe, RecordingSink::new("rec", &probe).recording_threads());
-    std::thread::sleep(Wall::from_millis(50));
+    assert!(probe.wait_until(|lines| lines.iter().any(|line| line.starts_with("rec:step_on:")), Wall::from_secs(10)));
     let before = stepped_on(&probe);
     let _ = manifest_of(run);
     assert!(!before.is_empty());
@@ -307,11 +320,11 @@ fn kg_02_the_simulation_class_starts_no_thread() {
 fn kg_02_a_sink_that_always_progresses_does_not_livelock() {
     let probe = Probe::new();
     let run = publishing_spec_run(&probe, RecordingSink::new("rec", &probe).always_progressing());
-    std::thread::sleep(Wall::from_millis(200));
+    // A livelocking Sink crosses the livelock threshold (1 000 rounds at one instant) before it can step 1 000 times.
+    assert!(probe.wait_until(|lines| lines.iter().filter(|line| line.starts_with("rec:step:")).count() > 1_000, Wall::from_secs(10)));
     running(&run);
     let livelock = kind(EventKind::STEP_LIVELOCK);
     assert!(!run.events(0).iter().any(|event| event.kind == livelock));
-    assert!(count(&probe, "rec:step:") > 1_000, "{}", count(&probe, "rec:step:"));
     let _ = manifest_of(run);
 }
 
@@ -326,7 +339,10 @@ fn kg_02_a_failed_sink_is_not_stepped_again() {
     let sink_double = RecordingSink::new("rec", &probe).failing_step_at(at, ModuleErrorKind::DeviceLost);
     let run = start_spec_run(&spec, &profile, sink(assembly, sink_double, &probe)).unwrap();
     running(&run);
-    std::thread::sleep(Wall::from_millis(100));
+    // The failing step is the first one at or after `at`; it records its line before it fails. Wait for it as a condition, then give the sink time to be stepped
+    // again (the one negative wait).
+    let failed = |lines: &[String]| lines.iter().filter_map(|line| line.strip_prefix("rec:step:")).any(|until| until.parse::<i64>().is_ok_and(|until| until >= at));
+    assert!(probe.wait_until(failed, Wall::from_secs(10)), "the sink never reached its failing step: {:?}", probe.lines());
     let first = count(&probe, "rec:step:");
     std::thread::sleep(Wall::from_millis(100));
     assert_eq!(count(&probe, "rec:step:"), first, "stepped again after its failure");
@@ -344,19 +360,49 @@ fn session(assembly: Assembly, profile: &serde_json::Value) -> RunHandle {
     run
 }
 
+/// `rounds` times: a `wait_for` that only the data thread's delivery can end, with a horizon an hour away. The Provider emits its mark when the test releases it,
+/// and the test does so only after it has seen the control loop wait for the horizon, so the delivery cannot come before the call parks and the call cannot
+/// return without a wake: a lost wake is a hang that the 10 s expiry fails, never an early return a bound would have to measure. With `fire_first` the Authority
+/// also runs each wake's callback before `schedule` returns (KC-46a), and the double counts that it did.
+fn woken_rounds(rounds: u32, fire_first: bool) {
+    let probe = Probe::new();
+    let gate = release();
+    let (rig, park) = paced_parked(|authority| if fire_first { authority.firing_before_schedule_returns() } else { authority });
+    let double = ThreadedProvider::new("radio", "radio", &probe).marking_on("test.MARK", gate.clone());
+    let mut run = session(provider(rig.assembly, "radio", double), &profile_one());
+    let mark = kind("test.MARK");
+    let (tick_tx, ticks) = mpsc::channel();
+    let (found_tx, found) = mpsc::channel();
+    let (run_tx, returned) = mpsc::channel();
+    // Detached, as the KC-36 tests' workers are: a joined worker would turn a lost wake into a test timeout instead of a failed assertion.
+    std::thread::spawn(move || {
+        let mut from = 0;
+        for _ in 0..rounds {
+            let horizon = after(&run, Wall::from_secs(3600));
+            tick_tx.send(horizon.ticks_in(horizon.domain()).unwrap()).unwrap();
+            let index = run.wait_for(std::slice::from_ref(&mark), from, horizon).unwrap().expect("the delivered mark is found before the horizon");
+            found_tx.send(index).unwrap();
+            from = index + 1;
+        }
+        let _ = run_tx.send(run);
+    });
+    for round in 0..rounds {
+        let tick = ticks.recv_timeout(Wall::from_secs(10)).expect("the worker began a wait");
+        assert!(park.wait_parked_until(tick, Wall::from_secs(10)), "round {round}: the control loop never waited for the horizon");
+        release_one(&gate);
+        found.recv_timeout(Wall::from_secs(10)).unwrap_or_else(|_| panic!("round {round}: a delivery did not wake the waiting call"));
+    }
+    let run = returned.recv_timeout(Wall::from_secs(10)).expect("the worker returned the Run");
+    // Read once, after the data thread is joined: it counts a wake after it has re-locked the Authority, so no earlier read is stable.
+    let _ = manifest_of(run);
+    if fire_first {
+        assert!(park.fired_before_schedule_returned() >= u64::from(rounds), "{} of {rounds} wakes ran their callback before `schedule` returned", park.fired_before_schedule_returned());
+    }
+}
+
 #[test]
 fn kg_02_wait_for_returns_when_the_data_thread_delivers() {
-    let probe = Probe::new();
-    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).marking("test.MARK", Wall::from_millis(30)));
-    let mut run = session(assembly, &profile_one());
-    let horizon = after(&run, Wall::from_secs(5));
-    let begun = Instant::now();
-    let found = run.wait_for(&[kind("test.MARK")], 0, horizon).unwrap();
-    assert!(found.is_some());
-    assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
-    let root = horizon.domain();
-    assert!(run.now().ticks_in(root).unwrap() < horizon.ticks_in(root).unwrap() - 3_000_000_000);
-    let _ = manifest_of(run);
+    woken_rounds(1, false);
 }
 
 fn stopping_kinds() -> EventKindRegistry {
@@ -394,7 +440,7 @@ fn kg_02_the_first_delivered_stopping_event_is_the_termination_cause() {
         let mut run = session(assembly, &profile);
         let never = kind("test.custom");
         let begun = Instant::now();
-        while begun.elapsed() < Wall::from_secs(2) {
+        while begun.elapsed() < Wall::from_secs(10) {
             let horizon = after(&run, Wall::from_millis(1));
             if matches!(run.wait_for(std::slice::from_ref(&never), 0, horizon), Err(RunHandleError::Ended { .. })) {
                 break;
@@ -420,47 +466,15 @@ fn registry_with(vocabulary: ezsdr_kernel::module_api::VocabularyDescriptor) -> 
 
 #[test]
 fn kg_02_every_delivery_wakes_a_waiting_call() {
-    let probe = Probe::new();
-    let mut double = ThreadedProvider::new("radio", "radio", &probe);
-    for i in 1..=50 {
-        double = double.marking("test.MARK", Wall::from_millis(10 * i));
-    }
-    let mut run = session(provider(paced().assembly, "radio", double), &profile_one());
-    let mark = kind("test.MARK");
-    let mut from = 0;
-    for _ in 0..50 {
-        let horizon = after(&run, Wall::from_secs(5));
-        let begun = Instant::now();
-        let found = run.wait_for(std::slice::from_ref(&mark), from, horizon).unwrap();
-        let index = found.expect("each mark is found before the horizon");
-        assert!(begun.elapsed() < Wall::from_millis(200), "{:?}", begun.elapsed());
-        from = index + 1;
-    }
-    let _ = manifest_of(run);
+    woken_rounds(50, false);
 }
 
 #[test]
 fn kg_02_a_wake_that_fires_before_schedule_returns_still_clears() {
     // KC-46a: the pending generation is stored before `schedule`, so a callback that
-    // runs before `schedule` returns clears its own wake (Review L, P1-6).
-    let probe = Probe::new();
-    let mut double = ThreadedProvider::new("radio", "radio", &probe);
-    for i in 1..=20 {
-        double = double.marking("test.MARK", Wall::from_millis(10 * i));
-    }
-    let rig = paced_with(WallAuthority::firing_before_schedule_returns);
-    let mut run = session(provider(rig.assembly, "radio", double), &profile_one());
-    let mark = kind("test.MARK");
-    let mut from = 0;
-    for _ in 0..20 {
-        let horizon = after(&run, Wall::from_secs(2));
-        let begun = Instant::now();
-        let found = run.wait_for(std::slice::from_ref(&mark), from, horizon).unwrap();
-        let index = found.expect("each mark is found before the horizon");
-        assert!(begun.elapsed() < Wall::from_millis(200), "{:?}", begun.elapsed());
-        from = index + 1;
-    }
-    let _ = manifest_of(run);
+    // runs before `schedule` returns clears its own wake (Review L, P1-6). Every round
+    // runs the callback first, so a wake left pending by round one wakes nothing in round two.
+    woken_rounds(20, true);
 }
 
 #[test]
@@ -471,7 +485,7 @@ fn kg_02_a_detached_lease_expires_while_no_call_runs() {
     let mut run = connect(&profile_one(), &Default::default(), assembly, lease).unwrap();
     running(&run);
     run.disconnect();
-    assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(10)));
     let manifest = manifest_of(run);
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::LeaseExpiry {} });
 }
@@ -503,7 +517,7 @@ fn kc_36_renew_moves_the_deadline_the_data_thread_checks() {
     }
     assert!(!provider_stopped(&probe), "{:?}", probe.lines());
     running(&run);
-    assert!(probe.wait_for("radio:stop", Wall::from_secs(1)));
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(10)));
     assert_eq!(manifest_of(run).termination.reason, Termination::Stopped { cause: StopCause::LeaseExpiry {} });
 }
 
@@ -539,12 +553,7 @@ fn kc_36_a_disconnect_signal_ends_a_waiting_advance() {
     // F1: the signal comes only once the control loop waits in `next_wakeup` for the
     // horizon; no event is ever delivered, so only the signal's own wake ends that wait.
     let probe = Probe::new();
-    let mut park = None;
-    let rig = paced_with(|authority| {
-        park = Some(authority.park_probe());
-        authority
-    });
-    let park = park.unwrap();
+    let (rig, park) = paced_parked(|authority| authority);
     let mut run = session(provider(rig.assembly, "radio", ThreadedProvider::new("radio", "radio", &probe)), &profile_one());
     let signal = run.disconnect_signal();
     let target = after(&run, Wall::from_secs(3600));
@@ -701,7 +710,7 @@ fn lost_device_session(probe: &Probe) -> RunHandle {
 fn kg_03_a_fatal_event_stops_the_providers_without_a_client_call() {
     let probe = Probe::new();
     let run = lost_device_session(&probe);
-    assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(10)));
     let manifest = manifest_of(run);
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
     assert_eq!(count(&probe, "radio:stop"), 1);
@@ -714,7 +723,7 @@ fn kc_29_an_end_the_data_thread_requested_is_cleaned_up_at_the_next_call() {
     // shows the cause, until the next call cleans up.
     let probe = Probe::new();
     let mut run = lost_device_session(&probe);
-    assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(10)));
     std::thread::sleep(Wall::from_millis(50));
     if !matches!(run.state(), RunState::Running {}) {
         // A Run the data thread moved on dropped mid-unwind trips cleanup's debug_assert and aborts: leak it so the failure is the assertion.
@@ -726,8 +735,8 @@ fn kc_29_an_end_the_data_thread_requested_is_cleaned_up_at_the_next_call() {
     let radio = support::node_source("radio");
     assert!(run.events(0).iter().any(|e| e.kind == lost && e.source == radio), "{:?}", run.events(0));
     let begun = Instant::now();
-    let result = run.advance_to(after(&run, Wall::from_secs(5)));
-    assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
+    let result = run.advance_to(after(&run, Wall::from_secs(10)));
+    assert!(begun.elapsed() < Wall::from_secs(5), "{:?}", begun.elapsed());
     let termination = Termination::Stopped { cause: StopCause::Policy { event: lost } };
     assert_eq!(result, Err(RunHandleError::Ended { termination: termination.clone() }));
     assert_eq!(run.state(), RunState::CleanedUp { termination });
@@ -740,7 +749,7 @@ fn kc_32_a_disconnect_after_a_policy_stop_is_dropped() {
     // call requests a different Termination, which is dropped, not recorded in `also`.
     let probe = Probe::new();
     let mut run = lost_device_session(&probe);
-    assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(10)));
     run.disconnect();
     let manifest = manifest_of(run);
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
@@ -751,7 +760,7 @@ fn kc_32_a_disconnect_after_a_policy_stop_is_dropped() {
 fn kg_03_an_abort_stops_the_data_thread() {
     let probe = Probe::new();
     let run = lost_device_session(&probe);
-    assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(10)));
     std::thread::sleep(Wall::from_millis(50));
     let _ = manifest_of(run);
     let lines = probe.lines();
@@ -772,8 +781,8 @@ fn kg_03_a_step_done_early_is_not_repeated() {
     let sink_double = RecordingSink::new("rec", &probe).failing_step_at(at, ModuleErrorKind::Rejected);
     let run = start_spec_run(&spec, &profile, sink(assembly, sink_double, &probe)).unwrap();
     running(&run);
-    assert!(probe.wait_for("radio:stop", Wall::from_secs(1)));
-    assert!(probe.wait_for("other:stop", Wall::from_secs(1)));
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(10)));
+    assert!(probe.wait_for("other:stop", Wall::from_secs(10)));
     let manifest = manifest_of(run);
     assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
     for name in ["radio", "other"] {
@@ -804,7 +813,7 @@ fn kc_30_a_panic_after_a_device_lost_in_one_pass_fails_the_run() {
     let sink_double = RecordingSink::new("rec", &probe).failing_step_at(at, ModuleErrorKind::DeviceLost);
     let run = start_spec_run(&spec, &profile, sink(assembly, sink_double, &probe)).unwrap();
     running(&run);
-    assert!(probe.wait_for("radio:stop", Wall::from_secs(1)));
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(10)));
     let manifest = manifest_of(run);
     assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Run, .. }));
     assert!(failure(&manifest).starts_with("KC-30: rec2: a Module panicked"), "{}", failure(&manifest));
@@ -821,7 +830,7 @@ fn kg_03_step_3_runs_a_final_round_over_the_sinks() {
     let sink_double = RecordingSink::new("rec", &probe).recording_threads();
     let run = start_spec_run(&spec, &profile, sink(assembly, sink_double, &probe)).unwrap();
     running(&run);
-    std::thread::sleep(Wall::from_millis(20));
+    assert!(probe.wait_until(|lines| lines.iter().any(|line| line.starts_with("rec:step_on:")), Wall::from_secs(10)));
     let data = stepped_on(&probe)[0].clone();
     let _ = manifest_of(run);
     let lines = probe.lines();
@@ -845,8 +854,13 @@ fn kc_46b_under_orderly_the_data_thread_steps_on_after_its_stop() {
     let mut run = connect(&session_sink_profile(), &Default::default(), assembly, lease).unwrap();
     running(&run);
     run.disconnect();
-    assert!(probe.wait_for_count("radio:tail", 2, Wall::from_secs(1)));
-    std::thread::sleep(Wall::from_millis(100));
+    assert!(probe.wait_for_count("radio:tail", 2, Wall::from_secs(10)));
+    // The tail the Provider delivered in stop reaches the Sink, and the data thread steps on after it, with no call running.
+    let stepped_after_tail = |lines: &[String]| {
+        let Some(last_tail) = lines.iter().rposition(|line| line == "radio:tail") else { return false };
+        lines[last_tail..].iter().any(|line| line.starts_with("rec:block:")) && lines[last_tail..].iter().filter(|line| line.starts_with("rec:step_on:")).count() >= 2
+    };
+    assert!(probe.wait_until(stepped_after_tail, Wall::from_secs(10)), "{:?}", probe.lines());
     running(&run);
     let lines = probe.lines();
     let last_tail = lines.iter().rposition(|line| line == "radio:tail").unwrap();
@@ -863,14 +877,26 @@ fn kc_46b_under_orderly_the_data_thread_steps_on_after_its_stop() {
 
 #[test]
 fn kg_03_a_cancelled_horizon_wakes_the_control_loop() {
+    // The loss cancels the horizon an hour away, and only that cancel can wake the loop: it is released after the loop is seen waiting for it, and the
+    // wait would otherwise last the hour.
     let probe = Probe::new();
-    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).losing_device(Wall::from_millis(20)));
+    let loss = Arc::new((Mutex::new(false), Condvar::new()));
+    let (rig, park) = paced_parked(|authority| authority);
+    let assembly = provider(rig.assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).losing_device_on(loss.clone()));
     let mut run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     running(&run);
-    let begun = Instant::now();
-    let result = run.run_until_end(after(&run, Wall::from_secs(5)));
+    let horizon = after(&run, Wall::from_secs(3600));
+    let (done, returned) = mpsc::channel();
+    // Detached: a joined worker would turn a lost wake into a test timeout.
+    std::thread::spawn(move || {
+        let result = run.run_until_end(horizon);
+        let _ = done.send((result, run));
+    });
+    assert!(park.wait_parked_until(horizon.ticks_in(horizon.domain()).unwrap(), Wall::from_secs(10)), "the control loop never waited for the horizon");
+    *loss.0.lock().unwrap() = true;
+    loss.1.notify_all();
+    let (result, run) = returned.recv_timeout(Wall::from_secs(10)).expect("the loss woke the control loop that waited for the horizon");
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
-    assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
     let _ = manifest_of(run);
 }
 
@@ -966,15 +992,22 @@ fn kg_04_a_provider_that_never_finishes_fails_the_run() {
 #[test]
 fn kc_21a_an_end_requested_during_the_wait_ends_it() {
     // The exit review's KC-21a clause, its re-check: the Provider never finishes the
-    // Action and loses its device 100 ms after the start; the end the data thread
-    // requests ends the wait long before the 5 s budget.
+    // Action and loses its device once it has taken it; the end the data thread
+    // requests ends the wait long before the 5 s budget would.
     let probe = Probe::new();
-    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).never_finishing().losing_device(Wall::from_millis(100)));
+    let loss = Arc::new((Mutex::new(false), Condvar::new()));
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).never_finishing().losing_device_on(loss.clone()));
     let mut run = session(assembly, &profile_one());
-    let begun = Instant::now();
-    let _ = run.submit(gain(1.0), None);
-    assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
-    assert!(probe.lines().iter().any(|line| line == "radio:took:UpdateParameter"));
+    let (done, returned) = mpsc::channel();
+    // Detached: a joined worker would turn a wait that lasts its budget into a test timeout.
+    std::thread::spawn(move || {
+        let _ = run.submit(gain(1.0), None);
+        let _ = done.send(run);
+    });
+    assert!(probe.wait_for("radio:took:UpdateParameter", Wall::from_secs(10)), "{:?}", probe.lines());
+    *loss.0.lock().unwrap() = true;
+    loss.1.notify_all();
+    let run = returned.recv_timeout(Wall::from_secs(3)).expect("the end the Provider's loss requested ended the wait");
     let manifest = manifest_of(run);
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
 }
@@ -1028,8 +1061,10 @@ fn kc_21a_a_module_s_own_submission_is_not_waited_for() {
     assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(support::ProbeExecutor::new("x", &probe).submitting(action)));
     let run = start_spec_run(&spec, &profile, assembly).unwrap();
     running(&run);
-    assert!(probe.wait_for("radio:took:UpdateParameter", Wall::from_millis(500)));
-    std::thread::sleep(Wall::from_millis(100));
+    assert!(probe.wait_for("radio:took:UpdateParameter", Wall::from_secs(10)));
+    let stepped_after_submit =
+        |lines: &[String]| lines.iter().position(|line| line.starts_with("x:submit:")).is_some_and(|at| lines[at..].iter().filter(|line| line.starts_with("x:step:")).count() >= 2);
+    assert!(probe.wait_until(stepped_after_submit, Wall::from_secs(10)), "{:?}", probe.lines());
     running(&run);
     let lines = probe.lines();
     let submitted = lines.iter().position(|line| line.starts_with("x:submit:")).expect("the submission returned");
@@ -1139,7 +1174,7 @@ fn kg_04_a_simulation_session_does_not_wait() {
     let begun = Instant::now();
     let entry = run.submit(gain(4.0), None).unwrap();
     assert!(admitted(&entry), "{entry:?}");
-    assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
+    assert!(begun.elapsed() < Wall::from_secs(3), "{:?}", begun.elapsed());
     running(&run);
     let _ = manifest_of(run);
 }
@@ -1171,9 +1206,9 @@ fn kg_05_a_device_paced_spec_run_ends_at_its_scheduled_stop() {
     let mut run = start_spec_run(&spec, &profile_one(), assembly).unwrap();
     running(&run);
     let begun = Instant::now();
-    let result = run.run_until_end(after(&run, Wall::from_secs(5)));
+    let result = run.run_until_end(after(&run, Wall::from_secs(10)));
     assert!(matches!(result, Err(RunHandleError::Ended { termination: Termination::Completed {} })), "{result:?}");
-    assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
+    assert!(begun.elapsed() < Wall::from_secs(5), "{:?}", begun.elapsed());
 }
 
 // ---------------------------------------------------------------- KG-6
@@ -1306,9 +1341,7 @@ fn tm_16c_a_paced_authority_accepts_an_instant_already_passed() {
     std::thread::sleep(Wall::from_millis(6));
     let passed = TimePoint::new(root, time.now(root).unwrap().ticks_in(root).unwrap() - 1_000_000);
     time.schedule(passed, Box::new(|_| {})).expect("an instant already passed is accepted");
-    let begun = Instant::now();
     assert_eq!(authority.next_wakeup(), Some(passed));
-    assert!(begun.elapsed() < Wall::from_millis(5));
     let before = TimePoint::new(root, fired.ticks_in(root).unwrap() - 1);
     assert!(matches!(time.schedule(before, Box::new(|_| {})), Err(ezsdr_kernel::time::TimeError::InPast { .. })));
 }
@@ -1321,8 +1354,8 @@ fn kg_10_a_device_lost_from_a_provider_thread_aborts_the_run() {
     let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).losing_device(Wall::from_millis(20)));
     let mut run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     let begun = Instant::now();
-    let result = run.run_until_end(after(&run, Wall::from_secs(5)));
-    assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
+    let result = run.run_until_end(after(&run, Wall::from_secs(10)));
+    assert!(begun.elapsed() < Wall::from_secs(5), "{:?}", begun.elapsed());
     let lost = kind(EventKind::DEVICE_LOST);
     assert_eq!(result, Err(RunHandleError::Ended { termination: Termination::Stopped { cause: StopCause::Policy { event: lost.clone() } } }));
     let manifest = manifest_of(run);

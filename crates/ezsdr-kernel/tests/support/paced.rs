@@ -30,6 +30,10 @@ struct WallState {
     ran: std::collections::BTreeSet<u64>,
     /// The tick a waiting `next_wakeup` waits for, for [`WallPark`].
     parked_until: Option<i64>,
+    /// True while a `next_wakeup` runs, for `firing_before_schedule_returns`.
+    waiting: bool,
+    /// The calls of `schedule` that returned after their own callback had run.
+    fired_before_schedule_returned: u64,
 }
 
 /// The clock of [`WallAuthority`]: a 1 GHz root counting host nanoseconds since the
@@ -108,14 +112,20 @@ impl TimeAuthority for WallTime {
         self.changed.notify_all();
         if self.fire_first.load(Ordering::Acquire) && ticks <= self.elapsed() {
             // A paced Authority may return from `schedule` after the callback of an
-            // instant already passed has run on a waiting `next_wakeup` (KC-46a).
-            let until = std::time::Instant::now() + std::time::Duration::from_millis(20);
-            while !state.ran.contains(&seq) {
+            // instant already passed has run on a waiting `next_wakeup` (KC-46a): it
+            // waits for that callback as long as a `next_wakeup` runs. The cap turns a
+            // waiter that never comes into a failed assertion, not a hang (`wake` holds
+            // the Run's `wake_handle` across `schedule`).
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !state.ran.contains(&seq) && state.waiting {
                 let left = until.saturating_duration_since(std::time::Instant::now());
                 if left.is_zero() {
                     break;
                 }
                 state = self.changed.wait_timeout(state, left).unwrap_or_else(|e| e.into_inner()).0;
+            }
+            if state.ran.contains(&seq) {
+                state.fired_before_schedule_returned += 1;
             }
         }
         Ok(ScheduleHandle { root: self.root, ticks, seq })
@@ -219,6 +229,11 @@ impl WallPark {
         }
         true
     }
+
+    /// How many calls of `schedule` returned after their own callback had run on a waiting `next_wakeup`.
+    pub fn fired_before_schedule_returned(&self) -> u64 {
+        self.0.lock().fired_before_schedule_returned
+    }
 }
 
 impl Authority for WallAuthority {
@@ -232,6 +247,19 @@ impl Authority for WallAuthority {
     /// `schedule` and `cancel`, and runs the callbacks due there without holding the
     /// lock (MA-29 as KG-3 amends it).
     fn next_wakeup(&self) -> Option<TimePoint> {
+        self.time.lock().waiting = true;
+        let due = self.wait_and_fire();
+        self.time.lock().waiting = false;
+        self.time.changed.notify_all();
+        due
+    }
+    fn relations(&self) -> Vec<ClockRelation> {
+        self.relations.clone()
+    }
+}
+
+impl WallAuthority {
+    fn wait_and_fire(&self) -> Option<TimePoint> {
         let time = &self.time;
         let mut state = time.lock();
         let tick = loop {
@@ -261,9 +289,19 @@ impl Authority for WallAuthority {
         }
         Some(TimePoint::new(time.root, tick))
     }
-    fn relations(&self) -> Vec<ClockRelation> {
-        self.relations.clone()
-    }
+}
+
+/// What a test counts up to let [`ThreadedProvider::marking_on`] emit one more mark.
+pub type Release = Arc<(Mutex<u32>, Condvar)>;
+
+/// A fresh [`Release`] holding nothing.
+pub fn release() -> Release {
+    Arc::new((Mutex::new(0), Condvar::new()))
+}
+
+/// Lets the Provider emit one more mark.
+pub fn release_one(release: &Release) {
+    *release.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
 }
 
 /// What [`ThreadedProvider`]'s thread shares with its calls.
@@ -341,6 +379,7 @@ pub struct ThreadedProvider {
     action_delay: Option<std::time::Duration>,
     publish: Option<(u32, std::time::Duration)>,
     marks: Vec<(String, std::time::Duration)>,
+    released_marks: Vec<(String, Release)>,
     lost_after: Option<std::time::Duration>,
     loss: Option<Arc<(Mutex<bool>, Condvar)>>,
     prepare_delay: Option<std::time::Duration>,
@@ -367,6 +406,7 @@ impl ThreadedProvider {
             action_delay: None,
             publish: None,
             marks: Vec::new(),
+            released_marks: Vec::new(),
             lost_after: None,
             loss: None,
             prepare_delay: None,
@@ -399,6 +439,12 @@ impl ThreadedProvider {
     /// Emits `kind` once, `after` the start.
     pub fn marking(mut self, kind: &str, after: std::time::Duration) -> Self {
         self.marks.push((kind.to_owned(), after));
+        self
+    }
+
+    /// Emits `kind` once for every unit `release` holds ([`release_one`]), from its thread: a test releases it when it has seen the waiting call it wants woken.
+    pub fn marking_on(mut self, kind: &str, release: Release) -> Self {
+        self.released_marks.push((kind.to_owned(), release));
         self
     }
 
@@ -543,6 +589,7 @@ impl Provider for ThreadedProvider {
         let flag = stop.clone();
         let publish = self.publish.zip(self.rx_clock.as_ref().map(|h| h.id()));
         let marks = self.marks.clone();
+        let released_marks = self.released_marks.clone();
         let lost_after = self.lost_after;
         let loss = self.loss.clone();
         let next = self.next_index.clone();
@@ -551,6 +598,7 @@ impl Provider for ThreadedProvider {
             let begun = std::time::Instant::now();
             let mut next_publish = publish.map(|((_, period), _)| begun + period);
             let mut marked = vec![false; marks.len()];
+            let mut emitted = vec![0_u32; released_marks.len()];
             let mut lost = false;
             let mut took_one = deaf;
             while !flag.load(Ordering::Acquire) {
@@ -576,6 +624,14 @@ impl Provider for ThreadedProvider {
                             ctx.emit(kind, Severity::Info, serde_json::json!({}));
                             ctx.record(format!("marked:{kind}"));
                             marked[i] = true;
+                        }
+                    }
+                    for (i, (kind, release)) in released_marks.iter().enumerate() {
+                        let released = *release.0.lock().unwrap_or_else(|e| e.into_inner());
+                        while emitted[i] < released {
+                            ctx.emit(kind, Severity::Info, serde_json::json!({}));
+                            ctx.record(format!("marked:{kind}"));
+                            emitted[i] += 1;
                         }
                     }
                     let gate_open = loss.as_ref().is_some_and(|gate| *gate.0.lock().unwrap_or_else(|e| e.into_inner()));

@@ -50,7 +50,7 @@ def fixed_field(pattern, line):
 
 
 def row_record(line):
-    """The row's fields (`id`, `outcome`, `real_clock`, `reruns`, and `why` for an ERROR) from a mutate.py `EZSDR-ROW` line; None for other lines."""
+    """The row's fields (`id`, `outcome`, `real_clock`, `declared`, `reruns`, and `why` for an ERROR) from a mutate.py `EZSDR-ROW` line; None for other lines."""
     found = fixed_field(ROW, line)
     return found if found and isinstance(found.get("id"), str) and isinstance(found.get("outcome"), str) else None
 

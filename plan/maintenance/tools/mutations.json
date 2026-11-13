@@ -763,7 +763,8 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "provider::",
-  "equivalent": "note 23 round 2: both happen under the plans' lock, and every thread that acts on the loss's cut after it sees the flag reads the plan under that lock (uhd-rx's finish(), pinned by J53), so it waits until both are done; no test can order them."
+  "equivalent": "note 23 round 2: both happen under the plans' lock, and every thread that acts on the loss's cut after it sees the flag reads the plan under that lock (uhd-rx's finish(), pinned by J53), so it waits until both are done; no test can order them. The `\"kill\": \"bound\"` declaration only classifies the filter: `provider::` selects tests whose subject is a real deadline (`ur_22_t3` x2, `ur_75`), so the row is marked; nothing is killed.",
+  "kill": "bound"
  },
  {
   "id": "J60",
@@ -2920,7 +2921,8 @@
   "new": "        let validity = if false { Validity { from: measured, to: Some(measured) } } else { Validity { from: measured, to: None } };",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_08_the_manual_clock_s_relations_hold_only_at_the_instant_measured"
+  "filter": "ur_08_the_manual_clock_s_relations_hold_only_at_the_instant_measured",
+  "kill": "bound"
  },
  {
   "id": "J291",
@@ -2964,7 +2966,8 @@
   "test_bin": "fake",
   "filter": "ur_21_a_descheduled_timed_send_is_on_time_on_the_manual_clock_and_late_on_the_real_one",
   "old2": "        Some(d) if t > d => d,",
-  "new2": "        Some(d) if false => d,"
+  "new2": "        Some(d) if false => d,",
+  "kill": "bound"
  },
  {
   "id": "J296",
@@ -3004,7 +3007,8 @@
   "new": "        Some(TimePoint::new(self.root, ns))",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_07_the_host_timeline_is_judged_on_real_time_on_the_real_clock"
+  "filter": "ur_07_the_host_timeline_is_judged_on_real_time_on_the_real_clock",
+  "kill": "bound"
  },
  {
   "id": "J300",
@@ -3177,7 +3181,8 @@
   "new": "        let zero = Duration::ZERO;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_33_a_real_fake_s_time_counts_from_its_own_creation"
+  "filter": "ur_33_a_real_fake_s_time_counts_from_its_own_creation",
+  "kill": "bound"
  },
  {
   "id": "J317",
@@ -5127,7 +5132,8 @@
    "new": "        self.join(&core, &tx_name(0));",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_26_every_stream_s_threads_are_joined_in_order"
+   "filter": "ur_26_every_stream_s_threads_are_joined_in_order",
+   "kill": "bound"
   },
   {
    "id": "P246",
@@ -5227,7 +5233,8 @@
    "new": "                let name = rx_name(stream.k);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_16_a_wedged_thread_does_not_wedge_stop"
+   "filter": "ur_16_a_wedged_thread_does_not_wedge_stop",
+   "kill": "bound"
   },
   {
    "id": "P275",
@@ -5237,7 +5244,8 @@
    "new": "            self.join(&core, &rx_name(k));",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_16_a_wedged_thread_does_not_wedge_stop"
+   "filter": "ur_16_a_wedged_thread_does_not_wedge_stop",
+   "kill": "bound"
   },
   {
    "id": "P277",
@@ -5247,7 +5255,8 @@
    "new": "            self.detached.insert(name);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_16_a_wedged_thread_does_not_wedge_stop"
+   "filter": "ur_16_a_wedged_thread_does_not_wedge_stop",
+   "kill": "bound"
   },
   {
    "id": "P281",
@@ -5707,7 +5716,8 @@
   "new": "        for to_rx in &to_rx {\n            let _ = to_rx.send(RxCmd::Shutdown(mode));\n        }\n        for k in 0..to_rx.len() {\n            self.join(&core, &rx_name(k));\n        }\n        for k in 0..to_tx.len() {\n            self.join(&core, &tx_name(k));\n        }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_26_every_stream_s_threads_are_joined_in_order"
+  "filter": "ur_26_every_stream_s_threads_are_joined_in_order",
+  "kill": "bound"
  },
  {
     "id": "P445",
@@ -5827,7 +5837,8 @@
   "new": "        if false {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_16_a_wedged_later_stream_leaves_the_others_joined"
+  "filter": "ur_16_a_wedged_later_stream_leaves_the_others_joined",
+  "kill": "bound"
  },
  {
   "id": "P468",
@@ -10427,7 +10438,8 @@
        "new": "                    if false && host.now() >= until {\n                        self.stash_tx_report(stream, report);\n                        break;\n                    }",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
-       "filter": "ur_22_t3_ack_read_returned_after_deadline_is_not_a_flush_success"
+       "filter": "ur_22_t3_ack_read_returned_after_deadline_is_not_a_flush_success",
+       "kill": "bound"
       },
       {
        "id": "P1191",
@@ -19157,6 +19169,16 @@
   "filter": "direct_rig_until_fails_at_its_device_time_horizon"
  },
  {
+  "id": "N51C-11",
+  "name": "a Gated wait for a held call or a worker's end expires with no infra marker, so a runner counts the host's bound as a kill",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "infra(&format!(\"the Gated wait for {what} did not end within {bound:?} of real time\"));",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "direct_rig_a_gated_wait_that_expires_writes_the_infra_marker"
+ },
+ {
   "id": "N51C-13",
   "name": "the UhdRig's wait for events has no device-time horizon",
   "file": "crates/ezsdr-acceptance/tests/parity.rs",
@@ -19947,7 +19969,8 @@
   "new": "drop(manifest);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "run_a_dropped_live_run_is_judged"
+  "filter": "run_a_dropped_live_run_is_judged",
+  "kill": "bound"
  },
  {
   "id": "N51-2A-15",
@@ -19957,7 +19980,8 @@
   "new": "None",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "run_unwinding_marks_a_bound_and_never_panics_again"
+  "filter": "run_unwinding_marks_a_bound_and_never_panics_again",
+  "kill": "bound"
  },
  {
   "id": "N51-2A-16",
@@ -19977,7 +20001,8 @@
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "run_a_bound_is_marked_by_advance_to"
+  "filter": "run_a_bound_is_marked_by_advance_to",
+  "kill": "bound"
  },
  {
   "id": "N51-2A-18",
@@ -20124,7 +20149,7 @@
   "id": "N51-2A-32",
   "name": "the `#[test]` attribute is not recognised, so no fn counts as a test and no test that reads time is found (note 51 stage 2a)",
   "file": "crates/ezsdr-acceptance/tests/governance.rs",
-  "old": "\"#\" if at_pattern(&toks, i, &[\"#\", \"[\", \"test\", \"]\"]) => pending_test = true,",
+  "old": "\"#\" if at_pattern(toks, i, &[\"#\", \"[\", \"test\", \"]\"]) => pending_test = true,",
   "new": "\"#\" if false => pending_test = true,",
   "crate": "ezsdr-acceptance",
   "test_bin": "governance",
@@ -20938,7 +20963,8 @@
   "scope": "fn set_tx_gain",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "bench1115_zeros_sweep_refuses_a_gain_above_the_bench_maximum_and_restores_0_db"
+  "filter": "bench1115_zeros_sweep_refuses_a_gain_above_the_bench_maximum_and_restores_0_db",
+  "kill": "bound"
  },
  {
   "id": "B1115-31",
@@ -20949,7 +20975,8 @@
   "scope": "impl Drop for GainReset<'_>",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "bench1115_zeros_sweep_refuses_a_gain_above_the_bench_maximum_and_restores_0_db"
+  "filter": "bench1115_zeros_sweep_refuses_a_gain_above_the_bench_maximum_and_restores_0_db",
+  "kill": "bound"
  },
  {
   "id": "B1115-32",
@@ -21521,7 +21548,8 @@
   "scope": "pub fn open_flush_sweep",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "bench1115_open_flush_sweep_rehearses_on_the_fake_and_a_dropped_ack_fails"
+  "filter": "bench1115_open_flush_sweep_rehearses_on_the_fake_and_a_dropped_ack_fails",
+  "kill": "bound"
  },
  {
   "id": "B1115-84",
@@ -21960,7 +21988,8 @@
   "scope": "fn feed_pn",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "bench1115_pn_sweep_rehearses_on_the_fake"
+  "filter": "bench1115_pn_sweep_rehearses_on_the_fake",
+  "kill": "bound"
  },
  {
   "id": "B1115-125",
@@ -21971,7 +22000,8 @@
   "scope": "fn read_window",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "bench1115_pn_sweep_rehearses_on_the_fake"
+  "filter": "bench1115_pn_sweep_rehearses_on_the_fake",
+  "kill": "bound"
  },
  {
   "id": "B1115-126",
@@ -21982,7 +22012,8 @@
   "scope": "pub fn drain_without_clock",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "bench1115_the_cleanup_drain_ends_at_a_failure_and_keeps_draining_past_an_overflow"
+  "filter": "bench1115_the_cleanup_drain_ends_at_a_failure_and_keeps_draining_past_an_overflow",
+  "kill": "bound"
  },
  {
   "id": "B1115-127",
@@ -21993,7 +22024,8 @@
   "scope": "pub fn drain_without_clock",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "bench1115_the_cleanup_drain_ends_at_a_failure_and_keeps_draining_past_an_overflow"
+  "filter": "bench1115_the_cleanup_drain_ends_at_a_failure_and_keeps_draining_past_an_overflow",
+  "kill": "bound"
  },
  {
   "id": "B1115-128",
@@ -22004,7 +22036,8 @@
   "scope": "pub fn drain_without_clock",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "bench1115_the_cleanup_drain_ends_at_a_failure_and_keeps_draining_past_an_overflow"
+  "filter": "bench1115_the_cleanup_drain_ends_at_a_failure_and_keeps_draining_past_an_overflow",
+  "kill": "bound"
  },
  {
   "id": "B1115-129",
@@ -22015,7 +22048,8 @@
   "scope": "pub fn read_window",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "bench1115_a_failed_receive_call_ends_a_pn_window_with_its_error"
+  "filter": "bench1115_a_failed_receive_call_ends_a_pn_window_with_its_error",
+  "kill": "bound"
  },
  {
   "id": "B1115-130",
@@ -23929,5 +23963,225 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "N51-3C2-01",
+  "name": "a `from_secs(2)` expiry is as good as 3 s, so the rule's floor is lower than it says (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "is_some_and(|secs| secs < 3)",
+  "new": "is_some_and(|secs| secs < 2)",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_finds_a_sleep_and_a_short_expiry_however_it_is_written"
+ },
+ {
+  "id": "N51-3C2-02",
+  "name": "`from_millis` is not a short interval, so a millisecond expiry or sleep argument is not seen by R1 or R2 (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "[\"from_millis\", \"from_micros\",",
+  "new": "[\"from_micros\",",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_finds_a_sleep_and_a_short_expiry_however_it_is_written"
+ },
+ {
+  "id": "N51-3C2-03",
+  "name": "`wait_parked_until` is not an expiry call, so a short park wait is not seen (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "const WALL_CALLS: [&str; 8] = [\"wait_for\", \"wait_for_count\", \"wait_until\", \"wait_parked_until\", \"wait_timeout\", \"park_timeout\", \"recv_timeout\", \"recv_deadline\"];",
+  "new": "const WALL_CALLS: [&str; 7] = [\"wait_for\", \"wait_for_count\", \"wait_until\", \"wait_timeout\", \"park_timeout\", \"recv_timeout\", \"recv_deadline\"];",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_finds_a_sleep_and_a_short_expiry_however_it_is_written"
+ },
+ {
+  "id": "N51-3C2-04",
+  "name": "`<=` is not read as an upper bound, so `elapsed() <= Wall::from_millis(5)` passes (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "usize::from(toks.get(i + 1).is_some_and(|next| next.text == \"=\"))",
+  "new": "0",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_finds_a_sleep_and_a_short_expiry_however_it_is_written"
+ },
+ {
+  "id": "N51-3C2-05",
+  "name": "every path constructor is blinded after `<`: the path is not walked, so `Wall::from_millis` and `std::time::Duration::from_micros` both pass R1 (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "while at_pattern(&toks, j + 1, &[\":\", \":\"]) {",
+  "new": "while false {",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_finds_a_sleep_and_a_short_expiry_however_it_is_written"
+ },
+ {
+  "id": "N51-3C2-06",
+  "name": "a fn that is not a test is not scanned, so a sleep in a helper passes (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "let call = if tok.text == \"<\" {",
+  "new": "let call = if !context[i].1 { None } else if tok.text == \"<\" {",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_reads_every_fn_and_not_comments_or_strings"
+ },
+ {
+  "id": "N51-3C2-07",
+  "name": "a method named `sleep` is a sleep call, so `x.sleep(d)` trips the scan (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "!(i > 0 && (toks[i - 1].text == \".\" || toks[i - 1].text == \"fn\"))",
+  "new": "!(i > 0 && toks[i - 1].text == \"fn\")",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_reads_every_fn_and_not_comments_or_strings"
+ },
+ {
+  "id": "N51-3C2-08",
+  "name": "a sleep's call is spelt from its last segment, so the pin does not distinguish `thread::sleep` from `std::thread::sleep` (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "while start >= 3 &&",
+  "new": "while false &&",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_pins_each_allowance_to_its_fn_call_and_count"
+ },
+ {
+  "id": "N51-3C2-09",
+  "name": "an allowance matches by call only, so a pinned sleep is allowed in any test (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "*fn_name == name && *pinned == call",
+  "new": "*pinned == call",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_pins_each_allowance_to_its_fn_call_and_count"
+ },
+ {
+  "id": "N51-3C2-10",
+  "name": "an allowance pins a count of at most, so a pinned fn that lost an occurrence still passes (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "Some((_, _, count, _)) if *count == lines.len() => {",
+  "new": "Some((_, _, count, _)) if *count >= lines.len() => {",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_pins_each_allowance_to_its_fn_call_and_count"
+ },
+ {
+  "id": "N51-3C2-11",
+  "name": "a pinned fn with more occurrences than its row is allowed, so Sol's bypass (another sleep and a count read beside it) passes (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "Some((_, _, count, _)) if *count == lines.len() => {",
+  "new": "Some((_, _, count, _)) if *count <= lines.len() => {",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_pins_each_allowance_to_its_fn_call_and_count"
+ },
+ {
+  "id": "N51-3C2-12",
+  "name": "the scan records no allowance as used, so a stale row never fails (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "used.insert(format!(\"{name} {call}\"));",
+  "new": "used.insert(String::new());",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_pins_each_allowance_to_its_fn_call_and_count"
+ },
+ {
+  "id": "N51-3C2-13",
+  "name": "`wait_timeout`, `park_timeout` and `recv_deadline` are not expiry calls, so a short Condvar, park or deadline wait is not seen (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": "const WALL_CALLS: [&str; 8] = [\"wait_for\", \"wait_for_count\", \"wait_until\", \"wait_parked_until\", \"wait_timeout\", \"park_timeout\", \"recv_timeout\", \"recv_deadline\"];",
+  "new": "const WALL_CALLS: [&str; 5] = [\"wait_for\", \"wait_for_count\", \"wait_until\", \"wait_parked_until\", \"recv_timeout\"];",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_finds_a_sleep_and_a_short_expiry_however_it_is_written"
+ },
+ {
+  "id": "N51-3D-01",
+  "name": "the stage reads the wrong event name for the shorts, so a START_LEAD_SHORT is a LATE_COMMAND (note 51 stage 3d)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "super::kind(\"radio.START_LEAD_SHORT\")",
+  "new": "super::kind(\"radio.LATE_COMMAND\")",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_restart_stage_reports_what_the_events_say"
+ },
+ {
+  "id": "N51-3D-02",
+  "name": "the planned origin is read from an undecodable payload field, so no event is associated with a trial (note 51 stage 3d)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "event.payload[\"requested\"][\"ticks\"].as_i64()",
+  "new": "event.payload[\"requested\"][\"tick\"].as_i64()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_restart_stage_reports_what_the_events_say"
+ },
+ {
+  "id": "N51-3D-03",
+  "name": "a short at any origin is taken for the trial's own (note 51 stage 3d)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "*at == origin",
+  "new": "*at == *at",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_restart_stage_reports_what_the_events_say"
+ },
+ {
+  "id": "N51-3D-04",
+  "name": "a trial with a short event is not marked short (note 51 stage 3d)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "trial.short = short_event.is_some();",
+  "new": "trial.short = false;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_restart_stage_reports_what_the_events_say"
+ },
+ {
+  "id": "N51-3D-05",
+  "name": "two shorts at one origin keep the larger remaining lead (note 51 stage 3d)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": ".map(|(_, lead)| *lead).min()",
+  "new": ".map(|(_, lead)| *lead).max()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_restart_stage_reports_what_the_events_say"
+ },
+ {
+  "id": "N51-3D-06",
+  "name": "the stage's row reports no start_lead_short (note 51 stage 3d)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "row[\"start_lead_short\"] = json!(trial.short);",
+  "new": "row[\"start_lead_short\"] = json!(false);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_restart_stage_reports_what_the_events_say"
+ },
+ {
+  "id": "N51-3D-07",
+  "name": "the stage's smallest remaining lead is the largest (note 51 stage 3d)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": ".filter_map(|trial| trial.lead_left_ns).min()",
+  "new": ".filter_map(|trial| trial.lead_left_ns).max()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_restart_stage_reports_what_the_events_say"
+ },
+ {
+  "id": "N51-3D-08",
+  "name": "a late restart is not marked late (note 51 stage 3d)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "trial.late = late.contains(&origin);",
+  "new": "trial.late = false;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_restart_stage_reports_what_the_events_say"
+ },
+ {
+  "id": "N51-3C2-14",
+  "name": "an integer suffix is not stripped, so `from_secs(1_u64)` is not read as a short literal and passes R1 and R2 (note 51 stage 3c-2)",
+  "file": "crates/ezsdr-acceptance/tests/governance.rs",
+  "old": ".find_map(|suffix| text.strip_suffix(suffix))",
+  "new": ".find_map(|_| None)",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "governance",
+  "filter": "kernel_wall_scan_finds_a_sleep_and_a_short_expiry_however_it_is_written"
  }
 ]

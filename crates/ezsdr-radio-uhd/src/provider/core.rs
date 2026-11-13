@@ -1918,7 +1918,7 @@ mod tests {
             (vec![FakeFault::TxAsyncFails(Wall::ZERO, false)], true, false),
             (vec![FakeFault::DropBurstAck, FakeFault::TxReport(Wall::ZERO, TxCode::Other(77))], false, true),
         ] {
-            let config = FakeConfig { clock: crate::ClockMode::Manual, faults, ..FakeConfig::default() };
+            let config = FakeConfig { faults, ..FakeConfig::default() };
             let (core, device, _time, _events) = super::super::test_support::rig_with(config, Vec::new());
             device.tx_open(0, &[0]).unwrap();
             let before = device.host().now();
@@ -1939,7 +1939,7 @@ mod tests {
         use crate::device::{FakeConfig, FakeFault};
 
         for fault in [FakeFault::ShortSend(0), FakeFault::StalledSend(0), FakeFault::FailSend(0)] {
-            let config = FakeConfig { clock: crate::ClockMode::Manual, faults: vec![fault.clone()], ..FakeConfig::default() };
+            let config = FakeConfig { faults: vec![fault.clone()], ..FakeConfig::default() };
             let (core, device, _time, _events) = super::super::test_support::rig_with(config, Vec::new());
             device.tx_open(0, &[0]).unwrap();
             let result = core.tx_flush(0, &[0]);
@@ -1953,13 +1953,13 @@ mod tests {
     fn ur_22_t3_flush_requires_each_channel_ack_and_device_loss_stays_distinct() {
         use crate::device::{FakeConfig, FakeFault};
 
-        let (core, device, _time, _events) = super::super::test_support::rig_with(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }, Vec::new());
+        let (core, device, _time, _events) = super::super::test_support::rig_with(FakeConfig::default(), Vec::new());
         device.tx_open(0, &[0, 1]).unwrap();
         let result = core.tx_flush(0, &[0, 1]);
         assert!(result.acknowledged, "both channel-position acks are required: {:?}", lock(&core.rec).device_async);
         assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] == true).map(|row| row["channel"].as_u64()).collect::<Vec<_>>(), [Some(0), Some(1)]);
 
-        let config = FakeConfig { clock: crate::ClockMode::Manual, faults: vec![FakeFault::TxAsyncFails(Wall::ZERO, true)], ..FakeConfig::default() };
+        let config = FakeConfig { faults: vec![FakeFault::TxAsyncFails(Wall::ZERO, true)], ..FakeConfig::default() };
         let (lost_core, lost_device, _time, events) = super::super::test_support::rig_with(config, Vec::new());
         lost_device.tx_open(0, &[0]).unwrap();
         let result = lost_core.tx_flush(0, &[0]);
@@ -2099,11 +2099,8 @@ mod tests {
         // UR-28, UR-29 (T3): an Underflow read before a device loss during the flush wait is the flush's; the loss is one DEVICE_LOST and no TX_UNDERFLOW.
         use crate::device::{FakeConfig, FakeFault, TxCode};
 
-        let config = FakeConfig {
-            clock: crate::ClockMode::Manual,
-            faults: vec![FakeFault::DropBurstAck, FakeFault::TxReport(Wall::ZERO, TxCode::Underflow), FakeFault::TxAsyncFails(Wall::from_millis(50), true)],
-            ..FakeConfig::default()
-        };
+        let config =
+            FakeConfig { faults: vec![FakeFault::DropBurstAck, FakeFault::TxReport(Wall::ZERO, TxCode::Underflow), FakeFault::TxAsyncFails(Wall::from_millis(50), true)], ..FakeConfig::default() };
         let (core, device, _time, events) = super::super::test_support::rig_with(config, Vec::new());
         device.tx_open(0, &[0]).unwrap();
         let result = core.tx_flush(0, &[0]);

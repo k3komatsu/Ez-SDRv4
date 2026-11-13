@@ -1338,8 +1338,12 @@ mod tests {
         ]);
         let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
         let description = ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms());
-        let (core, _time, _) =
-            crate::provider::test_support::rig_on_description(Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default())), vec![Arc::new(NoLink)], BTreeMap::new(), description);
+        let (core, _time, _) = crate::provider::test_support::rig_on_description(
+            Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() })),
+            vec![Arc::new(NoLink)],
+            BTreeMap::new(),
+            description,
+        );
         let mut control = control(&core, &[Dir::Rx]);
         let streams = std::ptr::from_ref(&core.streams) as usize;
         let instant = core.ticks(300_000_000);
@@ -1523,7 +1527,7 @@ mod tests {
 
     /// A receive-only rig with its events: uhd-control booking on the manual clock held at 0.
     fn staging_rig() -> (Arc<Core>, Control, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::event::EventCollector>, crate::provider::test_support::Frozen) {
-        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() };
+        let config = crate::device::FakeConfig::default();
         let (core, device, time, events) = crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)]);
         let frozen = hold(&core, &time, &device);
         let control = control(&core, &[Dir::Rx]);

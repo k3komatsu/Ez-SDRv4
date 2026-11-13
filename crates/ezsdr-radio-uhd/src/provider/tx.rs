@@ -1500,7 +1500,7 @@ mod tests {
             if let Some(fault) = reopen_fault.clone() {
                 faults.push(fault);
             }
-            let device = Arc::new(FakeDevice::new(FakeConfig { faults, ..FakeConfig::default() }));
+            let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, faults, ..FakeConfig::default() }));
             let (core, time, mut tx, clock, events) = recovery_rig(device.clone());
             device.set_time(0);
 
@@ -1768,7 +1768,7 @@ mod tests {
     #[test]
     fn ur_22_a_partial_ack_on_every_attempt_is_unconfirmed() {
         let two_channels = |faults: Vec<FakeFault>| {
-            let config = FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() };
+            let config = FakeConfig { faults, ..FakeConfig::default() };
             let (core, device, _time, _events) = super::super::test_support::rig_with(config, Vec::new());
             let frozen = Frozen::of(&device);
             device.tx_open(0, &[0, 1]).unwrap();
@@ -1804,7 +1804,7 @@ mod tests {
     #[test]
     fn ur_22_nonterminal_reopen_failures_cancel_held_initial_bursts() {
         for fault in [FakeFault::TxOpenFails(1), FakeFault::RatesMismatch(0)] {
-            let device = Arc::new(FakeDevice::new(FakeConfig { faults: vec![fault.clone()], ..FakeConfig::default() }));
+            let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, faults: vec![fault.clone()], ..FakeConfig::default() }));
             let (core, _time, mut tx, clock, _events) = recovery_rig(device.clone());
             {
                 let streams = lock(&core.streams);
@@ -1866,7 +1866,7 @@ mod tests {
     #[test]
     fn ur_22_tx_stop_preserves_recovery_for_later_bursts() {
         for (fail_stop_close, has_tail) in [(true, true), (true, false), (false, false)] {
-            let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+            let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
             let (core, _time, mut tx, clock, _events) = recovery_rig(device.clone());
             if fail_stop_close {
                 tx.chain().open_device_burst(0, 100, has_tail.then_some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
@@ -4036,7 +4036,7 @@ mod tests {
     fn ur_28_a_later_stream_s_reopen_discards_only_its_correlations() {
         // UR-28, UR-36 (T3): the streamer's generation is per stream; an open of stream 1
         // discards stream 1's pending correlations alone.
-        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let feed = Arc::new(ReportFeed::new(inner.clone()));
         let (core, _, _) = super::super::test_support::rig_on_description(feed.clone(), Vec::new(), BTreeMap::new(), two_tx_description());
         let (_to0, cmds0) = std::sync::mpsc::channel();
@@ -4103,7 +4103,7 @@ mod tests {
     /// 30 000 samples driven in 13 steps of up to 2 500 samples, so its last sample is held
     /// back and `continues_at` is 70 000 (design note 37, T1–T5).
     fn at_a_held_tail(faults: Vec<crate::device::FakeFault>) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, crate::provider::test_support::Frozen) {
-        let config = FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() };
+        let config = FakeConfig { faults, ..FakeConfig::default() };
         let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
         let frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
@@ -4227,7 +4227,7 @@ mod tests {
     fn ur_23_a_stop_ends_the_burst_within_the_in_flight_window() {
         // UR-23, RM-16: payload stops at the first SampleClock sample at or after `s + W`;
         // the two-zero EOB is separate. The fake's Session test reads the receipt instant.
-        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
+        let config = FakeConfig::default();
         let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
@@ -4347,7 +4347,7 @@ mod tests {
         // RM-15: held bursts go out in target order, whatever order they were booked in. The
         // Spec sorts its entries by instant, so its two bursts arrive in target order; the
         // reverse booking is pinned here, on the controlled clock.
-        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
+        let config = FakeConfig::default();
         let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
@@ -4376,7 +4376,7 @@ mod tests {
         // report after a short send or an error that may have accepted samples.
         for (fault, cursor) in [(crate::device::FakeFault::ShortSend(0), 40_499), (crate::device::FakeFault::FailSend(0), 40_999)] {
             let what = format!("{fault:?}");
-            let config = FakeConfig { clock: ClockMode::Manual, faults: vec![fault], ..FakeConfig::default() };
+            let config = FakeConfig { faults: vec![fault], ..FakeConfig::default() };
             let (core, device, time, events) = crate::provider::test_support::rig_with(config, Vec::new());
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
@@ -4442,7 +4442,7 @@ mod tests {
         ];
         for (fault, len) in cases {
             let nth = format!("{fault:?}");
-            let config = FakeConfig { clock: ClockMode::Manual, faults: vec![fault], ..FakeConfig::default() };
+            let config = FakeConfig { faults: vec![fault], ..FakeConfig::default() };
             let (core, device, time, _events) = crate::provider::test_support::rig_with(config, Vec::new());
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
@@ -4518,7 +4518,7 @@ mod tests {
     fn ur_22_a_failed_eob_close_recovers_with_flush_before_the_next_timed_burst() {
         for fault in [FakeFault::ShortSend(1), FakeFault::StalledSend(1), FakeFault::FailSend(1)] {
             let faults = vec![fault.clone(), FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck)];
-            let config = FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() };
+            let config = FakeConfig { faults, ..FakeConfig::default() };
             let (core, device, time, _events) = super::super::test_support::rig_with(config, Vec::new());
             let frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
@@ -4570,7 +4570,7 @@ mod tests {
 
     #[test]
     fn ur_28_ack_ticks_separate_a_lost_flush_ack_from_later_bursts() {
-        let config = FakeConfig { clock: ClockMode::Manual, faults: vec![FakeFault::DropBurstAck], ..FakeConfig::default() };
+        let config = FakeConfig { faults: vec![FakeFault::DropBurstAck], ..FakeConfig::default() };
         let (core, device, _time, events) = super::super::test_support::rig_with(config, Vec::new());
         device.tx_open(0, &[0]).unwrap();
         let result = core.tx_flush(0, &[0]);
@@ -5611,7 +5611,7 @@ mod tests {
     #[test]
     fn ur_23_a_new_sob_after_an_abandon_waits_for_32_window_samples() {
         // UR-22 (S3, #78): after a failed first send, the next burst's first send waits for 32 samples of window space like any first send.
-        let config = FakeConfig { clock: crate::ClockMode::Manual, faults: vec![crate::device::FakeFault::FailSend(0)], ..FakeConfig::default() };
+        let config = FakeConfig { faults: vec![crate::device::FakeFault::FailSend(0)], ..FakeConfig::default() };
         let (core, device, time, _events) = crate::provider::test_support::rig_with(config, Vec::new());
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
@@ -6310,7 +6310,7 @@ mod tests {
     }
 
     fn owner_with(channels: usize, faults: Vec<FakeFault>) -> OwnerRig {
-        let config = FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() };
+        let config = FakeConfig { faults, ..FakeConfig::default() };
         let (core, device, time, events) = super::super::test_support::rig_with(config, Vec::new());
         let frozen = Frozen::of(&device);
         device_at(&core, &time, &device, 0);

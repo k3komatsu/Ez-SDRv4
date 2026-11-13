@@ -785,7 +785,8 @@
   "new": "if false {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_16_cleanup_keeps_the_streamer_of_a_detached_thread"
+  "filter": "ur_16_cleanup_keeps_the_streamer_of_a_detached_thread",
+  "kill": "bound"
  },
  {
   "id": "U43",
@@ -1136,7 +1137,8 @@
   "new": "let deadline = Instant::now();",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_07_the_last_device_handle_is_not_dropped_on_uhd_clock"
+  "filter": "ur_07_the_last_device_handle_is_not_dropped_on_uhd_clock",
+  "kill": "bound"
  },
  {
   "id": "B24",
@@ -1146,7 +1148,8 @@
   "new": "        let _ = &stop;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_07_no_device_read_follows_the_authority_s_drop"
+  "filter": "ur_07_no_device_read_follows_the_authority_s_drop",
+  "kill": "bound"
  },
   {
    "id": "B25",

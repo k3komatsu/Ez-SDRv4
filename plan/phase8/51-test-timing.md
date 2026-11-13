@@ -94,6 +94,7 @@ A が後でできなくすること：登録していない別スレッドから
 - **P1 観測した進み**：「進んだ」と言えるのは Provider か device が残した記録だけ。試験のスレッドが読んだ時刻と，それに足した定数は観測ではない。遅れの証拠は判定を差し控えるだけで，判定を作ることはない（§5.3b）。
 - **P2 時計の持ち主**：判定に入る時刻の差は，1 つの時計の上で，その時計の参加者だけが作る。
 - **P3 実時間の上限**：使ってよいのは「満了＝失敗」の上限だけ。大きさは秒，通る側の所要の 100 倍以上。ms の上限と「実時間の区間に N 個以上」は判定にしない。
+- **P3a 否定の待ち**：「その間に起きない」ことを期待する待ち（遅い host は検出を弱めるだけで，基準線を落とさない）と，時計を通すだけの短い sleep，TTL そのものが主題の待ちは，理由つきで 1 か所ずつ固定して許す。Kernel の `device_paced.rs` では `governance.rs` の `KERNEL_WALL_ALLOWED` が `(fn, 呼び出し, 回数, 理由)` で持つ。走査（stage 3c-2）は，ファイルの全 fn（helper も）で，`sleep(` で終わる path の呼び出しと，`<`／`<=` の右辺や待ちの呼び出し（`wait_for`，`wait_for_count`，`wait_until`，`wait_parked_until`，`wait_timeout`，`park_timeout`，`recv_timeout`，`recv_deadline`）の中の短い満了を，その表にない限り違反にする。短い満了として読む構築子は `from_millis`，`from_micros`，`from_nanos`，`from_secs_f32`／`_f64`，`from_secs(n)` の n < 3（path は問わない）。限界（走査は読まない）：`elapsed().as_*() < n`，向きを逆にした `bound > elapsed()`，`Wall::new(..)`，10 進でない・計算した値（`from_secs(10 - 8)` は先頭の `10` だけを読むので通る），別ファイルの helper に隠した wall の読み。
 - **P4 実時間の FakeDevice**：使うテストは印で数えられ，それを filter にする mutation の行は `bound` と宣言する（§6.5）。
 - **P5 狭い窓**：poll 数回ぶんより狭い窓は `Frozen`／stepped の unit rig。
 - **P6 実機**：時計は止められない。予行で規則の境界を固め，実機では P1 だけで判定する。
@@ -363,7 +364,7 @@ Sol の列：baseline は通る → mutant が負荷の下で走る → prepare 
 - **filter を，選ばれるテスト全部に対して解く**：libtest の filter は module path を含む名前の部分文字列（probe 7 (d) で VERIFIED）。例：`kc_36_`（phase7 C07）は `device_paced.rs` の 8 本を選ぶ。
   - 印は `FakeDevice::new` 自身が出す（clock が Real で，mutate.py が baseline に立てる環境変数があるときだけ `EZSDR-CLASS: real-clock`。`eprintln!` でよい）。baseline を `--show-output` つきで流して読む（probe 7 (e) で VERIFIED）。
   - `FakeConfig::default()` は Real（`device.rs:415`）で，`fake_real` を通らずに Real を作る所が 66 か所ある（grep の上限。1 本ずつは見ていない）。
-  - M 段では報告だけ（`gate.json` に `real-clock (unclassified)` の数と id）。段 3 で 1 本ずつ：Manual にして印を消すか，行を `bound` と宣言。その後は，印があって宣言の無い行は broken。
+  - M 段では報告だけだった（`gate.json` に `real-clock (unclassified)` の数と id）。段 3 で 1 本ずつ：Manual にして印を消すか，行を `bound` と宣言した（印のある行は 200 から 27 へ，27 行すべてに `"kill": "bound"`。3e）。**今は，印があって宣言の無い行は，結果に依らず（killed，survived，equivalent，known survivor）broken**：`mutate.py` が `ERROR`（`real-clock row without a bound declaration`。baseline の失敗は `BASELINE FAILED` のまま，ほかの理由で既に `ERROR` の行はその理由を残す。印は baseline の key の性質，宣言は行の性質），`gate.py` は行の固定の欄（`real_clock`，`declared`）から数え直し（宣言の欄が無い行は未宣言），`known-survivors.txt` でも許さず，`real-clock (undeclared)`（空であること）と `real-clock (declared)` に出す。equivalent の行（J58）の宣言は filter の分類だけで，何も kill しない。
   - 今分かっている下限：`fake.rs` の本体に `fake_real(`／`ClockMode::Real` と書いた 4 本を 9 行（J295，P1120〜P1123，P1149，P1150，P1156，P1157）が選ぶ。
 - **規則 M-R**：遅れ・phase・受け取りまでの遅れを kill の証拠にする行は，直結の rig か unit のテストを filter にする。予行は filter にしない（落ちても `ERROR`）。
 
@@ -383,7 +384,7 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 | `fake` binary の Run を通すテスト | 398 本中，注入で 11 本，うち予行 6 本 | S1，Run | 2a〜2c |
 | `ezsdr-acceptance/tests/uhd.rs`，`ezsdr-server/tests/protocol.rs` | 17 本（注入で 1 本），74 本（0 本） | S1，Run | 2a・2b |
 | Real の FakeDevice | `fake_real` ほか明示 12 か所，default の Real 66 か所（上限） | S2 | 3 |
-| `ezsdr-kernel/tests/device_paced.rs` | 12 本（ms の上限 4，1 s の上限 7，「100 ms に 50 block」1）。6 本が phase7 の G05・G08・G36・C05・C06・C07 の filter | S3 | 3 |
+| `ezsdr-kernel/tests/device_paced.rs` | 12 本（ms の上限 4，1 s の上限 7，「100 ms に 50 block」1）。5 本が phase7 の G05・G08・G36・C05・C06 の filter，1 本が maintenance の N47S3-28（C07 の `kc_36_` は 8 本を選び，判定する実時間の上限を持つものは無い） | S3 | 3 |
 | `python/tests/test_easy_api.py`，`ezsdr-server/tests/watch.rs` | 上限 10 s，`recv_timeout(BOUND)` | P3 に合う（INFERRED） | 変更なし |
 
 ### 7.2 段階（どの段の終わりも tree は green）
@@ -416,8 +417,8 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 | 遅れの証拠 | 予行（fake） | **検出はするが kill にしない** | Action を遅らせる変異は印が 3 回出て `ERROR`。kill は直結／unit の filter（M-R）。今ある 6 行の filter の予行は，遅れとは別の理由で kill される（2c の計画 §6.2） |
 | 実機 | 実機 | **遅れは変えない** | 遅れた trial は今どおり INCONCLUSIVE（`late_arrival_verdict` ほか）。変わるのは，遅れの報告が無いのに長い close の形が欠けた trial が FAIL になることだけ（M4）。Q15 は 2c で作らない（decision 3） |
 | S1 | `protocol.rs`，Python | **対象外** | 注入点を 1 か所にするだけ |
-| S2 | — | **囲う**（段 3 の後） | 印は constructor が出す。行は `bound` と宣言して数える。default の Real 66 か所は未分類 |
-| S3 | Kernel `device_paced.rs` | **書き直す**（段 3）＋走査 | 残る秒の上限は下の「包みの無い rig」 |
+| S2 | — | **囲う**（段 3 で済） | 印は constructor が出す。印があって `bound` の宣言が無い行は broken（`mutate.py`，`gate.py`）。残る 27 行が宣言つき。`FakeConfig::default()` は Real のまま |
+| S3 | Kernel `device_paced.rs` | **書き直した**（段 3：3c-1，3c-2）＋走査（`governance.rs`） | 残る秒の上限は下の「包みの無い rig」 |
 | 偽の kill：assertion が証拠 | 直結 | 閉じる（S1 について） | — |
 | 偽の kill：mutate.py の timeout，build，signal，watchdog | 全部 | **検出**（M の後） | watchdog の marker は §6.4 の fixture 2 が根拠 |
 | 偽の kill：生成時の上限（KC-12a，生成の中の KC-21a と RS-8a，Authority の 5 s） | (v3.1) **`session_with` を通る生成と `UhdRig` だけ** | **検出**（M の後） | fixture 3 |
@@ -509,7 +510,7 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 2. Q2 = yes (owner 2026-11-11): `Provider::join`'s 1 ms wait becomes `host.wait` (a clock wait that tells the manual clock the joining thread is idle); `JOIN_BOUND` stays real time. On the real clock it is the same 1 ms wait, except that a `notify_all` may end it early (harmless: the loop re-checks).
 3. Q3 = (a) (owner 2026-11-11): Run-based rigs get an always-on real-time delay at every rig call that returns control to the test (reading time, after advancing, after waiting for events) plus a governance scan, so a violating test fails on its first run. Conditions the owner accepted as part of the decision: (i) the scan covers by crate/directory so new test files are included automatically, and forbids bypassing the rig's entry points (`.now(`, `Instant::now`, `thread::sleep`, …); (ii) the delay is longer than the largest lead a test relies on, set in one place; (iii) every rig call that returns control to the test is covered (Sol to check for gaps). Genuine races inside Provider/Kernel code are product bugs, outside this scheme. (b) only if some of the failing tests cannot be fixed.
 4. Q4 = finish #96 first (owner 2026-11-11): the per-test fix on `work/n96` (with the two extra tests from probe 1c) closes and lands; stage 1a follows. #96's observed-progress waits may stay after A.
-5. Q5 = include (owner 2026-11-11): the 12 wall-bound tests of Kernel `tests/device_paced.rs` (6 are phase7 mutation filters G05, G08, G36, C05, C06, C07) are stage 3, classified by P3: the ms bounds and G05 become observations (#89 S1's park-probe shape) or second-scale "must end" bounds; the 1 s bounds that meet P3 stay.
+5. Q5 = include (owner 2026-11-11): the 12 wall-bound tests of Kernel `tests/device_paced.rs` (5 are phase7 mutation filters G05, G08, G36, C05, C06 and 1 is maintenance N47S3-28; C07 is `kc_36_`, which selects 8 tests and none holds a wall bound that judges a verdict apart from the two TTL tests pinned under P3a — corrected in stage 3c-2) are stage 3, classified by P3: the ms bounds and G05 become observations (#89 S1's park-probe shape) or second-scale "must end" bounds; the 1 s bounds that meet P3 stay.
 6. Q6 = both, staged (owner 2026-11-11): 1c-i in stage 1 — the 15 `drop(frozen)` sites become the participant guard; 1c-ii after stage 3 — the ~75 `Frozen`/`released` uses, starting from a classification table: replace with the guard where it fits, keep `Frozen` where time must stay stopped while the test waits for an owner's reaction (the guard cannot do that: a non-clock wait under it hangs); remove `Frozen` only if nothing needs it.
 
 ### After Sol's design review (sol-design.md: FAIL, 4 majors) — owner 2026-11-11

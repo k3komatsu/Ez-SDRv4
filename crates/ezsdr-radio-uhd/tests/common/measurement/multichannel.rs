@@ -1183,7 +1183,7 @@ mod tests {
         let error = duplex_limits(&measured).unwrap_err();
         assert!(error.contains("radio.perf.tx_bytes_per_s is unmeasured") && !error.contains("rx_bytes_per_s"), "{error}");
         // An unmeasured value starts no pair: the Run is not made and no call reaches the device.
-        let fake = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default()));
+        let fake = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() }));
         let group = measure_duplex_at_limits(fake.clone(), &MeasurementPlan::rehearsal(), duplex_limits(&measured), 4).unwrap();
         assert!(group.conditions.is_empty() && group.observations[0].result["ran"] == false, "{:?}", group.observations[0].result);
         assert!(fake.calls().is_empty(), "{:?}", fake.calls());
@@ -1191,7 +1191,7 @@ mod tests {
 
     #[test]
     fn the_duplex_pair_is_not_run_without_both_values_and_says_so() {
-        let fake = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default()));
+        let fake = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() }));
         let device: Arc<dyn Device> = fake.clone();
         let group = measure_duplex_at_limits(device, &MeasurementPlan::rehearsal(), Err("radio.perf.rx_bytes_per_s is unmeasured (x)".to_owned()), 4).unwrap();
         assert!(group.values.is_empty() && group.conditions.is_empty(), "the pair decides no value");
@@ -1333,7 +1333,7 @@ mod tests {
         let later = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = open_record_guard(|| {
                 opened += 1;
-                Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default()))
+                Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() }))
             });
         }));
         assert!(later.is_err() && opened == 0, "a latched record opens nothing");
@@ -1361,12 +1361,16 @@ mod tests {
         // A probe's `set_sources` is retried and latches the same way, with UHD's text turned into the retried one.
         let latch = Latch::new();
         install_record_latch(Some(latch.clone()));
-        let fake = ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { faults: vec![ezsdr_radio_uhd::FakeFault::ReferenceDoesNotLock], ..ezsdr_radio_uhd::FakeConfig::default() });
+        let fake = ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig {
+            clock: ezsdr_radio_uhd::ClockMode::Manual,
+            faults: vec![ezsdr_radio_uhd::FakeFault::ReferenceDoesNotLock],
+            ..ezsdr_radio_uhd::FakeConfig::default()
+        });
         let error = common::set_sources_with_pll_retries_every(&fake, "internal", "internal", Wall::ZERO).unwrap_err();
         assert!(error.starts_with(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK), "{error}");
         assert_eq!(fake.calls().iter().filter(|call| call.starts_with("set_sources")).count(), 4, "the call and three retries");
         assert!(latch.reason().is_some());
-        let healthy = ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default());
+        let healthy = ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() });
         install_record_latch(Some(Latch::new()));
         assert!(common::set_sources_with_pll_retries_every(&healthy, "internal", "internal", Wall::ZERO).is_ok());
         assert_eq!(record_latch_reason(), None, "a lock that comes needs no latch");
@@ -1429,7 +1433,10 @@ mod tests {
     #[test]
     fn the_guard_latches_on_apply_errors_timeouts_and_losses_only() {
         let latch = Latch::new();
-        let guard = GuardedDevice::new(Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default())), latch.clone());
+        let guard = GuardedDevice::new(
+            Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() })),
+            latch.clone(),
+        );
         assert!(guard.note(Err::<(), _>(DeviceError::failed("ordinary failure")), false).is_err());
         assert_eq!(latch.reason(), None, "an ordinary error of another call does not latch");
         assert!(is_control_timeout("UHD: Control operation timed out waiting for reply") && !is_control_timeout("short send"));
@@ -1438,7 +1445,10 @@ mod tests {
         latch.set("second");
         assert!(latch.reason().is_some_and(|reason| !reason.contains("second")), "the first reason stays");
         let apply = Latch::new();
-        let guard = GuardedDevice::new(Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default())), apply.clone());
+        let guard = GuardedDevice::new(
+            Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() })),
+            apply.clone(),
+        );
         let _ = guard.note(Err::<(), _>(DeviceError::failed("any apply error")), true);
         assert!(apply.reason().is_some_and(|reason| reason.starts_with("apply failed")));
     }

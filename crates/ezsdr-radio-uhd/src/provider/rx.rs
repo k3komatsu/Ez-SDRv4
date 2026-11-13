@@ -1165,7 +1165,7 @@ mod tests {
 
     #[test]
     fn ur_29_a_lost_receive_owner_configure_releases_stream_lock_before_reporting() {
-        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let device: Arc<dyn Device> = Arc::new(super::super::test_support::ApplyFails::lost(inner.clone(), Dir::Rx, Some(0)));
         let (core, _time, events) = super::super::test_support::rig_on(device, vec![link()], 2_000);
         let (mut rx, _) = rx_unopened(&core, 1);
@@ -1449,7 +1449,7 @@ mod tests {
     fn ur_29_a_loss_after_a_configure_starts_no_receive_segment() {
         // UR-29 (L1): the device is found lost while the owner's configuration is in
         // flight; the owner issues no timed start and registers no clock.
-        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let holder = Arc::new(super::super::test_support::HoldApply::new(inner.clone(), Dir::Rx, Some(0)));
         let (core, _time, _events) = super::super::test_support::rig_on(holder.clone(), vec![link()], 2_000);
         let (mut rx, _clock) = rx_unopened(&core, 1);
@@ -1520,7 +1520,7 @@ mod tests {
         // leaves through its own turn, so a stop joins it inside the 1 s bound instead of
         // leaving it detached.
         for passed in [false, true] {
-            let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+            let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
             let holder = Arc::new(super::super::test_support::HoldApply::new(inner.clone(), Dir::Rx, Some(0)));
             let link = link();
             let (core, time, _events) = super::super::test_support::rig_on(holder.clone(), vec![link.clone()], 2_000);
@@ -2161,7 +2161,7 @@ mod tests {
         // UR-13 (S25): channel 1 of {0,1} is refused after channel 0 applied. The record keeps
         // the set open and not configured, so the next segment configures both channels, and no
         // streamer is opened again.
-        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let device: Arc<dyn crate::device::Device> = Arc::new(super::super::test_support::ApplyFails::new(inner.clone(), Dir::Rx, Some(1)));
         let (core, _, _) = super::super::test_support::rig_on(device, vec![link()], 2_000);
         let (mut rx, _) = rx(&core, 2);
@@ -2682,7 +2682,7 @@ mod tests {
     fn ur_29_a_loss_between_two_channels_of_a_configure_applies_no_more() {
         // UR-29, UR-36: a segment's configuration applies channel by channel; a loss published
         // after the first channel's apply stops the second's.
-        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig::default()));
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let (core, _time, _events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let (mut rx, _) = rx_unopened(&core, 2);
@@ -2712,7 +2712,7 @@ mod tests {
     fn ur_29_an_owner_does_not_configure_a_segment_a_stop_dropped_from_the_plan() {
         // UR-25, UR-36: a Stop booked between the owner's read of the plan and its configure
         // drops the not yet running segment; the owner makes no device call for it.
-        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let dynamic: Arc<dyn Device> = device.clone();
         let (core, _time, _events) = super::super::test_support::rig_on(dynamic, vec![link()], 2_000);
         let (_rx, _) = rx_unopened(&core, 1);
@@ -2730,7 +2730,7 @@ mod tests {
     /// uhd-rx with the manual clock held, one segment planned at `origin` begun by the command 1, and the owner's configure taking until
     /// `completion` (the probe moves the Core's clock and the device's together, as a slow `apply` does). Returns what `begin` left.
     fn begin_with_configure_ending_at(origin_ms: i64, completion_ns: i64) -> (Arc<Core>, Arc<crate::device::FakeDevice>, Vec<ezsdr_kernel::event::Event>, i64) {
-        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() };
+        let config = crate::device::FakeConfig::default();
         let (core, device, time, events) = super::super::test_support::rig_with(config, vec![link()]);
         let _frozen = super::super::test_support::Frozen::of(&device);
         super::super::test_support::device_at(&core, &time, &device, 0);
@@ -2783,7 +2783,7 @@ mod tests {
     /// delivers its first block. Returns the events, the first block's header and the restart instant `rx_restart` recorded.
     fn begin_and_recover_from_a_missed_start(completion_ns: i64, faults: Vec<crate::device::FakeFault>) -> (Arc<Core>, Vec<ezsdr_kernel::event::Event>, ezsdr_kernel::stream::BlockHeader, i64, i64) {
         let link = link();
-        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, faults, ..crate::device::FakeConfig::default() };
+        let config = crate::device::FakeConfig { faults, ..crate::device::FakeConfig::default() };
         let (core, device, time, events) = super::super::test_support::rig_with(config, vec![link.clone()]);
         let _frozen = super::super::test_support::Frozen::of(&device);
         super::super::test_support::device_at(&core, &time, &device, 0);
@@ -2834,7 +2834,11 @@ mod tests {
     #[test]
     fn ur_25_a_refused_start_is_labelled_as_a_command_with_the_start_s_id() {
         // The start's refusal names the `start_rx` Action by its id with kind `command`; a failed `rx_stop` is kind `stop`.
-        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { faults: vec![crate::device::FakeFault::RxApplyFails], ..crate::device::FakeConfig::default() }));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            faults: vec![crate::device::FakeFault::RxApplyFails],
+            ..crate::device::FakeConfig::default()
+        }));
         let dynamic: Arc<dyn Device> = device.clone();
         let (core, _time, events) = super::super::test_support::rig_on(dynamic, vec![link()], 2_000);
         let (mut rx, _) = rx_unopened(&core, 1);
@@ -2866,7 +2870,7 @@ mod tests {
     fn ur_36_owner_configure_takes_each_command_s_own_snapshot() {
         // UR-36: each segment's configure applies its own command's snapshot, not the values of the one before, and a command with the same
         // values as the one before still configures (the device may have been retuned by a refusal's partial apply).
-        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let dynamic: Arc<dyn Device> = device.clone();
         let (core, _time, _events) = super::super::test_support::rig_on(dynamic, vec![link()], 2_000);
         let (_rx, _) = rx_unopened(&core, 1);

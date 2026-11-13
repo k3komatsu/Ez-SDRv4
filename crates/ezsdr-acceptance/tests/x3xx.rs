@@ -12,7 +12,7 @@ use ezsdr_kernel::spec::{CapabilityValue, Constraint, Ident, Key, Scalar, Value}
 use ezsdr_mock_radio::MockRadio;
 use std::sync::Arc;
 
-use ezsdr_radio_uhd::{FakeConfig, FakeDevice, UhdRadio};
+use ezsdr_radio_uhd::{ClockMode, FakeConfig, FakeDevice, UhdRadio};
 
 fn mock_binding(selector: BTreeMap<Ident, Value>) -> Binding {
     Binding {
@@ -71,7 +71,7 @@ fn d3_the_two_providers_describe_one_layout_alike() {
         let elements = vec![format!("0:A:{board}:0"), format!("0:B:{board}:0")];
         let selector = ezsdr_acceptance::layout::x3xx_selector(&elements, &elements);
         let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
-        let device = Arc::new(FakeDevice::new(FakeConfig { front_ends: vec![front, front], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, front_ends: vec![front, front], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
         let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
         let mock_capabilities = &mock.instance().tree.capabilities;
         let uhd_capabilities = &uhd.instance().tree.capabilities;
@@ -101,7 +101,7 @@ fn d3_the_two_providers_refuse_a_transmit_rate_below_one_msps_alike() {
     let elements = vec!["0:A:ubx:0".to_owned(), "0:B:ubx:0".to_owned()];
     let selector = ezsdr_acceptance::layout::x3xx_selector(&elements, &elements);
     let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
-    let device = Arc::new(FakeDevice::new(FakeConfig { front_ends: vec!["UBX", "UBX"], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
+    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, front_ends: vec!["UBX", "UBX"], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
     let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
     let tx = Key::parse("radio.tx.s0.sample_rate_hz").unwrap();
     for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
@@ -129,7 +129,7 @@ fn d3_a_named_selector_gives_each_provider_its_unnamed_description() {
         let plain = vec![format!("0:A:{board}:0"), format!("0:B:{board}:0")];
         let named = vec![format!("0:A:{board}:0#in"), format!("0:B:{board}:0#aux")];
         let named_out = vec![format!("0:A:{board}:0#out"), format!("0:B:{board}:0")];
-        let device = || Arc::new(FakeDevice::new(FakeConfig { front_ends: vec![front, front], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
+        let device = || Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, front_ends: vec![front, front], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
         let mock = |rx: &[String], tx: &[String]| MockRadio::from_binding(&mock_binding(ezsdr_acceptance::layout::x3xx_selector(rx, tx))).unwrap();
         let uhd = |rx: &[String], tx: &[String]| UhdRadio::from_binding(&uhd_binding(ezsdr_acceptance::layout::x3xx_selector(rx, tx)), device()).unwrap();
         let (plain_mock, named_mock) = (mock(&plain, &plain), mock(&named, &named_out));
@@ -152,7 +152,7 @@ fn d3_the_layout_decides_the_channels_on_both_providers() {
     // the rate grid does not depend on the layout at all.
     let selector = ezsdr_acceptance::layout::x3xx_selector(&["0:A:ubx:0".to_owned()], &["0:A:ubx:0".to_owned(), "0:B:ubx:0".to_owned()]);
     let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
-    let device = Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn ezsdr_radio_uhd::Device>;
+    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
     let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
     let range = |min, max| CapabilityValue::Range { min, max };
     for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
@@ -173,7 +173,7 @@ fn d3_the_two_providers_default_every_channel_to_no_stream() {
     // RM-30: no channel of either direction is in a stream by default, on both Providers alike.
     let selector = ezsdr_acceptance::layout::x3xx_selector(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]);
     let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
-    let device = Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn ezsdr_radio_uhd::Device>;
+    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
     let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
     for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
         for direction in ["rx", "tx"] {
@@ -189,7 +189,7 @@ fn d3_a_layout_without_receive_channels_requests_none_on_both_providers() {
     // An empty receive layout has no receive channel or stream keys.
     let selector = ezsdr_acceptance::layout::x3xx_selector(&[] as &[&str], &["0:A:ubx:0"]);
     let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
-    let device = Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn ezsdr_radio_uhd::Device>;
+    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
     let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
     for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
         let capabilities = &provider.instance().tree.capabilities;
@@ -208,7 +208,7 @@ fn d3_a_cbx_layout_is_not_coherent_on_either_provider() {
         let channels = elements(board);
         let selector = ezsdr_acceptance::layout::x3xx_selector(&channels, &channels);
         let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
-        let device = Arc::new(FakeDevice::new(FakeConfig { front_ends: vec![front, front], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, front_ends: vec![front, front], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
         let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
         for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
             let phase = if coherent { "random_unless_timed_tune" } else { "random" };
@@ -229,7 +229,7 @@ fn d3_the_layout_is_a_node_id_of_neither_provider() {
     // stream children on both Providers (RM-2).
     let selector = ezsdr_acceptance::layout::x3xx_selector(&["0:A:ubx:0".to_owned()], &["0:A:ubx:0".to_owned()]);
     let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
-    let uhd = UhdRadio::from_binding(&uhd_binding(selector), Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn ezsdr_radio_uhd::Device>).unwrap();
+    let uhd = UhdRadio::from_binding(&uhd_binding(selector), Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>).unwrap();
     for (provider, id) in [(&mock as &dyn Provider, "mock"), (&uhd as &dyn Provider, "usrp")] {
         let tree = &provider.instance().tree;
         assert_eq!(tree.id, ResourceId::parse(id).unwrap());

@@ -1670,7 +1670,7 @@ fn ur_12_every_advertised_rate_is_accepted() {
     assert_eq!(ezsdr_radio::x3xx::clip_decimation(200_000_000, 200e6 / 257.0), 256);
     assert_eq!(ezsdr_radio::x3xx::clip_decimation(200_000_000, 200e6 / 257.4), 258);
     assert_eq!(ezsdr_radio::x3xx::clip_decimation(200_000_000, 200e6 / 2041.0), 2040);
-    let fake_device = FakeDevice::new(FakeConfig::default());
+    let fake_device = FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() });
     let applied = fake_device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { rate: Some(200e6 / 257.0), ..ezsdr_radio_uhd::Settings::default() }).unwrap();
     assert_eq!(applied.rate, 200e6 / 256.0, "the fake clips like the device");
     let applied = fake_device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { rate: Some(200e6 / 2041.0), ..ezsdr_radio_uhd::Settings::default() }).unwrap();
@@ -4018,10 +4018,15 @@ impl Gated {
 
     /// Waits until one held call whose name starts with each of `names` has begun.
     fn entered(&self, names: &[&str]) {
+        self.entered_within(names, Wall::from_secs(10));
+    }
+
+    /// `entered` with the real-time `bound` of each wait for an arrival (the host's: its expiry writes the marker). An argument only so that a fixture can expire it.
+    fn entered_within(&self, names: &[&str], bound: Wall) {
         let mut seen: Vec<&'static str> = Vec::new();
         while !names.iter().all(|name| seen.iter().any(|seen| seen.starts_with(name))) {
             let arrivals = self.arrivals.lock().unwrap();
-            let name = arrivals.recv_timeout(Wall::from_secs(10)).unwrap_or_else(|_| panic!("no held call arrived: {seen:?}"));
+            let name = arrivals.recv_timeout(bound).unwrap_or_else(|_| bound_expired("a held call to arrive", bound, &seen));
             drop(arrivals);
             seen.push(name);
         }
@@ -4032,7 +4037,7 @@ impl Gated {
         let mut seen: Vec<&'static str> = Vec::new();
         while wanted.iter().any(|(name, n)| seen.iter().filter(|seen| seen.starts_with(name)).count() < *n) {
             let arrivals = self.arrivals.lock().unwrap();
-            let name = arrivals.recv_timeout(Wall::from_secs(20)).unwrap_or_else(|_| panic!("no held call arrived: {seen:?}"));
+            let name = arrivals.recv_timeout(Wall::from_secs(20)).unwrap_or_else(|_| bound_expired("held calls to arrive", Wall::from_secs(20), &seen));
             drop(arrivals);
             seen.push(name);
         }
@@ -4067,11 +4072,17 @@ impl Gated {
     }
 }
 
+/// A `Gated` wait's real-time `bound` expired: a bound is not an assertion (note 51), so an expiry writes the infrastructure marker before it fails, and only a row that declares `"kill": "bound"` counts it as a kill.
+fn bound_expired(what: &str, bound: Wall, seen: &dyn std::fmt::Debug) -> ! {
+    infra(&format!("the Gated wait for {what} did not end within {bound:?} of real time"));
+    panic!("no {what} within {bound:?}: {seen:?}")
+}
+
 /// Waits on `ends` until every thread of `names` has ended (S13, S14).
 fn ended(ends: &std::sync::mpsc::Receiver<String>, names: &[&str]) {
     let mut seen: Vec<String> = Vec::new();
     while !names.iter().all(|name| seen.iter().any(|seen| seen == name)) {
-        let name = ends.recv_timeout(Wall::from_secs(20)).unwrap_or_else(|_| panic!("no worker ended: {seen:?}"));
+        let name = ends.recv_timeout(Wall::from_secs(20)).unwrap_or_else(|_| bound_expired("a worker to end", Wall::from_secs(20), &seen));
         seen.push(name);
     }
 }
@@ -4413,7 +4424,7 @@ fn ur_05_the_spec_is_set_before_the_channel_map_is_read() {
     // UR-5, H1: `from_binding` sets the spec before it reads `front_end`, so the front-end
     // check reads the mapping the spec made, and `describe` — the Manifest's channel
     // counts — is read after it.
-    let device = Arc::new(Recording::new(FakeConfig { front_ends: vec!["BasicRX"], serial: "ur05-order-log".to_owned(), ..FakeConfig::default() }));
+    let device = Arc::new(Recording::new(FakeConfig { clock: ClockMode::Manual, front_ends: vec!["BasicRX"], serial: "ur05-order-log".to_owned(), ..FakeConfig::default() }));
     let selector = json!({ "args": ARGS,  "rx": ["0:A:basic_rx:1"], "tx": [] });
     let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
     let log = device.log();
@@ -4579,8 +4590,9 @@ fn ur_05_a_basic_front_end_s_number_is_checked() {
     assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:1".to_owned()), "{:?}", device.calls());
     assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap(), "BasicRX (1)");
     // The same layout through a device that answers `(0)`.
-    let device: Arc<dyn Device> =
-        Arc::new(Mislabelled { inner: FakeDevice::new(FakeConfig { front_ends: vec!["BasicRX", "BasicRX"], serial: "ur05-fe-mislabelled".to_owned(), ..FakeConfig::default() }) });
+    let device: Arc<dyn Device> = Arc::new(Mislabelled {
+        inner: FakeDevice::new(FakeConfig { clock: ClockMode::Manual, front_ends: vec!["BasicRX", "BasicRX"], serial: "ur05-fe-mislabelled".to_owned(), ..FakeConfig::default() }),
+    });
     let error = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device).err().unwrap();
     assert_eq!(error.kind, ModuleErrorKind::Rejected);
     assert!(error.message.contains("rx channel 0") && error.message.contains("BasicRX (0)") && error.message.contains("basic_rx"), "{}", error.message);
@@ -7517,7 +7529,7 @@ fn reopened_values_use_the_conservative_pair_and_failures_invalidate_base_values
 fn h4_fake_session_records_tx_headroom_and_load_with_no_run_time_update() {
     // The Session asks for rx/tx c0 at 10 MS/s at connect and repeats a burst; nothing changes at Run time.
     let selector = json!({ "rx": ["0:B:cbx:0"], "tx": ["0:B:cbx:0"] });
-    let guard = Arc::new(measurement::GuardedDevice::new(fake_real(obx_and_cbx()), measurement::Latch::new()));
+    let guard = Arc::new(measurement::GuardedDevice::new(fake(obx_and_cbx()), measurement::Latch::new()));
     let device: Arc<dyn Device> = guard.clone();
     let probe = Arc::new(common::probe_device::ProbeDevice::new(device));
     let group = with_selector(selector, || measurement::measure_h4_load(probe.clone(), 200).unwrap());
@@ -7535,7 +7547,7 @@ fn h4_fake_session_records_tx_headroom_and_load_with_no_run_time_update() {
 
 #[test]
 fn h4_a_tx_underflow_makes_the_load_record_partial_and_converts_its_time() {
-    let guard = Arc::new(measurement::GuardedDevice::new(fake_real(one_obx()), measurement::Latch::new()));
+    let guard = Arc::new(measurement::GuardedDevice::new(fake(one_obx()), measurement::Latch::new()));
     let device: Arc<dyn Device> = guard;
     let probe = Arc::new(common::probe_device::ProbeDevice::new(device));
     probe.underflow_after_tx_send();
@@ -7875,7 +7887,7 @@ fn ur_23_g1b_a_refused_priority_call_does_not_latch_the_guard() {
 #[test]
 fn ur_23_g2_every_wrapper_forwards_the_priority_call() {
     fn raised_through(wrap: impl FnOnce(Arc<Recording>) -> Arc<dyn Device> + Send + 'static) -> Vec<String> {
-        let device = recording(ClockMode::Real);
+        let device = recording(ClockMode::Manual);
         let wrapper = wrap(device.clone());
         std::thread::Builder::new().name("uhd-tx-probe".to_owned()).spawn(move || wrapper.raise_thread_priority().unwrap()).unwrap().join().unwrap();
         device.raisers()
@@ -7889,7 +7901,7 @@ fn ur_23_g2_every_wrapper_forwards_the_priority_call() {
 /// A latched guard refuses the call like every other and the device sees nothing.
 #[test]
 fn ur_23_g3_a_latched_guard_refuses_the_priority_call() {
-    let device = recording(ClockMode::Real);
+    let device = recording(ClockMode::Manual);
     let latch = measurement::Latch::new();
     let guard = measurement::GuardedDevice::new(device.clone(), latch.clone());
     latch.set("an earlier loss");
@@ -8870,6 +8882,20 @@ fn direct_rig_until_writes_the_infra_marker_when_its_real_time_bound_expires() {
 fn direct_rig_fixture_until_real_bound() {
     if fixture_runs("direct_rig_fixture_until_real_bound") {
         one_stream_direct(FakeConfig::default()).until_within("an event that never comes", Wall::from_secs(60), Wall::from_millis(50), |_| false);
+    }
+}
+
+#[test]
+fn direct_rig_a_gated_wait_that_expires_writes_the_infra_marker() {
+    let stderr = run_fixture("direct_rig_fixture_gated_real_bound");
+    assert!(stderr.contains("EZSDR-INFRA: direct_rig_fixture_gated_real_bound: the Gated wait for a held call to arrive did not end within"), "{}", unmarked(&stderr));
+}
+
+/// Run by the test above in a child process; a no-op otherwise. Nothing is held, so no call ever arrives; the clock is manual because nothing drives it and the wait is a channel timeout.
+#[test]
+fn direct_rig_fixture_gated_real_bound() {
+    if fixture_runs("direct_rig_fixture_gated_real_bound") {
+        Gated::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }).entered_within(&["rx_start"], Wall::from_millis(50));
     }
 }
 

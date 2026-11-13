@@ -66,22 +66,23 @@ impl Probe {
 
     /// Waits until an observation reaches a count, without polling.
     pub fn wait_for_count(&self, line: &str, count: usize, timeout: std::time::Duration) -> bool {
+        self.wait_until(|lines| lines.iter().filter(|observed| observed.as_str() == line).count() >= count, timeout)
+    }
+
+    /// Waits until `pred` holds over the observations, without polling; false after `timeout`, which is an expiry that fails a test, never an oracle.
+    pub fn wait_until(&self, pred: impl Fn(&[String]) -> bool, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         let (lines, changed) = &*self.0;
         let mut lines = lines.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            if lines.iter().filter(|observed| observed.as_str() == line).count() >= count {
+            if pred(&lines) {
                 return true;
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return false;
             }
-            let (next, result) = changed.wait_timeout(lines, remaining).unwrap_or_else(|e| e.into_inner());
-            lines = next;
-            if result.timed_out() && lines.iter().filter(|observed| observed.as_str() == line).count() < count {
-                return false;
-            }
+            lines = changed.wait_timeout(lines, remaining).unwrap_or_else(|e| e.into_inner()).0;
         }
     }
 }

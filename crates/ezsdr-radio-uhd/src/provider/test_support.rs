@@ -1,7 +1,7 @@
 //! A controlled Provider clock for command-order tests without host deadlines.
 use super::core::Core;
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, Iq, RxRecv, Settings, TxReport};
-use crate::host::HostClock;
+use crate::host::{ClockMode, HostClock};
 use ezsdr_kernel::event::{EventCollector, EventSink, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ResourceId;
@@ -25,9 +25,10 @@ pub(super) fn rig_with_links(links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>
     rig_with(FakeConfig::default(), links)
 }
 
-/// `rig_with_links` on a FakeDevice of `config`.
+/// `rig_with_links` on a FakeDevice of `config`, whose clock is overridden to the manual one: a test that needs a real clock builds its
+/// own device and calls `rig_on`.
 pub(super) fn rig_with(config: FakeConfig, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>) -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
-    let device = Arc::new(FakeDevice::new(config));
+    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..config }));
     let (core, time, events) = rig_on(device.clone(), links, 2_000);
     (core, device, time, events)
 }
@@ -35,7 +36,7 @@ pub(super) fn rig_with(config: FakeConfig, links: Vec<Arc<dyn ezsdr_kernel::stre
 /// `rig` with the Run's Command inputs, for a test that books a waveform (UR-21: a burst's
 /// bytes must be an input of its Run).
 pub(super) fn rig_with_inputs(inputs: BTreeMap<ContentHash, Arc<[u8]>>) -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
-    let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
     let (core, time, events) = rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
     (core, device, time, events)
 }
@@ -104,7 +105,7 @@ pub(super) fn rig_with_links_on(
     links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>,
     description: ezsdr_radio::channels::Description,
 ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
-    let device = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
     let mut per_stream: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>> = Vec::new();
     per_stream.resize_with(k + 1, Vec::new);
     per_stream[k] = links;

@@ -884,7 +884,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     let terms = terms(extra.block);
     let link = Arc::new(Headers::default());
     let refuse = extra.refuse.map(|rate| FakeFault::WrongRate { claimed: rate as f64, applied: rate as f64 - 1_000.0, nth: 0 });
-    let inner = FakeDevice::new(FakeConfig { faults: refuse.into_iter().collect(), ..FakeConfig::default() });
+    let inner = FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, faults: refuse.into_iter().collect(), ..FakeConfig::default() });
     let (to_rx, cmds) = channel();
     let world = Arc::new(Mutex::new(World {
         time: None,

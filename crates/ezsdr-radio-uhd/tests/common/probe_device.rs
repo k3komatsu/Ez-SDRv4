@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn tx_eob_count_tracks_recorded_eob_sends() {
-        let inner = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default()));
+        let inner = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() }));
         let probe = ProbeDevice::new(inner);
         probe.record(json!({"call":"tx_send","eob":false}));
         probe.record(json!({"call":"rx_stop","eob":true}));
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn probe_rows_stop_at_the_limit_and_count_dropped_rows() {
-        let inner = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default()));
+        let inner = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() }));
         let probe = ProbeDevice::new(inner);
         for index in 0..=PROBE_ROW_LIMIT {
             probe.record(json!({ "index": index }));

@@ -449,27 +449,16 @@ struct Frame {
     depth: usize,
 }
 
-/// Violations of the wrapper's rules in `source`, the text of `path` (relative to the workspace, `/`-separated). `used` collects the allow-list
-/// rows the file relied on, so that the real-tree test can refuse a row that nothing needs.
-fn scan_used(path: &str, source: &str, used: &mut BTreeSet<String>) -> Vec<String> {
-    let uhd = path.starts_with("crates/ezsdr-radio-uhd/tests/");
-    let acceptance = path.strip_prefix("crates/ezsdr-acceptance/tests/").is_some_and(|rest| !ACCEPTANCE_EXEMPT.contains(&rest) && !ACCEPTANCE_EXEMPT_DIRS.iter().any(|dir| rest.starts_with(dir)));
-    let runs = (uhd || acceptance) && path != RUN_FILE;
-    let time = path == "crates/ezsdr-radio-uhd/tests/fake.rs" || path.starts_with("crates/ezsdr-radio-uhd/tests/common/") || path == "crates/ezsdr-acceptance/tests/uhd.rs";
-    let handle = path == "crates/ezsdr-server/tests/protocol.rs";
-    let fake_assembly = path.starts_with("crates/ezsdr-acceptance/tests/") && path != "crates/ezsdr-acceptance/tests/uhd.rs";
-    if !(runs || time || handle || fake_assembly) {
-        return Vec::new();
-    }
-    let toks = tokens(&blank(source));
-    let mut found = Vec::new();
+/// For every token: the innermost fn it is in (`""` outside any) and whether that fn is a `#[test]` fn. A closure belongs to the fn around it; a fn nested
+/// in another is its own.
+fn fn_context(toks: &[Tok]) -> Vec<(String, bool)> {
     let (mut depth, mut nest) = (0usize, 0usize);
     let mut frames: Vec<Frame> = Vec::new();
     let (mut pending_test, mut pending_fn): (bool, Option<(String, bool)>) = (false, None);
+    let mut context = Vec::with_capacity(toks.len());
     for (i, tok) in toks.iter().enumerate() {
-        let text = tok.text.as_str();
-        match text {
-            "#" if at_pattern(&toks, i, &["#", "[", "test", "]"]) => pending_test = true,
+        match tok.text.as_str() {
+            "#" if at_pattern(toks, i, &["#", "[", "test", "]"]) => pending_test = true,
             "fn" if toks.get(i + 1).is_some_and(|name| name.text.chars().next().is_some_and(|ch| ch.is_alphabetic() || ch == '_')) => {
                 pending_fn = Some((toks[i + 1].text.clone(), std::mem::take(&mut pending_test)));
                 nest = 0;
@@ -491,7 +480,29 @@ fn scan_used(path: &str, source: &str, used: &mut BTreeSet<String>) -> Vec<Strin
             }
             _ => {}
         }
-        let (in_fn, in_test) = (frames.last().map_or("", |frame| frame.name.as_str()), frames.last().is_some_and(|frame| frame.test));
+        context.push((frames.last().map_or(String::new(), |frame| frame.name.clone()), frames.last().is_some_and(|frame| frame.test)));
+    }
+    context
+}
+
+/// Violations of the wrapper's rules in `source`, the text of `path` (relative to the workspace, `/`-separated). `used` collects the allow-list
+/// rows the file relied on, so that the real-tree test can refuse a row that nothing needs.
+fn scan_used(path: &str, source: &str, used: &mut BTreeSet<String>) -> Vec<String> {
+    let uhd = path.starts_with("crates/ezsdr-radio-uhd/tests/");
+    let acceptance = path.strip_prefix("crates/ezsdr-acceptance/tests/").is_some_and(|rest| !ACCEPTANCE_EXEMPT.contains(&rest) && !ACCEPTANCE_EXEMPT_DIRS.iter().any(|dir| rest.starts_with(dir)));
+    let runs = (uhd || acceptance) && path != RUN_FILE;
+    let time = path == "crates/ezsdr-radio-uhd/tests/fake.rs" || path.starts_with("crates/ezsdr-radio-uhd/tests/common/") || path == "crates/ezsdr-acceptance/tests/uhd.rs";
+    let handle = path == "crates/ezsdr-server/tests/protocol.rs";
+    let fake_assembly = path.starts_with("crates/ezsdr-acceptance/tests/") && path != "crates/ezsdr-acceptance/tests/uhd.rs";
+    if !(runs || time || handle || fake_assembly) {
+        return Vec::new();
+    }
+    let toks = tokens(&blank(source));
+    let context = fn_context(&toks);
+    let mut found = Vec::new();
+    for (i, tok) in toks.iter().enumerate() {
+        let text = tok.text.as_str();
+        let (in_fn, in_test) = (context[i].0.as_str(), context[i].1);
         let mut violation = |what: &str| found.push(format!("{path}:{}: {what} (in fn `{in_fn}`)", tok.line));
         if runs {
             if text == "RunHandle" {
@@ -684,6 +695,205 @@ fn run_scan_the_diagnostic_door_is_the_only_handle_call() {
     assert_eq!(scan(PROTOCOL, "fn t() { Server::new(c).handle(r, b); }").len(), 1);
     assert_eq!(scan(PROTOCOL, "fn t() { handle(&mut s, r, b); }").len(), 0, "the door itself");
     assert_eq!(scan(FAKE, "fn t() { s.handle(r, b); }").len(), 0, "only protocol.rs");
+}
+
+// ---------------------------------------------------------------- the Kernel's wall expiries (note 51 stage 3c-2)
+//
+// Every test of the Kernel's device-paced file runs on the host clock, where a wall interval that judges a positive outcome is a flake on a loaded host. One
+// rule: a positive wall expiry is `from_secs(n)` with n >= 3. `kernel_wall_scan` finds what breaks it in every fn of the file, helpers included: R1 a `<` / `<=`
+// against a `from_millis`, `from_micros`, `from_nanos`, `from_secs_f32` / `_f64` or `from_secs(n < 3)` constructor (reached by any path), R2 such a constructor
+// inside the call of `wait_for`, `wait_for_count`, `wait_until`, `wait_parked_until`, `wait_timeout`, `park_timeout`, `recv_timeout` or `recv_deadline`, R3 any
+// call of a path ending in `sleep`. A hit is allowed only as a pinned occurrence: `(fn, call, exact count, reason)`, so a new sleep in a pinned fn is a
+// violation. Limits, stated: only a bound spelt as one of those forms is seen, so `elapsed().as_*() < n`, a mirrored `bound > elapsed()`, `Wall::new(..)`, a
+// non-decimal literal and a computed one (`from_secs(10 - 8)`: only the first token is read) pass, and so does a wall read hidden in another file.
+
+const KERNEL_FILE: &str = "crates/ezsdr-kernel/tests/device_paced.rs";
+
+const NEGATIVE: &str = "negative: a slow host only weakens it";
+const LOWER_BOUND: &str = "lower bound: cannot false-kill";
+const TTL: &str = "TTL is the subject";
+
+/// `(fn, call, exact count, reason)`: `call` is the occurrence's own tokens, joined without spaces and spelt as the code spells it.
+const KERNEL_WALL_ALLOWED: [(&str, &str, usize, &str); 11] = [
+    ("kg_02_a_failed_sink_is_not_stepped_again", "std::thread::sleep(Wall::from_millis(100))", 1, NEGATIVE),
+    ("kc_29_an_end_the_data_thread_requested_is_cleaned_up_at_the_next_call", "std::thread::sleep(Wall::from_millis(50))", 1, NEGATIVE),
+    ("kg_03_an_abort_stops_the_data_thread", "std::thread::sleep(Wall::from_millis(50))", 1, NEGATIVE),
+    ("kg_03_dropping_a_live_device_paced_handle_cleans_up", "std::thread::sleep(Wall::from_millis(20))", 1, NEGATIVE),
+    ("kg_21a_submit_cannot_complete_before_the_booking_gate_opens", "recv_timeout(Wall::from_millis(150))", 1, NEGATIVE),
+    // The call's string argument is blanked, so it reads `wait_for(,…)`; the result is ignored (`let _ =`): a pause in `Gate::check`, never a verdict.
+    ("check", "wait_for(,Wall::from_millis(200))", 1, NEGATIVE),
+    ("tm_16c_a_paced_callback_sees_now_at_or_after_its_instant", "std::thread::sleep(Wall::from_millis(2))", 1, LOWER_BOUND),
+    ("tm_16c_a_paced_authority_accepts_an_instant_already_passed", "std::thread::sleep(Wall::from_millis(6))", 1, LOWER_BOUND),
+    ("kc_36_renew_moves_the_deadline_the_data_thread_checks", "std::thread::sleep(Wall::from_millis(50))", 1, TTL),
+    ("kc_36_renew_moves_the_deadline_the_data_thread_checks", "<Wall::from_millis(600)", 1, TTL),
+    ("kc_36_adopt_clears_the_deadline_the_data_thread_checks", "std::thread::sleep(Wall::from_millis(300))", 1, TTL),
+];
+
+const WALL_CALLS: [&str; 8] = ["wait_for", "wait_for_count", "wait_until", "wait_parked_until", "wait_timeout", "park_timeout", "recv_timeout", "recv_deadline"];
+
+const INT_SUFFIXES: [&str; 12] = ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"];
+
+/// A decimal integer literal token, underscores and a type suffix (`1_u64`) removed.
+fn int_literal(text: &str) -> Option<u64> {
+    let text = INT_SUFFIXES.iter().find_map(|suffix| text.strip_suffix(suffix)).unwrap_or(text);
+    text.replace('_', "").parse().ok()
+}
+
+/// Whether token `j` is the constructor of a wall interval shorter than 3 s: `from_secs(n)` with a literal n < 3, or any finer unit; reached by a path
+/// (`Wall::from_millis`), whatever the type is called.
+fn short_wall_at(toks: &[Tok], j: usize) -> bool {
+    let named = |name: &str| toks[j].text == name;
+    let path = j >= 2 && toks[j - 1].text == ":" && toks[j - 2].text == ":";
+    let open = toks.get(j + 1).is_some_and(|tok| tok.text == "(");
+    path && open
+        && (["from_millis", "from_micros", "from_nanos", "from_secs_f32", "from_secs_f64"].iter().any(|name| named(name))
+            || (named("from_secs") && toks.get(j + 2).and_then(|tok| int_literal(&tok.text)).is_some_and(|secs| secs < 3)))
+}
+
+/// The tokens `from..=to`, joined without spaces.
+fn joined(toks: &[Tok], from: usize, to: usize) -> String {
+    toks[from..=to.min(toks.len() - 1)].iter().map(|tok| tok.text.as_str()).collect()
+}
+
+type Allowed<'a> = &'a [(&'a str, &'a str, usize, &'a str)];
+
+/// Violations of the Kernel wall rule in `source` (the text of `KERNEL_FILE`) against `allowed`; the pinned occurrences it relied on go to `used` as `fn call`.
+fn wall_scan(source: &str, allowed: Allowed, used: &mut BTreeSet<String>) -> Vec<String> {
+    let toks = tokens(&blank(source));
+    let context = fn_context(&toks);
+    let mut hits: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    for (i, tok) in toks.iter().enumerate() {
+        let call = if tok.text == "<" {
+            // R1: `<` or `<=`, then a path whose last segment is the constructor.
+            let mut j = i + 1 + usize::from(toks.get(i + 1).is_some_and(|next| next.text == "="));
+            while at_pattern(&toks, j + 1, &[":", ":"]) {
+                j += 3;
+            }
+            (j < toks.len() && short_wall_at(&toks, j)).then(|| joined(&toks, i, paren_close(&toks, j + 1)))
+        } else if WALL_CALLS.contains(&tok.text.as_str()) && at_pattern(&toks, i + 1, &["("]) && !(i > 0 && toks[i - 1].text == "fn") {
+            // R2: a short literal inside the call's parentheses.
+            let close = paren_close(&toks, i + 1);
+            (i + 2..close).any(|j| short_wall_at(&toks, j)).then(|| joined(&toks, i, close))
+        } else if tok.text == "sleep" && at_pattern(&toks, i + 1, &["("]) && !(i > 0 && (toks[i - 1].text == "." || toks[i - 1].text == "fn")) {
+            // R3: any call of a path ending in `sleep`, from the path's start.
+            let mut start = i;
+            while start >= 3 && at_pattern(&toks, start - 2, &[":", ":"]) && toks[start - 3].text.chars().next().is_some_and(|ch| ch.is_alphabetic() || ch == '_') {
+                start -= 3;
+            }
+            Some(joined(&toks, start, paren_close(&toks, i + 1)))
+        } else {
+            None
+        };
+        if let Some(call) = call {
+            hits.entry((context[i].0.clone(), call)).or_default().push(tok.line);
+        }
+    }
+    let mut found = Vec::new();
+    for ((name, call), lines) in hits {
+        match allowed.iter().find(|(fn_name, pinned, _, _)| *fn_name == name && *pinned == call) {
+            Some((_, _, count, _)) if *count == lines.len() => {
+                used.insert(format!("{name} {call}"));
+            }
+            Some((_, _, count, _)) => found.push(format!("{KERNEL_FILE}:{}: `{call}` occurs {} times in fn `{name}`, its allowance pins {count}", lines[0], lines.len())),
+            None => found.push(format!("{KERNEL_FILE}:{}: a positive wall expiry shorter than 3 s, or a sleep: `{call}` (in fn `{name}`)", lines[0])),
+        }
+    }
+    found
+}
+
+fn kernel_wall_scan(source: &str, used: &mut BTreeSet<String>) -> Vec<String> {
+    wall_scan(source, &KERNEL_WALL_ALLOWED, used)
+}
+
+#[test]
+fn kernel_wall_the_tree_is_clean_and_every_allowance_is_used() {
+    let mut used = BTreeSet::new();
+    let found = kernel_wall_scan(&fs::read_to_string(workspace_root().join(KERNEL_FILE)).unwrap(), &mut used);
+    assert!(found.is_empty(), "the Kernel wall scan (note 51 stage 3c-2):\n{}", found.join("\n"));
+    for (name, call, _, _) in KERNEL_WALL_ALLOWED {
+        assert!(used.contains(&format!("{name} {call}")), "the allowance {name} {call} is not needed any more: remove it");
+    }
+}
+
+#[test]
+fn kernel_wall_scan_finds_a_sleep_and_a_short_expiry_however_it_is_written() {
+    let hits = |source: &str| kernel_wall_scan(source, &mut BTreeSet::new()).len();
+    let body = |statement: &str| format!("#[test]\nfn t() {{ {statement} }}");
+    assert_eq!(hits(&body("sleep(Wall::from_millis(100)); assert!(count(&probe, \"x\") >= 50);")), 1, "an unpinned sleep");
+    assert_eq!(hits(&body("std::thread::sleep(d);")), 1, "a sleep of any argument");
+    assert_eq!(hits(&body("use std::thread::sleep; sleep(d);")), 1, "a sleep imported and called by its last segment");
+    assert_eq!(hits(&body("thread::sleep(d); std::thread::sleep(d);")), 2, "two spellings are two calls");
+    for (source, count) in [
+        ("assert!(begun.elapsed() < Wall::from_secs(1));", 1),
+        ("assert!(begun.elapsed() < Wall::from_secs(2));", 1),
+        ("assert!(begun.elapsed() < Wall::from_secs(3));", 0),
+        ("assert!(begun.elapsed() < Wall::from_secs(2_0));", 0),
+        ("assert!(begun.elapsed() < Wall::from_secs(1_u64));", 1),
+        ("assert!(begun.elapsed() < Wall::from_millis(200u32));", 1),
+        ("assert!(begun.elapsed() < Wall::from_secs(10_u64));", 0),
+        ("assert!(begun.elapsed() < Wall::from_millis(5));", 1),
+        ("assert!(begun.elapsed() <= Wall::from_millis(5));", 1),
+        ("assert!(begun.elapsed() < std::time::Duration::from_micros(5));", 1),
+        ("assert!(waited < Wall::from_secs(10));", 0),
+        ("assert!(waited < Wall::from_millis(900));", 1),
+        ("assert!(waited >= Wall::from_millis(900));", 0),
+        ("let v: Vec<Wall> = f(); let w = Wall::from_millis(5);", 0),
+    ] {
+        assert_eq!(hits(&body(source)), count, "{source}");
+    }
+    for (source, count) in [
+        ("probe.wait_for(\"x\", Wall::from_millis(500));", 1),
+        ("probe.wait_for(\"x\", Wall::from_secs(1));", 1),
+        ("probe.wait_for(\"x\", Wall::from_secs(10));", 0),
+        ("rx.recv_timeout(Wall::from_secs(1_u64));", 1),
+        ("rx.recv_timeout(Wall::from_secs(10_u64));", 0),
+        ("probe.wait_for_count(\"x\", 2, Wall::from_secs(1));", 1),
+        ("probe.wait_until(|lines| lines.len() > 1, Wall::from_millis(10));", 1),
+        ("let (g, _) = cv.wait_timeout(guard, Wall::from_millis(10)).unwrap();", 1),
+        ("std::thread::park_timeout(Wall::from_millis(10));", 1),
+        ("rx.recv_deadline(Instant::now() + Wall::from_millis(10));", 1),
+        ("rx.recv_deadline(Instant::now() + Wall::from_secs(10));", 0),
+        ("park.wait_parked_until(tick, Wall::from_millis(10));", 1),
+        ("rx.recv_timeout(Wall::from_millis(100));", 1),
+        ("assert!(rx.recv_timeout(Wall::from_secs(5)).is_err());", 0),
+        ("let _ = after(&run, Wall::from_millis(30));", 0),
+    ] {
+        assert_eq!(hits(&body(source)), count, "{source}");
+    }
+}
+
+#[test]
+fn kernel_wall_scan_reads_every_fn_and_not_comments_or_strings() {
+    let hits = |source: &str| kernel_wall_scan(source, &mut BTreeSet::new()).len();
+    assert_eq!(hits("fn helper() { std::thread::sleep(d); }"), 1, "a helper is scanned");
+    assert_eq!(hits("#[test]\nfn t() { let f = || std::thread::sleep(d); f(); }"), 1, "a closure belongs to its test");
+    assert_eq!(hits("#[test]\nfn t() { fn inner() { std::thread::sleep(d); } inner(); }"), 1, "a fn nested in a test is scanned");
+    assert_eq!(hits("// std::thread::sleep(d)\n#[test]\nfn t() { let s = \"sleep(d)\"; let r = \"x < Wall::from_millis(5)\"; }"), 0, "comments and strings");
+    assert_eq!(hits("#[test]\nfn t() { x.sleep(d); }"), 0, "a method of that name");
+}
+
+#[test]
+fn kernel_wall_scan_pins_each_allowance_to_its_fn_call_and_count() {
+    let call = "std::thread::sleep(Wall::from_millis(100))";
+    let table = [("pinned", call, 2, NEGATIVE), ("other", call, 1, NEGATIVE)];
+    let source = |name: &str, calls: &[&str]| format!("#[test]\nfn {name}() {{ {} }}", calls.iter().map(|call| format!("{call};")).collect::<String>());
+    let run = |source: &str| {
+        let mut used = BTreeSet::new();
+        (wall_scan(source, &table, &mut used).len(), used.contains(&format!("pinned {call}")))
+    };
+    assert_eq!(run(&source("pinned", &[call, call])), (0, true), "the pinned occurrences pass and are used");
+    // Sol's bypass: a third sleep, with a count it asserts on, inside an approved fn.
+    assert_eq!(run(&source("pinned", &[call, call, call, "assert!(count(&probe, \"rec:block:\") >= 50)"])), (1, false), "one more than pinned is refused");
+    assert_eq!(run(&source("pinned", &[call, call, "std::thread::sleep(Wall::from_millis(250))"])).0, 1, "a different duration is not the pinned call");
+    assert_eq!(run(&source("pinned", &[call])), (1, false), "one fewer than pinned: refused, and the row is not used");
+    assert_eq!(run(&source("pinned", &[])), (0, false), "none: the row is not used");
+    assert_eq!(run(&source("unlisted", &[call, call])), (1, false), "a pinned call in an unlisted fn");
+    assert_eq!(run(&source("other", &[call, call])).0, 1, "another fn's pin counts for that fn alone");
+    for (name, call, count, _) in KERNEL_WALL_ALLOWED {
+        let mut used = BTreeSet::new();
+        assert!(kernel_wall_scan(&source(name, &vec![call; count]), &mut used).is_empty(), "{name} {call}");
+        assert!(used.contains(&format!("{name} {call}")), "{name} {call}");
+    }
 }
 
 // ---------------------------------------------------------------- the rehearsals' wiring (note 51 stage 2c)

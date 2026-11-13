@@ -23,9 +23,9 @@ refused and nothing is deleted.
 
 Prints per mutation a line `M01 <name>: killed` (or `killed (bound)`, `SURVIVED`, `ERROR`,
 `NOT FOUND[: reason]`, `COMPILE ERROR`, `BASELINE FAILED`) and, first, the line a runner reads:
-`EZSDR-ROW {"id": ..., "outcome": ..., "real_clock": ..., "reruns": ..., "why": ...}` (`why` only for `ERROR` and `killed (bound)`: `build timeout`, `test timeout`,
-`infra marker`, `signal`, `no test result line`, `no test ran`, or `re-run unsettled` for two timing-marked re-runs; otherwise the decisive re-run's own reason; a fixed field, so a row's
-name cannot be read as a result: #91). Exits 1 unless every selected mutation is killed.
+`EZSDR-ROW {"id": ..., "outcome": ..., "real_clock": ..., "declared": ..., "reruns": ..., "why": ...}` (`why` only for `ERROR` and `killed (bound)`: `build timeout`, `test timeout`,
+`infra marker`, `signal`, `no test result line`, `no test ran`, `real-clock row without a bound declaration`, or `re-run unsettled` for two timing-marked re-runs; otherwise the decisive re-run's own reason; a fixed field, so a row's
+name cannot be read as a result: #91; `declared` is whether the row says `"kill": "bound"`). Exits 1 unless every selected mutation is killed.
 A mutation recorded as equivalent carries an `equivalent` field saying why no test
 can kill it in this tree; it must survive, and prints `equivalent (survived)` (spec 20,
 Appendix A: F24 once VF-4 is in).
@@ -39,8 +39,13 @@ carry an `EZSDR-TIMING:` marker (matched by name, not by count) and where nothin
 signal, no build error) is re-run one at a time while the mutant is applied (at most twice each): a re-run that fails
 without the marker is conclusive and kills, a marker-free pass does not, two markers are `ERROR`; any other re-run
 result is kept and stops the attempts.
-The baseline of each row runs with `EZSDR_REAL_CLOCK_PROBE` set and `--show-output`, to report the rows
-that select a real-clock FakeDevice test (`real_clock`). The baseline is judged like a mutated run: a failure whose tests all
+The baseline of each row runs with `EZSDR_REAL_CLOCK_PROBE` set and `--show-output`, to find the rows
+that select a real-clock FakeDevice test (`real_clock`). A row whose baseline is marked real-clock and that does not declare
+`"kill": "bound"` is `ERROR` (`real-clock row without a bound declaration`) whatever its outcome: killed, survived, or recorded as
+equivalent (note 51 §6.5: a real clock is the one input the host's load can move, so a kill or a survival there is not shown to be
+the mutant's doing); an `ERROR` that has another reason keeps it, and `BASELINE FAILED` stays a baseline failure. The mark belongs to
+the baseline key and the declaration to the row, so two rows that share a baseline are judged each by its own declaration. On an
+`equivalent` row the declaration only classifies its filter: nothing is killed. The baseline is judged like a mutated run: a failure whose tests all
 carry an `EZSDR-TIMING:` marker is re-run alone (at most twice each) and the baseline is good when a re-run passes marker-free;
 its re-runs are counted in the `reruns` of the first row that uses it.
 
@@ -167,6 +172,7 @@ INFRA, SIGNAL = "EZSDR-INFRA:", "(signal:"
 FAILURE_LINE = re.compile(r"test result: FAILED|^FAILED \(", re.MULTILINE)
 TIMING = re.compile(r"EZSDR-TIMING: (\S+) (\S+) (\S+): ")
 REAL_CLOCK = "EZSDR-CLASS: real-clock"
+UNDECLARED = "real-clock row without a bound declaration"
 RERUNS = 2
 
 
@@ -263,8 +269,8 @@ def judge(ran, bound, rerun):
     return outcome, 0, why(ran, outcome)
 
 
-def row_line(row_id, outcome, real_clock, reruns, reason=""):
-    fields = {"id": row_id, "outcome": outcome, "real_clock": real_clock, "reruns": reruns}
+def row_line(row_id, outcome, real_clock, reruns, reason="", declared=False):
+    fields = {"id": row_id, "outcome": outcome, "real_clock": real_clock, "declared": declared, "reruns": reruns}
     return "EZSDR-ROW " + json.dumps(dict(fields, why=reason) if reason else fields)
 
 
@@ -277,10 +283,11 @@ def exact_rerun(scratch, env):
 
 
 def run_one(scratch, env, mutation):
-    """`(outcome, real_clock, reruns, why)` for one row. The baseline goes through `judge` like a mutated run (a timing-marked
+    """`(outcome, real_clock, reruns, why, declared)` for one row (`declared`: it says `"kill": "bound"`). The baseline goes through `judge` like a mutated run (a timing-marked
     baseline is re-run alone); its re-runs are added to the first row that uses it."""
     if mutation.get("kill") not in (None, "bound"):
-        return f"NOT FOUND: unknown \"kill\" value {mutation['kill']!r}", False, 0, ""
+        return f"NOT FOUND: unknown \"kill\" value {mutation['kill']!r}", False, 0, "", False
+    declared = mutation.get("kill") == "bound"
     key = mutation.get("python") or (mutation["crate"], mutation["test_bin"], mutation["filter"])
     baseline_reruns = 0
     if key not in BASELINES:
@@ -289,7 +296,7 @@ def run_one(scratch, env, mutation):
         BASELINES[key] = (outcome == "SURVIVED" and (baseline_reruns > 0 or ran_tests(baseline.output)), REAL_CLOCK in baseline.output)
     ok, real_clock = BASELINES[key]
     if not ok:
-        return "BASELINE FAILED", real_clock, baseline_reruns, ""
+        return "BASELINE FAILED", real_clock, baseline_reruns, "", declared
     path = os.path.join(scratch, mutation["file"])
     if mutation["file"] not in ORIGINALS:
         ORIGINALS[mutation["file"]] = open(path, encoding="utf-8").read()
@@ -297,12 +304,14 @@ def run_one(scratch, env, mutation):
     try:
         mutated = anchor.apply(original, mutation)
     except anchor.AnchorError as error:
-        return f"NOT FOUND: {error}", real_clock, 0, ""
+        return f"NOT FOUND: {error}", real_clock, 0, "", declared
     open(path, "w", encoding="utf-8").write(mutated)
     try:
         ran = cargo_test(scratch, env, mutation)
-        outcome, reruns, reason = judge(ran, mutation.get("kill") == "bound", exact_rerun(scratch, env))
-        return outcome, real_clock, baseline_reruns + reruns, reason
+        outcome, reruns, reason = judge(ran, declared, exact_rerun(scratch, env))
+        if real_clock and not declared and outcome in ("killed", "SURVIVED"):
+            outcome, reason = "ERROR", UNDECLARED
+        return outcome, real_clock, baseline_reruns + reruns, reason, declared
     finally:
         open(path, "w", encoding="utf-8").write(original)
 
@@ -459,6 +468,16 @@ def self_test():
     assert row_outcome(tricky) == ("M01", "ERROR") and row_outcome("M01 the row's name: killed") is None, "self-test: a result is read from the fixed field only"
     assert row_outcome(row_line("M01", "killed, but recorded as equivalent", False, 0)) == ("M01", "killed, but recorded as equivalent"), "self-test: the outcome text is the whole field"
     assert run_one(".", {}, {"kill": "unbound"})[0].startswith("NOT FOUND"), "self-test: an unknown kill value is refused"
+    for name, mutation, outcome, expected in [
+        ("equivalent, ERROR", {"equivalent": "x"}, "ERROR", ("ERROR, but recorded as equivalent", True)),
+        ("equivalent, killed", {"equivalent": "x"}, "killed", ("killed, but recorded as equivalent", True)),
+        ("equivalent, survived", {"equivalent": "x"}, "SURVIVED", ("equivalent (survived)", False)),
+        ("not equivalent, killed", {}, "killed", ("killed", False)),
+        ("not equivalent, killed (bound)", {}, "killed (bound)", ("killed (bound)", False)),
+        ("not equivalent, survived", {}, "SURVIVED", ("SURVIVED", True)),
+    ]:
+        assert settle(mutation, outcome) == expected, f"self-test: settle: {name}: {settle(mutation, outcome)}"
+    assert json.loads(row_line("M01", "killed", True, 0, "", True).split(" ", 1)[1])["declared"] is True and json.loads(row_line("M01", "killed", True, 0).split(" ", 1)[1])["declared"] is False, "self-test: the row line carries `declared`"
 
     # The baseline goes through `judge`: `run_one` driven with a stub `cargo_test` (a queue of results, the calls recorded).
     global cargo_test
@@ -478,7 +497,7 @@ def self_test():
             open(os.path.join(dir_, "x.txt"), "w").write("aaa")
             for name, queue, expected, expected_calls in [
                 ("baseline marked once, then a pass: the row runs", [Ran(101, one), Ran(0, ok), Ran(101, fails("t::a"))], ("killed", False, 1, ""), [first_run, re_run, mutated_run]),
-                ("baseline marked, the probe line survives the failing run", [Ran(101, REAL_CLOCK + "\n" + one), Ran(0, ok), Ran(101, fails("t::a"))], ("killed", True, 1, ""), [first_run, re_run, mutated_run]),
+                ("baseline marked, the probe line survives the failing run (the row is undeclared)", [Ran(101, REAL_CLOCK + "\n" + one), Ran(0, ok), Ran(101, fails("t::a"))], ("ERROR", True, 1, UNDECLARED), [first_run, re_run, mutated_run]),
                 ("baseline marked on every attempt", [Ran(101, one), Ran(101, one), Ran(101, one)], ("BASELINE FAILED", False, 2, ""), [first_run, re_run, re_run]),
                 ("baseline fails plainly", [Ran(101, fails("t::a"))], ("BASELINE FAILED", False, 0, ""), [first_run]),
                 ("baseline passes with no test run", [Ran(0, "running 0 tests\n")], ("BASELINE FAILED", False, 0, ""), [first_run]),
@@ -489,11 +508,33 @@ def self_test():
                 BASELINES.clear(), ORIGINALS.clear(), calls.clear()
                 cargo_test = stub(*queue)
                 got = run_one(dir_, {}, row)
-                assert got == expected and calls == expected_calls, f"self-test: baseline: {name}: {got} {calls}"
+                assert got == expected + (False,) and calls == expected_calls, f"self-test: baseline: {name}: {got} {calls}"
                 assert open(os.path.join(dir_, "x.txt")).read() == "aaa", f"self-test: baseline: {name}: the file is restored"
             BASELINES.clear(), ORIGINALS.clear(), calls.clear()
             cargo_test = stub(Ran(101, one), Ran(0, ok), Ran(101, fails("t::a")), Ran(101, fails("t::a")))
             assert [run_one(dir_, {}, row)[2] for _ in range(2)] == [1, 0], "self-test: baseline: its re-runs are counted once, in the first row that uses it"
+            # Note 51 §6.5: a row whose baseline is marked real-clock needs `"kill": "bound"`, whatever its outcome.
+            marked, bound_row = REAL_CLOCK + "\n" + ok, dict(row, kill="bound")
+            for name, this, queue, expected in [
+                ("marked, undeclared, killed: ERROR", row, [Ran(0, marked), Ran(101, fails("t::a"))], ("ERROR", True, 0, UNDECLARED)),
+                ("marked, undeclared, survived: ERROR", row, [Ran(0, marked), Ran(0, ok)], ("ERROR", True, 0, UNDECLARED)),
+                ("marked, declared, killed", bound_row, [Ran(0, marked), Ran(101, fails("t::a"))], ("killed", True, 0, "")),
+                ("marked, declared, survived", bound_row, [Ran(0, marked), Ran(0, ok)], ("SURVIVED", True, 0, "")),
+                ("not marked, undeclared, killed", row, [Ran(0, ok), Ran(101, fails("t::a"))], ("killed", False, 0, "")),
+                ("not marked, undeclared, survived", row, [Ran(0, ok), Ran(0, ok)], ("SURVIVED", False, 0, "")),
+                ("marked, undeclared, baseline failed: stays a baseline failure", row, [Ran(101, REAL_CLOCK + "\n" + fails("t::a"))], ("BASELINE FAILED", True, 0, "")),
+                ("marked, undeclared, already ERROR: keeps its own reason (signal)", row, [Ran(0, marked), Ran(101, signal)], ("ERROR", True, 0, "signal")),
+                ("marked, undeclared, already ERROR: keeps its own reason (marker)", row, [Ran(0, marked), Ran(101, marker + failed)], ("ERROR", True, 0, "infra marker")),
+                ("marked, declared, marker: killed (bound)", bound_row, [Ran(0, marked), Ran(101, marker + failed)], ("killed (bound)", True, 0, "infra marker")),
+            ]:
+                BASELINES.clear(), ORIGINALS.clear(), calls.clear()
+                cargo_test = stub(*queue)
+                got = run_one(dir_, {}, this)
+                assert got == expected + (this is bound_row,), f"self-test: real clock: {name}: {got}"
+            BASELINES.clear(), ORIGINALS.clear(), calls.clear()
+            cargo_test = stub(Ran(0, marked), Ran(101, fails("t::a")), Ran(101, fails("t::a")))
+            got = [(g[0], g[1], g[4]) for g in (run_one(dir_, {}, r) for r in (bound_row, row))]
+            assert got == [("killed", True, True), ("ERROR", True, False)] and calls.count(first_run) == 1, f"self-test: real clock: the mark is the baseline's, the declaration the row's: {got} {calls}"
     finally:
         cargo_test = real_cargo_test
         BASELINES.clear(), ORIGINALS.clear()
@@ -506,6 +547,14 @@ def self_test():
     assert all(f"fn infra_fixture_{case['fixture']}()" in fixtures for case in E2E), "self-test: every e2e case names a fixture test"
     print("mutate.py self-test: ok")
     return 0
+
+
+def settle(mutation, outcome):
+    """`(outcome, failed)` for a row: a row recorded as equivalent must survive; any other row must be killed."""
+    if "equivalent" in mutation:
+        outcome = "equivalent (survived)" if outcome == "SURVIVED" else f"{outcome}, but recorded as equivalent"
+        return outcome, not outcome.startswith("equivalent")
+    return outcome, not outcome.startswith("killed")
 
 
 def main():
@@ -528,14 +577,9 @@ def main():
     for mutation in mutations:
         if selected and mutation["id"] not in selected:
             continue
-        outcome, real_clock, reruns, reason = run_one(scratch, env, mutation)
-        if "equivalent" in mutation:
-            # Recorded as equivalent: a kill means the record is wrong, not the code.
-            outcome = "equivalent (survived)" if outcome == "SURVIVED" else f"{outcome}, but recorded as equivalent"
-            failed = not outcome.startswith("equivalent")
-        else:
-            failed = not outcome.startswith("killed")
-        print(row_line(mutation["id"], outcome, real_clock, reruns, reason))
+        outcome, real_clock, reruns, reason, declared = run_one(scratch, env, mutation)
+        outcome, failed = settle(mutation, outcome)  # recorded as equivalent: a kill means the record is wrong, not the code
+        print(row_line(mutation["id"], outcome, real_clock, reruns, reason, declared))
         print(f"{mutation['id']} {mutation['name']}: {outcome}", flush=True)
         if failed:
             failures += 1

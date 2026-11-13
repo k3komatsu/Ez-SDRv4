@@ -2280,6 +2280,39 @@ fn configure_lead_left(manifest: &Manifest, before: Option<i64>, origin: Option<
     i64::try_from((i128::from(origin) - i128::from(completion)) * 1_000_000_000 / i128::from(master_clock_hz)).ok()
 }
 
+/// One stage of the receive start-lead group read from the Run's delivered events: each trial is marked late or short when a
+/// `radio.LATE_COMMAND` or `radio.START_LEAD_SHORT` event names the trial's origin as its `requested` tick, classified, and
+/// written into the stage's JSON row. A trial's remaining lead comes from `configure_lead` first (the configure record, which
+/// the caller holds) and from the smallest warning's payload when the record holds no row.
+fn restart_stage(condition: &str, value: u64, delivered: &[ezsdr_kernel::event::Event], trials: &mut [RxStartTrial], configure_lead: impl Fn(&RxStartTrial) -> Option<i64>) -> (Json, Vec<TrialClass>) {
+    let (late_kind, short_kind) = (super::kind("radio.LATE_COMMAND"), super::kind("radio.START_LEAD_SHORT"));
+    let late: Vec<i64> = delivered.iter().filter(|event| event.kind == late_kind).filter_map(requested_tick).collect();
+    let short: Vec<(i64, i64)> = delivered.iter().filter(|event| event.kind == short_kind).filter_map(|event| requested_tick(event).zip(event.payload["lead_left_ns"].as_i64())).collect();
+    for trial in trials.iter_mut() {
+        let short_event = trial.origin.and_then(|origin| short.iter().filter(|(at, _)| *at == origin).map(|(_, lead)| *lead).min());
+        if let Some(origin) = trial.origin {
+            trial.late = late.contains(&origin);
+        }
+        trial.short = short_event.is_some();
+        trial.lead_left_ns = configure_lead(trial).or(short_event);
+    }
+    let classes: Vec<TrialClass> = trials.iter().map(rx_start_trial_class).collect();
+    let mut stage = candidate_stage_json(condition, value, &classes, &[]);
+    if let Some(rows) = stage["trials"].as_array_mut() {
+        for (row, trial) in rows.iter_mut().zip(trials.iter()) {
+            row["expected_origin"] = json!(trial.expected);
+            row["origin"] = json!(trial.origin);
+            row["first_tick"] = json!(trial.first_tick);
+            row["started"] = json!(trial.started);
+            row["late_command"] = json!(trial.late);
+            row["start_lead_short"] = json!(trial.short);
+            row["lead_left_ns"] = json!(trial.lead_left_ns);
+        }
+    }
+    stage["smallest_lead_left_ns"] = json!(trials.iter().filter_map(|trial| trial.lead_left_ns).min());
+    (stage, classes)
+}
+
 /// The companion group's Session: the profile's default asking plus `COMPANION_RATE_HZ` for the transmit stream at
 /// connect, and the rate the clock then reads back; a profile that cannot express the rate runs the companion at its
 /// default and says so.
@@ -2420,34 +2453,9 @@ fn rx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companio
                     trials.push(restart_trial(&mut run, &probe, *value, values, *shape_channels)?);
                 }
                 let manifest = run.finish();
-                let late: Vec<i64> = super::events_of(&manifest, "radio.LATE_COMMAND").iter().filter_map(requested_tick).collect();
-                let short: Vec<(i64, i64)> =
-                    super::events_of(&manifest, "radio.START_LEAD_SHORT").iter().filter_map(|event| requested_tick(event).zip(event.payload["lead_left_ns"].as_i64())).collect();
                 let master_clock_hz = device.master_clock_rate();
-                for trial in &mut trials {
-                    let short_event = trial.origin.and_then(|origin| short.iter().filter(|(at, _)| *at == origin).map(|(_, lead)| *lead).min());
-                    if let Some(origin) = trial.origin {
-                        trial.late = late.contains(&origin);
-                    }
-                    trial.short = short_event.is_some();
-                    // The remaining lead is recorded for every candidate, warning or not: from the configure record first,
-                    // and from the warning's payload when the record holds no row.
-                    trial.lead_left_ns = configure_lead_left(&manifest, trial.expected, trial.origin, master_clock_hz).or(short_event);
-                }
-                let classes: Vec<TrialClass> = trials.iter().map(rx_start_trial_class).collect();
-                let mut stage = candidate_stage_json(&condition, *value, &classes, &[]);
-                if let Some(rows) = stage["trials"].as_array_mut() {
-                    for (row, trial) in rows.iter_mut().zip(&trials) {
-                        row["expected_origin"] = json!(trial.expected);
-                        row["origin"] = json!(trial.origin);
-                        row["first_tick"] = json!(trial.first_tick);
-                        row["started"] = json!(trial.started);
-                        row["late_command"] = json!(trial.late);
-                        row["start_lead_short"] = json!(trial.short);
-                        row["lead_left_ns"] = json!(trial.lead_left_ns);
-                    }
-                }
-                stage["smallest_lead_left_ns"] = json!(trials.iter().filter_map(|trial| trial.lead_left_ns).min());
+                let (mut stage, classes) =
+                    restart_stage(&condition, *value, &manifest.events.delivered, &mut trials, |trial| configure_lead_left(&manifest, trial.expected, trial.origin, master_clock_hz));
                 if companion_group {
                     stage["companion"] = companion_observation(&manifest, Direction::Tx, companion_rate);
                     stage["companion_rate_hz"] = json!(companion_rate);
@@ -4307,9 +4315,10 @@ mod tests {
 
     #[test]
     fn rx_start_lead_group_runs_on_the_fake() {
-        // One configure delay, three candidates: the rehearsal holds a LATE candidate and a SHORT one as well as
-        // successful ones (the two conditions configure different amounts), and every trial records its remaining
-        // lead from the configure record, warning or not. The manual clock (#83) makes the 5 ms configure a device-time delay,
+        // One configure delay, three candidates: the rehearsal holds a LATE candidate as well as successful ones and every
+        // trial records its remaining lead from the configure record, warning or not. Whether a candidate is SHORT depends on the
+        // test thread's own delays between a stop and the start, so `a_restart_stage_reports_what_the_events_say` judges the SHORT
+        // report from synthetic events instead. The manual clock (#83) makes the 5 ms configure a device-time delay,
         // so a loaded host cannot turn the 10 ms candidate into a late or short one.
         let mut plan = MeasurementPlan::rehearsal();
         plan.rx_start_leads_ns = vec![3_000_000, 5_000_000, 10_000_000];
@@ -4320,7 +4329,6 @@ mod tests {
         let conditions: Vec<&str> = stages.iter().map(|stage| stage["condition"].as_str().unwrap()).collect();
         assert_eq!(conditions, ["restart-same"; 3].into_iter().chain(["restart-retune"; 3]).collect::<Vec<_>>());
         assert!(stages.iter().any(|stage| stage["trials"][0]["late_command"] == true), "a LATE candidate: {stages:?}");
-        assert!(stages.iter().any(|stage| stage["trials"][0]["start_lead_short"] == true), "a SHORT candidate: {stages:?}");
         for condition in ["restart-same", "restart-retune"] {
             let successful = stages
                 .iter()
@@ -4338,6 +4346,75 @@ mod tests {
             }
         }
         assert!(matches!(&group.values[0], ValueRecord::Measured { worst: model::Worst::Number(ns), .. } if *ns == 10_000_000.0), "{:?}", group.values);
+    }
+
+    #[test]
+    fn a_restart_stage_reports_what_the_events_say() {
+        use ezsdr_kernel::event::{Event, EventKind, EventSource, Severity};
+        use ezsdr_kernel::id::ResourceId;
+        use ezsdr_radio::payloads::{LateCommandPayload, StartLeadShortPayload};
+        let at = |ticks: i64| TimePoint::new(ClockDomainId::local(1), ticks);
+        let event = |kind: &str, payload: Json| Event {
+            source: EventSource::Node { node: ResourceId::parse("usrp").unwrap() },
+            time: at(0),
+            severity: Severity::Warning,
+            kind: EventKind::parse(kind).unwrap(),
+            payload,
+        };
+        let late = |requested: i64| serde_json::to_value(LateCommandPayload { key: None, requested: at(requested), applied: at(requested + 1) }).unwrap();
+        let short =
+            |requested: i64, lead_left_ns: i64| serde_json::to_value(StartLeadShortPayload { requested: at(requested), configured: at(requested - 1), lead_left_ns, min_lead_ns: 10_000 }).unwrap();
+        let mut unreadable = short(400, 1);
+        unreadable["requested"]["ticks"] = json!("400");
+        let delivered = vec![
+            event("radio.LATE_COMMAND", late(100)),
+            event("radio.START_LEAD_SHORT", short(200, 7_000)),
+            event("radio.START_LEAD_SHORT", short(200, 3_000)),
+            event("radio.START_LEAD_SHORT", short(999, 1)),
+            event("radio.START_LEAD_SHORT", unreadable),
+            event("radio.START_LEAD_SHORT", short(600, 8_000)),
+            // The event's kind decides which report it is, whatever its payload: a short's payload under the late kind is a late
+            // command, and a late command's payload under the short kind (no `lead_left_ns`) is not a short.
+            event("radio.LATE_COMMAND", short(700, 2_000)),
+            event("radio.START_LEAD_SHORT", late(800)),
+        ];
+        let trial = |origin: Option<i64>| RxStartTrial { expected: origin, origin, first_tick: origin, started: origin.is_some(), late: false, short: false, lead_left_ns: None };
+        let mut trials: Vec<RxStartTrial> = [Some(100), Some(200), Some(300), None, Some(400), Some(500), Some(600), Some(700), Some(800)].map(trial).to_vec();
+        // The configure record answers for one trial only; the others take the warning's payload, when there is one.
+        let (stage, classes) = restart_stage("restart-same", 5_000_000, &delivered, &mut trials, |trial| (trial.origin == Some(600)).then_some(-5));
+        // (late, short, lead_left_ns) of each trial: a late command at 100; the smaller of two shorts at 200; a short at another
+        // origin, an origin that is none, a short whose requested tick is not a number, and no event at all, each unflagged; a short whose
+        // configure record answers; the two events whose kind and payload disagree.
+        let flags: Vec<(bool, bool, Option<i64>)> = trials.iter().map(|trial| (trial.late, trial.short, trial.lead_left_ns)).collect();
+        assert_eq!(
+            flags,
+            [
+                (true, false, None),
+                (false, true, Some(3_000)),
+                (false, false, None),
+                (false, false, None),
+                (false, false, None),
+                (false, false, None),
+                (false, true, Some(-5)),
+                (true, false, None),
+                (false, false, None),
+            ]
+        );
+        use TrialClass::{Incomplete, ProviderFailure, Success};
+        assert_eq!(classes, [ProviderFailure, ProviderFailure, Success, Incomplete, Success, Success, ProviderFailure, ProviderFailure, Success]);
+        assert_eq!((stage["condition"].as_str(), stage["candidate"].as_u64()), (Some("restart-same"), Some(5_000_000)));
+        assert_eq!((stage["classes"]["ProviderFailure"].as_u64(), stage["classes"]["Success"].as_u64(), stage["classes"]["Incomplete"].as_u64()), (Some(4), Some(4), Some(1)));
+        assert_eq!(stage["smallest_lead_left_ns"].as_i64(), Some(-5), "the smallest remaining lead over the trials");
+        let rows = stage["trials"].as_array().expect("one row per trial");
+        assert_eq!(rows.len(), trials.len());
+        for (row, (trial, class)) in rows.iter().zip(trials.iter().zip(&classes)) {
+            assert_eq!(row["class"].as_str(), Some(trial_class_name(*class)), "{row:?}");
+            assert_eq!(
+                (&row["expected_origin"], &row["origin"], &row["first_tick"], &row["started"], &row["late_command"], &row["start_lead_short"], &row["lead_left_ns"]),
+                (&json!(trial.expected), &json!(trial.origin), &json!(trial.first_tick), &json!(trial.started), &json!(trial.late), &json!(trial.short), &json!(trial.lead_left_ns)),
+                "the row reports the trial: {row:?}"
+            );
+        }
     }
 
     #[test]

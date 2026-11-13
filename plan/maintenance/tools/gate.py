@@ -15,9 +15,12 @@ The mutation step is judged from the per-row and summary lines of remote_mutate.
 exit code: a row passes when it is killed (`killed`, or `killed (bound)` for a row that declares
 `"kill": "bound"`), or when it is a survivor listed in plan/maintenance/tools/known-survivors.txt; an `ERROR`
 row (a marker, a signal, a timeout: the mutant was not shown to be caught) is broken; every selected row must
-appear in the results. gate.json's mutation record counts the `killed (bound)` rows, the `ERROR` rows, the
-serial re-runs of timing-marked tests and the rows that select a real-clock FakeDevice test
-(`real-clock (unclassified)`, report only). The e2e step runs `remote_mutate.py --e2e`: mutate.py's
+appear in the results. A row whose baseline selected a real-clock FakeDevice test (`real_clock` in its row line) and that
+does not declare `"kill": "bound"` (`declared` false or absent) is broken whatever its outcome (killed, survived, a known survivor,
+`equivalent (survived)`; note 51 §6.5): the gate checks it from the row line itself, not from the outcome mutate.py drew. A row
+that is only `BASELINE FAILED` is reported as that. gate.json's mutation record counts the `killed (bound)` rows, the `ERROR` rows,
+the serial re-runs of timing-marked tests and, in `real-clock (declared)` and `real-clock (undeclared)`, the rows that select a
+real-clock FakeDevice test; the second must be empty. The e2e step runs `remote_mutate.py --e2e`: mutate.py's
 self-test and the infra fixtures through the same `cargo_test()` the rows use, in the mutation image,
 and every case must draw its fixed verdict. A failure of the test step whose every failing test wrote an
 `EZSDR-TIMING:` marker (matched by name, and with no signal, infra marker or build error anywhere in the output) is
@@ -218,6 +221,8 @@ def parse_mutation(text, exit_code, expected, requested, known):
     known_hits = [k for k in survived if k in known]
     unexpected = [k for k in survived if k not in known]
     baseline = sorted(k for k in not_killed if seen.get(k) == "BASELINE FAILED")
+    real_clock = [k for k in exp if k in rows and rows[k].get("real_clock") and seen.get(k) != "BASELINE FAILED"]
+    undeclared = [k for k in real_clock if rows[k].get("declared") is not True]
     broken = {k: seen[k] for k in not_killed if k in seen and k not in survived and k not in baseline}
     if missing:
         reasons.append(f"mutation: selected row(s) missing from the results: {missing}")
@@ -227,6 +232,8 @@ def parse_mutation(text, exit_code, expected, requested, known):
         reasons.append(f"mutation: survived and not in {KNOWN_FILE}: {unexpected}")
     if baseline:
         reasons.append(f"mutation: BASELINE FAILED in {baseline}")
+    if undeclared:
+        reasons.append(f"mutation: real-clock row(s) without a \"kill\": \"bound\" declaration, whatever their outcome: {undeclared}")
     extra = sorted(k for k in seen if k not in exp)
     if extra:
         reasons.append(f"mutation: result rows that were not selected: {extra}")
@@ -238,7 +245,7 @@ def parse_mutation(text, exit_code, expected, requested, known):
                 "broken": broken, "missing": missing, "missing_ids": missing_ids, "notes": notes, "remote_exit": exit_code,
                 "errors": sorted(k for k in exp if seen.get(k) == "ERROR"), "killed_by_bound": sorted(k for k in exp if seen.get(k) == "killed (bound)"),
                 "timing_reruns": {k: rows[k]["reruns"] for k in exp if k in rows and rows[k].get("reruns")},
-                "real-clock (unclassified)": sorted(k for k in exp if k in rows and rows[k].get("real_clock"))}
+                "real-clock (declared)": sorted(set(real_clock) - set(undeclared)), "real-clock (undeclared)": sorted(undeclared)}
     return {"passed": total[0], "total": total[1]}, mutation, reasons
 
 
@@ -568,11 +575,12 @@ TEST_OK = ("running 2 tests\ntest a::b ... ok\n\ntest result: ok. 2 passed; 0 fa
 TEST_FAIL = "test x::y ... FAILED\n\ntest result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
 
 
-def remote_text(rows):
-    """remote_mutate's output for `(list, id, outcome)` rows: the headers, each row's fixed-field line and its free-text line, the summaries."""
+def remote_text(rows, real_clock=(), declared=()):
+    """remote_mutate's output for `(list, id, outcome)` rows: the headers, each row's fixed-field line and its free-text line, the summaries.
+    The ids in `real_clock` have a marked baseline and those in `declared` say `"kill": "bound"`."""
     text, current = "", None
     for name, row_id, outcome in rows:
-        text += (f"--- {name} (sim02)\n" if name != current else "") + row_line(row_id, outcome, False, 0) + f"\n{row_id} a name: {outcome}\n"
+        text += (f"--- {name} (sim02)\n" if name != current else "") + row_line(row_id, outcome, row_id in real_clock, 0, declared=row_id in declared) + f"\n{row_id} a name: {outcome}\n"
         current = name
     for name in dict.fromkeys(r[0] for r in rows):
         mine = [r for r in rows if r[0] == name]
@@ -580,8 +588,8 @@ def remote_text(rows):
     return text + f"{sum(o in PASSED for _, _, o in rows)}/{len(rows)} passed; not passed or missing: {[f'{n}/{i}' for n, i, o in rows if o not in PASSED]}\n"
 
 
-def mut_known(m39="killed", g09="SURVIVED", g10="killed"):
-    return remote_text([("phase3", "M39", m39), ("phase7", "G09", g09), ("phase7", "G10", g10)])
+def mut_known(m39="killed", g09="SURVIVED", g10="killed", **marks):
+    return remote_text([("phase3", "M39", m39), ("phase7", "G09", g09), ("phase7", "G10", g10)], **marks)
 
 
 MUT_KNOWN = mut_known()
@@ -623,9 +631,24 @@ def self_test():
     _, mutation, reasons = parse_mutation(mut_known(g09="ERROR"), 1, MUT_ROWS, [], {})
     assert mutation["errors"] == ["phase7/G09"] and any("not killed, and not a survivor" in r for r in reasons), "self-test: an ERROR row is broken, even when it is not a known survivor"
     text = remote_text([("phase3", "M39", "killed (bound)"), ("phase7", "G09", "killed"), ("phase7", "G10", "killed")]).replace(
-        row_line("G10", "killed", False, 0), row_line("G10", "killed", True, 2))
+        row_line("G10", "killed", False, 0), row_line("G10", "killed", True, 2, declared=True))
     _, mutation, reasons = parse_mutation(text, 0, MUT_ROWS, [], {})
-    assert reasons == [] and mutation["killed_by_bound"] == ["phase3/M39"] and mutation["real-clock (unclassified)"] == ["phase7/G10"] and mutation["timing_reruns"] == {"phase7/G10": 2}, "self-test: a bound kill passes and is counted; real-clock rows and re-runs are reported"
+    assert reasons == [] and mutation["killed_by_bound"] == ["phase3/M39"] and mutation["real-clock (declared)"] == ["phase7/G10"] and mutation["real-clock (undeclared)"] == [] and mutation["timing_reruns"] == {"phase7/G10": 2}, "self-test: a bound kill passes and is counted; declared real-clock rows and re-runs are reported"
+    # Note 51 §6.5: a marked row without a declaration is broken whatever its outcome, read from the row line.
+    for name, key, text in [
+        ("killed", "phase7/G10", mut_known(real_clock={"G10"})),
+        ("a known survivor (the known file does not excuse it)", "phase7/G09", mut_known(real_clock={"G09"})),
+        ("equivalent (survived)", "phase7/G10", mut_known(g10="equivalent (survived)", real_clock={"G10"})),
+        ("a row line with no `declared` key", "phase7/G10", mut_known(real_clock={"G10"}).replace(', "declared": false', "")),
+    ]:
+        _, mutation, reasons = parse_mutation(text, 1, MUT_ROWS, [], {"phase7/G09": "race"})
+        assert mutation["real-clock (undeclared)"] == [key] and mutation["real-clock (declared)"] == [] and any("without a" in r and key in r for r in reasons), f"self-test: an undeclared marked row is broken: {name}"
+    _, mutation, reasons = parse_mutation(mut_known(m39="killed (bound)", real_clock={"M39"}, declared={"M39"}), 1, MUT_ROWS, [], {"phase7/G09": "race"})
+    assert reasons == [] and mutation["real-clock (declared)"] == ["phase3/M39"] and mutation["real-clock (undeclared)"] == [], "self-test: a declared marked row passes and is listed"
+    _, mutation, reasons = parse_mutation(mut_known(m39="BASELINE FAILED", real_clock={"M39"}), 1, MUT_ROWS, [], {"phase7/G09": "race"})
+    assert mutation["real-clock (undeclared)"] == [] and len(reasons) == 1 and "BASELINE FAILED" in reasons[0], "self-test: a marked baseline failure is only a baseline failure"
+    _, mutation, reasons = parse_mutation(mut_known(declared={"G10"}), 1, MUT_ROWS, [], {"phase7/G09": "race"})
+    assert reasons == [] and mutation["real-clock (undeclared)"] == [] and mutation["real-clock (declared)"] == [], "self-test: a row with no mark is not affected, declared or not"
     _, mutation, reasons = parse_mutation(MUT_KNOWN.replace("G09 a name: SURVIVED", "G09 a name: killed"), 1, MUT_ROWS, [], {"phase7/G09": "race"})
     assert mutation["known"] == ["phase7/G09"], "self-test: the free-text line is not a result"
     spoof = remote_text([("phase3", "M39", "SURVIVED")]).replace("M39 a name: SURVIVED", "M39 a: killed")

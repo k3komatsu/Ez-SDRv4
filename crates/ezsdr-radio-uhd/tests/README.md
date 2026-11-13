@@ -73,7 +73,11 @@ is the point: the Authority's own diagnostics, `ur_07_now_is_monotonic_across_a_
 pinned by a unit test in `src/authority.rs`; the re-anchor's bracket error is real
 time's), the device's own time against the process's clock
 (`ur_33_a_real_fake_s_time_starts_at_its_own_creation`), and the intentionally
-wedged thread (`FakeFault::TxBlocks`). `ur_21_late_policies_on_the_device_lead` now runs
+wedged thread (`FakeFault::TxBlocks`). Such a test builds a `ClockMode::Real` fake, and the mutation runner marks it: with `EZSDR_REAL_CLOCK_PROBE` set
+(the baseline of every row), `FakeDevice::new` on the real clock writes `EZSDR-CLASS: real-clock`. A mutation row whose baseline is marked must declare
+`"kill": "bound"` (the row's filter selects a test whose verdict is a real-time quantity, or one a held thread would hang on a manual clock): otherwise `mutate.py` makes it `ERROR`
+whatever its outcome (killed, survived or recorded as equivalent) and `gate.py` rejects it again from the row line (`real-clock (undeclared)`). A test whose subject is not real time
+takes the manual clock instead: the `rig*` helpers of `src/provider/test_support.rs` and `common::fake()` do. `ur_21_late_policies_on_the_device_lead` now runs
 on the manual clock and asserts the booking's verdicts only; the repeat's re-decision at
 uhd-tx's first hand-over — a real interval — is pinned deterministically by the unit test
 `ur_21_first_dispatch_rechecks_all_late_policies` (plan 30 stage A). The tests a loaded host
@@ -124,8 +128,9 @@ assertion under the delay (stage 2b moved those it could: a booking made untimed
 trials through `common::Rehearsal` (note 51 stage 2c, §5.3b): a trial that carries evidence of host lateness (a `radio.TIME_ERROR` with cause `late`, or a Kernel log
 stamp past its deadline; `iii::late_evidence`) is not judged, and `finish()` writes the `EZSDR-TIMING:` marker and fails once, so `mutate.py` and `gate.py` re-run the test
 alone, up to twice (three marked runs: a red gate step, a mutation row `ERROR`). A trial without evidence is judged as before, and a Kernel refusal beside evidence is a plain
-failure. The three `rehearsal_b7_*` tests carry their own tolerance and are unchanged; `rx_start_lead_group_runs_on_the_fake` waits for stage 3: it reads `radio.LATE_COMMAND` /
-`START_LEAD_SHORT`, not `radio.TIME_ERROR`, and the Kernel log bounds its restart gap only from above, so about 1 ms of failure would stay unmarked until the trial runs on a rig with a fixed gap.
+failure. The three `rehearsal_b7_*` tests carry their own tolerance and are unchanged. `rx_start_lead_group_runs_on_the_fake` reads `radio.LATE_COMMAND` /
+`START_LEAD_SHORT`, not `radio.TIME_ERROR`, and the Kernel log bounds its restart gap only from above, so a delayed test thread can turn a SHORT stage into a LATE one: the Run rehearsal
+therefore does not assert that a SHORT candidate exists (note 51 stage 3d), and `a_restart_stage_reports_what_the_events_say` covers the events-to-stage decoding (SHORT, LATE, association, the reported row) on synthetic events with no timing.
 
 Before the B3/B4/B6/B7 waveform/index assertions and the single-burst assertion,
 `require_stream_timing` checks measured stream events and expired-timeline

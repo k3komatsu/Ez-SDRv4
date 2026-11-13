@@ -898,7 +898,7 @@ mod tests {
             "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
         }))
         .unwrap();
-        let config = FakeConfig { clock: crate::ClockMode::Manual, faults: vec![crate::device::FakeFault::DropBurstAck], ..FakeConfig::default() };
+        let config = FakeConfig { faults: vec![crate::device::FakeFault::DropBurstAck], ..FakeConfig::default() };
         let (core, device, _time, _events) = test_support::rig_with(config, Vec::new());
         let mut radio = UhdRadio::from_binding(&binding, device.clone()).unwrap();
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Tx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
