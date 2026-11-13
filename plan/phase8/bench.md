@@ -824,7 +824,7 @@ hw() { # $1 = 試験名．EZSDR_UHD_ARGS と BOARD（36 か 37）と EZSDR_BENCH
   while [[ -e $log ]]; do n=$((n + 1)); log="$dir/$1.$BOARD.$n.log"; done # 既存の log は上書きしない（.2，.3）
   docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,size=4g \
     -v "$PWD:/work" -v ezsdr-v4-cargo-target:/cargo-target -w /work \
-    -e CARGO_HOME=/cargo-target/.cargo-home -e EZSDR_UHD_ARGS -e EZSDR_BENCH_NIC \
+    -e CARGO_HOME=/cargo-target/.cargo-home -e EZSDR_UHD_ARGS -e EZSDR_BENCH_NIC -e EZSDR_SLOT_B_ATTENUATOR_CONFIRMED -e EZSDR_OFS_TWO_CHANNEL_WAIVED \
     ezsdr-v4-dev:uhd4.10 cargo test -q --release -p ezsdr-radio-uhd --features uhd --test hardware "$1" -- --exact --ignored --nocapture --test-threads=1 \
     >"$log" 2>&1 || status=$?
   grep -h 'VERDICT\|test result\|panicked' "$log"
@@ -1256,3 +1256,102 @@ orchestrator に返すもの：`<NEW>` の commit，(i-a)・(i-b)・(ii) の VER
   - `close_before_origin` だけが FAIL：close は安全でない。stop は安全。
   - どちらかで次の start が誤った位置（block がある）：origin 前の cancel が streamer か device の状態を壊した証拠。block が来ないだけなら INCONCLUSIVE で，再現を見る。
   - `stop_after_origin`（control）が FAIL か INCONCLUSIVE：条件が成り立っていない（100 MS/s で host が追いつかず `Overflow`，新しい start が origin からずれる，など）。同じ rate の他の cell を読まない。`TRACE` の `next_offset_ticks` が control でも 0 でないなら，それは #67 と関係がない。
+
+## 2026-11-15 の手順（#67 の probe に加えて：受信 restart の zeros の掃引，#75 の probe，open-flush の掃引）
+
+出典：`~/.cache/ezsdr-fixes/2026-11-13-rxzeros/options.md` §4（掃引の計画）と末尾の owner の決定（direction D），`~/.cache/ezsdr-fixes/2026-11-13-n75/options.md`（#75）§2.4 と owner の決定（(3) は下の open-flush の掃引の後に enable），`crates/ezsdr-radio-uhd/tests/common/bench1115.rs`（cell の表・summary・verdict・決定の規則はここ，非 device の試験は default の suite と FakeDevice の rehearsal）．**どれも結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．** 4 つの試験は `hw` で単独に流せる（記録 suite には入れていない）．いずれも device の一生全体を 1 本の期限で囲み（`bounded`），過ぎると `EZSDR-INFRA:` の行を書いて abort する．hang の印なので電源を入れ直して owner へ．
+
+- 構成・準備・`hw` の定義・stop の規則は「note 47 段階 5 の後」の節と同じ（#2 UBX slot A → #1 OBX slot A，30 dB，基準は内部，slot A だけ）．順は **#2 → #1**．
+- **送信するのは (2)(3)(4)**．#67（(1)）は受信だけで att は要らない．**(2)(3)(4) の 1 本ごとの前に owner が各 board の TX/RX → ≥30 dB の att → 同じ board の RX2 を確かめる**（毎回．3 本を 1 回の確認で続けて流さない）．
+- **(2) は送信 gain を 0 dB から +10・+20 dB まで上げる**．att を loopback に入れたまま送信 gain を最大まで許す owner の決定（2026-10-27，T5 の +6 dB と同じ）に基づく．上限は `bench1115::MAX_TONE_GAIN_DB` = 20 dB で，これを超える cell は送信の前に panic する．試験の終わり・失敗・unwind で gain は 0 dB に戻る（FakeDevice の試験が確かめる）．波形の振幅は 0.4 のまま，周波数は 1 GHz（`SAFE_TX_HZ`），rate は 1 MS/s の tone 源（(3) は 1・200 MS/s と 1・10 MS/s，(4) は 1・2・10 MS/s の 4 byte の零）．
+- **(2)(3)(4) は slot A の channel 0 にだけ送信する**（(4) の 2 channel の cell は上の slot B の確認を別に要る）。`EZSDR_D9_CHANNEL` が 0 以外なら device を呼ぶ前に panic する（`hw` はこの変数を container に渡さないので 0）。
+- 起動の形（盤ごとに export し直す．送信する probe は 1 本ずつ，確認のあと 1 コマンドだけ．FAIL が事実の報告である (3) は `run_all` ではなく一つずつ）：
+
+  ```sh
+  export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0   # #2 UBX．盤を替えて addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 が #1 OBX
+  hw hw_67_stop_before_origin                                  # (1) 受信のみ．att 不要
+  # --- owner が att（TX/RX → ≥30 dB → RX2）を確かめた．次の 1 本だけ ---
+  hw hw_rxzeros_sweep                                          # (2) 送信
+  # --- owner が att を確かめた．次の 1 本だけ ---
+  hw hw_75_t3_probes                                           # (3) 送信
+  # --- owner が att を確かめた．次の 1 本だけ（2 channel の cell は走らない配線．slot B の att を owner が確かめて EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1 を付けない限り slot B には送信しない．owner が免除しない限り decision は INCONCLUSIVE，(4) 参照）---
+  hw hw_75_open_flush_sweep                                    # (4) 送信（slot B には送信しない形）
+  # --- slot B の att も owner が確かめた場合だけ．1 本の呼び出しに付ける（export しない：shell に残ると後の試験にも渡る）---
+  EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1 hw hw_75_open_flush_sweep
+  ```
+
+### (1) `hw_67_stop_before_origin`（受信のみ，約 5 分 / 台，estimate）
+
+詳細・VERDICT の読み方は上の「2026-11-15 の項目：#67」．決めること：origin より前の untimed stop と close を X310 が安全に扱うか（#67）．
+
+### (2) `hw_rxzeros_sweep`（TX あり：tone 源，gain 0・+10・+20 dB，約 8 分 / 台，estimate．期限 30 分）
+
+問い：受信 restart 直後の exact-zero の数は DDC の half-band 数 n_hb = min(v2(D), 3) の束の値か（owner の direction D：bound 0 / 4 / 11 / 15），そして (a) 毎回の start か restart だけか．
+
+- **cell 35**（`bench1115::zeros_cells`）：rate cell 20（D = 1, 2, 3, 4, 6, 8, 10, 12, 20, 24, 25, 40, 50, 60, 100, 125, 200, 248, 250, 255．各 n_hb の束に 5 つ．rate は 0.784〜200 MS/s）× restart，10 trial（束の境の D = 3, 125, 255, 6, 10, 50, 250 は **15**）；start の種類 3 × level の rate 3（D = 200, 100, 2 = 1・2・100 MS/s）× 10 trial：fresh open（`rx_close`，rate，`rx_open`，`rx_start`），retune（受信周波数を搬送波 +50 kHz と搬送波で交互に），after_rate（companion の rate の segment の後に戻す）；level cell 6（同じ 3 つの D × gain +10・+20 dB，restart，10 trial）．各 cell は先頭に **warm-up の 1 trial**（dump はするが数えない）．trial は計 420．
+- 1 trial は `hw_iii_raw_rx_restart_fill` と同じ形（`iii::restart_fill`）：tone 源が 20 ms 前から 60 ms の 100 kHz を送り，planned の 50 ms 前に start を積み，4 000 sample（最低 2 ms）を読む．数える条件は `iii::incomplete_reason`（rate の read-back，連続，100 kHz の tone，fill が測れた）．cell は計画した trial の **すべて**（10，15 の cell は 15）が complete のときだけ数える（80 % などの閾値は無い）．
+- 出力：trial ごとに `RXZ trial {json}`（zeros，ramp10・ramp90，steady，precursor の peak，**先頭 40 sample の fc32（`head`）**，planned と first_tick，失敗した呼び出し）；cell ごとに `RXZ cell …` と `VERDICT rxz <cell>`；最後に `RXZ class n_hb <n>`（構造の範囲と候補の bound）・`RXZ observed`・`RXZ decision 1〜4`・`RXZ summary`。**決定の規則（`bench1115::RXZ_RULE`）は最初の行と summary の行に印字される**（結果が出る前に書いた）。
+  ```sh
+  grep -h 'RULE (\|RXZ cell\|RXZ class\|RXZ observed\|RXZ decision\|RXZ summary\|VERDICT\|EZSDR-INFRA' <log>     # 読む行
+  grep -h 'RXZ trial' <log>                                                                             # 全 trial と先頭 40 sample
+  ```
+- VERDICT：FAIL は device の呼び出しの失敗か first block が planned tick と違う，INCONCLUSIVE は complete が計画した trial 数に足りない，PASS は数えた．**FAIL が 1 つでもあれば test は失敗する．INCONCLUSIVE だけなら `ok` で終わるので cell の行を必ず読む．**
+- **決めること（規則，§4 の決定規則）**：**計画した 35 cell の全部が数えられる（各 cell の計画した trial がすべて complete で，呼び出しの失敗も first block のずれも無い）ときだけ** decision 1〜4 を出す．1 つでも欠けると 4 つとも `INCONCLUSIVE` で，欠けた cell の名前を書く（観測は `RXZ cell`・`RXZ class`・`RXZ observed` に残る）．D = 3, 6, 12, 24, 60 の cell も，解析 span を整数 sample かつ tone 解析の窓（25 sample）の整数倍に丸めてあるので complete になれる．
+  | 行 | 結果 | 決まること |
+  |---|---|---|
+  | decision 1 | 4 つの束が全部 holds（gain 0・restart の rate cell の zeros の範囲が，束の前の範囲 13–15・9–11・3–4・0 の ±1 の中） | D：half-band 数の表が残る |
+  | | 束が ±1 を超える | B：掃引した rate だけの表，他は `unmeasured` |
+  | `RXZ class` の candidate bound | その束の**数えた全 cell（全 gain，全 start の種類）の zeros の max**．構造の比較（decision 1）とは別に出す．level の効果は bound を下げない．束の計画した cell に数えていないものがあると行に `(INCOMPLETE: …)` と `max over n of m planned` が出る：**その値は bound ではない** | 束の値 = **両 board の candidate bound の max**．束の値は `INCOMPLETE` の無い（計画した cell が全部数えられた）candidate bound からだけ作る |
+  | decision 2 | fresh open が同じ D の restart の範囲の ±1 の外 | fill は measured の場合（restart）だけに掛ける．中なら**毎回の start**（(a) の答え） |
+  | decision 3 | gain が範囲の端（min か max）を 2 より大きく動かす | KNOWN_LIMITATIONS：zero の数は述べた level に限る．Mock の値は bound のまま（候補の bound は全 level を含む） |
+  | decision 4 | precursor の peak が steady の 5 % 以上（`head` の dump で確かめる） | fill は ramp が要る．コードの前に推薦を見直す |
+- 条件を超えて一般化しない：1 GHz，1 MS/s の tone 源，gain 0・+10・+20 dB，rate 0.784〜200 MS/s の 20 点，各 10（15）trial，この 2 board，FPGA 39.3，UHD 4.10。**結果の「束の値」は 2 board の candidate bound の max を取ってから**（片方だけで決めない）。
+
+### (3) `hw_75_t3_probes`（TX あり：零と 1 ms の tone，gain 0，約 3 分 / 台，estimate．期限 15 分）
+
+問い（#75，recovery の T3 flush）：(a) T3 を飛ばすと次の burst は変わるか（options.md §2.4），(b) 閉じた burst の ACK が新しい streamer に届くか（F1），(c) T3 の ACK を 150 ms 遅れて読んでも残っているか。**FAIL は device の事実の報告で，欠陥ではない**（test は FAIL で失敗するが，decision の行を読む）。
+
+- (a)：rate 1・200 MS/s × 3 cell。skip の 2 cell は各 10 trial，control は **11 trial** で，control・open_then_skip・closed_then_skip・control・… の順に**交互に**走らせ，最後も control で終わる（各 skip の trial は前後の 2 つの control に挟まれる）。cell：`open_then_flush`（control：A を EOB なしで開いたまま，`tx_close`，`tx_open`，T3 を送り ACK を待つ），`open_then_skip`（同じで T3 を飛ばす），`closed_then_skip`（A を閉じて reopen，T3 を飛ばす）。そのあと B（1 ms の 100 kHz tone，200 MS/s は 0.1 ms）を 40 ms 先に timed で送り，同じ rate の RX で onset（容量の 90 % 分位の半分を最初に越えた sample）と長さと ACK を測る。ACK は **B の start 以後の tick** のものだけを B の ACK と数え（それより前の ACK は A の古い ACK として `old_acks` に出し，数えない．tick の無い ACK は INCONCLUSIVE）。receive の outcome が Timeout 以外（overflow など）か capture に gap（sample の tick が間隔どおりでない）がある trial は，onset と長さが B のものと言えないので **INCONCLUSIVE**（FAIL にも「T3 が要る」の根拠にもしない．`rx_other` と `contiguous` が trace に出る）。PASS：B が ACK され（ACK は `n47::burst_ack_holds`），onset が前後の 2 つの control の中点から **±400 tick（2 µs）** 以内で，長さが 400 tick 以内。**control の安定の規則**：1 つの rate の control の onset の offset が全部測れていて，max − min が **200 tick**（許容の半分）以下であること，かつ skip の trial を挟む 2 つの control の差も 200 tick 以下であること。満たさない control に対しては skip の trial を INCONCLUSIVE とし，T3 のせいにしない（`P75 a control stability` の行と claim）。`TRACE` は `P75 a trace …`（round，onset の offset，ACK の tick，report の列，位置ごとの ACK の数）。
+- (b)：rate 1・10 MS/s × 2 cell × 10 trial。A は 1 ms の timed burst を EOB で閉じ，`a_ends_before_close`（A の ACK を読まずに `tx_close`，`tx_open`，すぐ T3）と `a_ends_after_reopen`（A が 120 ms 先で，閉じて開き直して T3）。新しい streamer の ACK を T3 の送信から A の終わり + 150 ms まで読み続け，**位置ごとの数と tick**（A の終わりとの差，T3 との差）を出す。PASS：ACK が 1 つで，tick が T3 の送信以後，かつ A の終わりではない（= **外来の ACK は観測されなかった**．ACK が streamer に属することの証明ではない：UHD は ACK を radio の graph の辺に載せる）。FAIL：2 つ以上，または唯一の ACK が A の終わり（= 古い burst の ACK が届いた）。device 呼び出しの失敗は `transport/setup failure`（FAIL の行，decision では INCONCLUSIVE）。INCONCLUSIVE：ACK なし，tick の無い ACK，T3 より前で A の終わりでもない ACK（誰のものか決められない）。
+- (c)：rate 1・10 MS/s × 10 trial。T3 を送って **150 ms 読まず**，その後 100 ms 読む。PASS：ACK が 1 つ残っている（**保持を確認した**）。INCONCLUSIVE：ACK が無い（生成されなかった・見えなかった・期限切れ，のどれかは分からない：**欠けていることだけでは期限切れの証明にならない**），または tick の無い ACK・T3 の送信より前の tick の ACK（この T3 のものと決められない）。FAIL：ACK が 2 つ以上。device 呼び出しの失敗は `transport/setup failure`（FAIL の行，decision では INCONCLUSIVE）。
+- `grep -h 'P75\|VERDICT\|EZSDR-INFRA' <log>`
+- **決めること**：
+  | 行 | 結果 | 決まること |
+  |---|---|---|
+  | `P75 a decision` | 計画した trial が揃っていない，control が清潔でない，control が不安定，device 呼び出しの失敗がある | INCONCLUSIVE（理由を書く）．T3 のせいにしない |
+  | | open_then_skip の cell が FAIL（control は清潔で安定） | T3 は要る：#75 の option 2（確認された T3 だけが recovery を終える）の根拠が bench で確かめられた |
+  | | closed_then_skip だけが FAIL | closed の burst の後でも skip で変わる：開いたままの A のせいではない．行を読む |
+  | | 両 skip が全 PASS | 開いた burst の後でも次の burst は変わらない（この rate では hazard は見えない，INFERRED のまま）．#75 の規則を弱める根拠にはしない（条件：A は 1 000 sample の開いた burst，1・200 MS/s） |
+  | `P75 b decision` | 計画した 40 trial が揃っていない，device 呼び出しの失敗，INCONCLUSIVE の trial | INCONCLUSIVE（推薦なし） |
+  | | 全 PASS | **外来の ACK は観測されなかった**：F1 の ACK の routing の hazard はこの rate・A の終わり方では見えない（ACK が streamer に属することの証明ではない） |
+  | | A の終わりの ACK が FAIL に出た（`ACK at A's end`） | F1 の routing は本物：flush は ACK を **tick** で照合する（数では不可） |
+  | | FAIL はあるが A の終わりの ACK は無い（1 つの T3 に ACK が 2 つ以上） | 原因は観測していない：FAIL の行を読む（F1 の routing を示すものではない） |
+  | `P75 c decision` | 計画した 20 trial が揃っていない，device 呼び出しの失敗，ACK の無い trial | INCONCLUSIVE：欠けた ACK は「失われた」と読まない．待ちを延ばす推薦もしない |
+  | | 全 PASS | 保持を確認した：100 ms の窓を過ぎても ACK は残る（この rate では）．窓を過ぎたことは「report が失われた」ではない（再試行の待ちを延ばせる） |
+
+### (4) `hw_75_open_flush_sweep`（TX あり：4 sample の零，gain 0，約 2 分 / 台，estimate．期限 15 分）
+
+問い（#75 の (3)）：`arm` の open 時の T3（`core.rs` `open_tx_device_locked`）の ACK は，1・2・10 MS/s の 1 channel・2 channel の送信 streamer で 100 ms 以内に来るか。owner の決定：(3) は**この掃引の 1・2 channel の cell を見たあと**に enable し，ACK が 1 度でも欠けたら owner に諮り直す。
+
+- 1 trial：`tx_close`，`tx_open`（所要の wall 時間 = `open_ms`），T3（4 つの零，untimed の SOB+EOB，100 ms の期限で送り，期限内に全 channel 位置の ACK を読む = `flush_ms`）。期限を過ぎても欠けた位置は 400 ms 余分に待って late かどうかを出す。cell は rate 3 × channel 数 2，各 10 trial（1 channel は 3 cell，2 channel は 3 cell）。
+- **2 channel の cell は slot B にも送信する．slot B の board を入れ替えたあとは，owner が slot B の board の TX/RX → ≥30 dB の att → 同じ board の RX2 を確かめ，そのときだけ `EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1 hw hw_75_open_flush_sweep` の形で 1 本の呼び出しに付けて流す**（`export` はしない：shell に残ると次の試験にも渡る．この節の `hw` は `-e` で container に渡す．`EZSDR_OFS_TWO_CHANNEL_WAIVED` も同じ）。付けないと，board が OBX／UBX でも cell は `NOT RUNNABLE: slot B's attenuator is not confirmed …` と出て slot B には送信しない（INCONCLUSIVE，`hw` は 0）。
+- **2 channel の cell は現在の配線では走らない**。2 channel の streamer は slot A と B の両方が **OBX か UBX** のときだけ（1 GHz に同調できる）。#1 は OBX＋空の slot B（UHD は第 2 channel を未知の board として報告する），#2 は UBX＋CBX（CBX は 1.2 GHz 以上で `SAFE_TX_HZ` の外）。この 2 台では cell が `OFS cell … NOT RUNNABLE: <理由>` と出て INCONCLUSIVE（`not runnable`）になり，test は失敗しない（`hw` は 0）。走らせるには盤の入れ替え（電源を落として #2 の slot B の CBX を OBX にする，各 board に att を loopback で付ける）が要る．owner の決定事項（CBX を 1.2 GHz 以上で零だけ送ることを許すなら，`two_channel_runnable` を 1 行変える）。**2 channel の cell が NOT RUNNABLE のあいだ，全体の `OFS decision` は INCONCLUSIVE のまま**．owner が 2 channel の cell を免除したときだけ `EZSDR_OFS_TWO_CHANNEL_WAIVED=1` を付けて流す（その decision の行に免除と書かれる）。
+- 出力：`OFS trace …`（trial ごと：ACK の tick と送信時の device 時刻との差，位置ごとの ACK，open と flush の時間），`OFS cell …`（全位置 ACK の trial 数，tick の差・open・flush の min / median / max），`VERDICT n75 ofs …`，`OFS decision`。`grep -h 'OFS\|VERDICT\|EZSDR-INFRA' <log>`。
+- VERDICT：PASS は T3 が 4 sample 通り全位置が期限内に ACK，FAIL は欠けた・短い send・呼び出しの失敗，INCONCLUSIVE は tick の無い ACK か送信より前の tick の ACK（この flush のものと決められない．decision は INCONCLUSIVE になり enable しない）。
+- **決めること**：`OFS decision` が「enable (3)」→ open 時の flush も確認された ACK だけで終える（#75 の (3) を enable。計画した cell と trial が揃い，2 channel の cell が走ったか owner が免除したときだけ出る．条件：rate・channel 数・board を書く）。「ask the owner again」→ 欠けた cell と trial を添えて owner へ。`INCONCLUSIVE`（2 channel の cell が NOT RUNNABLE で免除なし，または計画した trial の欠け）→ enable しない．走らなかった 2 channel の cell は `unmeasured` のまま（結果に書く）。
+
+### 時間の合計（estimate）
+
+| ブロック | 1 台 | 備考 |
+|---|---|---|
+| (1) `hw_67_stop_before_origin` | 約 5 分 | 受信のみ |
+| (2) `hw_rxzeros_sweep` | 約 8 分 | trial 420，各 約 0.6〜1 s |
+| (3) `hw_75_t3_probes` | 約 3 分 | trial 62（(a) の control は 11）+ 40 + 20 |
+| (4) `hw_75_open_flush_sweep` | 約 2 分 | 1 channel の 3 cell だけ走る |
+| 合計 | 約 18 分 | |
+
+2 台で約 36 分．そのほか：ホスト確認と装置確認（「note 47 段階 5 の後」の (a)）約 10 分，初回の build（volume が冷たい）数分から十数分，att の確認と盤の入れ替え。**全体で約 1 時間（estimate）**。stop：`EZSDR-INFRA`（期限超過 = hang），`Control operation timed out`，`Reference Clock PLL failed to lock`，装置が応答しない → 電源を入れ直して owner へ。
+
+### 閉じ方と記録
+
+log は `~/.cache/ezsdr-bench/<日付>/<試験名>.<BOARD>.log`。bench の記録は `bench/<日付>-<topic>/`（`conditions.json`，`results/`（log の `RXZ trial`・`P75 … trace`・`OFS trace` の行から機械的に），`README.md`，`raw.txt`）と private repo の release（AGENTS §9）。orchestrator に返すもの：commit，各 log の path，`RXZ class`・`RXZ decision` の行（両 board），`RXZ trial` の dump（`head`），`P75 a/b/c cell` と `decision` の行，`OFS cell` と `OFS decision` の行，電源の入れ直しの有無，att の型番（owner の確認）。

@@ -34,6 +34,7 @@ use serde_json::{Value as Json, json};
 mod watchdog;
 pub use watchdog::infra::{creation_limit, infra, rig_delay, timing};
 pub use watchdog::watch;
+pub mod bench1115;
 pub mod d9;
 pub mod e3;
 pub mod iii;

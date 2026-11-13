@@ -3967,3 +3967,69 @@ fn hw_n47s5_untimed() {
     );
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+/// Prints each claim's VERDICT line and fails when one is a FAIL: the sweeps' and probes' shared ending.
+fn print_and_assert_no_fail(name: &str, verdicts: &[(String, Verdict)]) {
+    for (claim, outcome) in verdicts {
+        print_verdict(claim, outcome);
+    }
+    let failed = verdicts.iter().filter(|(_, outcome)| matches!(outcome, Verdict::Fail(_))).count();
+    assert_eq!(failed, 0, "{name}: {failed} claim(s) FAILed; their VERDICT lines say why");
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_rxzeros_sweep() {
+    // Item 11, direction D: leading zeros after a receive restart by DDC half-band count. 35 cells (plan/phase8/bench.md, 2026-11-15), the tone source
+    // transmits at gain 0, +10 and +20 dB (attenuator in the loopback; owner's confirmation first). Each trial prints an `RXZ trial` line with the first
+    // 40 samples; each cell an `RXZ cell` line and a VERDICT; the decision rule (`bench1115::RXZ_RULE`) is printed first and last. The device's whole life
+    // is bounded to 30 min (the sweep takes about 10).
+    bounded(Wall::from_secs(1800), "hw_rxzeros_sweep", || {
+        let device = raw();
+        let runs = common::bench1115::zeros_sweep(&*device, &common::bench1115::zeros_cells());
+        let verdicts = common::bench1115::zeros_report(&runs);
+        drop(device);
+        print_and_assert_no_fail("rxzeros", &verdicts);
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_75_t3_probes() {
+    // #75 (options.md §2.4 and the Fable review): (a) a timed burst B after a reopen that skips T3, against a control that sends it, at 1 and 200 MS/s;
+    // (b) an old burst's ACK on the new streamer; (c) the T3 ACK read 150 ms late. Transmits (zeros and 1 ms tones at gain 0, attenuator in the loopback).
+    // A FAIL is a fact about the hardware, not a defect: the decision lines say what each result decides. Bounded to 15 min (about 5).
+    bounded(Wall::from_secs(900), "hw_75_t3_probes", || {
+        use common::bench1115::*;
+        let device = raw();
+        let skip = skip_probe(&*device, &SKIP_RATES, P75_TRIALS);
+        let mut verdicts = skip_report(&skip);
+        println!("{}", skip_decision(&skip, &SKIP_RATES, P75_TRIALS));
+        let rest = routing_and_late_probe(&*device, &ROUTING_RATES, P75_TRIALS);
+        for line in routing_decision(&rest, &ROUTING_RATES, P75_TRIALS) {
+            println!("{line}");
+        }
+        verdicts.extend(rest);
+        drop(device);
+        print_and_assert_no_fail("n75", &verdicts);
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_75_open_flush_sweep() {
+    // #75 (3): the open-time T3 at `arm` on a raw streamer, 1, 2 and 10 MS/s x one and two channels, ten trials a cell, with the open's and the flush's wall
+    // time. A two-channel cell the board layout cannot run (it needs an OBX or UBX in both slots) is reported as not runnable. Transmits four zero
+    // samples a trial (attenuator in the loopback). The two-channel cells also transmit on slot B, so they run only with `EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1`
+    // (the owner confirmed slot B's attenuator after any board swap). Bounded to 15 min (about 2).
+    bounded(Wall::from_secs(900), "hw_75_open_flush_sweep", || {
+        use common::bench1115::*;
+        let device = raw();
+        let slot_b_confirmed = std::env::var(SLOT_B_CONFIRMED).is_ok_and(|value| value == "1");
+        let verdicts = open_flush_sweep(&*device, &FLUSH_RATES, FLUSH_TRIALS, slot_b_confirmed);
+        let waived = std::env::var(TWO_CHANNEL_WAIVER).is_ok_and(|value| value == "1");
+        println!("{}", open_flush_decision(&verdicts, &FLUSH_RATES, FLUSH_TRIALS, waived));
+        drop(device);
+        print_and_assert_no_fail("open flush", &verdicts);
+    });
+}

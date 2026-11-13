@@ -8946,3 +8946,155 @@ fn run_any_a_perf_trial_still_fails_on_a_bound() {
     assert!(message.contains("met join"), "{message}");
     assert_eq!(markers.len(), 1, "{markers:?}");
 }
+
+// ---- the bench probes of 2026-11-15 (`common::bench1115`), once on the fake: the calls they make, their pure judgements are unit-tested there.
+
+#[test]
+fn bench1115_zeros_sweep_rehearses_on_the_fake() {
+    // On the host clock because the probe waits in real time. The fake returns the transmitted tone only at equal rates and frequencies, so the
+    // 1 MS/s restart cell is judged PASS (it models no fill); a retune moves the receive frequency, so its tone is a ramp there: INCONCLUSIVE.
+    use common::bench1115::{Start, ZCell, cell_stats, cell_verdict, zeros_cells, zeros_report, zeros_sweep};
+    use common::tone::Verdict;
+    let device = fake_real(one_obx());
+    device.set_time_zero(false).unwrap();
+    let cell = |decim, start, gain_db| ZCell { decim, start, gain_db, trials: 2 };
+    let cells =
+        [cell(200, Start::Restart, 0.0), cell(200, Start::Fresh, 0.0), cell(200, Start::Retune, 0.0), cell(100, Start::AfterRate, 0.0), cell(6, Start::Restart, 0.0), cell(200, Start::Restart, 10.0)];
+    let runs = zeros_sweep(&*device, &cells);
+    assert_eq!(runs.len(), cells.len());
+    for (cell, trials) in &runs {
+        assert_eq!(trials.len(), 3, "{}: a warm-up and two trials", cell.name());
+        assert!(trials[0].warmup && trials[1..].iter().all(|trial| !trial.warmup));
+        let stats = cell_stats(trials);
+        assert_eq!((stats.errors, stats.misplaced), (0, 0), "{}: {:?}", cell.name(), trials.iter().map(|t| t.error.clone()).collect::<Vec<_>>());
+    }
+    let verdict = |decim, start: Start, gain: f64| runs.iter().find(|(c, _)| c.decim == decim && c.start == start && c.gain_db == gain).map(|(c, t)| cell_verdict(c, &cell_stats(t))).unwrap();
+    assert!(matches!(verdict(200, Start::Restart, 0.0), Verdict::Pass(_)), "{:?}", verdict(200, Start::Restart, 0.0));
+    assert!(matches!(verdict(200, Start::Fresh, 0.0), Verdict::Pass(_)), "{:?}", verdict(200, Start::Fresh, 0.0));
+    assert!(matches!(verdict(200, Start::Restart, 10.0), Verdict::Pass(_)));
+    let verdicts = zeros_report(&runs);
+    assert!(verdicts.iter().all(|(_, v)| !matches!(v, Verdict::Fail(_))), "{verdicts:?}");
+    assert!(zeros_cells().len() > cells.len());
+    let gain_now = |device: &FakeDevice| device.apply(Dir::Tx, 0, &ezsdr_radio_uhd::Settings::default()).unwrap().gain;
+    assert_eq!(gain_now(&device), 0.0, "the tone source is back at 0 dB after a +10 dB cell");
+}
+
+#[test]
+fn bench1115_zeros_sweep_refuses_a_gain_above_the_bench_maximum_and_restores_0_db() {
+    use common::bench1115::{MAX_TONE_GAIN_DB, Start, ZCell, zeros_sweep};
+    let device = fake_real(one_obx());
+    device.set_time_zero(false).unwrap();
+    let cells = [ZCell { decim: 200, start: Start::Restart, gain_db: 10.0, trials: 1 }, ZCell { decim: 200, start: Start::Restart, gain_db: MAX_TONE_GAIN_DB + 5.0, trials: 1 }];
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| zeros_sweep(&*device, &cells)));
+    let message = panic_text(&*refused.expect_err("a gain above the maximum is refused"));
+    assert!(message.contains("RF safety"), "{message}");
+    assert_eq!(device.apply(Dir::Tx, 0, &ezsdr_radio_uhd::Settings::default()).unwrap().gain, 0.0, "the unwind put the tone source back at 0 dB");
+}
+
+#[test]
+fn bench1115_t3_probes_rehearse_on_the_fake() {
+    // (a) on the fake: every call succeeds, T3 is ACKed and B is ACKed at its end. The capture cannot show B: before a transmit the fake's receive samples
+    // are a ramp above the tone (`device.rs` `sample_at`), so each trial is judged "not in the capture" (the onset is unit-tested on a synthetic capture).
+    // (b) the fake's reports belong to their streamer, (c) its ACK is kept 150 ms.
+    use common::bench1115::*;
+    use common::tone::Verdict;
+    let device = fake_real(one_obx());
+    device.set_time_zero(false).unwrap();
+    let skip = skip_probe(&*device, &[1e6, 200e6], 2);
+    assert_eq!(skip.len(), 6);
+    for (_, kind, trials) in &skip {
+        assert_eq!(trials.len(), 2 + usize::from(*kind == SkipKind::OpenThenFlush), "{kind:?}: the controls bracket the skipping trials");
+        for trial in trials {
+            assert!(trial.error.is_none() && trial.reports.len() == 1, "{kind:?}: {:?}", trial.trace());
+            assert_eq!(trial.t3_ack.is_some(), *kind == SkipKind::OpenThenFlush, "{kind:?}");
+            assert_eq!(trial.reports[0].tick, Some(trial.b_end + 1));
+        }
+    }
+    let verdicts = skip_report(&skip);
+    println!("{}", skip_decision(&skip, &[1e6, 200e6], 2));
+    assert_eq!(verdicts.len(), 2 * (3 + 2 + 2 + 1));
+    let of = |kind: &str| verdicts.iter().filter(|(claim, _)| claim.contains(kind)).map(|(_, v)| v).collect::<Vec<_>>();
+    assert!(of("n75 a open_then_flush").iter().all(|v| matches!(v, Verdict::Fail(text) if text == "burst B is not in the capture")), "{verdicts:?}");
+    assert!(of("skip").iter().all(|v| matches!(v, Verdict::Inconclusive(text) if text.contains("no stable bracketing control"))), "{verdicts:?}");
+    assert!(of("control stability").iter().all(|v| matches!(v, Verdict::Inconclusive(_))), "{verdicts:?}");
+    assert!(skip_decision(&skip, &[1e6, 200e6], 2).contains("INCONCLUSIVE"));
+    let rest = routing_and_late_probe(&*device, &[1e6], 2);
+    assert_eq!(rest.len(), 6);
+    assert!(rest.iter().all(|(_, v)| matches!(v, Verdict::Pass(_))), "{rest:?}");
+}
+
+#[test]
+fn bench1115_skip_probe_records_a_receive_overflow_and_its_gap() {
+    // The recording side of (a): an overrun on the first receive call of the first trial skips 50 ms, so the capture starts after B's window opened: the
+    // trial keeps the outcome and is not clean, and the verdict is INCONCLUSIVE (never a FAIL about B), the later trials stay clean. (A gap inside a capture
+    // needs a fault that fires after a sample block, which the fake times by the clock; `a_trial_records_the_outcomes...` in bench1115.rs covers it.)
+    use common::bench1115::*;
+    use common::tone::Verdict;
+    let device = fake_real(FakeConfig { faults: vec![FakeFault::Overflow(Wall::ZERO)], ..one_obx() });
+    device.set_time_zero(false).unwrap();
+    let skip = skip_probe(&*device, &[1e6], 1);
+    let all: Vec<&SkipTrial> = skip.iter().flat_map(|(_, _, trials)| trials.iter()).collect();
+    let dirty: Vec<&&SkipTrial> = all.iter().filter(|trial| !trial.rx_other.is_empty()).collect();
+    assert_eq!(dirty.len(), 1, "the overrun fires once: {:?}", all.iter().map(|trial| trial.trace()).collect::<Vec<_>>());
+    assert!(dirty[0].rx_other[0].contains("Overflow") && !dirty[0].spans_b && !dirty[0].clean(), "{:?}", dirty[0].trace());
+    assert!(all.iter().filter(|trial| trial.rx_other.is_empty()).all(|trial| trial.clean() && trial.contiguous && trial.spans_b));
+    let verdicts = skip_report(&skip);
+    assert!(verdicts.iter().any(|(_, v)| matches!(v, Verdict::Inconclusive(text) if text.contains("not clean") && text.contains("Overflow"))), "{verdicts:?}");
+    assert!(!skip_decision(&skip, &[1e6], 1).contains("T3 is needed"));
+}
+
+#[test]
+fn bench1115_probes_refuse_another_channel_before_any_device_call() {
+    // `EZSDR_D9_CHANNEL` is read once per process, so each probe runs in a child with it set to 1; the refusal is the first thing it does.
+    for name in [
+        "bench1115_zeros_sweep_rehearses_on_the_fake",
+        "bench1115_t3_probes_rehearse_on_the_fake",
+        "bench1115_routing_and_late_probe_rehearses_on_the_fake",
+        "bench1115_open_flush_sweep_rehearses_on_the_fake_and_a_dropped_ack_fails",
+        "bench1115_skip_probe_records_a_receive_overflow_and_its_gap",
+    ] {
+        let out = std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact", name, "--test-threads=1", "--nocapture"]).env("EZSDR_D9_CHANNEL", "1").output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success() && stderr.contains("EZSDR_D9_CHANNEL=1: the 2026-11-15 probes transmit on channel 0"), "{name}: {stderr}");
+    }
+}
+
+#[test]
+fn bench1115_routing_and_late_probe_rehearses_on_the_fake() {
+    // Alone, so that the channel refusal below reaches this probe's own entry.
+    use common::bench1115::*;
+    use common::tone::Verdict;
+    let device = fake_real(one_obx());
+    device.set_time_zero(false).unwrap();
+    let rest = routing_and_late_probe(&*device, &[1e6], 1);
+    assert_eq!(rest.len(), 3);
+    assert!(rest.iter().all(|(_, v)| matches!(v, Verdict::Pass(_))), "{rest:?}");
+}
+
+#[test]
+fn bench1115_open_flush_sweep_rehearses_on_the_fake_and_a_dropped_ack_fails() {
+    use common::bench1115::*;
+    use common::tone::Verdict;
+    let two = fake_real(FakeConfig { front_ends: vec!["UBX", "UBX"], ..FakeConfig::default() });
+    two.set_time_zero(false).unwrap();
+    let verdicts = open_flush_sweep(&*two, &[1e6, 2e6], 2, true);
+    assert_eq!(verdicts.len(), 8, "{verdicts:?}");
+    assert!(verdicts.iter().all(|(claim, v)| matches!(v, Verdict::Pass(_)) || claim.contains("x 2")), "{verdicts:?}");
+    assert!(verdicts.iter().all(|(_, v)| matches!(v, Verdict::Pass(_))), "{verdicts:?}");
+    assert!(open_flush_decision(&verdicts, &[1e6, 2e6], 2, false).contains("enable (3)"));
+    let unconfirmed = open_flush_sweep(&*two, &[1e6], 1, false);
+    assert_eq!(unconfirmed.iter().map(|(_, v)| matches!(v, Verdict::Pass(_))).collect::<Vec<_>>(), [true, false], "{unconfirmed:?}");
+    assert!(matches!(&unconfirmed[1].1, Verdict::Inconclusive(text) if text.contains("not runnable") && text.contains("EZSDR_SLOT_B_ATTENUATOR_CONFIRMED")), "{unconfirmed:?}");
+    let one = fake_real(one_obx());
+    one.set_time_zero(false).unwrap();
+    let verdicts = open_flush_sweep(&*one, &[1e6], 2, true);
+    assert_eq!(verdicts.iter().map(|(_, v)| matches!(v, Verdict::Pass(_))).collect::<Vec<_>>(), [true, true, false]);
+    assert!(matches!(&verdicts[2].1, Verdict::Inconclusive(text) if text.contains("not runnable") && text.contains("empty slot")), "{verdicts:?}");
+    assert!(open_flush_decision(&verdicts, &[1e6], 2, false).contains("NOT RUNNABLE"), "the gated two-channel cell keeps the decision open");
+    assert!(open_flush_decision(&verdicts, &[1e6], 2, true).contains("enable (3)"), "unless the owner waives it");
+    let dropped = fake_real(FakeConfig { faults: vec![FakeFault::DropBurstAck], ..one_obx() });
+    dropped.set_time_zero(false).unwrap();
+    let verdicts = open_flush_sweep(&*dropped, &[1e6], 1, true);
+    assert!(matches!(&verdicts[0].1, Verdict::Fail(text) if text.contains("missing on positions [0]")), "{verdicts:?}");
+    assert!(open_flush_decision(&verdicts, &[1e6], 1, false).contains("ask the owner again"));
+}
