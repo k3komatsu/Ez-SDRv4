@@ -102,6 +102,57 @@ pub fn drain(device: &dyn Device) -> Drain {
     Drain { read, quiet }
 }
 
+/// Reads `rx_recv` until two timeouts in a row or `limit`, one row per result. A failure ends the drain and is kept as the last row: a closed
+/// streamer fails at once and would otherwise be polled for the whole limit. Any other result (an overflow, a late command...) is kept, resets the
+/// quiet count and the drain goes on: samples may still be queued behind it.
+pub fn drain_without_clock(device: &dyn Device, timeout: Wall, limit: Wall) -> Vec<serde_json::Value> {
+    let begun = Instant::now();
+    let mut idle = 0;
+    let mut rows = Vec::new();
+    while begun.elapsed() < limit && idle < 2 {
+        match device.rx_recv(0, 2_000, timeout, false) {
+            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
+                idle = 0;
+                rows.push(serde_json::json!({ "kind": "samples", "first_tick": first_tick, "samples": samples[0].len() }));
+            }
+            ezsdr_radio_uhd::RxRecv::Timeout => {
+                idle += 1;
+                rows.push(serde_json::json!({ "kind": "timeout" }));
+            }
+            failed @ ezsdr_radio_uhd::RxRecv::Failed(_) => {
+                rows.push(serde_json::json!({ "kind": "other", "result": format!("{failed:?}") }));
+                break;
+            }
+            other => {
+                idle = 0;
+                rows.push(serde_json::json!({ "kind": "other", "result": format!("{other:?}") }));
+            }
+        }
+    }
+    rows
+}
+
+/// Runs `call` and returns its result with the wall time it took.
+pub fn timed<T>(call: impl FnOnce() -> T) -> (T, Wall) {
+    let begun = Instant::now();
+    let value = call();
+    (value, begun.elapsed())
+}
+
+/// Starts receive channel 0 at the next 200-tick boundary 5 000 samples ahead of the device clock (200 ticks a sample) and returns that tick.
+pub fn rx_start_ahead(device: &dyn Device) -> i64 {
+    let from = (device.time_now().unwrap() / 200 + 5_000) * 200;
+    device.rx_start(0, from).unwrap();
+    from
+}
+
+/// Starts receive as `rx_start_ahead` does, lets it run for `run` of wall time and stops it.
+pub fn rx_run_then_stop(device: &dyn Device, run: Wall) {
+    rx_start_ahead(device);
+    std::thread::sleep(run);
+    device.rx_stop(0).unwrap();
+}
+
 /// A tone `offset_hz` from the carrier at `rate` S/s, amplitude 0.4, `n` samples; its magnitude bound is asserted.
 pub fn tone_wave(rate: f64, n: usize, offset_hz: f64) -> Vec<(f32, f32)> {
     let wave: Vec<(f32, f32)> = (0..n)

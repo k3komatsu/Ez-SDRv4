@@ -8992,6 +8992,80 @@ fn bench1115_zeros_sweep_refuses_a_gain_above_the_bench_maximum_and_restores_0_d
 }
 
 #[test]
+fn bench1115_pn_sweep_rehearses_on_the_fake() {
+    // On the host clock because the probe waits in real time. The fake models a loopback delay and no DDC fill: the PN is found at the delay in a
+    // continuous capture and in a restart, with no zeros, so the trial is INSEPARABLE and the cell passes.
+    use common::bench1115::{PnCell, PnOutcome, pn_cell_verdict, pn_report, pn_stats, pn_sweep};
+    use common::tone::Verdict;
+    let device = fake_real(FakeConfig { loopback_delay_samples: 44, ..one_obx() });
+    device.set_time_zero(false).unwrap();
+    // 103 ms of 1 MS/s is not a whole number of the fake's 2 000-sample blocks, so a window starts and ends inside one.
+    let cell = PnCell { decim: 200, trials: 2, settle_ms: 103 };
+    let runs = pn_sweep(&*device, &[cell]);
+    let (_, trials) = &runs[0];
+    assert_eq!(trials.len(), 3, "a warm-up and two trials");
+    assert!(trials[0].warmup && trials[1..].iter().all(|trial| !trial.warmup));
+    for trial in trials {
+        assert!(trial.error.is_none() && trial.incomplete.is_none() && !trial.misplaced, "{trial:?}");
+        let measure = trial.measure.expect("measured");
+        assert_eq!((measure.z, measure.cont.d, measure.restart.d), (0, Some(44), Some(44)), "{measure:?}");
+        assert_eq!(trial.outcome(), Some(PnOutcome::Inseparable));
+    }
+    assert!(matches!(pn_cell_verdict(&cell, &pn_stats(trials)), Verdict::Pass(_)));
+    let sends: Vec<String> = device.calls().into_iter().filter(|call| call.starts_with("tx_send 0")).collect();
+    let starts: Vec<&String> = sends.iter().filter(|call| call.contains("sob=true")).collect();
+    assert!(starts.len() == 3 && starts.iter().all(|call| !call.contains("at=-")), "one timed start a trial: {sends:?}");
+    assert!(sends.iter().filter(|call| !call.contains("sob=true")).all(|call| call.contains("at=-")), "the continuation is untimed: {sends:?}");
+    assert!(sends.iter().filter(|call| call.contains("eob=true")).count() == 3 && sends.len() > 6, "a burst of several sends, closed once a trial: {sends:?}");
+    let verdicts = pn_report(&runs);
+    assert!(verdicts.iter().all(|(_, v)| matches!(v, Verdict::Pass(_))), "{verdicts:?}");
+}
+
+#[test]
+fn bench1115_a_failed_receive_call_ends_a_pn_window_with_its_error() {
+    // The PN trial's `?` turns this error into the trial's `error` (an infrastructure FAIL), not an INCONCLUSIVE capture, and the read does not poll
+    // the failure for its whole limit.
+    use common::bench1115::read_window;
+    use common::raw::{rx_start_ahead, timed};
+    let device = fake_real(one_obx());
+    device.set_time_zero(false).unwrap();
+    let (closed, took) = timed(|| read_window(&*device, 2_000, 200, 0, 100, Wall::from_secs(4)));
+    assert!(matches!(&closed, Err(text) if text.starts_with("rx_recv:") && text.contains("not open")), "{:?}", closed.as_ref().map(|w| w.samples.len()));
+    assert!(took < Wall::from_secs(2), "the read stopped at the failure, not at its limit");
+    device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { rate: Some(1e6), ..ezsdr_radio_uhd::Settings::default() }).unwrap();
+    device.rx_open(0, &[0]).unwrap();
+    let from = rx_start_ahead(&*device);
+    let window = read_window(&*device, 2_000, 200, from, 100, Wall::from_secs(4)).expect("an open stream reads");
+    assert_eq!(window.samples.len(), 100);
+}
+
+#[test]
+fn bench1115_the_cleanup_drain_ends_at_a_failure_and_keeps_draining_past_an_overflow() {
+    // A closed streamer fails at once ("UR-3: the receive streamer is not open" on hardware: about 184 000 rows in a trial's 300 ms): the drain keeps that row
+    // and stops instead of polling it for its whole limit. Timeouts still end it only after two in a row; an overflow after a stop does not end it.
+    use common::raw::{drain_without_clock, rx_run_then_stop, timed};
+    let device = fake_real(one_obx());
+    device.set_time_zero(false).unwrap();
+    let (rows, took) = timed(|| drain_without_clock(&*device, Wall::from_millis(10), Wall::from_secs(5)));
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["kind"], "other");
+    assert!(rows[0]["result"].as_str().unwrap().contains("not open"), "{rows:?}");
+    assert!(took < Wall::from_secs(2), "the drain stopped at the failure, not at its limit");
+    device.rx_open(0, &[0]).unwrap();
+    let rows = drain_without_clock(&*device, Wall::from_millis(10), Wall::from_secs(5));
+    assert_eq!(rows.iter().map(|row| row["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["timeout", "timeout"], "an open, stopped stream drains in two timeouts");
+    let device = fake_real(FakeConfig { faults: vec![FakeFault::Overflow(Wall::ZERO)], ..one_obx() });
+    device.set_time_zero(false).unwrap();
+    device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { rate: Some(1e6), ..ezsdr_radio_uhd::Settings::default() }).unwrap();
+    device.rx_open(0, &[0]).unwrap();
+    rx_run_then_stop(&*device, Wall::from_millis(30));
+    let rows = drain_without_clock(&*device, Wall::from_millis(10), Wall::from_secs(5));
+    let kinds: Vec<&str> = rows.iter().map(|row| row["kind"].as_str().unwrap()).collect();
+    assert!(rows[0]["result"].as_str().unwrap().contains("Overflow"), "{rows:?}");
+    assert!(kinds.len() >= 3 && kinds[1..].iter().all(|kind| *kind != "other") && kinds[kinds.len() - 2..] == ["timeout", "timeout"], "an overflow does not end the drain: {rows:?}");
+}
+
+#[test]
 fn bench1115_t3_probes_rehearse_on_the_fake() {
     // (a) on the fake: every call succeeds, T3 is ACKed and B is ACKed at its end. The capture cannot show B: before a transmit the fake's receive samples
     // are a ramp above the tone (`device.rs` `sample_at`), so each trial is judged "not in the capture" (the onset is unit-tested on a synthetic capture).
@@ -9048,6 +9122,7 @@ fn bench1115_probes_refuse_another_channel_before_any_device_call() {
     // `EZSDR_D9_CHANNEL` is read once per process, so each probe runs in a child with it set to 1; the refusal is the first thing it does.
     for name in [
         "bench1115_zeros_sweep_rehearses_on_the_fake",
+        "bench1115_pn_sweep_rehearses_on_the_fake",
         "bench1115_t3_probes_rehearse_on_the_fake",
         "bench1115_routing_and_late_probe_rehearses_on_the_fake",
         "bench1115_open_flush_sweep_rehearses_on_the_fake_and_a_dropped_ack_fails",

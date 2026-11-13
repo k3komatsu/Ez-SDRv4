@@ -1681,29 +1681,6 @@ fn read_until_tick_without_clock(device: &dyn Device, end_tick: i64, ticks_per_s
     out
 }
 
-fn drain_without_clock(device: &dyn Device, timeout: Wall, limit: Wall) -> Vec<Json> {
-    let begun = Instant::now();
-    let mut idle = 0;
-    let mut rows = Vec::new();
-    while begun.elapsed() < limit && idle < 2 {
-        match device.rx_recv(0, 2_000, timeout, false) {
-            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
-                idle = 0;
-                rows.push(serde_json::json!({ "kind": "samples", "first_tick": first_tick, "samples": samples[0].len() }));
-            }
-            ezsdr_radio_uhd::RxRecv::Timeout => {
-                idle += 1;
-                rows.push(serde_json::json!({ "kind": "timeout" }));
-            }
-            other => {
-                idle = 0;
-                rows.push(serde_json::json!({ "kind": "other", "result": format!("{other:?}") }));
-            }
-        }
-    }
-    rows
-}
-
 fn raw_report_rows(device: &dyn Device, limit: Wall) -> Vec<Json> {
     let begun = Instant::now();
     let mut quiet = 0;
@@ -3990,6 +3967,24 @@ fn hw_rxzeros_sweep() {
         let verdicts = common::bench1115::zeros_report(&runs);
         drop(device);
         print_and_assert_no_fail("rxzeros", &verdicts);
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_rxzeros_pn() {
+    // Are the zeros after a receive restart the filter's group delay (the signal on time, the zeros replacing samples) or a shift (the signal z samples
+    // late)? A PN at gain 0 dB, sent at the receive rate from a timed tick and running through the trial, is located by cross-correlation in a continuous
+    // capture (1 s settled) and in the samples after a restart's zeros; each trial prints an `RXZPN trial` line, each rate an `RXZPN cell` line and a VERDICT,
+    // and the rule (`bench1115::PNZ_RULE`) is printed first and last. 8 rates x 11 trials (the first is a warm-up) of about 2 s each; bounded to 20 min.
+    // Transmits (attenuator in the loopback; owner's confirmation first). A separate test, not a phase of `hw_rxzeros_sweep`: it can run alone, its transmit
+    // rate follows the receive rate (the tone source of the sweep stays at 1 MS/s), and its FAIL means something else (no PN in the capture).
+    bounded(Wall::from_secs(1200), "hw_rxzeros_pn", || {
+        let device = raw();
+        let runs = common::bench1115::pn_sweep(&*device, &common::bench1115::pn_cells());
+        let verdicts = common::bench1115::pn_report(&runs);
+        drop(device);
+        print_and_assert_no_fail("rxzeros_pn", &verdicts);
     });
 }
 

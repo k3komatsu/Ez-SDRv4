@@ -1262,7 +1262,7 @@ orchestrator に返すもの：`<NEW>` の commit，(i-a)・(i-b)・(ii) の VER
 出典：`~/.cache/ezsdr-fixes/2026-11-13-rxzeros/options.md` §4（掃引の計画）と末尾の owner の決定（direction D），`~/.cache/ezsdr-fixes/2026-11-13-n75/options.md`（#75）§2.4 と owner の決定（(3) は下の open-flush の掃引の後に enable），`crates/ezsdr-radio-uhd/tests/common/bench1115.rs`（cell の表・summary・verdict・決定の規則はここ，非 device の試験は default の suite と FakeDevice の rehearsal）．**どれも結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．** 4 つの試験は `hw` で単独に流せる（記録 suite には入れていない）．いずれも device の一生全体を 1 本の期限で囲み（`bounded`），過ぎると `EZSDR-INFRA:` の行を書いて abort する．hang の印なので電源を入れ直して owner へ．
 
 - 構成・準備・`hw` の定義・stop の規則は「note 47 段階 5 の後」の節と同じ（#2 UBX slot A → #1 OBX slot A，30 dB，基準は内部，slot A だけ）．順は **#2 → #1**．
-- **送信するのは (2)(3)(4)**．#67（(1)）は受信だけで att は要らない．**(2)(3)(4) の 1 本ごとの前に owner が各 board の TX/RX → ≥30 dB の att → 同じ board の RX2 を確かめる**（毎回．3 本を 1 回の確認で続けて流さない）．
+- **送信するのは (2)(2b)(3)(4)**．#67（(1)）は受信だけで att は要らない．**(2)(2b)(3)(4) の 1 本ごとの前に owner が各 board の TX/RX → ≥30 dB の att → 同じ board の RX2 を確かめる**（毎回．4 本を 1 回の確認で続けて流さない）．
 - **(2) は送信 gain を 0 dB から +10・+20 dB まで上げる**．att を loopback に入れたまま送信 gain を最大まで許す owner の決定（2026-10-27，T5 の +6 dB と同じ）に基づく．上限は `bench1115::MAX_TONE_GAIN_DB` = 20 dB で，これを超える cell は送信の前に panic する．試験の終わり・失敗・unwind で gain は 0 dB に戻る（FakeDevice の試験が確かめる）．波形の振幅は 0.4 のまま，周波数は 1 GHz（`SAFE_TX_HZ`），rate は 1 MS/s の tone 源（(3) は 1・200 MS/s と 1・10 MS/s，(4) は 1・2・10 MS/s の 4 byte の零）．
 - **(2)(3)(4) は slot A の channel 0 にだけ送信する**（(4) の 2 channel の cell は上の slot B の確認を別に要る）。`EZSDR_D9_CHANNEL` が 0 以外なら device を呼ぶ前に panic する（`hw` はこの変数を container に渡さないので 0）。
 - 起動の形（盤ごとに export し直す．送信する probe は 1 本ずつ，確認のあと 1 コマンドだけ．FAIL が事実の報告である (3) は `run_all` ではなく一つずつ）：
@@ -1272,6 +1272,8 @@ orchestrator に返すもの：`<NEW>` の commit，(i-a)・(i-b)・(ii) の VER
   hw hw_67_stop_before_origin                                  # (1) 受信のみ．att 不要
   # --- owner が att（TX/RX → ≥30 dB → RX2）を確かめた．次の 1 本だけ ---
   hw hw_rxzeros_sweep                                          # (2) 送信
+  # --- owner が att を確かめた．次の 1 本だけ ---
+  hw hw_rxzeros_pn                                             # (2b) 送信（gain 0 dB の PN，受信 restart の zeros の相互相関）
   # --- owner が att を確かめた．次の 1 本だけ ---
   hw hw_75_t3_probes                                           # (3) 送信
   # --- owner が att を確かめた．次の 1 本だけ（2 channel の cell は走らない配線．slot B の att を owner が確かめて EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1 を付けない限り slot B には送信しない．owner が免除しない限り decision は INCONCLUSIVE，(4) 参照）---
@@ -1306,6 +1308,29 @@ orchestrator に返すもの：`<NEW>` の commit，(i-a)・(i-b)・(ii) の VER
   | decision 3 | gain が範囲の端（min か max）を 2 より大きく動かす | KNOWN_LIMITATIONS：zero の数は述べた level に限る．Mock の値は bound のまま（候補の bound は全 level を含む） |
   | decision 4 | precursor の peak が steady の 5 % 以上（`head` の dump で確かめる） | fill は ramp が要る．コードの前に推薦を見直す |
 - 条件を超えて一般化しない：1 GHz，1 MS/s の tone 源，gain 0・+10・+20 dB，rate 0.784〜200 MS/s の 20 点，各 10（15）trial，この 2 board，FPGA 39.3，UHD 4.10。**結果の「束の値」は 2 board の candidate bound の max を取ってから**（片方だけで決めない）。
+
+### (2b) `hw_rxzeros_pn`（TX あり：PN，gain 0 dB のみ，約 3〜4 分 / 台，estimate．期限 20 分）
+
+問い（owner，2026-11-13）：受信 restart の直後の zeros は **フィルタの群遅延**（restart で pipeline が空になり，信号は z sample 遅れて来るので zeros が先に出る）か，**別の fill で信号は時刻どおり**か．電力の閾値ではなく PN の相互相関で分ける．`hw_rxzeros_sweep`（(2)）の 1 phase にせず別の test にした：単独で流せる，送信 rate を受信 rate に合わせる（(2) の tone 源は 1 MS/s のまま），FAIL の意味が違う（PN が capture に無い）．
+
+- **構成**（`bench1115::pn_sweep`，`pn_cells`）：rate 8（D = 200, 100, 40, 20, 8, 4, 2, 1 = 1, 2, 5, 10, 25, 50, 100, 200 MS/s．`hw_iii_raw_rx_restart_fill` の 8 rate）× 10 trial（先頭に warm-up 1，数えない）．slot A の channel 0 だけ，**送信 gain は 0 dB 固定**（振幅は 0.7 × 0.4 の QPSK PN = 大きさ 0.4，tone 源より低い電力．`tone_tx` が gain ≤ 20 dB と SAFE_TX_HZ を送信の前に assert，PN は大きさ ≤ 0.5 を assert）．各 cell で TX を閉じて**受信と同じ rate**で開き直す（PN の 1 sample = capture の 1 sample なので 1 sample のずれが相関に出る）．
+- 1 trial：PN（周期 16 384 sample）を timed の `t0` から 1 本の burst として送り続ける（device の flow control に任せ，untimed の続きを送る．trial の終わりに EOB）．(a) 連続：受信を `ta`（t0 の 20 ms 前）から start し，**1 s 読んで捨ててから**（settled）PN 1 周期分（16 384 sample）を取る → `d_cont`（相関は先頭側）（PN を送った tick からの遅れ，sample 単位．1 MS/s で H1/H2 は 44）．(b) restart：stop，drain，PN の途中の `t1` に timed start，6 000 sample を取る → 先頭の exact zero を数え `z`，**zeros の後の sample** を PN に相互相関して `d_restart`．あわせて **sample 単位の残差**：zeros の後の先頭 256 sample を，(a) の連続 capture（同じ経路・同じ filter を通った実波形）の同じ PN 位相の sample（`res_gd`）と，`z` sample 前の位相の sample（`res_shift`）に，それぞれ最良の複素 gain で当てた相対 rms 誤差（理想 PN ではなく連続 capture と比べるので，filter による波形の変形は残差に入らない）．
+- 出力：trial ごとに `RXZPN trial {json}`（z，d_cont，d_restart，delta，両方の相関の status（Found / Ambiguous / NoSignal = Absent）と peak/median，res_gd，res_shift，outcome，incomplete の理由，先頭 40 sample の `head`），rate ごとに `RXZPN cell …` と `VERDICT rxzpn <rate>`，最後に `RXZPN decision`・`RXZPN summary`．**決定の規則（`bench1115::PNZ_RULE`）は最初の行と summary に印字される**（結果の前に書いた）。
+  ```sh
+  grep -h 'RULE (\|RXZPN cell\|RXZPN decision\|RXZPN summary\|VERDICT\|EZSDR-INFRA' <log>     # 読む行
+  grep -h 'RXZPN trial' <log>                                                                    # 全 trial
+  ```
+- **決めること**（trial ごと，`delta = d_restart - d_cont`，許容 ±1 sample）：
+  | 結果 | 意味 |
+  |---|---|
+  | z < 3 | INSEPARABLE：2 つの読みの差が許容以内で分けられない（200 MS/s は z = 0 のはず）|
+  | \|delta\| ≤ 1 かつ res_gd ≤ 0.35 | **zeros = 群遅延**：zeros は来るはずだった sample を置き換えるだけで，信号は時刻どおり（時間のずれ無し）|
+  | \|delta − z\| ≤ 1 | **shifted**：信号が z sample 遅れて来る |
+  | それ以外 | neither：trial の行を読む |
+  rate の決定は 10 trial が全部 complete で一致したときだけ（割れたら MIXED，欠けたら INCONCLUSIVE）．全体は z ≥ 3 の rate が全部同じ読みのときにそれを言う．
+- VERDICT：**FAIL は基盤だけ**（device 呼び出しの失敗，restart の first block が planned tick と違う，usable な capture で相関の peak が無い）．outcome 自体は事実で FAIL にしない．INCONCLUSIVE は complete が 10 に足りない（capture の gap，overflow，送信側の Underflow など，burst の ACK 無し）．**FAIL が 1 つでもあれば test は失敗する．INCONCLUSIVE だけなら `ok` で終わるので cell の行を必ず読む．**
+- **INFERRED（bench で初めて確かめる）**：(i) 100・200 MS/s で host が送信（最大 1.6 GB/s の sc16）と受信を同時に続けられるか．できなければ該当 rate は Underflow / Overflow の INCONCLUSIVE になり，それは事実の報告（decision は INCONCLUSIVE）．(ii) 高い rate で PN が帯域制限され，隣の lag の相関が peak の 0.8 を超えると `Ambiguous` になり FAIL（相関の peak 無し）になる．そのとき FAIL は基盤の報告で，zeros の事実ではない．(iii) 探索範囲は ±2 048 sample：遅れがそれを超える rate は peak が出ない．
+- 条件を超えて一般化しない：1 GHz，gain 0 dB，送信 rate = 受信 rate，8 rate，各 10 trial，この board，FPGA 39.3，UHD 4.10．
 
 ### (3) `hw_75_t3_probes`（TX あり：零と 1 ms の tone，gain 0，約 3 分 / 台，estimate．期限 15 分）
 

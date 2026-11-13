@@ -14,6 +14,7 @@ use serde_json::{Value as Json, json};
 
 use super::iii::{self, RestartTrial};
 use super::n47;
+use super::observations;
 use super::raw::{Read, TICKS_PER_MS, align_to, d9_channel, drain, iq, pin_slot_a, raw_rx, read, read_with, send_burst, tone_wave};
 use super::tone::{Verdict, first_ms_frequency};
 use super::{MCR, SAFE_TX_HZ, SAFE_TX_MAX_RATE};
@@ -1592,6 +1593,507 @@ pub fn open_flush_decision(verdicts: &[(String, Verdict)], rates: &[f64], trials
     }
 }
 
+// ============================================================================================================================
+// Probe 4: the PN cross-correlation cell for the receive-restart zeros (`hw_rxzeros_pn`). Brief: ~/.cache/ezsdr-fixes/2026-11-13-bench1115b/brief.md §2.
+// ============================================================================================================================
+
+/// The decision rule, printed before the first trial and again with the decisions.
+pub const PNZ_RULE: &str = "RULE (written before the data): z = the leading exact zeros of a restart. d_cont and d_restart = the delay in receive samples of the transmitted PN, found by cross-correlation \
+(1 024-sample reference, +-2 048 samples searched) in a continuous capture of one PN period taken after 1 s of settled stream and in the restart's samples after the zeros; delta = d_restart - d_cont, tolerance +-1 sample. \
+res_gd and res_shift = the relative rms error of the first 256 post-zero samples against the continuous capture (one whole PN period, the same channel and filters) at the same PN phase and at the phase z samples earlier, each with its own best complex gain. \
+z < 3: INSEPARABLE (the two readings differ by no more than the tolerance). |delta| <= 1 and res_gd <= 0.35: GROUP DELAY (the zeros replace samples that would have been there: no time shift). \
+|delta - z| <= 1: SHIFTED (the signal arrives z samples late). Otherwise NEITHER. A rate is decided only when all 10 trials are complete and agree. \
+A FAIL is infrastructure only (a failed call, a first block off its tick, a complete capture without a correlation peak); the outcome itself is a fact, not a defect.";
+
+/// The PN's period in samples: the correlation is unique within half of it.
+pub const PN_PERIOD: usize = 16_384;
+/// The reference's length in samples.
+pub const PN_REF: usize = 1_024;
+/// How far either side of the expected position the correlation looks, in samples (below half the period).
+pub const PN_RADIUS: i64 = 2_048;
+/// The samples of each capture (the restart's, and the continuous capture's correlation): the search range (2 * radius) and a reference, with room for the zeros.
+pub const PN_SPAN: usize = 6_000;
+/// The continuous capture's samples: a whole PN period, so that every PN phase of the restart has its continuous sample.
+pub const PN_CONT_SPAN: usize = PN_PERIOD;
+/// The receive stream's settled time before the continuous capture (brief: at least 1 s).
+pub const PN_SETTLE_MS: u64 = 1_000;
+/// The tolerance on the alignment, in samples.
+pub const PN_TOL: i64 = 1;
+/// The fewest zeros that tell the two readings apart: more than twice the tolerance.
+pub const PN_MIN_ZEROS: usize = 2 * PN_TOL as usize + 1;
+/// The largest relative residual of the post-zero samples against the continuous prediction that still matches it.
+pub const PN_RES_MATCH: f64 = 0.35;
+/// The post-zero samples the residual is taken over.
+pub const PN_RES_SAMPLES: usize = 256;
+pub const PN_TRIALS: usize = 10;
+/// The decimations of the master clock for the 8 rates of `hw_iii_raw_rx_restart_fill` (1, 2, 5, 10, 25, 50, 100, 200 MS/s), slowest first.
+pub const PN_DECIMATIONS: [u64; 8] = [200, 100, 40, 20, 8, 4, 2, 1];
+const PN_CHUNK: usize = 4 * PN_PERIOD;
+const _: () = assert!(PN_SPAN >= 2 * PN_RADIUS as usize + PN_REF + 512 && (PN_RADIUS as usize) * 2 < PN_PERIOD && PN_REF < PN_PERIOD);
+
+/// One rate of the cell: transmit and receive at the same rate (a sample of the PN is a sample of the capture, so a one-sample shift shows).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PnCell {
+    pub decim: u64,
+    pub trials: usize,
+    pub settle_ms: u64,
+}
+
+impl PnCell {
+    pub fn rate(&self) -> f64 {
+        MCR as f64 / self.decim as f64
+    }
+
+    pub fn name(&self) -> String {
+        format!("D{} ({:.3} MS/s)", self.decim, self.rate() / 1e6)
+    }
+}
+
+pub fn pn_cells() -> Vec<PnCell> {
+    PN_DECIMATIONS.iter().map(|&decim| PnCell { decim, trials: PN_TRIALS, settle_ms: PN_SETTLE_MS }).collect()
+}
+
+/// The PN, one period: the bench's QPSK pseudo-noise at 0.7 of its amplitude (magnitude 0.4, inside the 0.5 bound).
+pub fn pn_period() -> Vec<Iq> {
+    super::pn(PN_PERIOD).into_iter().map(|(re, im)| [re * 0.7, im * 0.7]).collect()
+}
+
+fn pn_at(period: &[Iq], index: i64) -> Iq {
+    period[index.rem_euclid(period.len() as i64) as usize]
+}
+
+/// What the correlation of one capture found.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PnCorr {
+    pub status: observations::CorrelationStatus,
+    /// The delay in samples from the PN's transmit tick (`t0 + n * per` for PN sample `n`), when the peak is found.
+    pub d: Option<i64>,
+    /// The peak over the median of the searched correlations.
+    pub ratio: f64,
+}
+
+/// The PN's delay in `samples` (a capture at `per` ticks a sample), the PN's sample `n` having been transmitted at `t0 + n * per`: a reference
+/// segment is correlated over the first `2 * PN_RADIUS` start positions of the capture.
+pub fn locate_pn(samples: &[(i64, Iq)], period: &[Iq], t0: i64, per: i64) -> PnCorr {
+    let Some(&(first, _)) = samples.first() else { return PnCorr { status: observations::CorrelationStatus::NoSignal, d: None, ratio: 0.0 } };
+    let expected = first + PN_RADIUS * per;
+    let from = (expected - t0).div_euclid(per);
+    let reference: Vec<Iq> = (0..PN_REF as i64).map(|k| pn_at(period, from + k)).collect();
+    let found = observations::correlation_offset(samples, &reference, expected, per, PN_RADIUS);
+    PnCorr { status: found.status, d: found.sample_offset, ratio: if found.median > 0.0 { found.peak / found.median } else { 0.0 } }
+}
+
+/// The relative rms error of the first `PN_RES_SAMPLES` of `samples` against the continuous capture `cont` read `shift` samples later, with the best
+/// complex gain fitted: `cont` is one whole PN period of the settled stream through the same channel (its filters included), so a sample at PN phase
+/// `p` is predicted by the continuous sample of phase `p - shift`. None with fewer than 16 samples, a `cont` shorter than a period or no energy.
+pub fn pn_residual(samples: &[(i64, Iq)], cont: &[(i64, Iq)], t0: i64, per: i64, shift: i64) -> Option<f64> {
+    let window = &samples[..samples.len().min(PN_RES_SAMPLES)];
+    if window.len() < 16 || cont.len() < PN_PERIOD {
+        return None;
+    }
+    let phase = |tick: i64| (tick - t0).div_euclid(per);
+    let first = phase(cont[0].0);
+    let predicted: Vec<(f64, f64)> = window.iter().map(|(tick, _)| cont[(phase(*tick) - shift - first).rem_euclid(PN_PERIOD as i64) as usize].1).map(|p| (f64::from(p[0]), f64::from(p[1]))).collect();
+    let (mut re, mut im, mut power, mut energy) = (0.0, 0.0, 0.0, 0.0);
+    for ((_, sample), (pr, pi)) in window.iter().zip(&predicted) {
+        let (rr, ri) = (f64::from(sample[0]), f64::from(sample[1]));
+        re += pr * rr + pi * ri;
+        im += pr * ri - pi * rr;
+        power += pr * pr + pi * pi;
+        energy += rr * rr + ri * ri;
+    }
+    if power <= 0.0 || energy <= 0.0 {
+        return None;
+    }
+    let (gr, gi) = (re / power, im / power);
+    let error: f64 = window.iter().zip(&predicted).map(|((_, s), (pr, pi))| (f64::from(s[0]) - (gr * pr - gi * pi)).powi(2) + (f64::from(s[1]) - (gr * pi + gi * pr)).powi(2)).sum();
+    Some((error / energy).sqrt())
+}
+
+/// What one trial measured.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PnMeasure {
+    pub z: usize,
+    pub cont: PnCorr,
+    pub restart: PnCorr,
+    pub res_gd: Option<f64>,
+    pub res_shift: Option<f64>,
+}
+
+impl PnMeasure {
+    /// `d_restart - d_cont`, when both are found.
+    pub fn delta(&self) -> Option<i64> {
+        Some(self.restart.d? - self.cont.d?)
+    }
+}
+
+/// The measurement of a continuous capture and a restart capture of the same PN (`t0`, `per` as in `locate_pn`): the zeros, both delays and the residuals.
+pub fn pn_analyse(period: &[Iq], t0: i64, per: i64, cont: &[(i64, Iq)], restart: &[(i64, Iq)]) -> PnMeasure {
+    let z = restart.iter().take_while(|(_, sample)| sample[0] == 0.0 && sample[1] == 0.0).count();
+    let after = &restart[z..];
+    let cont_corr = locate_pn(cont, period, t0, per);
+    PnMeasure { z, cont: cont_corr, restart: locate_pn(after, period, t0, per), res_gd: pn_residual(after, cont, t0, per, 0), res_shift: pn_residual(after, cont, t0, per, z as i64) }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PnOutcome {
+    GroupDelay,
+    Shifted,
+    Neither,
+    Inseparable,
+    /// A delay was not found: no PN in the capture.
+    Unmeasured,
+}
+
+impl PnOutcome {
+    pub fn name(self) -> &'static str {
+        match self {
+            PnOutcome::GroupDelay => "group_delay",
+            PnOutcome::Shifted => "shifted",
+            PnOutcome::Neither => "neither",
+            PnOutcome::Inseparable => "inseparable",
+            PnOutcome::Unmeasured => "unmeasured",
+        }
+    }
+}
+
+/// The rule (`PNZ_RULE`) on one trial.
+pub fn pn_outcome(measure: &PnMeasure) -> PnOutcome {
+    let Some(delta) = measure.delta() else { return PnOutcome::Unmeasured };
+    if measure.z < PN_MIN_ZEROS {
+        PnOutcome::Inseparable
+    } else if delta.abs() <= PN_TOL && measure.res_gd.is_some_and(|residual| residual <= PN_RES_MATCH) {
+        PnOutcome::GroupDelay
+    } else if (delta - measure.z as i64).abs() <= PN_TOL {
+        PnOutcome::Shifted
+    } else {
+        PnOutcome::Neither
+    }
+}
+
+/// One trial of a cell.
+#[derive(Debug, Clone)]
+pub struct PnTrial {
+    pub warmup: bool,
+    /// A failed device call.
+    pub error: Option<String>,
+    /// Why the captures do not count (a gap, a receive or transmit outcome, no burst ACK): not a fact about the zeros.
+    pub incomplete: Option<String>,
+    /// The restart's first block is not at its planned tick in a read with no other outcome.
+    pub misplaced: bool,
+    pub measure: Option<PnMeasure>,
+}
+
+impl PnTrial {
+    fn usable(&self) -> bool {
+        self.error.is_none() && self.incomplete.is_none() && !self.misplaced
+    }
+
+    pub fn outcome(&self) -> Option<PnOutcome> {
+        self.measure.filter(|_| self.usable()).map(|measure| pn_outcome(&measure))
+    }
+
+    /// Usable captures with no correlation peak: infrastructure.
+    fn no_peak(&self) -> bool {
+        self.outcome() == Some(PnOutcome::Unmeasured)
+    }
+
+    fn counted(&self) -> bool {
+        self.outcome().is_some_and(|outcome| outcome != PnOutcome::Unmeasured)
+    }
+}
+
+/// What a cell's trials add up to (warm-up excluded).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PnStats {
+    pub trials: usize,
+    pub complete: usize,
+    pub errors: usize,
+    pub misplaced: usize,
+    pub no_peak: usize,
+    pub counts: BTreeMap<&'static str, usize>,
+    pub z: Option<(usize, usize, usize)>,
+    pub d_cont: Option<(i64, i64, i64)>,
+    pub delta: Option<(i64, i64, i64)>,
+}
+
+pub fn pn_stats(trials: &[PnTrial]) -> PnStats {
+    let counted: Vec<&PnTrial> = trials.iter().filter(|trial| !trial.warmup).collect();
+    let complete: Vec<&&PnTrial> = counted.iter().filter(|trial| trial.counted()).collect();
+    let mut counts = BTreeMap::new();
+    for outcome in complete.iter().filter_map(|trial| trial.outcome()) {
+        *counts.entry(outcome.name()).or_default() += 1;
+    }
+    let measures = || complete.iter().filter_map(|trial| trial.measure);
+    PnStats {
+        trials: counted.len(),
+        complete: complete.len(),
+        errors: counted.iter().filter(|trial| trial.error.is_some()).count(),
+        misplaced: counted.iter().filter(|trial| trial.misplaced).count(),
+        no_peak: counted.iter().filter(|trial| trial.no_peak()).count(),
+        counts,
+        z: spread(measures().map(|m| m.z).collect()),
+        d_cont: spread(measures().filter_map(|m| m.cont.d).collect()),
+        delta: spread(measures().filter_map(|m| m.delta()).collect()),
+    }
+}
+
+/// FAIL for infrastructure only: a failed call, a first block off its tick, a usable capture without a correlation peak. INCONCLUSIVE below the cell's
+/// planned complete trials. Otherwise PASS, whatever the outcome (`pn_cell_decision` says what it means).
+pub fn pn_cell_verdict(cell: &PnCell, stats: &PnStats) -> Verdict {
+    if stats.errors > 0 {
+        return Verdict::Fail(format!("{} of {} trials had a failed device call", stats.errors, stats.trials));
+    }
+    if stats.misplaced > 0 {
+        return Verdict::Fail(format!("{} of {} trials have the restart's first block off the planned tick", stats.misplaced, stats.trials));
+    }
+    if stats.no_peak > 0 {
+        return Verdict::Fail(format!("{} of {} trials have a usable capture without a correlation peak (no PN in it)", stats.no_peak, stats.trials));
+    }
+    if stats.complete < cell.trials {
+        return Verdict::Inconclusive(format!("{} of {} trials complete ({} needed)", stats.complete, stats.trials, cell.trials));
+    }
+    Verdict::Pass(format!("{} of {} complete; {:?}; z {:?}; d_cont {:?}; delta {:?}", stats.complete, stats.trials, stats.counts, stats.z, stats.d_cont, stats.delta))
+}
+
+/// What a cell decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PnKind {
+    Undecided,
+    Mixed,
+    Outcome(PnOutcome),
+}
+
+pub fn pn_cell_kind(cell: &PnCell, stats: &PnStats) -> PnKind {
+    if stats.errors > 0 || stats.misplaced > 0 || stats.no_peak > 0 || stats.complete < cell.trials {
+        return PnKind::Undecided;
+    }
+    let outcomes: Vec<PnOutcome> =
+        [PnOutcome::GroupDelay, PnOutcome::Shifted, PnOutcome::Neither, PnOutcome::Inseparable].into_iter().filter(|outcome| stats.counts.contains_key(outcome.name())).collect();
+    match outcomes[..] {
+        [one] => PnKind::Outcome(one),
+        _ => PnKind::Mixed,
+    }
+}
+
+pub fn pn_cell_line(cell: &PnCell, stats: &PnStats) -> String {
+    let what = match pn_cell_kind(cell, stats) {
+        PnKind::Undecided => format!("INCONCLUSIVE ({} of {} complete, {} failed call(s), {} misplaced, {} without a peak)", stats.complete, cell.trials, stats.errors, stats.misplaced, stats.no_peak),
+        PnKind::Mixed => format!("MIXED {:?}", stats.counts),
+        PnKind::Outcome(PnOutcome::GroupDelay) => "zeros = group delay: the signal is on time, the zeros replace samples that would have been there".to_owned(),
+        PnKind::Outcome(PnOutcome::Shifted) => "shifted: the signal arrives z samples late".to_owned(),
+        PnKind::Outcome(PnOutcome::Neither) => "neither (read the trial lines)".to_owned(),
+        PnKind::Outcome(_) => format!("inseparable: z < {PN_MIN_ZEROS}, the two readings cannot be told apart"),
+    };
+    format!("RXZPN cell {}: z min/med/max {:?}; d_cont {:?}; d_restart - d_cont {:?}; {what}", cell.name(), stats.z, stats.d_cont, stats.delta)
+}
+
+/// The decision over every rate: each rate's line, then the whole.
+pub fn pn_decision_lines(runs: &[(PnCell, PnStats)]) -> Vec<String> {
+    let mut lines: Vec<String> = runs.iter().map(|(cell, stats)| pn_cell_line(cell, stats)).collect();
+    let kinds: Vec<PnKind> = runs.iter().map(|(cell, stats)| pn_cell_kind(cell, stats)).collect();
+    let separable: Vec<PnKind> = kinds.iter().copied().filter(|kind| *kind != PnKind::Outcome(PnOutcome::Inseparable)).collect();
+    lines.push(if runs.is_empty() || kinds.contains(&PnKind::Undecided) {
+        "RXZPN decision: INCONCLUSIVE: a rate is not decided (read the cell lines)".to_owned()
+    } else if separable.is_empty() {
+        "RXZPN decision: inseparable at every rate: no rate has z >= 3".to_owned()
+    } else if separable.iter().all(|kind| *kind == PnKind::Outcome(PnOutcome::GroupDelay)) {
+        format!("RXZPN decision: zeros = group delay at the {} rate(s) with z >= 3 (the signal is on time; the zeros replace samples that would have been there)", separable.len())
+    } else if separable.iter().all(|kind| *kind == PnKind::Outcome(PnOutcome::Shifted)) {
+        format!("RXZPN decision: shifted at the {} rate(s) with z >= 3 (the signal arrives z samples late)", separable.len())
+    } else {
+        "RXZPN decision: neither, or different at different rates: read the cell lines".to_owned()
+    });
+    lines
+}
+
+/// What a read over a tick window kept.
+pub struct Window {
+    pub samples: Vec<(i64, Iq)>,
+    first_block: Option<i64>,
+    /// The end tick of the last block when an outcome other than samples and a timeout arrived, with the outcome.
+    other: Vec<(i64, String)>,
+}
+
+/// Reads until the stream reaches `from + span * per` or `limit` passes, keeping the samples of `[from, from + span * per)`: the settled stream before
+/// the window is read and dropped, so that 200 MS/s does not fill the memory. A failed call ends it with that error.
+pub fn read_window(device: &dyn Device, n: usize, per: i64, from: i64, span: usize, limit: Wall) -> Result<Window, String> {
+    let to = from + span as i64 * per;
+    let mut out = Window { samples: Vec::with_capacity(span), first_block: None, other: Vec::new() };
+    let mut end = i64::MIN;
+    let begun = Instant::now();
+    while begun.elapsed() < limit && end < to {
+        match device.rx_recv(0, n, Wall::from_millis(100), false) {
+            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
+                out.first_block.get_or_insert(first_tick);
+                let block = &samples[0];
+                end = first_tick + block.len() as i64 * per;
+                let begin = ((from - first_tick).max(0) + per - 1) / per;
+                let finish = ((to - first_tick).max(0) + per - 1) / per;
+                out.samples.extend(block.iter().enumerate().take(finish as usize).skip(begin as usize).map(|(index, sample)| (first_tick + index as i64 * per, *sample)));
+            }
+            ezsdr_radio_uhd::RxRecv::Timeout => {}
+            ezsdr_radio_uhd::RxRecv::Failed(error) => return Err(error_text("rx_recv", error)),
+            other => out.other.push((end, format!("{other:?}"))),
+        }
+    }
+    Ok(out)
+}
+
+/// The samples per `rx_recv` call: about a millisecond at 1 MS/s and above, 2 000 to 50 000 (100 MS/s needs calls of tens of thousands to keep up).
+fn pn_read_len(rate: f64) -> usize {
+    ((rate / 1e3) as usize).clamp(2_000, 50_000)
+}
+
+fn window_covered(window: &Window, from: i64, span: usize, per: i64) -> bool {
+    window.samples.len() == span && window.samples[0].0 == from && contiguous(&window.samples, per)
+}
+
+/// Sends the PN, repeated, as one burst from `t0` (timed) until `stop`, then closes it with two samples and an end of burst; the samples sent.
+/// The device's flow control paces it. PN sample `n` is sent at `t0 + n * per`, partial sends included.
+fn feed_pn(device: &dyn Device, ring: &[Iq], t0: i64, stop: &std::sync::atomic::AtomicBool) -> Result<usize, String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut sent = 0usize;
+    while !stop.load(Relaxed) {
+        let at = (sent == 0).then_some(t0);
+        let from = sent % PN_PERIOD;
+        let accepted = device.tx_send(0, &[&ring[from..from + PN_CHUNK]], at, sent == 0, false, Wall::from_millis(500)).map_err(|e| error_text("tx_send", e))?;
+        sent += accepted;
+        if accepted == 0 {
+            std::thread::sleep(Wall::from_millis(1));
+        }
+    }
+    let from = sent % PN_PERIOD;
+    device.tx_send(0, &[&ring[from..from + 2]], (sent == 0).then_some(t0), sent == 0, true, Wall::from_millis(500)).map_err(|e| error_text("tx_send (end)", e))?;
+    Ok(sent)
+}
+
+/// One trial: the PN is transmitted from `t0`; a receive started at `ta` is read for `settle_ms`, then `PN_CONT_SPAN` samples are kept (the continuous
+/// capture); the receive is stopped, drained and started timed at `t1` inside the running PN, and its first `PN_SPAN` samples are kept (the restart).
+fn pn_trial(device: &dyn Device, cell: &PnCell, period: &[Iq], ring: &[Iq], warmup: bool, index: usize) -> PnTrial {
+    let per = cell.decim as i64;
+    let n = pn_read_len(cell.rate());
+    if !quiet_rx(device) {
+        return pn_failed(cell, warmup, index, "the previous segment did not go quiet".to_owned());
+    }
+    let outcome = (|| -> Result<_, String> {
+        let now = device.time_now().map_err(|e| error_text("time_now", e))?;
+        let ta = align_to(now + 50 * TICKS_PER_MS, per);
+        let t0 = align_to(ta + 20 * TICKS_PER_MS, per);
+        let wa = align_to(ta + cell.settle_ms as i64 * TICKS_PER_MS, per);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let feeder = scope.spawn(|| feed_pn(device, ring, t0, &stop));
+            let captured = (|| -> Result<_, String> {
+                device.rx_start(0, ta).map_err(|e| error_text("rx_start", e))?;
+                let cont = read_window(device, n, per, wa, PN_CONT_SPAN, Wall::from_millis(cell.settle_ms + 4_000))?;
+                if !quiet_rx(device) {
+                    return Err("the continuous segment did not go quiet".to_owned());
+                }
+                let t1 = align_to(device.time_now().map_err(|e| error_text("time_now", e))? + 50 * TICKS_PER_MS, per);
+                device.rx_start(0, t1).map_err(|e| error_text("rx_start (restart)", e))?;
+                let restart = read_window(device, n, per, t1, PN_SPAN, Wall::from_secs(2))?;
+                device.rx_stop(0).map_err(|e| error_text("rx_stop", e))?;
+                Ok((cont, t1, restart))
+            })();
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let fed = feeder.join().expect("the PN feeder");
+            let (cont, t1, restart) = captured?;
+            Ok((t0, wa, t1, cont, restart, fed?))
+        })
+    })();
+    let (t0, wa, t1, cont, restart, fed) = match outcome {
+        Ok(done) => done,
+        Err(text) => {
+            let _ = quiet_rx(device);
+            return pn_failed(cell, warmup, index, text);
+        }
+    };
+    let (ack, reports) = super::raw::wait_burst_ack(device, Wall::from_secs(3));
+    let bad: Vec<String> = reports.iter().filter(|report| report.code != TxCode::BurstAck).map(|report| format!("{:?}", report.code)).collect();
+    let guard = 5 * TICKS_PER_MS;
+    let misplaced = restart.other.is_empty() && restart.first_block.is_some_and(|tick| tick != t1);
+    let incomplete = if !window_covered(&cont, wa, PN_CONT_SPAN, per) {
+        Some(format!("the continuous window is not covered ({} of {PN_CONT_SPAN} samples)", cont.samples.len()))
+    } else if !window_covered(&restart, t1, PN_SPAN, per) {
+        Some(format!("the restart window is not covered ({} of {PN_SPAN} samples)", restart.samples.len()))
+    } else if let Some((_, text)) = cont.other.iter().find(|(end, _)| *end >= wa - guard).or(restart.other.first()) {
+        Some(format!("a receive outcome in or just before a window: {text}"))
+    } else if !bad.is_empty() {
+        Some(format!("the transmitter reported {bad:?}"))
+    } else if ack.is_none() {
+        Some("no burst ACK for the PN".to_owned())
+    } else {
+        None
+    };
+    let measure = (incomplete.is_none() && !misplaced).then(|| pn_analyse(period, t0, per, &cont.samples, &restart.samples));
+    let done = PnTrial { warmup, error: None, incomplete, misplaced, measure };
+    println!(
+        "RXZPN trial {}",
+        json!({
+            "cell": cell.name(), "decim": cell.decim, "rate": cell.rate(), "index": index, "warmup": warmup,
+            "t0": t0, "window_a": wa, "planned": t1, "first_block": restart.first_block, "fed_samples": fed, "tx_reports": reports.len(), "tx_bad": bad,
+            "z": measure.map(|m| m.z), "d_cont": measure.and_then(|m| m.cont.d), "d_restart": measure.and_then(|m| m.restart.d), "delta": measure.and_then(|m| m.delta()),
+            "status_cont": measure.map(|m| format!("{:?}", m.cont.status)), "status_restart": measure.map(|m| format!("{:?}", m.restart.status)),
+            "ratio_cont": measure.map(|m| m.cont.ratio), "ratio_restart": measure.map(|m| m.restart.ratio), "res_gd": measure.and_then(|m| m.res_gd), "res_shift": measure.and_then(|m| m.res_shift),
+            "outcome": done.outcome().map(PnOutcome::name), "complete": done.counted(), "incomplete": done.incomplete, "misplaced": misplaced,
+            "rx_other": cont.other.iter().chain(&restart.other).map(|(_, text)| text.clone()).collect::<Vec<_>>(), "head": head_text(&restart.samples),
+        })
+    );
+    done
+}
+
+fn pn_failed(cell: &PnCell, warmup: bool, index: usize, error: String) -> PnTrial {
+    println!("RXZPN trial {}", json!({ "cell": cell.name(), "index": index, "warmup": warmup, "complete": false, "error": error }));
+    PnTrial { warmup, error: Some(error), incomplete: None, misplaced: false, measure: None }
+}
+
+/// One cell: the transmitter reopened at the cell's rate (gain 0 dB), the receiver at the same rate, a warm-up trial and `cell.trials`.
+fn run_pn_cell(device: &dyn Device, hz: f64, cell: &PnCell, period: &[Iq], ring: &[Iq]) -> Vec<PnTrial> {
+    let failed_all = |text: String| (0..cell.trials).map(|index| pn_failed(cell, false, index, text.clone())).collect::<Vec<_>>();
+    let rate = cell.rate();
+    let _ = quiet_rx(device);
+    device.tx_close(0);
+    tone_tx(device, rate, hz, 0.0);
+    match device.apply(Dir::Rx, d9_channel(), &rx_settings(Some(rate), Some(hz))) {
+        Ok(applied) if (applied.rate - rate).abs() <= rate * 1e-9 + 1e-6 => {}
+        Ok(applied) => return failed_all(format!("rate mismatch (asked {rate}, read back {})", applied.rate)),
+        Err(error) => return failed_all(error_text("apply rate", error)),
+    }
+    (0..=cell.trials).map(|index| pn_trial(device, cell, period, ring, index == 0, index)).collect()
+}
+
+/// The PN cell on `device`: every cell in order, the transmitter at gain 0 dB, the first trial of each cell a warm-up (printed, not counted).
+pub fn pn_sweep(device: &dyn Device, cells: &[PnCell]) -> Vec<(PnCell, Vec<PnTrial>)> {
+    assert_slot_a_only(d9_channel());
+    println!("{PNZ_RULE}");
+    let hz = pin_slot_a(device);
+    let period = pn_period();
+    let ring: Vec<Iq> = (0..PN_PERIOD + PN_CHUNK).map(|i| period[i % PN_PERIOD]).collect();
+    assert!(ring.iter().all(|sample| f64::from(sample[0]).hypot(f64::from(sample[1])) <= 0.5), "bench RF safety: TX amplitude exceeds 0.5");
+    raw_rx(device, 1e6, hz);
+    let mut runs = Vec::new();
+    for cell in cells {
+        let trials = run_pn_cell(device, hz, cell, &period, &ring);
+        println!("{}", pn_cell_line(cell, &pn_stats(&trials)));
+        runs.push((*cell, trials));
+    }
+    device.rx_stop(0).ok();
+    let _ = drain(device);
+    device.tx_close(0);
+    runs
+}
+
+/// The verdicts of a PN sweep, with the decision lines and the rule printed.
+pub fn pn_report(runs: &[(PnCell, Vec<PnTrial>)]) -> Vec<(String, Verdict)> {
+    let stats: Vec<(PnCell, PnStats)> = runs.iter().map(|(cell, trials)| (*cell, pn_stats(trials))).collect();
+    for line in pn_decision_lines(&stats) {
+        println!("{line}");
+    }
+    println!("RXZPN summary: {PNZ_RULE}");
+    stats.iter().map(|(cell, stats)| (format!("rxzpn {}", cell.name()), pn_cell_verdict(cell, stats))).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2531,5 +3033,248 @@ mod tests {
         assert_eq!(cell_counts(verdicts.iter()), "2 PASS, 1 FAIL, 1 INCONCLUSIVE of 4");
         assert_eq!(spread(vec![3, 1, 2]), Some((1, 2, 3)));
         assert_eq!(spread::<i64>(vec![]), None);
+    }
+
+    // ---- the PN cell (`hw_rxzeros_pn`)
+
+    const T0: i64 = 777 * 5;
+
+    /// The tick PN sample 0 is transmitted at, a whole number of samples.
+    fn t0_of(per: i64) -> i64 {
+        777 * per
+    }
+
+    fn gain_of(sample: Iq, gain: (f32, f32)) -> Iq {
+        [sample[0] * gain.0 - sample[1] * gain.1, sample[0] * gain.1 + sample[1] * gain.0]
+    }
+
+    /// `n` samples from tick `from`, each the PN delayed by `delay` samples times `gain`, the first `zeros` of them exact zeros.
+    fn pn_capture(period: &[Iq], per: i64, from: i64, n: usize, delay: i64, gain: (f32, f32), zeros: usize) -> Vec<(i64, Iq)> {
+        let t0 = t0_of(per);
+        (0..n)
+            .map(|k| {
+                let tick = from + k as i64 * per;
+                (tick, if k < zeros { [0.0, 0.0] } else { gain_of(pn_at(period, (tick - t0) / per - delay), gain) })
+            })
+            .collect()
+    }
+
+    /// Like `pn_capture`, through a channel that is the sum of `taps` (delay in samples, real gain): a filter, not one delay.
+    fn pn_filtered(period: &[Iq], per: i64, from: i64, n: usize, taps: &[(i64, f32)], zeros: usize) -> Vec<(i64, Iq)> {
+        let t0 = t0_of(per);
+        (0..n)
+            .map(|k| {
+                let tick = from + k as i64 * per;
+                let mut sample = [0.0f32, 0.0];
+                for (delay, gain) in taps {
+                    let p = pn_at(period, (tick - t0) / per - delay);
+                    sample = [sample[0] + gain * p[0], sample[1] + gain * p[1]];
+                }
+                (tick, if k < zeros { [0.0, 0.0] } else { sample })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_channel_that_filters_the_pn_does_not_turn_an_unshifted_restart_into_neither() {
+        // y[n] = 0.6 PN[n-44] + 0.4 PN[n-45]: both captures see the same filter, the restart only loses its first 8 samples. The residual is taken
+        // against the continuous capture of that same channel, so the post-zero samples match it and the restart is on time.
+        let period = pn_period();
+        let per = 5;
+        let taps = [(44, 0.6), (45, 0.4)];
+        let (wa, t1) = (T0 + 50_000 * per, T0 + 90_000 * per + 7 * per);
+        let cont = pn_filtered(&period, per, wa, PN_CONT_SPAN, &taps, 0);
+        let measure = pn_analyse(&period, T0, per, &cont, &pn_filtered(&period, per, t1, PN_SPAN, &taps, 8));
+        assert_eq!((measure.z, measure.cont.d, measure.restart.d), (8, Some(44), Some(44)), "{measure:?}");
+        assert!(measure.res_gd.is_some_and(|r| r < 1e-3) && measure.res_shift.is_some_and(|r| r > PN_RES_MATCH), "{measure:?}");
+        assert_eq!(pn_outcome(&measure), PnOutcome::GroupDelay);
+        let late = [(52, 0.6), (53, 0.4)];
+        let measure = pn_analyse(&period, T0, per, &cont, &pn_filtered(&period, per, t1, PN_SPAN, &late, 8));
+        assert!(measure.res_shift.is_some_and(|r| r < 1e-3) && measure.res_gd.is_some_and(|r| r > PN_RES_MATCH), "{measure:?}");
+        assert_eq!(pn_outcome(&measure), PnOutcome::Shifted);
+    }
+
+    fn corr(d: Option<i64>) -> PnCorr {
+        PnCorr { status: if d.is_some() { observations::CorrelationStatus::Found } else { observations::CorrelationStatus::NoSignal }, d, ratio: 30.0 }
+    }
+
+    fn measure(z: usize, d_cont: Option<i64>, d_restart: Option<i64>, res_gd: Option<f64>) -> PnMeasure {
+        PnMeasure { z, cont: corr(d_cont), restart: corr(d_restart), res_gd, res_shift: None }
+    }
+
+    #[test]
+    fn the_pn_locator_reads_the_delay_of_a_capture_whatever_its_gain_and_tick_grid() {
+        let period = pn_period();
+        for per in [1i64, 5, 200] {
+            for delay in [-30, 0, 44, 700, 2_000] {
+                let capture = pn_capture(&period, per, t0_of(per) + 90_000 * per, PN_SPAN, delay, (0.004, -0.003), 0);
+                let found = locate_pn(&capture, &period, t0_of(per), per);
+                assert_eq!((found.status, found.d), (observations::CorrelationStatus::Found, Some(delay)), "per {per} delay {delay}: {found:?}");
+            }
+        }
+        let silence: Vec<(i64, Iq)> = (0..PN_SPAN).map(|k| (T0 + k as i64 * 5, [0.0, 0.0])).collect();
+        assert_eq!(locate_pn(&silence, &period, T0, 5).d, None);
+        assert_eq!(locate_pn(&[], &period, T0, 5).d, None);
+    }
+
+    #[test]
+    fn a_restart_whose_zeros_replace_samples_is_group_delay_and_one_that_arrives_late_is_shifted() {
+        let period = pn_period();
+        let per = 5;
+        let (wa, t1) = (T0 + 50_000 * per, T0 + 90_000 * per);
+        let cont = pn_capture(&period, per, wa, PN_CONT_SPAN, 44, (0.004, -0.003), 0);
+        let analyse = |z: usize, restart_delay: i64| pn_analyse(&period, T0, per, &cont, &pn_capture(&period, per, t1, PN_SPAN, restart_delay, (-0.003, 0.002), z));
+        let on_time = analyse(8, 44);
+        assert_eq!((on_time.z, on_time.cont.d, on_time.restart.d, on_time.delta()), (8, Some(44), Some(44), Some(0)));
+        assert!(on_time.res_gd.is_some_and(|r| r < 1e-3) && on_time.res_shift.is_some_and(|r| r > PN_RES_MATCH), "{on_time:?}");
+        assert_eq!(pn_outcome(&on_time), PnOutcome::GroupDelay);
+        let late = analyse(8, 52);
+        assert_eq!((late.restart.d, late.delta()), (Some(52), Some(8)));
+        assert!(late.res_shift.is_some_and(|r| r < 1e-3) && late.res_gd.is_some_and(|r| r > PN_RES_MATCH), "{late:?}");
+        assert_eq!(pn_outcome(&late), PnOutcome::Shifted);
+        assert_eq!(pn_outcome(&analyse(8, 47)), PnOutcome::Neither, "3 samples late with 8 zeros is neither reading");
+        assert_eq!(pn_outcome(&analyse(2, 44)), PnOutcome::Inseparable);
+        assert_eq!(pn_outcome(&analyse(0, 44)), PnOutcome::Inseparable);
+        let silent = pn_analyse(&period, T0, per, &cont, &pn_capture(&period, per, t1, PN_SPAN, 44, (1.0, 0.0), PN_SPAN));
+        assert_eq!((silent.z, silent.restart.d, pn_outcome(&silent)), (PN_SPAN, None, PnOutcome::Unmeasured));
+        assert_eq!(pn_outcome(&pn_analyse(&period, T0, per, &[], &cont)), PnOutcome::Unmeasured, "no continuous capture");
+    }
+
+    #[test]
+    fn the_residual_fits_a_complex_gain_to_the_continuous_capture_at_the_same_phase_and_a_wrong_shift_does_not_fit() {
+        let period = pn_period();
+        let cont = pn_capture(&period, 5, T0 + 4_000 * 5, PN_CONT_SPAN, 44, (0.004, -0.003), 0);
+        // A restart capture of the same channel at another phase of the period than the continuous one's start.
+        let restart = pn_capture(&period, 5, T0 + 30_000 * 5, 400, 44, (-0.002, 0.001), 0);
+        assert!(pn_residual(&restart, &cont, T0, 5, 0).is_some_and(|r| r < 1e-4));
+        assert!(pn_residual(&restart, &cont, T0, 5, 1).is_some_and(|r| r > PN_RES_MATCH));
+        let late = pn_capture(&period, 5, T0 + 30_000 * 5, 400, 47, (-0.002, 0.001), 0);
+        assert!(pn_residual(&late, &cont, T0, 5, 3).is_some_and(|r| r < 1e-4), "shifted by 3 fits the continuous capture 3 samples earlier");
+        assert!(pn_residual(&late, &cont, T0, 5, 0).is_some_and(|r| r > PN_RES_MATCH));
+        assert_eq!(pn_residual(&restart[..15], &cont, T0, 5, 0), None, "too few samples");
+        assert_eq!(pn_residual(&restart, &cont[..PN_PERIOD - 1], T0, 5, 0), None, "less than one period of the continuous capture");
+        let zeros = pn_capture(&period, 5, T0, 400, 44, (1.0, 0.0), 400);
+        assert_eq!(pn_residual(&zeros, &cont, T0, 5, 0), None, "no energy");
+        let long = pn_capture(&period, 5, T0 + 30_000 * 5, PN_RES_SAMPLES + 100, 44, (1.0, 0.0), 0);
+        let mut broken = long.clone();
+        broken[PN_RES_SAMPLES + 50].1 = [9.0, 9.0];
+        assert_eq!(pn_residual(&long, &cont, T0, 5, 0), pn_residual(&broken, &cont, T0, 5, 0), "only the first {PN_RES_SAMPLES} samples count");
+    }
+
+    #[test]
+    fn the_outcome_rule_has_its_boundaries_at_the_tolerance_the_zero_count_and_the_residual_limit() {
+        let outcome = |z, delta: i64, res: Option<f64>| pn_outcome(&measure(z, Some(44), Some(44 + delta), res));
+        assert_eq!(outcome(PN_MIN_ZEROS - 1, 0, Some(0.0)), PnOutcome::Inseparable);
+        assert_eq!(outcome(PN_MIN_ZEROS, 0, Some(0.0)), PnOutcome::GroupDelay);
+        assert_eq!((PN_MIN_ZEROS, PN_TOL), (3, 1));
+        for delta in [-1, 0, 1] {
+            assert_eq!(outcome(8, delta, Some(0.1)), PnOutcome::GroupDelay, "delta {delta}");
+        }
+        for delta in [-2, 2] {
+            assert_eq!(outcome(8, delta, Some(0.1)), PnOutcome::Neither, "delta {delta}");
+        }
+        assert_eq!(outcome(8, 0, Some(PN_RES_MATCH)), PnOutcome::GroupDelay);
+        assert_eq!(outcome(8, 0, Some(PN_RES_MATCH + 0.01)), PnOutcome::Neither, "the samples do not match the prediction");
+        assert_eq!(outcome(8, 0, None), PnOutcome::Neither, "no residual is no match");
+        for delta in [7, 8, 9] {
+            assert_eq!(outcome(8, delta, Some(0.9)), PnOutcome::Shifted, "delta {delta}");
+        }
+        for delta in [6, 10] {
+            assert_eq!(outcome(8, delta, Some(0.9)), PnOutcome::Neither, "delta {delta}");
+        }
+        assert_eq!(outcome(3, 2, Some(0.9)), PnOutcome::Shifted);
+        assert_eq!(pn_outcome(&measure(8, None, Some(44), Some(0.0))), PnOutcome::Unmeasured);
+        assert_eq!(pn_outcome(&measure(8, Some(44), None, Some(0.0))), PnOutcome::Unmeasured);
+    }
+
+    fn pn_trial_of(z: usize, delta: i64) -> PnTrial {
+        PnTrial { warmup: false, error: None, incomplete: None, misplaced: false, measure: Some(measure(z, Some(44), Some(44 + delta), Some(if delta.abs() <= 1 { 0.05 } else { 0.9 }))) }
+    }
+
+    fn pn_cell() -> PnCell {
+        PnCell { decim: 200, trials: 10, settle_ms: PN_SETTLE_MS }
+    }
+
+    #[test]
+    fn a_cell_fails_only_for_infrastructure_and_is_inconclusive_below_its_planned_trials() {
+        let cell = pn_cell();
+        let ten = || -> Vec<PnTrial> { (0..10).map(|_| pn_trial_of(14, 0)).collect() };
+        let verdict = |trials: &[PnTrial]| pn_cell_verdict(&cell, &pn_stats(trials));
+        assert!(matches!(verdict(&ten()), Verdict::Pass(text) if text.contains("10 of 10") && text.contains("group_delay")));
+        let mut shifted = ten();
+        shifted.iter_mut().for_each(|t| *t = pn_trial_of(14, 14));
+        assert!(matches!(verdict(&shifted), Verdict::Pass(_)), "an outcome is a fact, not a defect");
+        let mut trials = ten();
+        trials[2].error = Some("rx_start: boom".to_owned());
+        assert!(matches!(verdict(&trials), Verdict::Fail(text) if text.contains("failed device call")));
+        let mut trials = ten();
+        trials[2].misplaced = true;
+        assert!(matches!(verdict(&trials), Verdict::Fail(text) if text.contains("planned tick")));
+        let mut trials = ten();
+        trials[2].measure = Some(measure(14, None, None, None));
+        assert!(matches!(verdict(&trials), Verdict::Fail(text) if text.contains("without a correlation peak")));
+        let mut trials = ten();
+        trials[2].measure = Some(measure(14, None, None, None));
+        trials[2].incomplete = Some("a gap".to_owned());
+        assert!(matches!(verdict(&trials), Verdict::Inconclusive(text) if text.contains("9 of 10") && text.contains("10 needed")), "a capture that does not count has no peak to blame");
+        let mut trials = ten();
+        trials[0].warmup = true;
+        trials[0].error = Some("the warm-up fails".to_owned());
+        assert!(matches!(verdict(&trials), Verdict::Inconclusive(text) if text.contains("9 of 9")), "a warm-up is not counted: nine trials remain");
+        assert_eq!(pn_stats(&trials).errors, 0);
+    }
+
+    #[test]
+    fn a_cell_decides_only_when_every_trial_is_complete_and_they_agree() {
+        let cell = pn_cell();
+        let kind = |trials: &[PnTrial]| pn_cell_kind(&cell, &pn_stats(trials));
+        let of = |z, delta| -> Vec<PnTrial> { (0..10).map(|_| pn_trial_of(z, delta)).collect() };
+        assert_eq!(kind(&of(14, 0)), PnKind::Outcome(PnOutcome::GroupDelay));
+        assert_eq!(kind(&of(14, 14)), PnKind::Outcome(PnOutcome::Shifted));
+        assert_eq!(kind(&of(14, 5)), PnKind::Outcome(PnOutcome::Neither));
+        assert_eq!(kind(&of(0, 0)), PnKind::Outcome(PnOutcome::Inseparable));
+        let mut mixed = of(14, 0);
+        mixed[4] = pn_trial_of(14, 14);
+        assert_eq!(kind(&mixed), PnKind::Mixed);
+        assert!(pn_cell_line(&cell, &pn_stats(&mixed)).contains("MIXED"));
+        let mut short = of(14, 0);
+        short[4].incomplete = Some("a gap".to_owned());
+        assert_eq!(kind(&short), PnKind::Undecided);
+        assert!(pn_cell_line(&cell, &pn_stats(&short)).contains("INCONCLUSIVE (9 of 10 complete"));
+        assert!(pn_cell_line(&cell, &pn_stats(&of(14, 0))).contains("zeros = group delay"));
+        assert!(pn_cell_line(&cell, &pn_stats(&of(14, 14))).contains("shifted"));
+        assert!(pn_cell_line(&cell, &pn_stats(&of(0, 0))).contains("inseparable"));
+    }
+
+    #[test]
+    fn the_decision_over_the_rates_ignores_the_inseparable_ones_and_needs_all_of_them_decided() {
+        let runs = |kinds: &[(usize, i64)]| -> Vec<(PnCell, PnStats)> { kinds.iter().map(|&(z, delta)| (pn_cell(), pn_stats(&(0..10).map(|_| pn_trial_of(z, delta)).collect::<Vec<_>>()))).collect() };
+        let last = |kinds: &[(usize, i64)]| pn_decision_lines(&runs(kinds)).pop().unwrap();
+        assert!(last(&[(14, 0), (10, 0), (0, 0)]).contains("zeros = group delay at the 2 rate(s)"), "{}", last(&[(14, 0), (10, 0), (0, 0)]));
+        assert!(last(&[(14, 14), (10, 10), (0, 0)]).contains("shifted at the 2 rate(s)"));
+        assert!(last(&[(14, 0), (10, 10)]).contains("neither, or different"));
+        assert!(last(&[(14, 5), (10, 5)]).contains("neither, or different"));
+        assert!(last(&[(0, 0), (1, 0)]).contains("inseparable at every rate"));
+        assert!(last(&[]).contains("INCONCLUSIVE"));
+        let mut undecided = runs(&[(14, 0), (10, 0)]);
+        undecided[1].1.complete = 9;
+        assert!(pn_decision_lines(&undecided).pop().unwrap().contains("INCONCLUSIVE"));
+        assert_eq!(pn_decision_lines(&runs(&[(14, 0), (10, 0)])).len(), 3, "a line a rate and the decision");
+    }
+
+    #[test]
+    fn the_pn_rule_names_its_thresholds_and_the_cell_covers_the_eight_rates_of_the_restart_fill_probe() {
+        for text in ["+-1", "0.35", "256", "z < 3", "10 trials", "1 s", "INSEPARABLE", "GROUP DELAY", "SHIFTED", "NEITHER"] {
+            assert!(PNZ_RULE.contains(text), "{text}");
+        }
+        let cells = pn_cells();
+        assert_eq!(cells.iter().map(|cell| cell.rate() / 1e6).collect::<Vec<_>>(), vec![1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0]);
+        assert!(cells.iter().all(|cell| cell.trials == 10 && cell.settle_ms == 1_000));
+        assert_eq!(cells.iter().map(|cell| iii::RESTART_RATES.contains(&cell.rate())).collect::<Vec<_>>(), vec![true; 8]);
+        assert_eq!(pn_read_len(1e6), 2_000);
+        assert_eq!(pn_read_len(25e6), 25_000);
+        assert_eq!(pn_read_len(200e6), 50_000);
+        let period = pn_period();
+        assert!(period.len() == PN_PERIOD && period.iter().all(|s| f64::from(s[0]).hypot(f64::from(s[1])) <= 0.5));
     }
 }
