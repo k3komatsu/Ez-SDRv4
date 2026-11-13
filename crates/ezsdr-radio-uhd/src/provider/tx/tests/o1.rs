@@ -728,11 +728,8 @@ fn o1_uhd_t6d_a_booking_after_a_stop_survives_the_failing_close_of_the_burst_it_
     let refused: Vec<_> = r.events.iter().filter(|e| e.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && e.payload["kind"] == "tx_burst").collect();
     assert!(refused.is_empty(), "B is accepted at receipt (the one rejection is the failed close): {:?}", r.events);
     let Rig { rig, .. } = r;
-    let SwitchRig { core, device, time, mut tx, clock, _frozen: frozen, .. } = rig;
-    let ((mut tx, passed), frozen) = crate::provider::test_support::released(frozen, &device.host(), move || {
-        let passed = tx.pass();
-        (tx, passed)
-    });
+    let SwitchRig { core, device, time, mut tx, clock, .. } = rig;
+    let passed = tx.pass();
     assert!(passed, "the owner reopened the uncertain streamer");
     assert!(!tx.chain().needs_reopen());
     for ms in 21..=40 {
@@ -750,7 +747,6 @@ fn o1_uhd_t6d_a_booking_after_a_stop_survives_the_failing_close_of_the_burst_it_
     let ends: Vec<_> = rows.iter().map(|row| (row["target"]["ticks"].as_i64().unwrap(), row["end"].as_str().unwrap().to_owned())).collect();
     assert_eq!(ends, [(10_000, "stop".to_owned()), (30_000, "eob".to_owned())], "{rows:?}");
     assert_eq!(rows[1]["samples"], 200, "B played whole");
-    drop(frozen);
 }
 
 // ------------------------------------------------------------------------------------------------------------ T7

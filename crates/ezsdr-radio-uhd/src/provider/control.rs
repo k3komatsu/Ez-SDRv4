@@ -762,11 +762,11 @@ mod tests {
     }
 
     /// The device's clock held still from its epoch, tick 0, asserted: every instant a test sets
-    /// later is past it (`Frozen`).
-    fn hold(core: &Core, time: &ezsdr_kernel::time::ManualTimeAuthority, device: &crate::device::FakeDevice) -> crate::provider::test_support::Frozen {
-        let frozen = crate::provider::test_support::Frozen::of(device);
+    /// later is past it (`clock_guard`).
+    fn hold(core: &Core, time: &ezsdr_kernel::time::ManualTimeAuthority, device: &crate::device::FakeDevice) -> crate::host::Driver {
+        let guard = crate::provider::test_support::clock_guard(&crate::device::Device::host(device));
         device_at(core, time, device, 0);
-        frozen
+        guard
     }
 
     /// The layout (RM-27): two receive front ends, one transmit.
@@ -1440,7 +1440,7 @@ mod tests {
         let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let links = vec![vec![Arc::new(NoLink) as Arc<dyn DataLink>]];
         let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]), layout_description());
-        let _frozen = hold(&core, &time, &device);
+        let _guard = hold(&core, &time, &device);
         let mut control = control(&core, &[Dir::Rx, Dir::Tx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let clock = tx_clock(&core);
@@ -1526,12 +1526,12 @@ mod tests {
     // ------------------------------------------------------------ note 47 stage 3: staging and the snapshot (RM-21, UR-26)
 
     /// A receive-only rig with its events: uhd-control booking on the manual clock held at 0.
-    fn staging_rig() -> (Arc<Core>, Control, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::event::EventCollector>, crate::provider::test_support::Frozen) {
+    fn staging_rig() -> (Arc<Core>, Control, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::event::EventCollector>, crate::host::Driver) {
         let config = crate::device::FakeConfig::default();
         let (core, device, time, events) = crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)]);
-        let frozen = hold(&core, &time, &device);
+        let guard = hold(&core, &time, &device);
         let control = control(&core, &[Dir::Rx]);
-        (core, control, device, events, frozen)
+        (core, control, device, events, guard)
     }
 
     fn book_value(control: &mut Control, core: &Core, id: u64, name: &str, value: Value, at: Option<i64>) {
@@ -1579,7 +1579,7 @@ mod tests {
 
     #[test]
     fn ur_26_a_value_for_a_streaming_stream_is_refused_without_a_device_call() {
-        let (core, mut control, device, events, _frozen) = staging_rig();
+        let (core, mut control, device, events, _guard) = staging_rig();
         let calls = device.calls().len();
         book_value(&mut control, &core, 7, "radio.rx.c0.frequency_hz", frequency(2.4e9), None);
         let refused = events_of(&events, kinds::COMMAND_REJECTED);
@@ -1606,7 +1606,7 @@ mod tests {
 
     #[test]
     fn ur_26_the_last_value_before_a_start_is_the_one_it_snapshots_and_a_second_stop_leaves_it() {
-        let (core, mut control, _device, events, _frozen) = staging_rig();
+        let (core, mut control, _device, events, _guard) = staging_rig();
         book_stop(&mut control, &core, 1);
         book_value(&mut control, &core, 2, "radio.rx.c0.frequency_hz", frequency(2.0e9), None);
         book_value(&mut control, &core, 3, "radio.rx.c0.frequency_hz", frequency(3.0e9), None);
@@ -1626,7 +1626,7 @@ mod tests {
 
     #[test]
     fn ur_26_a_value_after_a_booked_start_is_refused_even_before_its_instant() {
-        let (core, mut control, _device, events, _frozen) = staging_rig();
+        let (core, mut control, _device, events, _guard) = staging_rig();
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book_stop(&mut control, &core, 1);
         book_start(&mut control, &core, 2, Some(ms(50)));
@@ -1639,7 +1639,7 @@ mod tests {
     fn ur_26_a_stop_after_a_booked_future_start_does_not_make_the_stream_stopped() {
         // The line replayed in the order the commands take effect: the start at +1 s still begins its segment with its snapshot, so the value after
         // the second `Stop` is refused; an arrival-order flag would accept it while every sample came at the old value.
-        let (core, mut control, device, events, _frozen) = staging_rig();
+        let (core, mut control, device, events, _guard) = staging_rig();
         let begun = snapshots_default(&core);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book_stop(&mut control, &core, 1);
@@ -1663,7 +1663,7 @@ mod tests {
     fn ur_26_a_start_of_a_streaming_stream_is_refused_with_the_start_s_id_and_leaves_the_line_unchanged() {
         // RM-21: the Run begins streaming, so a first `start_rx` is refused, naming the Action with kind `command`; after a `Stop` a start booked ahead
         // (+1 s) counts as streaming too, so a second one at +200 ms is refused and the line keeps the first (never revised to an earlier origin).
-        let (core, mut control, _device, events, _frozen) = staging_rig();
+        let (core, mut control, _device, events, _guard) = staging_rig();
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book_start(&mut control, &core, 5, None);
         let refused = events_of(&events, kinds::COMMAND_REJECTED);
@@ -1690,7 +1690,7 @@ mod tests {
     fn ur_25_a_booking_the_line_cannot_represent_is_refused_with_the_start_s_id() {
         // RM-25: a start whose origin overflows the tick range is refused at its booking and the refusal names the Action, so the submit reply (EA-11)
         // can match it; the line keeps no item for it.
-        let (core, mut control, _device, events, _frozen) = staging_rig();
+        let (core, mut control, _device, events, _guard) = staging_rig();
         book_stop(&mut control, &core, 1);
         book_start(&mut control, &core, 2, Some(i64::MAX));
         let refused = events_of(&events, kinds::COMMAND_REJECTED);
@@ -1709,7 +1709,7 @@ mod tests {
 
     #[test]
     fn ur_26_a_staged_value_with_an_instant_or_another_target_is_refused_and_the_instance_and_its_streams_are_accepted() {
-        let (core, mut control, _device, events, _frozen) = staging_rig();
+        let (core, mut control, _device, events, _guard) = staging_rig();
         book_stop(&mut control, &core, 1);
         book_value(&mut control, &core, 2, "radio.rx.c0.frequency_hz", frequency(2.0e9), Some(core.ticks(5_000_000)));
         let other = ResourceId::parse("elsewhere").unwrap();
@@ -1754,7 +1754,7 @@ mod tests {
         let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let links = vec![vec![Arc::new(NoLink) as Arc<dyn DataLink>], vec![Arc::new(NoLink) as Arc<dyn DataLink>]];
         let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::new(), layout_description());
-        let _frozen = hold(&core, &time, &device);
+        let _guard = hold(&core, &time, &device);
         let mut config = core.description.defaults();
         config.insert(key("radio.rx.c0.stream"), Value::from(0));
         config.insert(key("radio.rx.c1.stream"), Value::from(1));

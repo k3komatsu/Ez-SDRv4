@@ -84,7 +84,7 @@ impl Hook<'_> {
 /// made, no lock held (the probe holds the Core weakly, and the control is taken back after the run: a probe holding either keeps the rig
 /// from ever dropping).
 fn run_acting_at_the_boundary_send(rig: SwitchRig, from: i64, until: i64, act: impl Fn(&mut Hook) + Send + Sync + 'static) -> SwitchRig {
-    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _frozen } = rig;
+    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _guard } = rig;
     let control = Arc::new(Mutex::new(Some(control)));
     let fired = Arc::new(AtomicBool::new(false));
     let (hook_core, hook_control, hook_time, hook_device, hook_fired) = (Arc::downgrade(&core), control.clone(), Arc::downgrade(&time), Arc::downgrade(&device), fired.clone());
@@ -111,7 +111,7 @@ fn run_acting_at_the_boundary_send(rig: SwitchRig, from: i64, until: i64, act: i
     }
     assert!(fired.load(Ordering::SeqCst), "the send that carries b was planned");
     let control = control.lock().unwrap().take().expect("the rig's control");
-    SwitchRig { core, device, time, events, control, tx, clock, waves, _frozen }
+    SwitchRig { core, device, time, events, control, tx, clock, waves, _guard }
 }
 
 fn heard_new(rig: &SwitchRig) -> bool {
@@ -578,14 +578,13 @@ fn c2_s15_a_failed_reopen_cancels_even_a_sent_switch() {
             rig.tx.read_list();
             assert_eq!(switch_row(&rig.core, 0)["outcome"], "pending", "the Stop is before b");
         }
-        drop(rig._frozen);
         rig.tx.chain().mark_reopen_needed();
         assert!(rig.tx.pass(), "the reopen runs");
         assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled", "Stop {stopped}");
     }
 }
 
-/// The owner's turn as the run loop makes it, on a rig whose freeze has been handed to the test thread (so `turn` cannot take the rig whole).
+/// The owner's turn as the run loop makes it, on a rig whose clock the test thread holds as a participant (so `turn` cannot take the rig whole).
 fn owner_turn(tx: &mut Tx) {
     for _ in 0..8 {
         drain_tx(tx);
@@ -619,7 +618,6 @@ fn c2_s15b_a_retried_recovery_settles_a_pending_switch_after_the_window_and_a_fa
             run(&mut rig, ms, ms);
             ms += 1;
         }
-        let _driver = handed_over(rig._frozen, &rig.device.host());
         rig.tx.chain().mark_reopen_needed();
         assert!(rig.tx.pass(), "the reopen runs");
         assert_ne!(switch_row(&rig.core, 0)["outcome"], "cancelled", "control: a confirmed recovery cancels nothing");
@@ -641,7 +639,6 @@ fn c2_s15b_a_retried_recovery_settles_a_pending_switch_after_the_window_and_a_fa
             assert!(ms < 12, "{case}: {:?}", rig.device.calls());
         }
         assert_eq!(switch_row(&rig.core, 0)["outcome"], "pending", "{case}: sent, device time short of b");
-        let _driver = handed_over(rig._frozen, &rig.device.host());
         let gates = Arc::new(Mutex::new(Vec::<(i64, String)>::new()));
         {
             let (core, time, device, gates) = (Arc::downgrade(&rig.core), Arc::downgrade(&rig.time), Arc::downgrade(&rig.device), gates.clone());

@@ -1112,7 +1112,7 @@ impl FakeDevice {
 
     /// The device's clock set to root tick `at`, for a test that reads what the device holds at an
     /// instant of its own (UR-33). Forward only — the clock is never taken back — and on a manual
-    /// clock whose participants stop it (`test_support::Frozen`), so the test's assertion holds.
+    /// clock whose participants stop it (the test thread's `test_support::clock_guard`), so the test's assertion holds.
     #[cfg(test)]
     pub fn set_time(&self, at: i64) {
         let mut st = self.lock();

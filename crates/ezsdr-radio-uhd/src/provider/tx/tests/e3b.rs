@@ -1,8 +1,8 @@
 //! E3b-1 (design note 49 stage E3b; plan `2026-11-12-e3b/test-plan.md`): today's device-burst state (`TxChain`) and the record's front pinned
-//! before the state moves into the book. Every test is single-threaded on the frozen rigs of `txp_rig`: device time moves only through
-//! `device_at`, so no verdict depends on when a thread runs (note 51 §3). An operation that waits on the device's host clock (a recovery's
-//! flush, a reopen, the shutdown's acknowledgement window) runs through `released`, which returns the owner and a new freeze before a
-//! snapshot is read; the freeze is never dropped around an unregistered test thread (plan M1).
+//! before the state moves into the book. Every test is single-threaded on the rigs of `txp_rig`, whose clock the test thread holds as a
+//! participant (`clock_guard`): device time moves only through `device_at`, so no verdict depends on when a thread runs (note 51 §3). An
+//! operation that waits on the device's host clock (a recovery's flush, a reopen, the shutdown's acknowledgement window) runs on the test
+//! thread, so the wait passes at clock speed and the clock stands still again before a snapshot is read.
 //!
 //! The chain is read and written only through the `dev_*` and `poke_*` functions below (E3b-3 changed their bodies, which now reach the chain in the
 //! stream's book through `Tx::chain()`, and `chain_line` for a hook that holds no `Tx`).
@@ -13,7 +13,7 @@
 use super::e1::{book, params};
 use super::e3::{Cases, Expected};
 use super::*;
-use crate::provider::test_support::{Frozen, on_next_lock, probe, record_locks, released, taken_locks};
+use crate::provider::test_support::{next_lock_armed, on_next_lock, probe, record_locks, taken_locks};
 use crate::provider::tx::oracle as o;
 use ezsdr_kernel::module_api::StopMode;
 use ezsdr_radio::staging::Overlap;
@@ -126,14 +126,14 @@ fn e3b_c1_the_front_after_each_close() {
     for (name, rate, n, gap) in [("1 MS/s", 1e6f64, 200i64, 15i64), ("200 MS/s", 200e6, 1, 3_000)] {
         let start = (5_000.0 * rate / 1e6).round() as i64;
         for len in [1usize, 3, 4, 32] {
-            let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig_rate(None, 2_000, rate, n);
+            let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig_rate(None, 2_000, rate, n);
             txp_book(&mut tx, &core, clock, txp_burst(&clock, start, len, false, LatePolicy::DropAndFlag));
             txp_drain(&mut tx);
             cases.check(format!("{name}: short head {len}"), front_lines(&core, &device, clock, &tx, start, start + len.max(4) as i64 + gap + 8));
         }
         let start = (6_000.0 * rate / 1e6).round() as i64;
         for stop in [true, false] {
-            let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig_rate(None, 2_000, rate, n);
+            let (core, device, time, _events, clock, mut tx, _guard) = txp_rig_rate(None, 2_000, rate, n);
             txp_book(&mut tx, &core, clock, txp_burst(&clock, start, 33, false, LatePolicy::DropAndFlag));
             txp_drain(&mut tx);
             if stop {
@@ -145,7 +145,7 @@ fn e3b_c1_the_front_after_each_close() {
             cases.check(format!("{name}: long head 33, {}", if stop { "a Stop closes it" } else { "its own end closes it" }), front_lines(&core, &device, clock, &tx, start, start + 33 + 12));
         }
         // A joined one-sample piece closes the chain (A 40, B 1 at A's end).
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig_rate(None, 2_000, rate, n);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig_rate(None, 2_000, rate, n);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, start, 40, false, LatePolicy::DropAndFlag));
         txp_book(&mut tx, &core, clock, txp_burst(&clock, start + 40, 1, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
@@ -153,7 +153,7 @@ fn e3b_c1_the_front_after_each_close() {
         txp_drain(&mut tx);
         cases.check(format!("{name}: A 40 and a joined one-sample piece"), front_lines(&core, &device, clock, &tx, start, start + 41 + 12));
         // An open repeat stopped: no tail, the close starts at the cursor.
-        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig_rate(None, 2_000, rate, n);
+        let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig_rate(None, 2_000, rate, n);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, start, 500, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         halt(&mut tx);
@@ -161,7 +161,7 @@ fn e3b_c1_the_front_after_each_close() {
     }
 
     // The direct close of a long burst's last send (F1): 40 samples whose last 8 reach the device lead, so no tail is held.
-    let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_100_000), 2_000);
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 40, false, LatePolicy::DropAndFlag));
     device_at(&core, &time, &device, txp_ticks(2_932));
     txp_drain(&mut tx);
@@ -171,22 +171,19 @@ fn e3b_c1_the_front_after_each_close() {
 
     // An abandon at the cursor (a first send the device takes half of): a repeat (F2) and a finite burst (F3).
     for (name, repeat, len) in [("a repeat", true, 2_000usize), ("a finite burst", false, 200)] {
-        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig_faults(None, 2_000, 1e6, 200, vec![FakeFault::ShortSend(0)]);
+        let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig_faults(None, 2_000, 1e6, 200, vec![FakeFault::ShortSend(0)]);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, len, repeat, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         cases.check(format!("1 MS/s: {name} abandoned by a short send"), front_lines(&core, &device, clock, &tx, 5_000, 5_000 + len as i64 + 40));
     }
 
-    // A failed padded EOB and its recovery flush (F6), at 200 MS/s: the clock-waiting reopen runs as a participant.
-    let (core, device, time, _events, clock, mut tx, frozen) = txp_high_rate_rig(1, vec![FakeFault::ShortSend(0)], BTreeMap::new());
+    // A failed padded EOB and its recovery flush (F6), at 200 MS/s: the clock-waiting reopen runs on this thread, a participant.
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, vec![FakeFault::ShortSend(0)], BTreeMap::new());
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 500_000, 1, false, LatePolicy::DropAndFlag));
     assert!(tx.step(), "the one-sample payload reaches its padded EOB send");
     cases.check("200 MS/s: a failed padded EOB", front_lines(&core, &device, clock, &tx, 500_000, 500_004 + 3_000 + 8).into_iter().chain([format!("recovering {}", dev_recovering(&tx))]).collect());
     device_at(&core, &time, &device, 500_003);
-    let ((tx, recovered), _frozen) = released(frozen, &device.host(), move || {
-        let recovered = tx.pass();
-        (tx, recovered)
-    });
+    let recovered = tx.pass();
     assert!(recovered);
     cases.check(
         "200 MS/s: the acknowledged recovery flush",
@@ -313,7 +310,7 @@ fn e3b_c2_may_be_handed_is_the_window_and_not_the_owner() {
         let mut lines = Vec::new();
         let mut answers = Vec::new();
         for state in ["not read", "held", "stepped"] {
-            let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+            let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
             let c = txp_burst(&clock, s, 100, false, LatePolicy::DropAndFlag);
             txp_record(&core, clock, &c);
             if state != "not read" {
@@ -332,7 +329,7 @@ fn e3b_c2_may_be_handed_is_the_window_and_not_the_owner() {
 
     // A chain behind an open join is not yet handed (the owner holds the device burst at the join's end until `J(e)`): A (40 at 5 000) ends at
     // 5 040, and C (100 at 9 900) starts below the horizon. A booking before C is accepted while A can still be joined and refused after.
-    let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 40, false, LatePolicy::DropAndFlag));
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 9_900, 100, false, LatePolicy::DropAndFlag));
     let mut lines = vec![format!("device time 0: B at 8 900 {:?}, placed {:?}", accepted(&core, clock, 8_900, 10), placed(&core, clock, 8_900))];
@@ -406,16 +403,6 @@ const C2: Expected = &[
 
 // ------------------------------------------------------------------------------------------------------------ C3
 
-/// `Tx::pass` run as a participant of the device's host clock (the flush and the reopen wait on it), the owner and a new freeze given back.
-fn pass_released(tx: Tx, frozen: Frozen, device: &FakeDevice) -> (Tx, bool, Frozen) {
-    let ((tx, worked), frozen) = released(frozen, &device.host(), move || {
-        let mut tx = tx;
-        let worked = tx.pass();
-        (tx, worked)
-    });
-    (tx, worked, frozen)
-}
-
 /// What the owner has done to the chain, one line: the chain, the open booking's next sample and the device's sends.
 fn state_line(tx: &Tx, device: &FakeDevice) -> String {
     format!("{}; open next {:?}; sends {:?}", dev_line(tx), tx.open_next(), sends(device))
@@ -429,7 +416,7 @@ fn stop_streams(core: &Core) {
 fn e3b_c3_the_chain_through_its_lifecycles() {
     // Today's chain transitions as the owner makes them, one ordered line after each operation: an open device burst under an underflow report
     // (E2a-4: a tick before the burst's first sample is the burst before's), the failed close and every way its recovery ends (UR-22, UR-33),
-    // `Provider::stop` and a loss. The sends that wait on the device's host clock run through `released`.
+    // `Provider::stop` and a loss. The sends that wait on the device's host clock run on the test thread.
     let mut cases = Cases::new(C3);
     let first = 200 * 5_000;
     for (name, code, tick) in [
@@ -438,7 +425,7 @@ fn e3b_c3_the_chain_through_its_lifecycles() {
         ("underflow without a tick", TxCode::Underflow, None),
         ("sequence error before the first sample", TxCode::SeqError, Some(first - 1)),
     ] {
-        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 2_000, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         let mut lines = vec![format!("sent: {}", state_line(&tx, &device))];
@@ -454,12 +441,12 @@ fn e3b_c3_the_chain_through_its_lifecycles() {
         ("failed EOB, flush acknowledged on the second attempt", vec![FakeFault::ShortSend(0), FakeFault::DropAckOfSend(1)], 1),
         ("failed EOB, reopen refused", vec![FakeFault::ShortSend(0), FakeFault::TxOpenFails(1)], 0),
     ] {
-        let (core, device, time, _events, clock, mut tx, frozen) = txp_high_rate_rig(1, faults, BTreeMap::new());
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, faults, BTreeMap::new());
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 500_000, 1, false, LatePolicy::DropAndFlag));
         assert!(tx.step());
         let mut lines = vec![format!("failed: {}", state_line(&tx, &device))];
         device_at(&core, &time, &device, 500_003);
-        let (tx, worked, _frozen) = pass_released(tx, frozen, &device);
+        let worked = tx.pass();
         lines.push(format!("recovered ({worked}): {}; clock {}", state_line(&tx, &device), tx.clock.is_some()));
         assert_eq!(crate::provider::test_support::flush_attempt_rows(&core).len(), unconfirmed, "{name}");
         cases.check(name, lines);
@@ -469,7 +456,7 @@ fn e3b_c3_the_chain_through_its_lifecycles() {
     // and ended by a reopen that fails and by a loss.
     for (name, how) in [("reopen succeeds", 0), ("Stop before the reopen", 1), ("loss before the reopen", 2), ("reopen refused, Stop in flight", 3), ("reopen refused, loss in flight", 4)] {
         let faults = if how >= 3 { vec![FakeFault::TxOpenFails(1)] } else { Vec::new() };
-        let (core, device, time, _events, clock, mut tx, frozen) = txp_rig_faults(None, 2_000, 1e6, 200, faults);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig_faults(None, 2_000, 1e6, 200, faults);
         // A reopen that succeeds is confirmed by an ack at or after the poked front's padded end (UR-22): device time starts past it.
         device_at(&core, &time, &device, if how == 0 { clock.instant(5_000) + 10 } else { 10 });
         poke_open_device(&mut tx, 1_000_000, 5_100, true);
@@ -485,7 +472,7 @@ fn e3b_c3_the_chain_through_its_lifecycles() {
             }
             _ => {}
         }
-        let (tx, worked, _frozen) = pass_released(tx, frozen, &device);
+        let worked = tx.pass();
         lines.push(format!("passed ({worked}): {}", state_line(&tx, &device)));
         if how == 0 {
             crate::provider::test_support::assert_no_flush_rows(&core);
@@ -495,21 +482,17 @@ fn e3b_c3_the_chain_through_its_lifecycles() {
     }
 
     // `Provider::stop` (the shutdown): the open burst is closed and the recovery cleared; and a loss found by a step.
-    let (core, device, time, _events, clock, mut tx, frozen) = txp_rig(None, 2_000);
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     device_at(&core, &time, &device, 10);
     poke_open_device(&mut tx, 1_000_000, 5_100, true);
     poke_front(&mut tx, clock, 5_000);
     poke_reopen_needed(&mut tx);
     let mut lines = vec![format!("running: {}", state_line(&tx, &device))];
-    let ((tx, ()), _frozen) = released(frozen, &device.host(), move || {
-        let mut tx = tx;
-        tx.shutdown();
-        (tx, ())
-    });
+    tx.shutdown();
     lines.push(format!("shut down: {}", state_line(&tx, &device)));
     cases.check("Provider::stop", lines);
 
-    let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     poke_open_device(&mut tx, 1_000_000, 5_100, true);
     poke_front(&mut tx, clock, 5_000);
     let mut lines = vec![format!("running: {}", state_line(&tx, &device))];
@@ -658,50 +641,47 @@ fn e3b_c4_the_streams_lock_sections() {
     // change to this table; E3b-4 folds the chain's effect into the book's own sections and brings the counts back to these.
     let mut cases = Cases::new(C4);
 
-    let (core, _device, _time, _events, _clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, _device, _time, _events, _clock, mut tx, _guard) = txp_rig(None, 2_000);
     cases.check("an idle step", vec![format!("{:?}", step_sections(&core, &mut tx))]);
 
-    let (core, _device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, _device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 100, false, LatePolicy::DropAndFlag));
     cases.check("a first send of a finite burst, held tail", vec![format!("{:?}", step_sections(&core, &mut tx))]);
 
-    let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 100, false, LatePolicy::DropAndFlag));
     let sent = step_sections(&core, &mut tx);
     device_at(&core, &time, &device, core.join_by(clock, 5_100) + 1);
     cases.check("close_unjoined: the owner's close at the join deadline", vec![format!("{sent:?}"), format!("{:?}", step_sections(&core, &mut tx))]);
 
-    let (core, _device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, _device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
     cases.check("a first send and its continuations", vec![format!("{:?}", step_sections(&core, &mut tx))]);
 
-    let (core, _device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, _device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 40, false, LatePolicy::DropAndFlag));
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_040, 10, false, LatePolicy::DropAndFlag));
     cases.check("a joined piece", vec![format!("{:?}", step_sections(&core, &mut tx))]);
 
-    let (core, _device, _time, _events, clock, mut tx, _frozen) = txp_rig_faults(None, 2_000, 1e6, 200, vec![FakeFault::ShortSend(0)]);
+    let (core, _device, _time, _events, clock, mut tx, _guard) = txp_rig_faults(None, 2_000, 1e6, 200, vec![FakeFault::ShortSend(0)]);
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 200, false, LatePolicy::DropAndFlag));
     cases.check("abandon: a short send", vec![format!("{:?}", step_sections(&core, &mut tx))]);
 
     for (name, repeat, len) in [("end_open: a Stop with a tail", false, 33usize), ("end_open: a Stop of a repeat", true, 500)] {
-        let (core, _device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, _device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, len, repeat, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).book.list.halt(ezsdr_radio::CancelReason::Stop);
         cases.check(name, vec![format!("{}", streams_sections(&core, || tx.read_list()))]);
     }
 
-    let (core, device, time, _events, clock, mut tx, frozen) = txp_high_rate_rig(1, vec![FakeFault::ShortSend(0)], BTreeMap::new());
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, vec![FakeFault::ShortSend(0)], BTreeMap::new());
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 500_000, 1, false, LatePolicy::DropAndFlag));
     cases.check("a failed padded EOB", vec![format!("{:?}", step_sections(&core, &mut tx))]);
     device_at(&core, &time, &device, 500_003);
-    let ((tx, counted), _frozen) = released(frozen, &device.host(), move || {
-        let mut tx = tx;
-        let mut worked = false;
-        let sections = streams_sections(&tx.core.clone(), || worked = tx.pass());
-        (tx, (worked, sections))
-    });
+    let mut worked = false;
+    let sections = streams_sections(&tx.core.clone(), || worked = tx.pass());
+    let counted = (worked, sections);
     cases.check("reopen_streamer: a recovery", vec![format!("{counted:?}")]);
     drop(tx);
     cases.finish();
@@ -768,7 +748,7 @@ fn e3b_c3b_the_seams_between_the_sections() {
 
     // (1) A send's booking completion and the chain's effect: the owner's third `rec` lock after the plan is the `tx_bursts` count, after
     // `complete_send` and before the chain is written.
-    let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 100, false, LatePolicy::DropAndFlag));
     let seams: Seams = Default::default();
     let chains: Seams = Default::default();
@@ -791,7 +771,7 @@ fn e3b_c3b_the_seams_between_the_sections() {
     assert_eq!(seen[0].split("; receipt ").nth(1), after.split("; receipt ").nth(1), "the receipt reads the same record at the seam and after the send");
 
     // (1b) The same seam of a continuation: the open booking's next sample has advanced and the chain's has not.
-    let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
     assert!(tx.step());
     let before = format!("first send: {}; chain {}", seam_line(&core, &device, clock, 3_000, 3_050), dev_line(&tx));
@@ -817,7 +797,7 @@ fn e3b_c3b_the_seams_between_the_sections() {
     // (2) `end_open`: the first streams section reads the open booking and the chain before the device is called; the second ends the booking
     // and applies the close's result to the chain, so a hook before it sees the chain as the close found it.
     for (name, repeat, len) in [("(2) end_open of a repeat", true, 500usize), ("(2) end_open with a held tail", false, 33)] {
-        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, len, repeat, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         let before = format!("before: {}; chain {}", seam_line(&core, &device, clock, 5_000, 5_050), dev_line(&tx));
@@ -854,7 +834,7 @@ fn e3b_c3b_the_seams_between_the_sections() {
 
     // (3) The reopen: between the flush's front and the reopen's result section the owner holds the claim; the book shows the open booking
     // unchanged and the record is unmoved.
-    let (core, device, time, _events, clock, mut tx, frozen) = txp_high_rate_rig(1, vec![FakeFault::ShortSend(0)], BTreeMap::new());
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, vec![FakeFault::ShortSend(0)], BTreeMap::new());
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 500_000, 1, false, LatePolicy::DropAndFlag));
     assert!(tx.step());
     device_at(&core, &time, &device, 500_003);
@@ -872,8 +852,9 @@ fn e3b_c3b_the_seams_between_the_sections() {
             hook_chains.lock().unwrap().push(chain_line(&hook_core, 0));
         });
     });
-    let (tx, worked, _frozen) = pass_released(tx, frozen, &device);
+    let worked = tx.pass();
     assert!(worked);
+    assert!(!next_lock_armed(), "the hook fired inside the reopen: a hook left armed would fire at the next lock of this thread");
     let after = seam_line(&core, &device, clock, 500_000, 503_020);
     let seen = seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 1, "the seam before the reopen's result section fired once");
@@ -996,7 +977,7 @@ fn e3b_c6_f1_as_it_is() {
     // F1 (plan §1.4): a long burst whose last send closes the device burst directly leaves the device front at its padded end plus three, and
     // the record's front at its end plus four: a booking at 5 043 is refused at receipt although the device would take it (UR-22's measured
     // minimum is three samples). Pinned as it is: the receipt answers from the record alone (K1 = S; issue #99 covers the same family).
-    let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_100_000), 2_000);
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 40, false, LatePolicy::DropAndFlag));
     device_at(&core, &time, &device, txp_ticks(2_932));
     txp_drain(&mut tx);
@@ -1025,7 +1006,7 @@ pub(super) fn evs(events: &EventCollector) -> Vec<String> {
 fn e3b_b8_a_new_owner_starts_with_a_closed_chain() {
     // The chain lives in the stream's book, which outlives an owner; a new owner starts with nothing open, no front and nothing to recover (K5), as
     // a `Tx` built once per start did before the chain moved.
-    let (core, _device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, _device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     poke_open_device(&mut tx, 1_000, 20, true);
     poke_front(&mut tx, clock, 50);
     poke_reopen_needed(&mut tx);
@@ -1042,7 +1023,7 @@ fn e3b_b8_a_new_owner_starts_with_a_closed_chain() {
 fn e3b_c3c_a_loss_found_while_the_open_burst_ends() {
     // `end_open(true)` on a lost device sends no close: the device burst ends and a pending recovery is cleared, as every loss clears it, and the
     // front stays (E3b-4: the section that ends the booking applies the loss).
-    let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     poke_open_device(&mut tx, 1_000_000, 5_100, true);
     poke_front(&mut tx, clock, 5_000);
     poke_reopen_needed(&mut tx);
@@ -1057,7 +1038,7 @@ fn e3b_c3c_a_loss_found_while_the_open_burst_ends() {
 fn e3b_c4c_the_stat_reads_the_front_the_close_leaves() {
     // The owner's close with no held tail fronts at the cursor + 2 + 3, one past the record's front for a chain that ends there (held-tail close:
     // `end + 4`); the stat compares the device front the close left, not the one before it (E3b-4: `end_open` returns it from its last section).
-    let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
     device_at(&core, &time, &device, core.ticks(12_000_000));
     txp_drain(&mut tx);

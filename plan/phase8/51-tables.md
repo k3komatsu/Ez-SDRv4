@@ -112,6 +112,8 @@ A fault changes the driving thread's waits only if it blocks in real time. `Fake
 | `fake.rs:303, :825, :978, :1013, :1165, :1575, :1637, :1684, :1696, :1749, :1891, :2385-2539, :2770, :3278, :3607, :3811, :4688, :5102, :5114, :6940` | assorted (Run rigs or raw/Authority tests) | not a stage-1 rig; Run rigs → §3, Authority/raw → outside stage 1 | n/a |
 | `src/provider/{tx.rs:1711, :1744, :1773, :4345, :4411, :4536, :4609, :4645, :5576, :6476; core.rs:1749, :1769, :1905; rx.rs:847, :1964, :2064, :2113, :2139, :2354, :2562; rx/differential.rs:850, :867; mod.rs:976}`, `authority.rs:792, :805`, `device.rs:2298, :2497` | assorted | unit tests on `Frozen`/`device_at`/`rig_with`; waits are the 17 `drop(frozen)` sites of §2.5, or none | per §2.5 |
 
+> After stage 4 (1c-ii, 2026-11-14) this table is history: `Frozen`, `released` and `handed_over` are gone; every G and H site holds the test thread's `clock_guard` from construction, the five W1 sites drop that guard on the line where the `Frozen` was dropped, and the N sites lost their `drop`. Rows below keep the `Frozen` spelling they were read in.
+
 ### 2.5 Crate-internal `drop(frozen)` sites (17; recounted in stage 1d on `bfd59d3`, lines as after 1d: `grep -rnE "drop\((_?frozen|rig\._frozen)\)|handed_over\(" crates/ezsdr-radio-uhd/src`; the first count, 15, on `093343d` used `drop(frozen)\|drop(_frozen)` and missed the spelling `drop(rig._frozen)` and `tx/tests/e2b.rs`, new since E2b)
 
 The shape is note 51 §4.4's. What I read after each release (G and W2 sites are guarded by `test_support::handed_over(frozen, &clock)`, i.e. `clock.drive()` before the release, since stage 1d):

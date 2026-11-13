@@ -1,7 +1,7 @@
 //! E3a-1 (design note 49 stage E3a; plan `2026-11-12-e3/test-plan.md` §2): today's send decisions of `Tx::send` pinned before they move into
 //! `ezsdr_radio` as pure functions. Each test ends in ordered snapshots (the device's sends, the chain's front, cursor and held tail, the
-//! open booking, the Kernel burst records and the stats) written out from the base run. The rigs are the frozen single-threaded ones of
-//! `txp_rig`: device time moves only through `device_at`, so no verdict depends on when a thread runs (note 51 §3), and nothing here
+//! open booking, the Kernel burst records and the stats) written out from the base run. The rigs are the single-threaded ones of
+//! `txp_rig`, their clock held by the test thread: device time moves only through `device_at`, so no verdict depends on when a thread runs (note 51 §3), and nothing here
 //! offers a margin or a repetition count as its guarantee.
 //!
 //! Units: one sample is 1 us at 1 MS/s (200 root ticks) unless a case says otherwise.
@@ -65,7 +65,7 @@ fn e3_c1_a_lone_finite_burst_by_length() {
     // snapshot is the drain at device time 0 (everything the window takes), the second the drain past the join deadline.
     let mut cases = Cases::new(C1);
     for len in [1usize, 2, 3, 4, 5, 31, 32, 33, 34, 40, 100] {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, len, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         cases.check(format!("len {len}, drained at device time 0"), snap(&core, &device, &tx));
@@ -108,13 +108,13 @@ fn e3_c2_the_first_send_window_edge() {
     // all it wants. A tiled repeat's first send is 32 and its continuation a whole 525-sample chunk.
     let mut cases = Cases::new(C2);
     for len in [10usize, 31, 33] {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_100_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, len, false, LatePolicy::DropAndFlag));
         let lines = first_times(&core, &time, &device, &mut tx, 900, 960);
         cases.check(format!("finite {len}"), lines);
     }
     for len in [1usize, 5, 31] {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_100_000), 2_000);
         let mut burst = txp_burst(&clock, 3_000, len, true, LatePolicy::DropAndFlag);
         burst.tile_repeat();
         txp_give(&mut tx, burst);
@@ -122,7 +122,7 @@ fn e3_c2_the_first_send_window_edge() {
         cases.check(format!("tiled repeat of {len}"), lines);
     }
     // A continuation of 2 500 on the default 10 ms window: two chunks go at once, the third when the window holds all of it.
-    let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
     cases.check("finite 30 000, a continuation of 2 500", first_times(&core, &time, &device, &mut tx, 0, 600));
     cases.finish();
@@ -137,7 +137,7 @@ fn e3_c3_joined_pieces() {
     // the last end. The one-sample piece at the end is padded to two, not to four.
     let mut cases = Cases::new(C3);
     for (name, pieces) in [("A40 B10 C4 D1", vec![40usize, 10, 4, 1]), ("A100 B1", vec![100, 1]), ("A33 B33", vec![33, 33])] {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         let mut start = 5_000;
         for len in &pieces {
             txp_book(&mut tx, &core, clock, txp_burst(&clock, start, *len, false, LatePolicy::DropAndFlag));
@@ -169,7 +169,7 @@ fn e3_c4_the_cut_at_a_held_start() {
         ("finite 100, held at +100 (its end)", 100, false, 100, 50),
         ("repeat 1000, held at +1000 (its wrap)", 1_000, true, 1_000, 300),
     ] {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 5_000, first, repeat, LatePolicy::DropAndFlag));
         txp_give(&mut tx, txp_burst(&clock, 5_000 + held_at, held_len, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
@@ -191,7 +191,7 @@ fn e3_c5_the_hold_deadline() {
     // drain (the join deadline of the burst's end is long past) sends it with the end of burst.
     let mut cases = Cases::new(C5);
     for (name, delta) in [("lead + 1 tick before the end", 1i64), ("exactly the lead before the end", 0), ("lead - 1 tick before the end", -1)] {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_100_000), 2_000);
         let lead = core.device_lead();
         assert_eq!(lead, 400_000, "the device lead is 2 ms of root ticks");
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 100, false, LatePolicy::DropAndFlag));
@@ -223,7 +223,7 @@ fn e3_c6_the_send_cap_by_window_and_rate() {
         (10_000_000, 25e3, 8_000, 3_000),
         (10_000_000, 12.5e3, 16_000, 3_000),
     ] {
-        let (_core, device, _time, _events, clock, mut tx, _frozen) = txp_rig_rate(Some(window_ns), 2_000, rate, n);
+        let (_core, device, _time, _events, clock, mut tx, _guard) = txp_rig_rate(Some(window_ns), 2_000, rate, n);
         let start = (start_us as f64 * 1e-6 * rate).ceil() as i64;
         txp_give(&mut tx, txp_burst(&clock, start, 100_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
@@ -231,7 +231,7 @@ fn e3_c6_the_send_cap_by_window_and_rate() {
         cases.check(format!("window {window_ns} ns, {rate} S/s"), vec![format!("first sends {:?} of {}", &counts[..counts.len().min(3)], counts.len()), format!("open next {:?}", tx.open_next())]);
     }
     for window_ns in [1_000_000i64, 100_000] {
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(window_ns), 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(Some(window_ns), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 100_000, true, LatePolicy::DropAndFlag));
         for t in 0..=3_200 {
             device_at(&core, &time, &device, txp_ticks(t));

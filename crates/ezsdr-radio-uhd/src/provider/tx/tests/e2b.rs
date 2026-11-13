@@ -1,15 +1,15 @@
 //! E2b-1 (design note 49 stage E2b; plan `2026-11-12-e2b/test-plan.md` §3.1, §3.3): today's configure and reopen turns pinned before
 //! `Configure` and `Reopen` become operations of the book. Each characterization ends with one ordered snapshot of what the turn left
 //! (device calls, the records and the events, §3.1 "Snapshots") taken from the base run. The configure tests run on the test thread with
-//! the device's clock frozen and device time moved only by `device_at`; a test that reopens the streamer runs the owner's work as a clock
-//! participant (`released`), so that the flush's wait runs at clock speed (note 51 §3). Probes and `on_next_lock` hooks run on the owner's
-//! thread with no lock held.
+//! the device's clock held by the test thread (`clock_guard`) and device time moved only by `device_at`; a test that reopens the streamer
+//! waits on the clock as that participant, so the flush's wait runs at clock speed (note 51 §3). Probes and `on_next_lock` hooks run on the
+//! test thread with no lock held.
 //!
 //! Units: one sample is 1 us (the rigs' 1 MS/s), 200 root ticks; `MS` is a millisecond in root ticks.
 
 use super::e1::{MS, at, notes, stop_receipt};
 use super::*;
-use crate::provider::test_support::{handed_over, next_lock_armed, on_next_lock, probe, released};
+use crate::provider::test_support::{clock_guard, next_lock_armed, on_next_lock, probe};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -83,9 +83,8 @@ fn check(what: &str, actual: Value, expected: &str) {
     assert!(actual == expected, "{what}: the snapshot differs from today's:\n{}", render(&actual));
 }
 
-/// `Tx::shutdown` with the device's clock released for its 100 ms acknowledgement window, as `e1::shutdown` makes it.
-fn shutdown_owner(core: &Core, tx: &mut Tx, frozen: Frozen) {
-    let _driver = handed_over(frozen, &core.device.host());
+/// `Tx::shutdown`, its 100 ms acknowledgement window passing on the clock the caller's guard holds, which drops with it, as `e1::shutdown` makes it.
+fn shutdown_owner(tx: &mut Tx, _guard: crate::host::Driver) {
     tx.shutdown();
 }
 
@@ -116,7 +115,7 @@ fn control_rig_with(waves: Vec<Vec<Iq>>, faults: Vec<FakeFault>, wrap: impl FnOn
         refs.push(wave);
     }
     let (core, time, events) = crate::provider::test_support::rig_on_inputs(wrap(device.clone()), Vec::new(), 2_000, inputs);
-    let frozen = Frozen::of(&device);
+    let guard = clock_guard(&device.host());
     device_at(&core, &time, &device, 0);
     device.tx_open(0, &[0]).unwrap();
     device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), freq: Some(F1), ..Settings::default() }).unwrap();
@@ -129,7 +128,7 @@ fn control_rig_with(waves: Vec<Vec<Iq>>, faults: Vec<FakeFault>, wrap: impl FnOn
     let control = Control::new(core.clone(), Arc::new(NoActions), config, false, start);
     let (_to_tx, cmds) = std::sync::mpsc::channel();
     let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-    SwitchRig { core, device, time, events, control, tx, clock, waves: refs, _frozen: frozen }
+    SwitchRig { core, device, time, events, control, tx, clock, waves: refs, _guard: guard }
 }
 
 /// A Stop as uhd-control books it (`control.rs:317,322`): the record's stop at `now`, then the halt on the list; the bound's sample, none
@@ -182,7 +181,7 @@ fn on_next_lock_runs_once_before_the_next_lock_of_its_mutex() {
 
 #[test]
 fn e2b_c0_a_configure_records_its_applied_rows_before_the_burst_s_first_send() {
-    let (core, device, time, mut tx, _frozen, events, _to_tx) = owner(1);
+    let (core, device, time, mut tx, _guard, events, _to_tx) = owner(1);
     let clock = tx.clock.expect("a clock");
     let at_mark = Arc::new(Mutex::new(None));
     let (seen, weak, probe_device) = (at_mark.clone(), Arc::downgrade(&core), device.clone());
@@ -204,7 +203,7 @@ fn e2b_c0_a_configure_records_its_applied_rows_before_the_burst_s_first_send() {
 
 #[test]
 fn e2b_c1_a_configure_waits_for_the_stream_claim() {
-    let (core, device, time, mut tx, _frozen, events, _to_tx) = owner(1);
+    let (core, device, time, mut tx, _guard, events, _to_tx) = owner(1);
     let clock = tx.clock.expect("a clock");
     give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F2, 1));
     device_at(&core, &time, &device, 15 * MS);
@@ -233,7 +232,7 @@ fn e2b_c2_a_full_stop_during_the_configure_settles_x_and_keeps_y() {
         book_frequency(&mut rig.control, &rig.core, 1, F2);
         book_burst_on(&mut rig.control, &rig.core, 2, 0, rig.clock, 20_000, &rig.waves[0], false, LatePolicy::DropAndFlag);
         at(&rig, 15 * MS);
-        let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _frozen } = rig;
+        let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _guard } = rig;
         let control: Shared = Arc::new(Mutex::new(Some(control)));
         let bound = Arc::new(Mutex::new(None));
         let (stop_bound, hook_control, weak, wave, fired) = (bound.clone(), control.clone(), Arc::downgrade(&core), waves[1].clone(), AtomicBool::new(false));
@@ -293,7 +292,7 @@ fn e2b_c4_a_loss_around_the_configure() {
     // (i) the loss lands at the mark, (ii) between two channels (the configure fails as lost), (iii) after the turn returned.
     for case in ["C4(i)", "C4(ii)", "C4(iii)"] {
         let channels = if case == "C4(ii)" { 2 } else { 1 };
-        let (core, device, time, mut tx, frozen, events, _to_tx) = owner(channels);
+        let (core, device, time, mut tx, guard, events, _to_tx) = owner(channels);
         let clock = tx.clock.expect("a clock");
         let weak = Arc::downgrade(&core);
         if case == "C4(i)" {
@@ -329,7 +328,7 @@ fn e2b_c4_a_loss_around_the_configure() {
         assert!(refusals_in(&read).is_empty(), "{case}: {read:?}");
         assert_eq!(read.iter().filter(|event| event["kind"] == EventKind::DEVICE_LOST).count(), 1, "{case}: {read:?}");
         assert_eq!(held_keys(&tx), [20_000], "{case}: the booking stays held");
-        shutdown_owner(&core, &mut tx, frozen);
+        shutdown_owner(&mut tx, guard);
         assert_eq!(notes(&core), ["UR-26: cancelled by Provider::stop"], "{case}");
         let expected = match case {
             "C4(i)" => C4_I,
@@ -357,7 +356,7 @@ fn lost_run(how: Loss, stop: bool) -> (ezsdr_radio::staging::Bookings, Vec<i64>,
     book_frequency(&mut rig.control, &rig.core, 1, F2);
     book_burst_on(&mut rig.control, &rig.core, 2, 0, rig.clock, 20_000, &rig.waves[0], false, LatePolicy::DropAndFlag);
     at(&rig, 15 * MS);
-    let SwitchRig { core, device, events, control, mut tx, _frozen, .. } = rig;
+    let SwitchRig { core, device, events, control, mut tx, _guard, .. } = rig;
     let (weak, fired, attempts) = (Arc::downgrade(&core), AtomicBool::new(false), Arc::new(AtomicUsize::new(0)));
     let counted = attempts.clone();
     let loss = move || {
@@ -391,7 +390,7 @@ fn lost_run(how: Loss, stop: bool) -> (ezsdr_radio::staging::Bookings, Vec<i64>,
     let held = held_keys(&tx);
     let mut log = Vec::new();
     let mut read = read_events(&events, &mut log);
-    shutdown_owner(&core, &mut tx, _frozen);
+    shutdown_owner(&mut tx, _guard);
     read.extend(read_events(&events, &mut log));
     assert!(!sent(&device), "{:?}", device.calls());
     assert_eq!(held_keys(&tx), Vec::<i64>::new());
@@ -421,7 +420,7 @@ fn n98_a_lost_configure_keeps_its_booking_as_a_held_one_is_kept() {
 
 #[test]
 fn n98_a_loss_in_the_first_bookings_configure_gives_both_held_bookings_the_note() {
-    let (core, device, time, mut tx, frozen, events, _to_tx) = owner(1);
+    let (core, device, time, mut tx, guard, events, _to_tx) = owner(1);
     let clock = tx.clock.expect("a clock");
     let (weak, applies) = (Arc::downgrade(&core), AtomicUsize::new(0));
     probe(&core, "apply", move |_| {
@@ -437,7 +436,7 @@ fn n98_a_loss_in_the_first_bookings_configure_gives_both_held_bookings_the_note(
     let mut log = Vec::new();
     let read = read_events(&events, &mut log);
     assert!(refusals_in(&read).is_empty(), "{read:?}");
-    shutdown_owner(&core, &mut tx, frozen);
+    shutdown_owner(&mut tx, guard);
     assert_eq!(notes(&core), ["UR-26: cancelled by Provider::stop", "UR-26: cancelled by Provider::stop"]);
     assert_eq!(device.calls().iter().filter(|call| call.starts_with("apply tx 0 rate=- ")).count(), 0, "{:?}", device.calls());
     assert!(!sent(&device));
@@ -445,7 +444,7 @@ fn n98_a_loss_in_the_first_bookings_configure_gives_both_held_bookings_the_note(
 
 #[test]
 fn n98_a_loss_landing_during_a_refusal_leaves_the_refusal() {
-    let (core, device, time, mut tx, frozen, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
+    let (core, device, time, mut tx, guard, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
     let clock = tx.clock.expect("a clock");
     arm_loss_at(&core, "tx_configure_before_mark");
     give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F2, 1));
@@ -456,7 +455,7 @@ fn n98_a_loss_landing_during_a_refusal_leaves_the_refusal() {
     let read = read_events(&events, &mut log);
     assert_eq!(refusals_in(&read).iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [json!(1)], "{read:?}");
     assert_eq!(read.iter().filter(|event| event["kind"] == EventKind::DEVICE_LOST).count(), 1, "{read:?}");
-    shutdown_owner(&core, &mut tx, frozen);
+    shutdown_owner(&mut tx, guard);
     assert!(notes(&core).is_empty(), "{:?}", lock(&core.rec).rejected);
 }
 
@@ -469,7 +468,7 @@ fn e2b_c5_a_switch_during_its_repeat_s_configure_is_refused_until_the_repeat_sen
     book_frequency(&mut rig.control, &rig.core, 1, F2);
     book_with(&mut rig.control, &rig.core, 2, 0, rig.clock, 20_000, &rig.waves[0], true, LatePolicy::SendAsapAndFlag, BTreeMap::new());
     at(&rig, 12 * MS);
-    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _frozen } = rig;
+    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _guard } = rig;
     let control: Shared = Arc::new(Mutex::new(Some(control)));
     let at_configure = Arc::new(Mutex::new(None));
     let (hook_control, seen, weak, wave, slow_time, slow_device) = (control.clone(), at_configure.clone(), Arc::downgrade(&core), waves[1].clone(), time.clone(), device.clone());
@@ -506,7 +505,7 @@ fn e2b_c5_a_switch_during_its_repeat_s_configure_is_refused_until_the_repeat_sen
 
 #[test]
 fn e2b_c6_provider_stop_during_a_refused_configure_reports_the_refusal_once() {
-    let (core, device, time, mut tx, frozen, events, to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
+    let (core, device, time, mut tx, guard, events, to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
     let clock = tx.clock.expect("a clock");
     let (weak, fired) = (Arc::downgrade(&core), AtomicBool::new(false));
     probe(&core, "apply", move |_| {
@@ -525,7 +524,7 @@ fn e2b_c6_provider_stop_during_a_refused_configure_reports_the_refusal_once() {
     assert!(tx.step(), "the configure turn");
     assert!(matches!(tx.cmds.try_recv(), Ok(TxCmd::Shutdown)), "Provider::stop came during the configure");
     assert_eq!(lock(&core.streams).holder(key0()), Holder::Free, "the configure's claim is back");
-    shutdown_owner(&core, &mut tx, frozen);
+    shutdown_owner(&mut tx, guard);
     let mut log = Vec::new();
     let read = read_events(&events, &mut log);
     assert_eq!(refusals_in(&read).iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [json!(1)], "X refused once: {read:?}");
@@ -539,7 +538,7 @@ fn e2b_c8_a_receipt_between_a_refused_configure_s_mark_and_its_drop_is_refused()
     let mut rig = control_rig(vec![vec![[0.25, 0.0]; 4], vec![[0.5, 0.0]; 1]], vec![FakeFault::TxApplyRefused(0, F2)]);
     book_frequency(&mut rig.control, &rig.core, 1, F2);
     book_burst_on(&mut rig.control, &rig.core, 2, 0, rig.clock, 20_000, &rig.waves[0], false, LatePolicy::SendAsapAndFlag);
-    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _frozen } = rig;
+    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _guard } = rig;
     // The test thread takes the control only outside the owner's turns: a hook left armed fails the count below instead of waiting on it.
     let control: Shared = Arc::new(Mutex::new(Some(control)));
     let hooks = Arc::new(AtomicUsize::new(0));
@@ -585,7 +584,7 @@ fn e2b_c8_a_receipt_between_a_refused_configure_s_mark_and_its_drop_is_refused()
 #[test]
 fn e2b_c9b_a_loss_just_before_the_configure_s_mark_section_leaves_the_mark_cleared() {
     // The hook's loss lands between the configure's device call and its mark's section.
-    let (core, device, time, mut tx, frozen, events, _to_tx) = owner(1);
+    let (core, device, time, mut tx, guard, events, _to_tx) = owner(1);
     let clock = tx.clock.expect("a clock");
     let ran = arm_loss_at(&core, "tx_configure_before_mark");
     give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F2, 1));
@@ -593,7 +592,7 @@ fn e2b_c9b_a_loss_just_before_the_configure_s_mark_section_leaves_the_mark_clear
     assert_eq!((ran.load(Ordering::SeqCst), next_lock_armed()), (1, false), "(b): the hook ran");
     assert_eq!(mark(&core), None, "(b): the loss's clear stands");
     assert!(!sent(&device), "{:?}", device.calls());
-    shutdown_owner(&core, &mut tx, frozen);
+    shutdown_owner(&mut tx, guard);
     assert_eq!(notes(&core), ["UR-26: cancelled by Provider::stop"], "(b)");
     check("C9(b)", snapshot(&core, &device, &events, Vec::new()), C9_B);
 }
@@ -638,19 +637,15 @@ fn e2b_c7_a_stop_during_a_reopen_is_read_after_its_result() {
     for fails in [false, true] {
         let what = if fails { "C7 failed" } else { "C7 reopened" };
         let faults = if fails { vec![FakeFault::TxOpenFails(1)] } else { Vec::new() };
-        let ((core, device, _time, tx, frozen, events, _to_tx), clock, b) = recovering(faults);
+        let ((core, device, _time, mut tx, _guard, events, _to_tx), clock, b) = recovering(faults);
         let (weak, fired) = (Arc::downgrade(&core), AtomicBool::new(false));
         probe(&core, "tx_reopen_claimed", move |_| {
             if let (false, Some(core)) = (fired.swap(true, Ordering::SeqCst), weak.upgrade()) {
                 full_stop(&core);
             }
         });
-        let (tx, _frozen) = released(frozen, &device.host(), move || {
-            let mut tx = tx;
-            assert!(tx.pass(), "the reopen turn");
-            tx.pass();
-            tx
-        });
+        assert!(tx.pass(), "the reopen turn");
+        tx.pass();
         let b_at = format!("at={} sob=true", clock.instant(b));
         assert!(!device.calls().iter().any(|call| call.contains(&b_at)), "{what}: B is not sent: {:?}", device.calls());
         let mut log = Vec::new();
@@ -672,13 +667,10 @@ fn e2b_c7_a_stop_during_a_reopen_is_read_after_its_result() {
 
 #[test]
 fn e2b_c9a_a_loss_just_before_the_reopen_s_result_section_leaves_the_mark_cleared() {
-    let ((core, device, _time, tx, frozen, events, _to_tx), _clock, b) = recovering(Vec::new());
+    let ((core, device, _time, mut tx, _guard, events, _to_tx), _clock, b) = recovering(Vec::new());
     let ran = arm_loss_at(&core, "tx_reopen_done");
-    let ((tx, armed), _frozen) = released(frozen, &device.host(), move || {
-        let mut tx = tx;
-        tx.pass();
-        (tx, next_lock_armed())
-    });
+    tx.pass();
+    let armed = next_lock_armed();
     assert_eq!((ran.load(Ordering::SeqCst), armed), (1, false), "the hook ran");
     assert_eq!(device.calls().iter().filter(|call| call.starts_with("tx_open")).count(), 2, "the reopen ran: {:?}", device.calls());
     assert!(core.is_lost());
@@ -689,13 +681,10 @@ fn e2b_c9a_a_loss_just_before_the_reopen_s_result_section_leaves_the_mark_cleare
 
 #[test]
 fn e2b_c9c_a_loss_just_before_a_failed_reopen_s_result_section_ends_no_clock() {
-    let ((core, device, _time, tx, frozen, events, _to_tx), _clock, b) = recovering(vec![FakeFault::TxOpenFails(1)]);
+    let ((core, device, _time, mut tx, _guard, events, _to_tx), _clock, b) = recovering(vec![FakeFault::TxOpenFails(1)]);
     let ran = arm_loss_at(&core, "tx_reopen_done");
-    let ((tx, armed), _frozen) = released(frozen, &device.host(), move || {
-        let mut tx = tx;
-        tx.pass();
-        (tx, next_lock_armed())
-    });
+    tx.pass();
+    let armed = next_lock_armed();
     assert_eq!((ran.load(Ordering::SeqCst), armed), (1, false), "the hook ran");
     assert!(core.is_lost());
     assert!(tx.clock.is_some(), "a loss ends no clock at the reopen");
@@ -738,8 +727,8 @@ fn e2b_r2b_the_line_lock_is_free_inside_the_reopen() {
     let (_to_tx, cmds) = std::sync::mpsc::channel();
     let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
     tx.chain().mark_reopen_needed();
-    let host = core.device.host();
-    let (worked, _frozen) = released(Frozen::on(host.clone()), &host, move || tx.pass());
+    let _guard = clock_guard(&core.device.host());
+    let worked = tx.pass();
     assert!(worked, "the reopen turn");
     assert_eq!(spy.seen("tx_open"), 2, "the test's open and the reopen's");
     assert!(spy.seen("tx_send") >= 1, "T3");
@@ -1172,7 +1161,7 @@ const C9_C: &str = r#"{
 
 #[test]
 fn n98_a_provider_stop_before_a_lost_configure_completes_cancels_the_booking_once() {
-    let (core, device, time, mut tx, frozen, events, to_tx) = owner(1);
+    let (core, device, time, mut tx, guard, events, to_tx) = owner(1);
     let clock = tx.clock.expect("a clock");
     let (weak, fired) = (Arc::downgrade(&core), AtomicBool::new(false));
     probe(&core, "apply", move |_| {
@@ -1194,7 +1183,7 @@ fn n98_a_provider_stop_before_a_lost_configure_completes_cancels_the_booking_onc
     assert_eq!(lock(&core.streams).holder(key0()), Holder::Free, "the configure's claim is back");
     assert_eq!(mark(&core), None);
     assert_eq!(held_keys(&tx), [20_000]);
-    shutdown_owner(&core, &mut tx, frozen);
+    shutdown_owner(&mut tx, guard);
     let mut log = Vec::new();
     let read = read_events(&events, &mut log);
     assert!(refusals_in(&read).is_empty(), "{read:?}");

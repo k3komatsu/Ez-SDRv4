@@ -95,7 +95,7 @@ fn e2a_s6_a_short_send_with_a_stop_unread_closes_once_then_cancels_held() {
     book(&mut rig, 2, 1, 40_000);
     rig.tx.read_list();
     at(&rig, MS);
-    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _frozen } = rig;
+    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _guard } = rig;
     let control = Arc::new(Mutex::new(Some(control)));
     let fired = Arc::new(AtomicBool::new(false));
     // The probe holds the Core weakly, and the control is taken back after the step: a probe holding either keeps the rig from ever
@@ -203,7 +203,7 @@ fn stop_then_b_then_a_failed_send(b_repeat: bool) -> (SwitchRig, i64, i64) {
     let t = 5 * MS / 2;
     at(&rig, t);
     let (_, b_start) = params().stop_bound(t);
-    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _frozen } = rig;
+    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _guard } = rig;
     let control = Arc::new(Mutex::new(Some(control)));
     let fired = Arc::new(AtomicBool::new(false));
     let (hook_core, hook_control, wave) = (Arc::downgrade(&core), control.clone(), waves[1].clone());
@@ -218,7 +218,7 @@ fn stop_then_b_then_a_failed_send(b_repeat: bool) -> (SwitchRig, i64, i64) {
     });
     assert!(tx.step());
     let control = control.lock().unwrap().take().expect("the rig's control");
-    let rig = SwitchRig { core, device, time, events, control, tx, clock, waves, _frozen };
+    let rig = SwitchRig { core, device, time, events, control, tx, clock, waves, _guard };
     let failed = rig.device.calls().into_iter().filter(|call| call.starts_with("tx_send 0 ")).nth(3).expect("the fourth send");
     let field = |name: &str| failed.split_whitespace().find_map(|word| word.strip_prefix(name)).map(str::to_owned).expect("a field");
     let first = rig.clock.at_or_after(field("at=").parse().unwrap());
@@ -335,7 +335,7 @@ fn e2a_f4_a_late_underflow_with_nothing_issued_sends_nothing_and_keeps_the_booki
     // A5, F4 (UR-22): an open first send waits for window space with no device burst open (`ur_23_a_first_send_waits_for_32_window_samples`).
     // A late underflow report finds no device burst to end: no send (today a two-zero end-of-burst with no start), the booking stays open
     // with no note, and it plays whole once its window opens.
-    let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+    let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_100_000), 2_000);
     let burst = txp_burst(&clock, 3_000, 100, false, LatePolicy::DropAndFlag);
     let samples = burst.samples[0].clone();
     txp_give(&mut tx, burst);
@@ -393,7 +393,7 @@ fn e2a_f1_a_failed_send_with_a_switch_received_in_flight_cancels_it() {
     book_repeat(&mut rig, 1, 2_000, 0);
     run(&mut rig, 0, 1);
     at(&rig, 5 * MS / 2);
-    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _frozen } = rig;
+    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _guard } = rig;
     let control = Arc::new(Mutex::new(Some(control)));
     let fired = Arc::new(AtomicBool::new(false));
     let (hook_core, hook_control, wave) = (Arc::downgrade(&core), control.clone(), waves[1].clone());
@@ -407,7 +407,7 @@ fn e2a_f1_a_failed_send_with_a_switch_received_in_flight_cancels_it() {
     });
     assert!(tx.step());
     let control = control.lock().unwrap().take().expect("the rig's control");
-    let mut rig = SwitchRig { core, device, time, events, control, tx, clock, waves, _frozen };
+    let mut rig = SwitchRig { core, device, time, events, control, tx, clock, waves, _guard };
     let failed = rig.device.calls().into_iter().filter(|call| call.starts_with("tx_send 0 ")).nth(3).expect("the fourth send");
     assert!(failed.contains(&format!("at={}", rig.clock.instant(9_500))), "the failing send is the intended one: {:?}", rig.device.calls());
     assert!(!refused_ids(&rig.events).contains(&2), "S was accepted: {:?}", lock(&rig.core.rec).rejected);

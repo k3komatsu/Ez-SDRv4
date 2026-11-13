@@ -846,7 +846,7 @@ mod tests {
     #[test]
     fn ur_24_fake_host_silence_delivers_no_block() {
         let device = crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, faults: vec![crate::device::FakeFault::Silence(Wall::ZERO)], ..Default::default() });
-        let _frozen = super::super::test_support::Frozen::of(&device);
+        let _guard = super::super::test_support::clock_guard(&device.host());
         device.set_time(0);
         device.rx_open(0, &[0]).unwrap();
         device.rx_start(0, 0).unwrap();
@@ -868,7 +868,7 @@ mod tests {
         let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), description);
         spy.watch(&core);
         spy.report_rx_packet_max(20_000);
-        let frozen = super::super::test_support::Frozen::on(spy.host());
+        let guard = super::super::test_support::clock_guard(&spy.host());
         spy.set_time(core.now());
         let (mut rx, clock) = rx(&core, 1);
         let now = clock.instant(46_000);
@@ -899,7 +899,7 @@ mod tests {
             })
             .unwrap();
         // The worker is a participant before the clock is released, so the exact return time below does not depend on this thread.
-        drop(frozen);
+        drop(guard);
         gate.wait();
         let returned_at = spy.time_now().unwrap();
         assert_eq!(returned_at, now + core.ticks(7_000_000), "the one-packet receive returned after 500 samples and delivery latency");
@@ -920,7 +920,7 @@ mod tests {
         let output = link();
         let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![output.clone()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
-        let frozen = super::super::test_support::Frozen::on(spy.host());
+        let guard = super::super::test_support::clock_guard(&spy.host());
         spy.set_time(core.now());
         let (mut rx, clock) = rx(&core, 1);
         let cut_at = core.ticks(40_000_000);
@@ -944,7 +944,7 @@ mod tests {
                 let _ = released.recv();
             })
             .unwrap();
-        drop(frozen);
+        drop(guard);
 
         turn.send(()).unwrap();
         first_turn.recv_timeout(Wall::from_secs(10)).expect("the pre-cut receive completed");
@@ -982,7 +982,7 @@ mod tests {
         let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
         let (core, time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
-        let frozen = super::super::test_support::Frozen::on(spy.host());
+        let _guard = super::super::test_support::clock_guard(&spy.host());
         spy.set_time(core.now());
         let (mut rx, clock) = rx(&core, 1);
         let starts = spy.seen("rx_start");
@@ -998,7 +998,6 @@ mod tests {
         spy.refuse_rx_stop(crate::DeviceError::failed("test: scripted rx_stop refusal"));
 
         rx.try_end();
-        drop(frozen);
 
         assert!(rx.stream.is_none());
         assert_eq!(spy.seen("rx_stop"), 1);
@@ -1012,13 +1011,13 @@ mod tests {
     }
 
     /// A manual-clock fake behind the spy, its rig and the held clock, for the open of a receive streamer.
-    fn spied_open_rig() -> (Arc<super::super::test_support::LockSpy>, Arc<Core>, Arc<ezsdr_kernel::event::EventCollector>, super::super::test_support::Frozen) {
+    fn spied_open_rig() -> (Arc<super::super::test_support::LockSpy>, Arc<Core>, Arc<ezsdr_kernel::event::EventCollector>, crate::host::Driver) {
         let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
         let (core, _time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
-        let frozen = super::super::test_support::Frozen::on(spy.host());
+        let _guard = super::super::test_support::clock_guard(&spy.host());
         spy.set_time(core.now());
-        (spy, core, events, frozen)
+        (spy, core, events, _guard)
     }
 
     #[test]
@@ -1029,7 +1028,7 @@ mod tests {
         // start, and the reopened streamer is silent through the old origin.
         let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let (core, time, _events) = super::super::test_support::rig_on(device.clone(), vec![link()], 2_000);
-        let frozen = super::super::test_support::Frozen::of(&device);
+        let _guard = super::super::test_support::clock_guard(&device.host());
         super::super::test_support::device_at(&core, &time, &device, 0);
         let origin = core.ticks(5_000_000_000);
         core.open_streamer(Dir::Rx, 0, Channels::first(1)).unwrap();
@@ -1041,7 +1040,6 @@ mod tests {
         assert!(position("rx_start", 0) < position("close_streams", 0) && position("close_streams", 0) < position("rx_open", 1) && position("rx_open", 1) < position("rx_stop", 1), "{calls:?}");
         assert_eq!(calls.iter().filter(|call| call.starts_with("rx_stop")).count(), 2, "one untimed stop on each open: {calls:?}");
         super::super::test_support::device_at(&core, &time, &device, origin - core.ticks(50_000_000));
-        let _driver = super::super::test_support::handed_over(frozen, &device.host());
         for _ in 0..6 {
             assert_eq!(device.rx_recv(0, 2_000, Wall::from_millis(100), false), RxRecv::Timeout, "the orphaned start delivered: {:?}", device.calls());
         }
@@ -1052,12 +1050,11 @@ mod tests {
     fn ur_16_a_failed_stop_on_open_refuses_the_segment_and_starts_nothing() {
         // UR-16, UR-24, UR-25: the open's stop refused (not a loss) is the open's refusal: the
         // owner makes no start, the refusal is the segment's, and the streamer is recorded as not open.
-        let (spy, core, events, frozen) = spied_open_rig();
+        let (spy, core, events, _guard) = spied_open_rig();
         let (mut rx, _) = rx_unopened(&core, 1);
         plan(&core, &[(core.ticks(5_000_000_000), None, Some(1))]);
         spy.refuse_rx_stop(crate::DeviceError::failed("test: scripted rx_stop refusal"));
         assert!(rx.begin());
-        drop(frozen);
         assert_eq!((spy.seen("rx_open"), spy.seen("rx_stop"), spy.seen("rx_start")), (1, 1, 0), "{:?}", spy.order());
         let refused: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).collect();
         assert_eq!(refused.len(), 1, "{refused:?}");
@@ -1069,12 +1066,11 @@ mod tests {
 
     #[test]
     fn ur_29_a_loss_found_by_the_stop_on_open_is_published_once_and_nothing_follows() {
-        let (spy, core, events, frozen) = spied_open_rig();
+        let (spy, core, events, _guard) = spied_open_rig();
         let (mut rx, _) = rx_unopened(&core, 1);
         plan(&core, &[(core.ticks(5_000_000_000), None, Some(1))]);
         spy.refuse_rx_stop(crate::DeviceError { lost: true, message: "test: lost at the open's stop".to_owned() });
         assert!(rx.begin());
-        drop(frozen);
         assert!(core.is_lost());
         let order = spy.order();
         let stop = order.iter().position(|name| *name == "rx_stop").expect("the stop on open");
@@ -1089,7 +1085,7 @@ mod tests {
         let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
         let (core, _time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
-        let _frozen = super::super::test_support::Frozen::on(spy.host());
+        let _guard = super::super::test_support::clock_guard(&spy.host());
         spy.set_time(core.now());
         let (mut rx, _) = rx(&core, 1);
 
@@ -1110,7 +1106,7 @@ mod tests {
         let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
         let (core, _time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
-        let _frozen = super::super::test_support::Frozen::on(spy.host());
+        let _guard = super::super::test_support::clock_guard(&spy.host());
 
         let mut config = core.description.defaults();
         config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
@@ -1472,7 +1468,7 @@ mod tests {
         let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
         let (core, _, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
-        let _frozen = super::super::test_support::Frozen::on(spy.host());
+        let _guard = super::super::test_support::clock_guard(&spy.host());
         let (mut rx, _) = rx_unopened(&core, 1);
         plan(&core, &[(0, None, Some(1))]);
         lock(&core.streams).stream_mut(stream_key(Dir::Rx, 0)).configs.insert(1, Arc::new(ColdConfig::new(core.description.defaults())));
@@ -1764,7 +1760,7 @@ mod tests {
         let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let (core, time, _events) =
             super::super::test_support::rig_on_description_links(device.clone(), vec![Vec::new(), vec![link.clone()]], BTreeMap::new(), super::super::test_support::default_description(2_000));
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         super::super::test_support::device_at(&core, &time, &device, 0);
         let stream = core.id.child("rx/s1").unwrap();
         let handle = core.clocks.declare_sample_clock(stream, core.root, Rational::new(200, 1).unwrap()).unwrap();
@@ -2298,14 +2294,14 @@ mod tests {
         events: Arc<ezsdr_kernel::event::EventCollector>,
         link: Arc<dyn ezsdr_kernel::stream::DataLink>,
         rx: Rx,
-        frozen: super::super::test_support::Frozen,
+        _guard: crate::host::Driver,
     }
 
     fn queued(origin: i64, faults: Vec<crate::device::FakeFault>) -> Queued {
         let link = link();
         let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, faults, ..crate::device::FakeConfig::default() }));
         let (core, time, events) = super::super::test_support::rig_on(device.clone(), vec![link.clone()], 2_000);
-        let frozen = super::super::test_support::Frozen::of(&device);
+        let _guard = super::super::test_support::clock_guard(&device.host());
         super::super::test_support::device_at(&core, &time, &device, 0);
         let (mut rx, _) = rx(&core, 1);
         plan(&core, &[(0, Some(10_000), None), (origin, None, Some(1))]);
@@ -2313,7 +2309,7 @@ mod tests {
         rx.receive(samples(0, 10_000));
         assert!(rx.begin());
         assert!(device.calls().contains(&format!("rx_start 0 {origin}")), "the second start is queued: {:?}", device.calls());
-        Queued { core, device, time, events, link, rx, frozen }
+        Queued { core, device, time, events, link, rx, _guard }
     }
 
     impl Queued {
@@ -2328,7 +2324,6 @@ mod tests {
         /// only timeouts, so the queued start is gone.
         fn assert_silent_through(self, origin: i64) {
             super::super::test_support::device_at(&self.core, &self.time, &self.device, origin - self.core.ticks(50_000_000));
-            let _driver = super::super::test_support::handed_over(self.frozen, &self.device.host());
             for _ in 0..6 {
                 assert_eq!(self.device.rx_recv(0, 2_000, Wall::from_millis(100), false), RxRecv::Timeout, "the cancelled start delivered: {:?}", self.device.calls());
             }
@@ -2454,7 +2449,7 @@ mod tests {
         let link = link();
         let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let (core, time, _events) = super::super::test_support::rig_on(device.clone(), vec![link.clone()], 2_000);
-        let _frozen = super::super::test_support::Frozen::of(&device);
+        let _guard = super::super::test_support::clock_guard(&device.host());
         super::super::test_support::device_at(&core, &time, &device, 0);
         let (mut rx, _) = rx(&core, 1);
         let key = stream_key(Dir::Rx, 0);
@@ -2670,7 +2665,7 @@ mod tests {
         let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
         let (core, _time, _events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
-        let _frozen = super::super::test_support::Frozen::on(spy.host());
+        let _guard = super::super::test_support::clock_guard(&spy.host());
         let (mut rx, _) = rx(&core, 1);
         core.device_lost("test: lost before the missed start is handled");
         let starts = spy.seen("rx_start");
@@ -2732,7 +2727,7 @@ mod tests {
     fn begin_with_configure_ending_at(origin_ms: i64, completion_ns: i64) -> (Arc<Core>, Arc<crate::device::FakeDevice>, Vec<ezsdr_kernel::event::Event>, i64) {
         let config = crate::device::FakeConfig::default();
         let (core, device, time, events) = super::super::test_support::rig_with(config, vec![link()]);
-        let _frozen = super::super::test_support::Frozen::of(&device);
+        let _guard = super::super::test_support::clock_guard(&device.host());
         super::super::test_support::device_at(&core, &time, &device, 0);
         let (mut rx, _clock) = rx_unopened(&core, 1);
         let origin = core.ticks(origin_ms * 1_000_000);
@@ -2785,7 +2780,7 @@ mod tests {
         let link = link();
         let config = crate::device::FakeConfig { faults, ..crate::device::FakeConfig::default() };
         let (core, device, time, events) = super::super::test_support::rig_with(config, vec![link.clone()]);
-        let _frozen = super::super::test_support::Frozen::of(&device);
+        let _guard = super::super::test_support::clock_guard(&device.host());
         super::super::test_support::device_at(&core, &time, &device, 0);
         let (mut rx, _clock) = rx_unopened(&core, 1);
         let origin = core.ticks(100_000_000);

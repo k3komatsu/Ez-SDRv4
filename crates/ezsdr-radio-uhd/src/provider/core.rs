@@ -1998,7 +1998,7 @@ mod tests {
 
         let inner = Arc::new(crate::device::FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
         let feed = Arc::new(super::super::test_support::ReportFeed::new(inner.clone()));
-        let frozen = super::super::test_support::Frozen::of(&inner);
+        let _guard = super::super::test_support::clock_guard(&inner.host());
         let (core, _time, _events) = super::super::test_support::rig_on(feed.clone(), Vec::new(), 2_000);
         feed.tx_open(0, &[0, 1]).unwrap();
         // The strict flush counts an ack stamped at or after the device time read before its send: the clock is held at it.
@@ -2009,10 +2009,7 @@ mod tests {
         feed.give(report(TxCode::BurstAck, 1));
         feed.give(report(TxCode::Underflow, 1));
         feed.give(report(TxCode::BurstAck, 0));
-        let (reopened, _frozen) = super::super::test_support::released(frozen, &inner.host(), {
-            let core = core.clone();
-            move || core.reopen_tx_streamer(0, Channels::first(2), i64::MIN).is_ok()
-        });
+        let reopened = core.reopen_tx_streamer(0, Channels::first(2), i64::MIN).is_ok();
         assert!(reopened, "{:?}", lock(&core.rec).device_async);
         let flush_rows: Vec<_> = lock(&core.rec).device_async.iter().filter(|row| row["tx_flush"] == true).map(|row| (row["code"].as_str().unwrap().to_owned(), row["channel"].as_u64())).collect();
         assert_eq!(flush_rows, [("Underflow".to_owned(), Some(0)), ("TimeError".to_owned(), Some(0)), ("BurstAck".to_owned(), Some(1)), ("BurstAck".to_owned(), Some(0))]);

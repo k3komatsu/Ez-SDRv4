@@ -1305,7 +1305,7 @@ mod tests {
     use super::{Held, TX_CHANNELS_MAX, Tail, Tx, TxCmd};
     use crate::device::{Device, Dir, FakeConfig, FakeDevice, FakeFault, Iq, Settings, TxCode, TxReport};
     use crate::provider::core::{Clock, Core, Holder, lock, stream_key};
-    use crate::provider::test_support::{Frozen, device_at, handed_over};
+    use crate::provider::test_support::{clock_guard, device_at};
     use ezsdr_kernel::id::ClockDomainId;
     use ezsdr_radio::staging::{DeviceChain, Recovery};
     use ezsdr_radio::timeline::Channels;
@@ -1589,40 +1589,33 @@ mod tests {
         }
     }
 
-    /// `Tx::pass` run as a participant of the device's host clock (the flush and the reopen wait on it), the owner and a new freeze given back.
-    fn pass_on(tx: Tx, frozen: Frozen, device: &FakeDevice) -> (Tx, bool, Frozen) {
-        let ((tx, worked), frozen) = crate::provider::test_support::released(frozen, &device.host(), move || {
-            let mut tx = tx;
-            let worked = tx.pass();
-            (tx, worked)
-        });
-        (tx, worked, frozen)
-    }
-
     /// The rig of a retried recovery flush (UR-22) before its bookings: a manual-clock fake with `faults` and the old front 123 (a padded end at
     /// 120). With `past_front` both clocks start just past the old front's padded end, so attempt 1's floor is the device time; without, the old
     /// front leads device time.
     #[allow(clippy::type_complexity)]
-    fn retry_rig_without_burst(faults: Vec<FakeFault>, past_front: bool) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, Clock, Arc<EventCollector>, Frozen) {
+    fn retry_rig_without_burst(
+        faults: Vec<FakeFault>,
+        past_front: bool,
+    ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, Clock, Arc<EventCollector>, crate::host::Driver) {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() }));
-        let frozen = Frozen::of(&device);
+        let guard = clock_guard(&device.host());
         let (core, time, mut tx, clock, events) = recovery_rig(device.clone());
         tx.chain().advance_front(clock.domain, 123);
         tx.remember_burst(TimePoint::new(clock.domain, 10));
         if past_front {
             device_at(&core, &time, &device, clock.instant(123) + 1);
         }
-        (core, device, time, tx, clock, events, frozen)
+        (core, device, time, tx, clock, events, guard)
     }
 
     /// [`retry_rig_without_burst`] with a burst held 500 ms ahead and the recovery pending.
     #[allow(clippy::type_complexity)]
-    fn retry_rig(faults: Vec<FakeFault>, past_front: bool) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, Clock, Arc<EventCollector>, Frozen, i64) {
-        let (core, device, time, tx, clock, events, frozen) = retry_rig_without_burst(faults, past_front);
+    fn retry_rig(faults: Vec<FakeFault>, past_front: bool) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, Clock, Arc<EventCollector>, crate::host::Driver, i64) {
+        let (core, device, time, tx, clock, events, guard) = retry_rig_without_burst(faults, past_front);
         let target = clock.at_or_after(core.now() + core.ticks(500_000_000));
         hold(&tx, held(&clock, target, 1, LatePolicy::DropAndFlag));
         tx.chain().mark_reopen_needed();
-        (core, device, time, tx, clock, events, frozen, target)
+        (core, device, time, tx, clock, events, guard, target)
     }
 
     /// The `COMMAND_REJECTED` events' kinds, in order, and the other event kinds' count of `kind`.
@@ -1648,10 +1641,10 @@ mod tests {
             (vec![FakeFault::FailSend(0)], 2, 0),
             (vec![FakeFault::DropAckOfSend(0), FakeFault::DropAckOfSend(1)], 3, 200),
         ] {
-            let (core, device, time, tx, clock, events, frozen, target) = retry_rig(faults.clone(), true);
+            let (core, device, time, mut tx, clock, events, _guard, target) = retry_rig(faults.clone(), true);
             let old_generation = tx.streamer;
             let before = device.time_now().unwrap();
-            let (tx, worked, frozen) = pass_on(tx, frozen, &device);
+            let worked = tx.pass();
             let elapsed = device.time_now().unwrap() - before;
             assert!(worked, "the owner did not complete its reopen ({faults:?})");
             assert_eq!(tx.chain().recovery(), Recovery::Clean, "{faults:?}");
@@ -1677,22 +1670,21 @@ mod tests {
 
             // The Kernel's clock follows the device's, inside the window of the burst: it is sent, once, after the last flush.
             device_at(&core, &time, &device, clock.instant(target) - core.ticks(100_000_000));
-            let (_tx, worked, frozen) = pass_on(tx, frozen, &device);
+            let worked = tx.pass();
             assert!(worked, "the burst was not dispatched ({faults:?})");
             let calls = device.calls();
             let sends: Vec<usize> = calls.iter().enumerate().filter(|(_, call)| call.contains(&at_target)).map(|(index, _)| index).collect();
             let last_flush = calls.iter().rposition(|call| call.starts_with("tx_send") && call.contains("at=- ")).unwrap();
             assert!(sends.len() == 1 && sends[0] > last_flush, "the burst follows the last flush ({faults:?}): {calls:?}");
-            drop(frozen);
         }
     }
 
     #[test]
     fn ur_22_a_flush_ack_below_the_old_burst_s_padded_end_costs_an_attempt() {
         // The old front leads device time: the fake's genuine ack (a few hundred ticks past device time) is below the floor, so attempt 1 is unconfirmed and attempt 2, 100 ms later, confirms.
-        let (core, device, _time, tx, clock, events, frozen, _target) = retry_rig(Vec::new(), false);
+        let (core, device, _time, mut tx, clock, events, _guard, _target) = retry_rig(Vec::new(), false);
         let before = device.time_now().unwrap();
-        let (tx, worked, frozen) = pass_on(tx, frozen, &device);
+        let worked = tx.pass();
         assert!(worked);
         assert_eq!(tx.chain().recovery(), Recovery::Clean);
         let rows = crate::provider::test_support::flush_attempt_rows(&core);
@@ -1703,7 +1695,6 @@ mod tests {
         assert_eq!(ticks.len(), 1);
         assert_eq!(tx.chain().front(), Some((clock.domain, super::close_front(clock.at_or_after(ticks[0] - 1), 0, tx.short_gap(clock)))));
         assert!(rejected_kinds(&events).is_empty());
-        drop(frozen);
     }
 
     #[test]
@@ -1712,10 +1703,10 @@ mod tests {
         // The fake's ack of the flush is the device time at its send plus 801 ticks (four samples of 200 and one): it is the old burst's own
         // (end + 1) and refused, or genuine (end + 2) and accepted, depending on where device time stands.
         for (ack_at, confirmed) in [(24_001, false), (24_002, true)] {
-            let (core, device, time, tx, clock, events, frozen, _target) = retry_rig(Vec::new(), false);
+            let (core, device, time, mut tx, clock, events, _guard, _target) = retry_rig(Vec::new(), false);
             assert_eq!(clock.instant(120), 24_000);
             device_at(&core, &time, &device, ack_at - 801);
-            let (tx, worked, _frozen) = pass_on(tx, frozen, &device);
+            let worked = tx.pass();
             assert!(worked);
             assert_eq!(tx.chain().recovery(), Recovery::Clean);
             let rows = crate::provider::test_support::flush_attempt_rows(&core);
@@ -1732,9 +1723,9 @@ mod tests {
             vec![FakeFault::ShortSend(0), FakeFault::ShortSend(1), FakeFault::ShortSend(2)],
             vec![FakeFault::FailSend(0), FakeFault::FailSend(1), FakeFault::FailSend(2)],
         ] {
-            let (core, device, _time, tx, clock, events, frozen, target) = retry_rig(faults.clone(), true);
+            let (core, device, _time, mut tx, clock, events, _guard, target) = retry_rig(faults.clone(), true);
             let key = stream_key(Dir::Tx, 0);
-            let (mut tx, worked, frozen) = pass_on(tx, frozen, &device);
+            let worked = tx.pass();
             assert!(worked, "{faults:?}");
             assert!(!tx.chain().needs_reopen(), "{faults:?}");
             assert!(tx.clock.is_none(), "a failed recovery ends the stream's clock ({faults:?})");
@@ -1761,7 +1752,6 @@ mod tests {
             let refused = lock(&core.rec).rejected.iter().filter(|row| row["reason"] == "UR-25: its transmit clock ended before the burst could start").count();
             assert_eq!(refused, 1, "a later burst is refused once ({faults:?})");
             assert_eq!(rejected_kinds(&events), ["tx_burst"], "{faults:?}");
-            drop(frozen);
         }
     }
 
@@ -1770,17 +1760,17 @@ mod tests {
         let two_channels = |faults: Vec<FakeFault>| {
             let config = FakeConfig { faults, ..FakeConfig::default() };
             let (core, device, _time, _events) = super::super::test_support::rig_with(config, Vec::new());
-            let frozen = Frozen::of(&device);
+            let guard = clock_guard(&device.host());
             device.tx_open(0, &[0, 1]).unwrap();
             let clock = core.register(Dir::Tx, 200, 0).unwrap();
             let (_to_tx, cmds) = std::sync::mpsc::channel();
             let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(2));
             tx.chain().advance_front(clock.domain, -1);
             tx.chain().mark_reopen_needed();
-            (core, device, tx, clock, frozen)
+            (core, device, tx, clock, guard)
         };
-        let (core, device, tx, _clock, frozen) = two_channels(vec![FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck), FakeFault::DropBurstAck]);
-        let (tx, worked, _frozen) = pass_on(tx, frozen, &device);
+        let (core, _device, mut tx, _clock, _guard) = two_channels(vec![FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck), FakeFault::DropBurstAck]);
+        let worked = tx.pass();
         assert!(worked);
         assert!(tx.clock.is_none(), "one channel's ack never confirms a flush");
         assert_eq!(crate::provider::test_support::flush_attempt_rows(&core).len(), 3);
@@ -1790,8 +1780,8 @@ mod tests {
             "the first channel's ack is recorded once, never as a completed flush"
         );
 
-        let (core, device, tx, clock, frozen) = two_channels(vec![FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck), FakeFault::DropAckOfSend(0)]);
-        let (tx, worked, _frozen) = pass_on(tx, frozen, &device);
+        let (core, _device, mut tx, clock, _guard) = two_channels(vec![FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck), FakeFault::DropAckOfSend(0)]);
+        let worked = tx.pass();
         assert!(worked);
         assert_eq!(tx.chain().recovery(), Recovery::Clean);
         assert_eq!(crate::provider::test_support::flush_attempt_rows(&core).len(), 1);
@@ -1847,11 +1837,8 @@ mod tests {
                 tx.chain().mark_reopen_needed();
             }
 
-            let host = core.device.host();
-            let clock_host = host.clone();
-            let clock_driver = host.spawn("tx-shutdown-deadline", move || clock_host.sleep(Wall::from_millis(150))).expect("a manual-clock participant");
+            let _guard = clock_guard(&core.device.host());
             tx.shutdown();
-            clock_driver.join().unwrap();
 
             assert_eq!(tx.chain().recovery(), Recovery::Clean, "Provider::stop follows stop_now (failed close={fail_close})");
             assert!(tx.chain().next().is_none() && tx.chain().tail().is_none());
@@ -2217,7 +2204,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, _events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2244,7 +2231,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2270,7 +2257,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2292,7 +2279,7 @@ mod tests {
     #[test]
     fn ur_21_s15_host_lateness_moves_an_untimed_burst_silently() {
         for policy in [LatePolicy::SendAsapAndFlag, LatePolicy::DropAndFlag] {
-            let (core, device, time, events, clock, mut tx, mut control, (wave, _), _frozen) = untimed_rig(0);
+            let (core, device, time, events, clock, mut tx, mut control, (wave, _), _guard) = untimed_rig(0);
             book_untimed(&mut control, &core, 1, clock, 10_000, &wave, false, policy);
             drain_tx(&mut tx);
             let head = tx.take_held(10_000).expect("the untimed head is booked at its instant");
@@ -2312,7 +2299,7 @@ mod tests {
     /// samples) at 10 000, piece P joined at 10 040 (front 10 084); the bound is 10 020, so H goes to P's front, not onto P.
     #[test]
     fn ur_21_s15_c_untimed_head_moved_past_its_joined_piece_goes_after_the_piece() {
-        let (core, device, time, _events, clock, mut tx, mut control, (wave, _), _frozen) = untimed_rig(0);
+        let (core, device, time, _events, clock, mut tx, mut control, (wave, _), _guard) = untimed_rig(0);
         book_untimed(&mut control, &core, 1, clock, 10_000, &wave, false, LatePolicy::SendAsapAndFlag);
         book_burst(&mut control, &core, 2, clock, 10_040, &wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -2328,7 +2315,7 @@ mod tests {
     /// placed there, since its front (10 064) is before C.
     #[test]
     fn ur_21_s15_d_untimed_head_moved_before_a_later_booking_keeps_the_bound() {
-        let (core, device, time, _events, clock, mut tx, mut control, (wave, _), _frozen) = untimed_rig(0);
+        let (core, device, time, _events, clock, mut tx, mut control, (wave, _), _guard) = untimed_rig(0);
         book_untimed(&mut control, &core, 1, clock, 10_000, &wave, false, LatePolicy::SendAsapAndFlag);
         book_burst(&mut control, &core, 2, clock, 10_100, &wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -2347,7 +2334,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2390,29 +2377,19 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn untimed_rig(
         now: i64,
-    ) -> (
-        Arc<Core>,
-        Arc<FakeDevice>,
-        Arc<ezsdr_kernel::time::ManualTimeAuthority>,
-        Arc<EventCollector>,
-        Clock,
-        Tx,
-        Control,
-        (ezsdr_kernel::manifest::ArtifactRef, Vec<u8>),
-        crate::provider::test_support::Frozen,
-    ) {
+    ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, Control, (ezsdr_kernel::manifest::ArtifactRef, Vec<u8>), crate::host::Driver) {
         let (wave, bytes) = waveform_input("untimed", &vec![[0.25, 0.0]; 40]);
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let inputs = BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes.clone()))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let frozen = crate::provider::test_support::Frozen::of(&device);
+        let guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, now);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        (core, device, time, events, clock, tx, control, (wave, bytes), frozen)
+        (core, device, time, events, clock, tx, control, (wave, bytes), guard)
     }
 
     /// S5: of two overlapping bookings the one received second is refused, whatever their targets, so the
@@ -2428,7 +2405,7 @@ mod tests {
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2462,7 +2439,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let inputs = BTreeMap::from([(c_wave.hash.clone(), Arc::<[u8]>::from(c_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2488,7 +2465,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2522,7 +2499,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2564,7 +2541,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2597,7 +2574,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.tx_open(1, &[1]).unwrap();
@@ -2638,7 +2615,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2670,7 +2647,7 @@ mod tests {
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(rate), ..Settings::default() }).unwrap();
@@ -2707,7 +2684,7 @@ mod tests {
         let mut description = super::super::test_support::default_description(2_000);
         description.timing.tx_in_flight_ns = 4_000_000;
         let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes.clone()))]), description);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2724,7 +2701,7 @@ mod tests {
         let mut description = super::super::test_support::default_description(2_000);
         description.timing.tx_in_flight_ns = 4_000_000;
         let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes))]), description);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2746,7 +2723,7 @@ mod tests {
         let mut description = super::super::test_support::default_description(10_000);
         description.timing.tx_in_flight_ns = 8_000_000;
         let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes))]), description);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2787,7 +2764,7 @@ mod tests {
         let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes))]));
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2812,7 +2789,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2843,7 +2820,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2879,7 +2856,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2916,7 +2893,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2958,7 +2935,7 @@ mod tests {
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -2991,7 +2968,7 @@ mod tests {
     /// `J(s + 40)`. B continues A with no end-of-burst at `s + 40`, and C plays on time at `s + 100`.
     #[test]
     fn ur_21_s4b_three_bookings_b_continues_a_and_c_plays_on_time() {
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, core.ticks(12_000_000));
         txp_drain(&mut tx);
@@ -3015,7 +2992,7 @@ mod tests {
     /// accepts it and the device burst continues: no end-of-burst at `s + 40`, B plays from `s + 40`.
     #[test]
     fn ur_21_s4b_booking_exactly_at_the_deadline_continues() {
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, core.ticks(12_000_000));
         txp_drain(&mut tx);
@@ -3037,7 +3014,7 @@ mod tests {
     /// `instant(s + 40) − lead` would start C late.
     #[test]
     fn ur_21_m1_148us_booked_early_at_the_chain_front_plays_on_time() {
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, core.ticks(12_000_000));
         txp_drain(&mut tx);
@@ -3057,7 +3034,7 @@ mod tests {
     /// before the owner reaches the close point after `J(s + 40)`. B and C continue A with no end-of-burst at `s + 40`.
     #[test]
     fn ur_21_m1_joins_booked_early_continue_the_device_burst() {
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, core.ticks(12_000_000));
         txp_drain(&mut tx);
@@ -3078,7 +3055,7 @@ mod tests {
     #[test]
     fn ur_21_m1_receipt_at_the_deadline_is_decided_by_the_record() {
         for (case, offset, accepted) in [("at J(e)", 0, true), ("one tick after J(e)", 1, false)] {
-            let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+            let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
             txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
             device_at(&core, &time, &device, core.ticks(12_000_000));
             txp_drain(&mut tx);
@@ -3099,7 +3076,7 @@ mod tests {
     /// B goes out as one burst closed at its end, and C, which joined it, is decided by its late policy: not played.
     #[test]
     fn ur_21_s2_a_short_surviving_head_is_closed_and_a_piece_joined_behind_it_is_late() {
-        let (core, device, time, mut tx, _frozen, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
+        let (core, device, time, mut tx, _guard, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
         let clock = tx.clock.expect("a clock");
         for (k, len, id, generation, frequency) in [(40_000, 40, 1, 1, F2), (40_040, 10, 2, 2, F3), (40_050, 4, 3, 2, F3)] {
             txp_book(&mut tx, &core, clock, valued(&clock, k, len, id, generation, frequency, 1));
@@ -3125,7 +3102,7 @@ mod tests {
     /// is dispatched, is refused at receipt, B plays, and C and D are late at dispatch under their DropAndFlag policy.
     #[test]
     fn ur_21_s2_c_and_d_joined_behind_a_refused_head_are_late_at_dispatch() {
-        let (core, device, time, mut tx, _frozen, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
+        let (core, device, time, mut tx, _guard, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
         let clock = tx.clock.expect("a clock");
         let bursts = [(40_000, 40, 1, 1, F2), (40_040, 10, 2, 2, F3), (40_050, 4, 3, 2, F3), (40_054, 10, 4, 2, F3)]
             .map(|(k, len, id, generation, frequency)| valued(&clock, k, len, id, generation, frequency, 1));
@@ -3166,7 +3143,7 @@ mod tests {
     /// record's front, as in S4b, is not.
     #[test]
     fn ur_21_stat_counts_owner_closes_past_the_record_front() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, core.ticks(12_000_000));
         txp_drain(&mut tx);
@@ -3174,7 +3151,7 @@ mod tests {
         txp_drain(&mut tx);
         assert_eq!(past_front(&core), 0, "the owner closed at the record's front");
 
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, core.ticks(12_000_000));
         txp_drain(&mut tx);
@@ -3195,7 +3172,7 @@ mod tests {
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -3250,7 +3227,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -3280,15 +3257,14 @@ mod tests {
     /// Stop at device 0 drops it, and its region reaches its own front, 10 018. Returns the rig with the booking control, and the waveform
     /// of a later booking.
     #[allow(clippy::type_complexity)]
-    fn dropped_head_rig()
-    -> (Arc<Core>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, Control, ezsdr_kernel::manifest::ArtifactRef, crate::provider::test_support::Frozen) {
+    fn dropped_head_rig() -> (Arc<Core>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, Control, ezsdr_kernel::manifest::ArtifactRef, crate::host::Driver) {
         let (a_wave, a_bytes) = waveform_input("region_a", &[[0.5, 0.0]]);
         let (d_wave, d_bytes) = waveform_input("region_d", &[[0.0, 0.5]]);
         let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (d_wave.hash.clone(), Arc::<[u8]>::from(d_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let frozen = crate::provider::test_support::Frozen::of(&device);
+        let guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -3298,7 +3274,7 @@ mod tests {
         book_burst(&mut control, &core, 1, clock, 9_999, &a_wave, false, LatePolicy::DropAndFlag);
         control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(super::super::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
         drain_tx(&mut tx);
-        (core, time, events, clock, tx, control, d_wave, frozen)
+        (core, time, events, clock, tx, control, d_wave, guard)
     }
 
     /// RM-16 (UHD, N-P6): a booking at 10 004 inside a dropped head's region follows its late policy. DropAndFlag is refused at receipt;
@@ -3307,7 +3283,7 @@ mod tests {
     fn ur_23_a_booking_in_a_dropped_head_s_region_follows_its_late_policy() {
         for policy in [LatePolicy::DropAndFlag, LatePolicy::SendAsapAndFlag] {
             let case = format!("{policy:?}");
-            let (core, _time, events, clock, mut tx, mut control, d_wave, _frozen) = dropped_head_rig();
+            let (core, _time, events, clock, mut tx, mut control, d_wave, _guard) = dropped_head_rig();
             book_burst(&mut control, &core, 3, clock, 10_004, &d_wave, false, policy);
             drain_tx(&mut tx);
             let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
@@ -3331,7 +3307,7 @@ mod tests {
     /// RM-16 (UHD, N-P6): a booking at the region's end, 10 013, is admitted on time: no refusal and no `TIME_ERROR`.
     #[test]
     fn ur_23_a_booking_at_a_dropped_head_s_front_is_admitted() {
-        let (core, _time, events, clock, mut tx, mut control, d_wave, _frozen) = dropped_head_rig();
+        let (core, _time, events, clock, mut tx, mut control, d_wave, _guard) = dropped_head_rig();
         book_burst(&mut control, &core, 3, clock, 10_018, &d_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
         let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
@@ -3344,7 +3320,7 @@ mod tests {
     /// refusal: the late policy is not consulted.
     #[test]
     fn ur_23_an_untimed_booking_after_a_dropped_head_is_placed_at_its_front() {
-        let (core, _time, events, clock, mut tx, mut control, d_wave, _frozen) = dropped_head_rig();
+        let (core, _time, events, clock, mut tx, mut control, d_wave, _guard) = dropped_head_rig();
         book_untimed(&mut control, &core, 3, clock, 10_004, &d_wave, false, LatePolicy::SendAsapAndFlag);
         drain_tx(&mut tx);
         let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
@@ -3360,7 +3336,7 @@ mod tests {
         let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let (core, time, _) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes))]));
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -3393,7 +3369,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -3428,7 +3404,7 @@ mod tests {
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -3468,7 +3444,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -3539,7 +3515,7 @@ mod tests {
                 2_000,
                 BTreeMap::from([(a_hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]),
             );
-            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -3601,7 +3577,7 @@ mod tests {
         // D24: B (10 samples) is booked with A, as A's joined continuation at A's end, 1 000 after A's start. A is abandoned mid-send
         // (a failed send), so B is dispatched as a non-head joined piece, and the host is late for it: `send_asap` would move it, but the
         // record cannot move a joined piece, so B is refused at dispatch (`TIME_ERROR { refused }`, `COMMAND_REJECTED`) and nothing of B is sent.
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig_faults(Some(2_032_000), 2_000, 1e6, 200, vec![FakeFault::FailSend(0)]);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig_faults(Some(2_032_000), 2_000, 1e6, 200, vec![FakeFault::FailSend(0)]);
         let action = |burst: &mut Held, id: u64| burst.settings = Arc::new(super::ColdConfig::of(BTreeMap::new(), ActionId(id)));
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 1_000, false, LatePolicy::DropAndFlag));
         let mut b = txp_burst(&clock, 21_000, 10, false, LatePolicy::SendAsapAndFlag);
@@ -4102,10 +4078,10 @@ mod tests {
     /// A-0: `manual_rig` with the device's clock held still (M3), A's burst at 40 000 with
     /// 30 000 samples driven in 13 steps of up to 2 500 samples, so its last sample is held
     /// back and `continues_at` is 70 000 (design note 37, T1–T5).
-    fn at_a_held_tail(faults: Vec<crate::device::FakeFault>) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, crate::provider::test_support::Frozen) {
+    fn at_a_held_tail(faults: Vec<crate::device::FakeFault>) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, crate::host::Driver) {
         let config = FakeConfig { faults, ..FakeConfig::default() };
         let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
-        let frozen = crate::provider::test_support::Frozen::of(&device);
+        let guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -4126,7 +4102,7 @@ mod tests {
             "A's last sample is not the held tail: {:?}",
             device.calls()
         );
-        (core, device, time, tx, frozen)
+        (core, device, time, tx, guard)
     }
 
     /// A burst that continues A's device burst at `k`: `len` samples of a waveform unlike
@@ -4175,7 +4151,7 @@ mod tests {
         // T1: B booked at A's end after A's last buffer went out (inside the in-flight
         // window) is played, continuing A's device burst: A's held last sample ahead of B's
         // first, one device burst of 31 000 samples, no end-of-burst between.
-        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let (core, device, time, mut tx, _guard) = at_a_held_tail(Vec::new());
         let clock = tx.clock.expect("a transmit clock");
         let b = continuation(&clock, 70_000, 1_000);
         let second = b.samples[0].clone();
@@ -4206,7 +4182,7 @@ mod tests {
     fn ur_23_a_stop_while_the_device_burst_waits_for_a_continuation_ends_it() {
         // T2: a `Stop` while the device burst waits for a continuation ends it with one
         // end-of-burst, A's held last sample, before it runs dry.
-        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let (core, device, time, mut tx, _guard) = at_a_held_tail(Vec::new());
         let clock = tx.clock.expect("a transmit clock");
         device_at(&core, &time, &device, core.ticks(63_000_000));
         halt(&mut tx);
@@ -4229,7 +4205,7 @@ mod tests {
         // the two-zero EOB is separate. The fake's Session test reads the receipt instant.
         let config = FakeConfig::default();
         let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -4266,7 +4242,7 @@ mod tests {
     fn ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played() {
         // T2: A closes with its held tail and one zero; B starts at the close's exclusive end
         // plus three samples, so the device sees A, zero, a gap of three, then B.
-        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let (core, device, time, mut tx, _guard) = at_a_held_tail(Vec::new());
         let clock = tx.clock.expect("a transmit clock");
         let b = continuation(&clock, 70_004, 1_000);
         let second = b.samples[0].clone();
@@ -4301,7 +4277,7 @@ mod tests {
         // the device burst ends with two zero samples after A's 29 999 accepted samples.
         for (fault, reason) in [(crate::device::FakeFault::StalledSend(13), "UR-22: a send did not complete"), (crate::device::FakeFault::FailSend(13), "fake: the send failed")] {
             let what = format!("{fault:?}");
-            let (core, device, time, mut tx, _frozen) = at_a_held_tail(vec![fault]);
+            let (core, device, time, mut tx, _guard) = at_a_held_tail(vec![fault]);
             let clock = tx.clock.expect("a transmit clock");
             give(&mut tx, continuation(&clock, 70_000, 1_000));
             device_at(&core, &time, &device, core.ticks(62_000_000));
@@ -4323,7 +4299,7 @@ mod tests {
     fn ur_23_a_continuation_s_first_send_that_takes_nothing_ends_the_device_burst() {
         // T5: B continues A's device burst; B's first payload send takes nothing. The device
         // burst is still open and ends with a two-zero EOB after A's last sample.
-        let (core, device, time, mut tx, _frozen) = at_a_held_tail(vec![crate::device::FakeFault::StalledSend(14)]);
+        let (core, device, time, mut tx, _guard) = at_a_held_tail(vec![crate::device::FakeFault::StalledSend(14)]);
         let clock = tx.clock.expect("a transmit clock");
         give(&mut tx, continuation(&clock, 70_000, 1_000));
         device_at(&core, &time, &device, core.ticks(62_000_000));
@@ -4349,7 +4325,7 @@ mod tests {
         // reverse booking is pinned here, on the controlled clock.
         let config = FakeConfig::default();
         let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -4378,7 +4354,7 @@ mod tests {
             let what = format!("{fault:?}");
             let config = FakeConfig { faults: vec![fault], ..FakeConfig::default() };
             let (core, device, time, events) = crate::provider::test_support::rig_with(config, Vec::new());
-            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -4444,7 +4420,7 @@ mod tests {
             let nth = format!("{fault:?}");
             let config = FakeConfig { faults: vec![fault], ..FakeConfig::default() };
             let (core, device, time, _events) = crate::provider::test_support::rig_with(config, Vec::new());
-            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -4488,7 +4464,7 @@ mod tests {
         }
 
         for fault in [crate::device::FakeFault::ShortSend(1), crate::device::FakeFault::FailSend(1)] {
-            let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(1, vec![fault.clone()], BTreeMap::new());
+            let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, vec![fault.clone()], BTreeMap::new());
             let start = 500_000;
             device_at(&core, &time, &device, clock.instant(start - 400_000));
             let wave: Vec<Iq> = (0..997).map(|i| [i as f32 / 1_000.0, -(i as f32) / 2_000.0]).collect();
@@ -4520,7 +4496,7 @@ mod tests {
             let faults = vec![fault.clone(), FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck)];
             let config = FakeConfig { faults, ..FakeConfig::default() };
             let (core, device, time, _events) = super::super::test_support::rig_with(config, Vec::new());
-            let frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
@@ -4544,11 +4520,8 @@ mod tests {
             txp_give(&mut tx, txp_burst(&clock, 1_000_000, 1, false, LatePolicy::DropAndFlag));
             // The flush's ack must be at or after the old front's padded end (UR-22): both clocks are past it before the reopen.
             device_at(&core, &time, &device, 201);
-            // The recovery flush waits for its ack on the device's clock: it runs as a participant, and the clock is held again before it ends.
-            let ((mut tx, passed), frozen) = crate::provider::test_support::released(frozen, &device.host(), move || {
-                let passed = tx.pass();
-                (tx, passed)
-            });
+            // The recovery flush waits for its ack on the device's clock: this thread is a participant, so the wait runs at clock speed.
+            let passed = tx.pass();
             assert!(passed, "{fault:?}: the owner did not reopen the uncertain streamer");
             crate::provider::test_support::assert_no_flush_rows(&core);
             let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
@@ -4564,7 +4537,6 @@ mod tests {
             let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
             assert_eq!(sends.len(), 4, "{fault:?}: {sends:?}");
             assert!(sends[3].contains("at=1000000 sob=true"), "{fault:?}: the timed burst did not follow the recovery flush: {sends:?}");
-            drop(frozen);
         }
     }
 
@@ -4597,7 +4569,7 @@ mod tests {
 
     #[test]
     fn ur_22_a_failed_one_sample_padded_eob_is_not_safe_until_flush_recovery() {
-        let (core, device, time, _events, clock, mut tx, frozen) = txp_high_rate_rig(1, vec![FakeFault::ShortSend(0)], BTreeMap::new());
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, vec![FakeFault::ShortSend(0)], BTreeMap::new());
         let start = 500_000;
         txp_give(&mut tx, txp_burst(&clock, start, 1, false, LatePolicy::DropAndFlag));
         assert!(tx.step(), "the one-sample payload did not reach the padded EOB send");
@@ -4610,11 +4582,8 @@ mod tests {
         assert!(lock(&core.rec).rejected.iter().any(|row| row["call"] == "tx_close"), "the failed EOB is identified as an uncertain close");
 
         device_at(&core, &time, &device, start + 3);
-        // The recovery flush waits for its ack on the device's clock: it runs as a participant, and the clock is held again before it ends.
-        let ((mut tx, recovered), frozen) = crate::provider::test_support::released(frozen, &device.host(), move || {
-            let recovered = tx.pass();
-            (tx, recovered)
-        });
+        // The recovery flush waits for its ack on the device's clock: this thread is a participant, so the wait runs at clock speed.
+        let recovered = tx.pass();
         assert!(recovered, "streamer replacement and recovery flush were not attempted");
         assert!(!tx.chain().needs_reopen());
         crate::provider::test_support::assert_no_flush_rows(&core);
@@ -4632,7 +4601,6 @@ mod tests {
         let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
         assert_eq!(sends.len(), 3, "the next burst follows the flush: {sends:?}");
         assert!(sends[2].contains("at=1000000 sob=true"), "the first later data packet remains timed: {sends:?}");
-        drop(frozen);
     }
 
     /// A repeat whose send is abandoned keeps its accepted cursor as the recovery front (UR-23), and its span stays open
@@ -4648,7 +4616,7 @@ mod tests {
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, _events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -4684,7 +4652,7 @@ mod tests {
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            let _guard = crate::provider::test_support::clock_guard(&device.host());
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -4759,10 +4727,7 @@ mod tests {
 
     /// A transmit owner on a frozen manual clock: the window `window_ns` (the default 10 ms when `None`) and RX `block_len`.
     #[allow(clippy::type_complexity)]
-    fn txp_rig(
-        window_ns: Option<i64>,
-        block_len: u32,
-    ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, crate::provider::test_support::Frozen) {
+    fn txp_rig(window_ns: Option<i64>, block_len: u32) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, crate::host::Driver) {
         txp_rig_rate(window_ns, block_len, 1e6, 200)
     }
 
@@ -4772,7 +4737,7 @@ mod tests {
         block_len: u32,
         rate: f64,
         ticks_per_sample: i64,
-    ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, crate::provider::test_support::Frozen) {
+    ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, crate::host::Driver) {
         txp_rig_faults(window_ns, block_len, rate, ticks_per_sample, Vec::new())
     }
 
@@ -4783,14 +4748,14 @@ mod tests {
         rate: f64,
         ticks_per_sample: i64,
         faults: Vec<FakeFault>,
-    ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, crate::provider::test_support::Frozen) {
+    ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, crate::host::Driver) {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, faults, ..FakeConfig::default() }));
         let mut description = super::super::test_support::default_description(block_len);
         if let Some(window) = window_ns {
             description.timing.tx_in_flight_ns = window;
         }
         let (core, time, events) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::new(), description);
-        let frozen = crate::provider::test_support::Frozen::of(&device);
+        let guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(rate), ..Settings::default() }).unwrap();
@@ -4798,7 +4763,7 @@ mod tests {
         let (to_tx, cmds) = std::sync::mpsc::channel();
         std::mem::forget(to_tx);
         let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        (core, device, time, events, clock, tx, frozen)
+        (core, device, time, events, clock, tx, guard)
     }
 
     #[allow(clippy::type_complexity)]
@@ -4806,10 +4771,10 @@ mod tests {
         channels: usize,
         faults: Vec<FakeFault>,
         inputs: BTreeMap<ContentHash, Arc<[u8]>>,
-    ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, crate::provider::test_support::Frozen) {
+    ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, crate::host::Driver) {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, faults, ..FakeConfig::default() }));
         let (core, time, events) = super::super::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let frozen = crate::provider::test_support::Frozen::of(&device);
+        let guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         let channel_ids: Vec<_> = (0..channels).collect();
         device.tx_open(0, &channel_ids).unwrap();
@@ -4820,7 +4785,7 @@ mod tests {
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         std::mem::forget(_to_tx);
         let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(channels as u32));
-        (core, device, time, events, clock, tx, frozen)
+        (core, device, time, events, clock, tx, guard)
     }
 
     /// Sample `i` of burst `k` is `[(i + 1) / 100 000, k / 10 000]`, so a played-out sample names its place.
@@ -4885,7 +4850,7 @@ mod tests {
 
     #[test]
     fn ur_23_txs_tiles_a_short_repeat_across_original_wraps_at_high_rate() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
         let wave: Vec<Iq> = (0..997).map(|i| [(i + 1) as f32 / 997.0, -(i as f32) / 1_000.0]).collect();
         let start = 2_000_000 - 996;
         let mut burst = txp_burst(&clock, start, wave.len(), true, LatePolicy::DropAndFlag);
@@ -4920,7 +4885,7 @@ mod tests {
 
     #[test]
     fn ur_22_repeat_wrap_is_not_a_new_burst_start() {
-        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 500, true, LatePolicy::DropAndFlag));
         assert!(tx.step());
         assert_eq!(sends(&device), [(2_500, true, false)]);
@@ -4933,7 +4898,7 @@ mod tests {
 
     #[test]
     fn ur_23_txs_a_held_cut_splits_a_high_rate_repeat_at_the_target() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
         let start = 500_000;
         device_at(&core, &time, &device, clock.instant(start - 400_000));
         let repeat = txp_burst(&clock, start, 50_000, true, LatePolicy::DropAndFlag);
@@ -4972,7 +4937,7 @@ mod tests {
         let of_kind = |events: &[ezsdr_kernel::event::Event], kind: &str| events.iter().filter(|event| event.kind.as_str() == kind).cloned().collect::<Vec<_>>();
 
         // Sol 3: A [20 000, 40 000) is moved to 42 000 by a dispatch at 40 000; B at 50 000 is booked.
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(Some(2_032_000), 2_000);
         let mut a = txp_burst(&clock, 20_000, 20_000, false, LatePolicy::SendAsapAndFlag);
         action(&mut a, 2);
         txp_book(&mut tx, &core, clock, a);
@@ -4997,7 +4962,7 @@ mod tests {
         assert_eq!(device.transmitted(clock.instant(50_000), expected.len()), expected, "B plays as booked");
 
         // M4: A(30 000) at 3 000 with B(10) joined at 33 000. A's dispatch at 1 001 moves it to 3 001, whose region reaches B's piece.
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(Some(2_032_000), 2_000);
         let mut a = txp_burst(&clock, 3_000, 30_000, false, LatePolicy::SendAsapAndFlag);
         action(&mut a, 2);
         txp_book(&mut tx, &core, clock, a);
@@ -5023,7 +4988,7 @@ mod tests {
         assert_eq!(device.transmitted(clock.instant(33_000), expected.len()), expected, "B plays as booked");
 
         // Free space: the same move with no booking after A is sent at the moved start, one SendAsap error.
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(Some(2_032_000), 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::SendAsapAndFlag));
         device_at(&core, &time, &device, txp_ticks(1_001));
         txp_drain(&mut tx);
@@ -5037,7 +5002,7 @@ mod tests {
     #[test]
     fn ur_23_s3_refused_move_frees_its_front() {
         // UR-23 (Sol 3): a refused move leaves the overlap rule. The refused head held [20 000, 40 002): a booking there is accepted.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_032_000), 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 20_000, false, LatePolicy::SendAsapAndFlag));
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 50_000, 1_000, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, txp_ticks(40_000));
@@ -5048,7 +5013,7 @@ mod tests {
         // C6's value half: a refused move keeps the burst's booked end in the value rule. A [20 000, 60 002) is refused at 40 000 by
         // B [70 000, 70 100): a booking that meets A's moved region starts after A's front, so its end is the later one, and no value
         // before A's end is taken.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_032_000), 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40_000, false, LatePolicy::SendAsapAndFlag));
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 70_000, 100, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, txp_ticks(40_000));
@@ -5069,7 +5034,7 @@ mod tests {
         let (b_wave, b_bytes) = waveform_input("f10_b", &[[0.75, -0.25]; 10]);
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -5098,7 +5063,7 @@ mod tests {
     #[test]
     fn ur_23_a_burst_at_the_handed_frontier_continues_the_open_burst() {
         // UR-23 (P1166): a held burst that starts at the open burst's first unhanded sample continues it on time, with no end-of-burst between.
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
+        let (core, device, time, events, clock, mut tx, _guard) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
         let start = 500_000;
         device_at(&core, &time, &device, clock.instant(start - 400_000));
         let repeat = txp_burst(&clock, start, 30_000, true, LatePolicy::DropAndFlag);
@@ -5126,7 +5091,7 @@ mod tests {
 
     #[test]
     fn ur_23_txs_stop_does_not_send_past_a_high_rate_bound() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
         let start = 500_000;
         device_at(&core, &time, &device, clock.instant(start - 400_000));
         let repeat = txp_burst(&clock, start, 30_000, true, LatePolicy::DropAndFlag);
@@ -5142,7 +5107,7 @@ mod tests {
     #[test]
     fn ur_23_txs_one_shots_keep_their_payload_and_end_on_the_last_sample() {
         for len in [1_000, 25_000] {
-            let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
+            let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
             let start = 10_000_000;
             device_at(&core, &time, &device, clock.instant(start + len as i64 - 1_200_000));
             let wave: Vec<Iq> = (0..len).map(|i| [0.1 + i as f32 / 100_000.0, -(i as f32) / 200_000.0]).collect();
@@ -5165,7 +5130,7 @@ mod tests {
 
     #[test]
     fn ur_23_txs_grouped_short_repeats_keep_channel_phase_aligned() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(2, Vec::new(), BTreeMap::new());
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(2, Vec::new(), BTreeMap::new());
         let start = 500_000;
         device_at(&core, &time, &device, clock.instant(start - 400_000));
         for channel in 0..2 {
@@ -5194,7 +5159,7 @@ mod tests {
     #[test]
     fn ur_23_txs_does_not_copy_repeats_at_or_above_the_send_cap() {
         for len in [20_000, 25_000] {
-            let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
+            let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
             let start = 500_000;
             device_at(&core, &time, &device, clock.instant(start - 400_000));
             let mut burst = txp_burst(&clock, start, len, true, LatePolicy::DropAndFlag);
@@ -5212,7 +5177,7 @@ mod tests {
 
     #[test]
     fn ur_23_m1_a_repeat_stops_short_of_a_window_edge_it_cannot_fill() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         for _ in 0..10 {
             if !tx.step() {
@@ -5239,7 +5204,7 @@ mod tests {
 
     #[test]
     fn ur_23_m2_the_last_part_of_a_burst_is_not_split_by_the_window() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_500, 6_800, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(sends(&device), [(2_500, true, false), (2_500, false, false)]);
@@ -5254,7 +5219,7 @@ mod tests {
 
     #[test]
     fn ur_23_m3_a_tiled_repeat_waits_for_a_full_chunk_across_wraps() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 9_000, 1_500, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(sends(&device), [(1_000, true, false)], "the first timed buffer takes what fits");
@@ -5270,7 +5235,7 @@ mod tests {
 
     #[test]
     fn ur_23_m4_a_continuation_waits_without_a_device_call() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(tx.open_next().unwrap(), 8_000);
@@ -5295,7 +5260,7 @@ mod tests {
     fn ur_22_a_short_first_send_is_padded_to_four() {
         // UR-22: a first send of one to three samples goes at once as one timed SOB+EOB of four, its zeros after its samples.
         for len in 1..=3 {
-            let (_, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+            let (_, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
             txp_give(&mut tx, txp_burst(&clock, 3_000, len, false, LatePolicy::DropAndFlag));
             txp_drain(&mut tx);
             assert_eq!(sends(&device), [(4, true, true)], "len {len}: {:?}", device.calls());
@@ -5313,7 +5278,7 @@ mod tests {
         // out from the arithmetic: 15, 30, 43 (N = 70), 150, 1 500 and 3 000 samples at 1, 2, 2.857, 10, 100 and 200 MS/s.
         for (rate, ticks_per_sample, gap) in [(1e6, 200, 15i64), (2e6, 100, 30), (200e6 / 70.0, 70, 43), (10e6, 20, 150), (100e6, 2, 1_500), (200e6, 1, 3_000)] {
             for len in [1usize, 3, 4, 10, 31, 32] {
-                let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig_rate(None, 2_000, rate, ticks_per_sample);
+                let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig_rate(None, 2_000, rate, ticks_per_sample);
                 // The burst starts 5 ms after the device's time zero at every rate, as the 1 MS/s rigs book theirs.
                 let start = (5_000.0 * rate / 1e6).round() as i64;
                 txp_book(&mut tx, &core, clock, txp_burst(&clock, start, len, false, LatePolicy::DropAndFlag));
@@ -5337,7 +5302,7 @@ mod tests {
         // RM-15: the record's front after a one-sample head (padded to four) is the gap of the stream's own rate past its padded end: 15 samples
         // at 1 MS/s and 30 at 2 on the 200 MHz root. The rig arms its record where it registers the clock (`register_in`).
         for (rate, ticks_per_sample, gap) in [(1e6, 200, 15), (2e6, 100, 30)] {
-            let (core, _device, _time, _events, clock, mut tx, _frozen) = txp_rig_rate(None, 2_000, rate, ticks_per_sample);
+            let (core, _device, _time, _events, clock, mut tx, _guard) = txp_rig_rate(None, 2_000, rate, ticks_per_sample);
             txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 1, false, LatePolicy::DropAndFlag));
             txp_drain(&mut tx);
             let mut streams = lock(&core.streams);
@@ -5358,7 +5323,7 @@ mod tests {
         for (rate, ticks_per_sample) in [(1e6f64, 200), (2e6, 100), (200e6 / 70.0, 70), (10e6, 20), (100e6, 2), (200e6, 1)] {
             let start = (6_000.0 * rate / 1e6).round() as i64;
             for stop in [true, false] {
-                let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig_rate(None, 2_000, rate, ticks_per_sample);
+                let (core, device, time, _events, clock, mut tx, _guard) = txp_rig_rate(None, 2_000, rate, ticks_per_sample);
                 txp_book(&mut tx, &core, clock, txp_burst(&clock, start, 33, false, LatePolicy::DropAndFlag));
                 txp_drain(&mut tx);
                 assert_eq!(sends(&device), [(32, true, false)], "{rate} S/s: {:?}", device.calls());
@@ -5400,7 +5365,7 @@ mod tests {
                 // The device's own verdict, on a rig of its own for each probe: a timed SOB one tick before the front is refused only while the
                 // fake's guard reaches it (the short bursts); at the front it is never refused for the guard.
                 for (delta, refused) in [(-1i64, accepted + 2 <= 32), (0, false)] {
-                    let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig_faults(Some(window_ns), 2_000, rate, ticks_per_sample, vec![FakeFault::ShortSend(0)]);
+                    let (core, device, time, _events, clock, mut tx, _guard) = txp_rig_faults(Some(window_ns), 2_000, rate, ticks_per_sample, vec![FakeFault::ShortSend(0)]);
                     txp_book(&mut tx, &core, clock, txp_burst(&clock, start, 200, false, LatePolicy::DropAndFlag));
                     txp_drain(&mut tx);
                     assert_eq!(sends(&device).first(), Some(&(accepted as usize, true, false)), "{case}: the first send is cut to half: {:?}", device.calls());
@@ -5419,7 +5384,7 @@ mod tests {
         // UR-22 (Q5): a 40-sample burst whose window lets 32 samples go first, then 8 that end it once the device lead already reaches
         // their end, so they are sent with end-of-burst at once rather than held. The 8 are a continuation (`device_sob` false), not the
         // device burst's first send, so the close fronts three samples past its padded end, not the gap: the short closed burst's rule does not apply.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_100_000), 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, 40, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, txp_ticks(2_932));
         txp_drain(&mut tx);
@@ -5434,7 +5399,7 @@ mod tests {
     #[test]
     fn ur_23_a_one_sample_continuation_eob_is_padded_to_two() {
         // UR-22 (N2): a one-sample continuation that closes the device burst is padded to two, not to four.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(tx.open_next().unwrap(), 8_000);
@@ -5452,7 +5417,7 @@ mod tests {
         // UR-22 (S3, #78): an open first send waits for 32 samples of window space, or for its whole length when that is shorter. The window
         // is 2 100 samples and the burst starts at 3 000: 28, then 31, samples of room at 928 and 931, nothing goes; at 932, 32. The device
         // lead (2 000 samples) still holds at 932, so the burst is not late.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_100_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 10_000, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, txp_ticks(928));
         txp_drain(&mut tx);
@@ -5470,7 +5435,7 @@ mod tests {
         // UR-22 (S3, #78, the bench's shape): a 10 000-sample burst at 1 MS/s whose window first admits 28 samples (at 928). The first send waits
         // for 32 (at 932), which still leaves the device lead before the start at 1 000, so FakeDevice sees no open first send under 30 samples:
         // no Underflow, no TimeError, one BurstAck, the whole waveform played.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_100_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 10_000, false, LatePolicy::DropAndFlag));
         for samples in [928, 932].into_iter().chain((1_432..14_000).step_by(500)) {
             device_at(&core, &time, &device, txp_ticks(samples));
@@ -5488,7 +5453,7 @@ mod tests {
     fn ur_22_a_repeat_of_one_to_five_samples_tiles_its_first_send() {
         // UR-22 (FS-6, S3): a repeat's first send is its waveform tiled to 32 payload samples; the window holds exactly 32.
         for len in [1usize, 3, 5] {
-            let (_, device, _time, _events, clock, mut tx, _frozen) = txp_rig(Some(3_032_000), 2_000);
+            let (_, device, _time, _events, clock, mut tx, _guard) = txp_rig(Some(3_032_000), 2_000);
             let mut burst = txp_burst(&clock, 3_000, len, true, LatePolicy::DropAndFlag);
             burst.tile_repeat();
             txp_give(&mut tx, burst);
@@ -5502,7 +5467,7 @@ mod tests {
     #[test]
     fn ur_23_a_short_first_send_closes_before_a_booking_at_its_end() {
         // UR-22 (N3): a padded short first send is closed; a Kernel burst booked at its payload end is not continued into the padding.
-        let (_, device, _time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (_, device, _time, events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 2, false, LatePolicy::DropAndFlag));
         txp_give(&mut tx, txp_burst(&clock, 3_002, 5, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
@@ -5521,7 +5486,7 @@ mod tests {
     #[test]
     fn ur_23_a_four_sample_first_send_is_not_held() {
         // UR-22 (FS-1, N1): a first send of four samples goes at once, its last sample is not held back.
-        let (_, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (_, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 4, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(sends(&device), [(4, true, true)], "{:?}", device.calls());
@@ -5531,7 +5496,7 @@ mod tests {
     fn ur_23_a_burst_of_31_or_32_is_sent_whole_without_a_held_tail() {
         // UR-22 (S3, #78): a finite burst of at most 32 samples is one closed device burst, with no sample held back.
         for len in [31, 32] {
-            let (_, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+            let (_, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
             txp_give(&mut tx, txp_burst(&clock, 3_000, len, false, LatePolicy::DropAndFlag));
             txp_drain(&mut tx);
             assert_eq!(sends(&device), [(len, true, true)], "len {len}: {:?}", device.calls());
@@ -5543,7 +5508,7 @@ mod tests {
     #[test]
     fn ur_23_a_33_sample_burst_sends_32_then_holds_one() {
         // UR-23 (S3, #78): a finite burst of 33 samples is not short: its first send is 32, and its last sample is held back to its end.
-        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 6_000, 33, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(sends(&device), [(32, true, false)], "{:?}", device.calls());
@@ -5558,7 +5523,7 @@ mod tests {
     fn ur_23_a_lone_burst_plays_every_sample_and_its_end_packet_is_its_last_sample() {
         // D74: a burst with nothing booked behind it plays all its samples; the held last sample goes with the end-of-burst packet.
         for len in [32usize, 33, 40] {
-            let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+            let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
             txp_book(&mut tx, &core, clock, txp_burst(&clock, 5_000, len, false, LatePolicy::DropAndFlag));
             txp_drain(&mut tx);
             device_at(&core, &time, &device, core.join_by(clock, 5_000 + len as i64) + 1);
@@ -5578,7 +5543,7 @@ mod tests {
         // this test gives the bursts without the record, so only the dispatch's verdict is tested.
         for len in [4usize, 10, 31, 32] {
             for (offset, late) in [(0i64, true), (14, true), (15, false)] {
-                let (_, device, _time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+                let (_, device, _time, events, clock, mut tx, _guard) = txp_rig(None, 2_000);
                 txp_give(&mut tx, txp_burst(&clock, 3_000, len, false, LatePolicy::DropAndFlag));
                 txp_give(&mut tx, txp_burst(&clock, 3_000 + len as i64 + offset, 4, false, LatePolicy::DropAndFlag));
                 txp_drain(&mut tx);
@@ -5599,7 +5564,7 @@ mod tests {
     #[test]
     fn ur_23_a_31_sample_burst_waits_for_all_31() {
         // UR-22 (S3, #78): a 31-sample burst's first send waits for all 31 of its samples, not for 32. The window holds 30 at once, 31 at 1 sample.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(3_030_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(3_030_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 31, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert!(sends(&device).is_empty(), "{:?}", device.calls());
@@ -5613,7 +5578,7 @@ mod tests {
         // UR-22 (S3, #78): after a failed first send, the next burst's first send waits for 32 samples of window space like any first send.
         let config = FakeConfig { faults: vec![crate::device::FakeFault::FailSend(0)], ..FakeConfig::default() };
         let (core, device, time, _events) = crate::provider::test_support::rig_with(config, Vec::new());
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
@@ -5636,7 +5601,7 @@ mod tests {
     #[test]
     fn ur_22_a_padded_send_counts_payload_only() {
         // UR-22 (FS-T4): the two samples of a padded first send are payload; its four device samples are not counted as payload.
-        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 2, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(sends(&device), [(4, true, true)], "{:?}", device.calls());
@@ -5649,7 +5614,7 @@ mod tests {
     #[test]
     fn ur_22_a_two_channel_one_sample_burst_is_padded_on_both_channels() {
         // UR-22 (D6): a one-sample burst on a two-channel stream is one timed SOB+EOB of four per call, padded on each channel; its front is the padded end + the gap (3 000 samples at 200 MS/s).
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(2, Vec::new(), BTreeMap::new());
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(2, Vec::new(), BTreeMap::new());
         let start = 500_000;
         for channel in 0..2 {
             device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
@@ -5671,7 +5636,7 @@ mod tests {
     #[test]
     fn ur_23_a_continuation_of_two_samples_is_sent_at_once_with_no_minimum() {
         // UR-23 (FS-7, TBD-b4): a continuation has no four-sample minimum: the two samples the window holds go at once. The window ends 2 samples after A's 7 000.
-        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(Some(7_002_000), 2_000);
+        let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(Some(7_002_000), 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 3_000, 4_000, false, LatePolicy::DropAndFlag));
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 7_000, 2, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
@@ -5683,7 +5648,7 @@ mod tests {
     #[test]
     fn ur_23_a_32_sample_window_takes_a_first_send_of_32() {
         // UR-22 (N5, S3): a window that holds exactly 32 samples of the burst admits a first send of 32; the next chunk waits for the window to empty.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_032_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, txp_ticks(1_000));
         txp_drain(&mut tx);
@@ -5735,7 +5700,7 @@ mod tests {
     #[test]
     fn ur_28_a_device_burst_over_two_kernel_bursts_keeps_both_records() {
         // UR-28, UR-23 (F8-d): B booked at A's end continues A's device burst: one pending correlation for the device burst's start, and both Kernel bursts in the record.
-        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let (core, device, time, mut tx, _guard) = at_a_held_tail(Vec::new());
         let clock = tx.clock.expect("a transmit clock");
         let b = continuation(&clock, 70_000, 1_000);
         give(&mut tx, b);
@@ -5751,7 +5716,7 @@ mod tests {
     #[test]
     fn ur_22_a_first_send_is_never_undersized() {
         // UR-22 (F6-c, S3): every first send of one to nine samples, each its own closed device burst, reaches the device padded to four samples per channel; an open first send carries at least 32.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         for (index, len) in [1usize, 2, 3, 4, 5, 9].into_iter().enumerate() {
             let start = 3_000 + 10_000 * index as i64;
             device_at(&core, &time, &device, txp_ticks(start - 2_000));
@@ -5766,7 +5731,7 @@ mod tests {
     #[test]
     fn ur_23_a_held_tail_is_timed_at_its_instant() {
         // UR-23 (F5-e): the held tail goes out at its own sample instant, not untimed.
-        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let (core, device, time, mut tx, _guard) = at_a_held_tail(Vec::new());
         let clock = tx.clock.expect("a transmit clock");
         device_at(&core, &time, &device, core.ticks(68_000_000));
         txp_drain(&mut tx);
@@ -5777,7 +5742,7 @@ mod tests {
     #[test]
     fn ur_23_a_burst_at_the_end_of_a_closed_burst_is_late() {
         // UR-23 (F4-late): a burst booked at the closed device burst's exclusive end is late (gap 0), not continued.
-        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let (core, device, time, mut tx, _guard) = at_a_held_tail(Vec::new());
         let clock = tx.clock.expect("a transmit clock");
         device_at(&core, &time, &device, core.ticks(68_000_000));
         txp_drain(&mut tx);
@@ -5792,7 +5757,7 @@ mod tests {
     #[test]
     fn ur_23_a_short_burst_then_an_adjacent_burst_booked_after_dispatch_follows_the_late_policy() {
         // UR-22 (N3): a short first send is padded and closed at once; an adjacent burst booked after that dispatch is judged against the padded front.
-        let (_, device, _time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (_, device, _time, events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 2, false, LatePolicy::DropAndFlag));
         assert!(tx.step());
         assert_eq!(sends(&device), [(4, true, true)], "{:?}", device.calls());
@@ -5808,7 +5773,7 @@ mod tests {
     #[test]
     fn ur_23_stop_while_the_first_send_waits_sends_nothing() {
         // UR-22 (FS-3): a first send waiting for four samples of window space sends nothing once Stop cancels it.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_004_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, txp_ticks(999));
         txp_drain(&mut tx);
@@ -5822,7 +5787,7 @@ mod tests {
     #[test]
     fn ur_23_loss_while_the_first_send_waits_sends_nothing() {
         // UR-22 (FS-3): a device loss while a first send waits for window space sends nothing more.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_004_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, txp_ticks(999));
         txp_drain(&mut tx);
@@ -5835,7 +5800,7 @@ mod tests {
     #[test]
     fn ur_23_a_wait_past_the_start_lead_follows_the_late_policy() {
         // UR-22 (FS-5): a first send that waited past its start is judged by its late policy before dispatch, not sent.
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(Some(2_004_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, txp_ticks(999));
         txp_drain(&mut tx);
@@ -5851,7 +5816,7 @@ mod tests {
     #[test]
     fn ur_23_a_wait_past_the_start_lead_moves_a_send_asap_first_send() {
         // UR-21, UR-22 (FS-5, SendAsapAndFlag): a first send that waited past its start is moved to the cursor, not dropped; the moved send opens a device burst.
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(Some(2_032_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::SendAsapAndFlag));
         device_at(&core, &time, &device, txp_ticks(999));
         txp_drain(&mut tx);
@@ -5869,7 +5834,7 @@ mod tests {
     /// appears at 1 000 samples; the start at 3 000 is then a device lead (2 000 samples) away, so `now_ticks` is the lead boundary
     /// or one tick past it. Returns the sends and the TIME_ERROR outcomes.
     fn first_send_at_its_lead(policy: LatePolicy, now_ticks: i64) -> (Vec<(usize, bool, bool)>, Vec<String>) {
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(Some(2_032_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, false, policy));
         device_at(&core, &time, &device, txp_ticks(999));
         txp_drain(&mut tx);
@@ -5911,7 +5876,7 @@ mod tests {
     #[test]
     fn ur_23_a_long_burst_in_many_chunks_plays_contiguously() {
         // UR-23 (F5-d): a burst sent in many window-sized chunks plays every sample once, in place, as one device burst.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_200_000), 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(Some(2_200_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 3_000, false, LatePolicy::DropAndFlag));
         for step in 0..600 {
             device_at(&core, &time, &device, txp_ticks(100 * step));
@@ -5941,7 +5906,7 @@ mod tests {
     #[test]
     fn ur_23_m4c_a_stop_during_a_continuation_s_wait_ends_the_device_burst_once() {
         // The waiting state (an open burst still `first`, its device burst continued) meets Stop, with and without a held tail.
-        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         txp_give(&mut tx, txp_burst(&clock, 9_600, 4_000, false, LatePolicy::DropAndFlag));
@@ -5953,7 +5918,7 @@ mod tests {
         assert!(tx.open_next().is_none() && tx.chain().next().is_none() && held_keys(&tx).is_empty());
         assert_eq!(e1::notes(&core), ["UR-26: cancelled by Stop"], "#85: the continuation issued nothing");
         // With a held tail (M9's state): the tail goes out as the device burst's last sample, with the end-of-burst.
-        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 3_000, 6_000, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 9_000, 4_000, false, LatePolicy::DropAndFlag));
@@ -5968,7 +5933,7 @@ mod tests {
 
     #[test]
     fn ur_23_m4b_the_buffer_before_a_held_start_is_not_split() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         txp_give(&mut tx, txp_burst(&clock, 10_200, 4_000, false, LatePolicy::DropAndFlag));
@@ -5983,7 +5948,7 @@ mod tests {
 
     #[test]
     fn ur_23_m5_the_first_timed_buffer_takes_what_fits() {
-        let (_, device, _time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_200_000), 2_000);
+        let (_, device, _time, _events, clock, mut tx, _guard) = txp_rig(Some(2_200_000), 2_000);
         txp_give(&mut tx, txp_burst(&clock, 2_000, 30_000, true, LatePolicy::DropAndFlag));
         assert!(tx.step(), "not a wait: the burst's start is its own lead away");
         assert_eq!(sends(&device), [(200, true, false)], "chunk 550, 200 samples of window");
@@ -5993,7 +5958,7 @@ mod tests {
 
     #[test]
     fn ur_23_m8_a_long_repeat_sends_full_chunks_as_the_window_advances() {
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         for ms in 1..=10 {
@@ -6009,7 +5974,7 @@ mod tests {
 
     #[test]
     fn ur_23_m9_a_waiting_continuation_leaves_the_held_tail_alone() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_book(&mut tx, &core, clock, txp_burst(&clock, 3_000, 6_000, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(sends(&device), [(2_500, true, false), (2_500, false, false), (999, false, false)]);
@@ -6028,7 +5993,7 @@ mod tests {
 
     #[test]
     fn ur_23_a_held_tails_keep_each_channel_sample() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(2, Vec::new(), BTreeMap::new());
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_high_rate_rig(2, Vec::new(), BTreeMap::new());
         let start = 500_000;
         for channel in 0..2 {
             device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
@@ -6062,7 +6027,7 @@ mod tests {
 
     #[test]
     fn ur_23_m10_a_waiting_burst_whose_timeline_passed_is_abandoned() {
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         device_at(&core, &time, &device, txp_ticks(9_001));
@@ -6075,7 +6040,7 @@ mod tests {
 
     #[test]
     fn ur_23_m11_tx_sizing_is_independent_of_receive_block_len() {
-        let (_, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 1);
+        let (_, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 1);
         txp_give(&mut tx, txp_burst(&clock, 3_000, 5, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(tx.open_next().unwrap(), 8_000);
@@ -6084,7 +6049,7 @@ mod tests {
 
     #[test]
     fn ur_23_m12_the_count_is_samples_per_channel() {
-        let (_, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        let (_, device, _time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
         tx.channels = Channels::first(2);
         device.tx_open(0, &[0, 1]).unwrap();
         let mut burst = txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag);
@@ -6105,7 +6070,7 @@ mod tests {
         let spy = Arc::new(super::super::test_support::TxSpy::new(inner.clone()));
         setup(&spy);
         let (core, time, events) = super::super::test_support::rig_on_description(spy.clone(), Vec::new(), BTreeMap::new(), super::super::test_support::default_description(2_000));
-        let frozen = crate::provider::test_support::Frozen::of(&inner);
+        let guard = crate::provider::test_support::clock_guard(&inner.host());
         device_at(&core, &time, &inner, 0);
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let host = core.device.host();
@@ -6121,7 +6086,7 @@ mod tests {
             senders.push(to_tx);
             threads.push(host.spawn(&super::super::tx_name(k), move || tx.run()).expect("a participant thread"));
         }
-        drop(frozen);
+        drop(guard);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         for k in 0..owners {
             let name = super::super::tx_name(k);
@@ -6203,13 +6168,13 @@ mod tests {
     /// An owner of the 100 kS/s transmit stream on a `TxSpy`: a 50 ms window (5 000 samples, buffers of 1 250) and a repeat
     /// burst at sample 1 250 in its channel, which fills the window with three buffers: the next one is 12.5 ms away.
     #[allow(clippy::type_complexity)]
-    fn txp_idle_owner() -> (Arc<Core>, Arc<FakeDevice>, Arc<super::super::test_support::TxSpy>, std::sync::mpsc::Sender<TxCmd>, Tx, crate::provider::test_support::Frozen) {
+    fn txp_idle_owner() -> (Arc<Core>, Arc<FakeDevice>, Arc<super::super::test_support::TxSpy>, std::sync::mpsc::Sender<TxCmd>, Tx, crate::host::Driver) {
         let inner = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
         let spy = Arc::new(super::super::test_support::TxSpy::new(inner.clone()));
         let mut description = super::super::test_support::default_description(2_000);
         description.timing.tx_in_flight_ns = 50_000_000;
         let (core, time, _events) = super::super::test_support::rig_on_description(spy.clone(), Vec::new(), BTreeMap::new(), description);
-        let frozen = crate::provider::test_support::Frozen::of(&inner);
+        let guard = crate::provider::test_support::clock_guard(&inner.host());
         device_at(&core, &time, &inner, 0);
         inner.tx_open(0, &[0]).unwrap();
         inner.apply(Dir::Tx, 0, &Settings { rate: Some(1e5), ..Settings::default() }).unwrap();
@@ -6218,17 +6183,17 @@ mod tests {
         let burst = txp_burst(&clock, 1_250, 5_000, true, LatePolicy::DropAndFlag);
         lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).book.list.book(burst);
         let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        (core, inner, spy, to_tx, tx, frozen)
+        (core, inner, spy, to_tx, tx, guard)
     }
 
     const TXP_IDLE: std::time::Duration = std::time::Duration::from_micros(200);
 
     #[test]
     fn ur_23_m8b_a_waiting_owner_sleeps_an_idle_period_between_looks() {
-        let (core, _device, spy, to_tx, tx, frozen) = txp_idle_owner();
+        let (core, _device, spy, to_tx, tx, guard) = txp_idle_owner();
         let (snapshots, release) = spy.trap_idle(3, 5);
         let owner = core.device.host().spawn("tx-idle", move || tx.run()).expect("a participant thread");
-        drop(frozen);
+        drop(guard);
         // The owner's own thread takes the snapshot at its fifth idle look and waits on a channel (the clock stands still);
         // this thread only receives it, queues the Shutdown and lets it go.
         let snapshot = snapshots.recv_timeout(std::time::Duration::from_secs(10)).expect("five idle looks");
@@ -6251,7 +6216,7 @@ mod tests {
 
     #[test]
     fn ur_23_m6_a_waiting_owner_wakes_for_a_stop_within_an_idle_period() {
-        let (core, _device, spy, to_tx, tx, frozen) = txp_idle_owner();
+        let (core, _device, spy, to_tx, tx, guard) = txp_idle_owner();
         let host = core.device.host();
         let (woken, woken_rx) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel();
@@ -6261,7 +6226,7 @@ mod tests {
                 tx.run();
             })
             .expect("a participant thread");
-        drop(frozen);
+        drop(guard);
         // The owner's first wake, held with its deadline: the clock reads that deadline, however late this thread runs.
         woken_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the owner's first idle wake");
         let woke = host.now();
@@ -6303,7 +6268,7 @@ mod tests {
 
     /// The owner on transmit stream 0's clock with `channels` channels, as `arm` leaves it: the connect values (F1) are on the
     /// device and the stream's mark is generation 0 (M1). The sender is the stream's command channel.
-    type OwnerRig = (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, Frozen, Arc<ezsdr_kernel::event::EventCollector>, std::sync::mpsc::Sender<TxCmd>);
+    type OwnerRig = (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, crate::host::Driver, Arc<ezsdr_kernel::event::EventCollector>, std::sync::mpsc::Sender<TxCmd>);
 
     fn owner(channels: usize) -> OwnerRig {
         owner_with(channels, Vec::new())
@@ -6312,7 +6277,7 @@ mod tests {
     fn owner_with(channels: usize, faults: Vec<FakeFault>) -> OwnerRig {
         let config = FakeConfig { faults, ..FakeConfig::default() };
         let (core, device, time, events) = super::super::test_support::rig_with(config, Vec::new());
-        let frozen = Frozen::of(&device);
+        let guard = clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &(0..channels).collect::<Vec<_>>()).unwrap();
         for chan in 0..channels {
@@ -6322,7 +6287,7 @@ mod tests {
         lock(&core.streams).record_configured(stream_key(Dir::Tx, 0), Some(0));
         let (to_tx, cmds) = std::sync::mpsc::channel();
         let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(channels as u32));
-        (core, device, time, tx, frozen, events, to_tx)
+        (core, device, time, tx, guard, events, to_tx)
     }
 
     /// The device time of each transmit apply the owner makes, read by the `apply` probe.
@@ -6389,7 +6354,7 @@ mod tests {
     #[test]
     fn ur_25_a_burst_whose_snapshot_equals_the_device_s_makes_no_apply() {
         // M1: the connect values are generation 0, which arm publishes, so the first burst with no new value applies nothing.
-        let (core, device, time, mut tx, _frozen, _events, _to_tx) = owner(1);
+        let (core, device, time, mut tx, _guard, _events, _to_tx) = owner(1);
         let applies = record_applies(&core, &device);
         let clock = tx.clock.expect("a clock");
         give(&mut tx, valued(&clock, 20_000, 4, 1, 0, F1, 1));
@@ -6401,7 +6366,7 @@ mod tests {
     #[test]
     fn ur_25_a_value_after_a_burst_ends_is_applied_before_the_next_burst() {
         // S1 (R4): A plays the connect values; B's new generation is applied after A's last sample and before B's first send.
-        let (core, device, time, mut tx, _frozen, _events, _to_tx) = owner(1);
+        let (core, device, time, mut tx, _guard, _events, _to_tx) = owner(1);
         let applies = record_applies(&core, &device);
         let clock = tx.clock.expect("a clock");
         give(&mut tx, valued(&clock, 20_000, 4, 1, 0, F1, 1));
@@ -6420,7 +6385,7 @@ mod tests {
     fn ur_23_a_burst_at_a_held_tail_with_a_new_generation_is_configured_before_it() {
         // S1 (R4): a burst booked at a held tail's end with a new generation is not a continuation of the device burst, which
         // would play the old values: the device burst ends, the configure runs, and only then does the burst play.
-        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let (core, device, time, mut tx, _guard) = at_a_held_tail(Vec::new());
         let clock = tx.clock.expect("a transmit clock");
         let applies = record_applies(&core, &device);
         give(&mut tx, valued(&clock, 70_000, 4, 2, 1, F2, 1));
@@ -6434,7 +6399,7 @@ mod tests {
     #[test]
     fn ur_23_a_contiguous_burst_with_the_same_generation_makes_no_configure_call() {
         // S9 (F-24): a contiguous burst of the same generation continues the device burst; no apply is made mid-burst.
-        let (core, device, time, mut tx, _frozen, _events, _to_tx) = owner(1);
+        let (core, device, time, mut tx, _guard, _events, _to_tx) = owner(1);
         let applies = record_applies(&core, &device);
         let clock = tx.clock.expect("a clock");
         give(&mut tx, valued(&clock, 20_000, 40, 1, 1, F2, 1));
@@ -6450,7 +6415,7 @@ mod tests {
     #[test]
     fn ur_25_an_equal_value_after_a_new_one_configures_once() {
         // Sol 7: a new generation with an equal value configures; a later burst of that generation configures nothing.
-        let (core, device, time, mut tx, _frozen, _events, _to_tx) = owner(1);
+        let (core, device, time, mut tx, _guard, _events, _to_tx) = owner(1);
         let applies = record_applies(&core, &device);
         let clock = tx.clock.expect("a clock");
         give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F1, 1));
@@ -6466,7 +6431,7 @@ mod tests {
     fn ur_21_a_refused_configure_refuses_the_burst_and_the_fixed_value_plays_on_the_same_clock() {
         // S7 (R5, M3): a refused configure refuses its burst with its Action id; nothing is sent, the stream is not halted, the mark
         // is None, and the next burst configures again while the refused value stays; a later value (F3) ends the refusal.
-        let (core, device, time, mut tx, _frozen, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
+        let (core, device, time, mut tx, _guard, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
         let clock = tx.clock.expect("a clock");
         give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F2, 1));
         turns(&core, &time, &device, &mut tx, 1, 15, 1);
@@ -6492,7 +6457,7 @@ mod tests {
     fn ur_21_a_partial_configure_refusal_sends_nothing_and_the_retry_configures_both() {
         // S7 partial (R4, R5): channel 0 applies and channel 1 is refused: the mark is None, nothing is sent, and the retry
         // configures both channels with a corrected value.
-        let (core, device, time, mut tx, _frozen, events, _to_tx) = owner_with(2, vec![FakeFault::TxApplyRefused(1, F2)]);
+        let (core, device, time, mut tx, _guard, events, _to_tx) = owner_with(2, vec![FakeFault::TxApplyRefused(1, F2)]);
         let clock = tx.clock.expect("a clock");
         give(&mut tx, valued(&clock, 20_000, 4, 1, 1, F2, 2));
         turns(&core, &time, &device, &mut tx, 1, 15, 1);
@@ -6516,7 +6481,7 @@ mod tests {
         let (one, one_bytes) = waveform_input("a1", &[[0.5, 0.0]; 1]);
         let inputs = BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes)), (one.hash.clone(), Arc::<[u8]>::from(one_bytes))]);
         let (core, time, events) = super::super::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let _frozen = Frozen::of(&device);
+        let _guard = clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), freq: Some(F1), ..Settings::default() }).unwrap();
@@ -6553,7 +6518,7 @@ mod tests {
     fn ur_22_a_stop_during_the_configure_leaves_no_payload_after_it() {
         // M2: a Stop that arrives while the configure is paused does not abort it; the configure completes and publishes its
         // generation, and the next turn drains the Stop and cancels the burst before any send.
-        let (core, device, time, mut tx, _frozen, _events, _to_tx) = owner(1);
+        let (core, device, time, mut tx, _guard, _events, _to_tx) = owner(1);
         let clock = tx.clock.expect("a clock");
         let stopper = core.clone();
         super::super::test_support::probe(&core, "tx_configure_before_mark", move |_| {
@@ -6571,7 +6536,7 @@ mod tests {
     #[test]
     fn ur_22_a_loss_during_the_configure_clears_the_mark() {
         // S10 (Sol 4): a loss during the configure keeps the mark None: the configure's publication is not made after the loss.
-        let (core, device, time, mut tx, _frozen, _events, _to_tx) = owner(1);
+        let (core, device, time, mut tx, _guard, _events, _to_tx) = owner(1);
         let clock = tx.clock.expect("a clock");
         let lost = core.clone();
         super::super::test_support::probe(&core, "tx_configure_before_mark", move |_| lost.device_lost("test: the device is lost during the configure"));
@@ -6599,7 +6564,7 @@ mod tests {
     fn ur_23_a_value_waits_for_a_burst_moved_at_dispatch_past_its_booked_end() {
         // Owner guard (a): A is booked to end at 20 004 and is dispatched late, moved to 21 000. B's value waits for A's moved
         // front (its device burst closes at 21 004 and fronts at 21 019, UR-22), not for the booked end, though A's device burst has already closed at 19 ms.
-        let (core, device, time, mut tx, _frozen, _events, _to_tx) = owner(1);
+        let (core, device, time, mut tx, _guard, _events, _to_tx) = owner(1);
         let applies = record_applies(&core, &device);
         let clock = tx.clock.expect("a clock");
         let mut moved = valued(&clock, 20_000, 4, 1, 0, F1, 1);
@@ -6621,7 +6586,7 @@ mod tests {
     fn ur_23_a_value_waits_for_a_padded_one_sample_burst() {
         // Owner guard (b): a one-sample burst at 20 000 is sent padded to four samples, a device burst that ends at 20 004 and fronts
         // at 20 019 (UR-22); B's value waits for that front, not for the payload's end at 20 001.
-        let (core, device, time, mut tx, _frozen, _events, _to_tx) = owner(1);
+        let (core, device, time, mut tx, _guard, _events, _to_tx) = owner(1);
         let applies = record_applies(&core, &device);
         let clock = tx.clock.expect("a clock");
         give(&mut tx, valued(&clock, 20_000, 1, 1, 0, F1, 1));
@@ -6641,7 +6606,7 @@ mod tests {
     fn ur_23_a_value_waits_for_a_stop_s_held_tail() {
         // Owner guard (c) (m9): after a Stop, A's held sample and the two-sample close end the device burst at 70 001 and it fronts at 70 004
         // (close_start + 5). A value received at 70 000 (the Stop's bound) waits for that front: no apply in [70 000, 70 004).
-        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let (core, device, time, mut tx, _guard) = at_a_held_tail(Vec::new());
         let clock = tx.clock.expect("a transmit clock");
         let applies = record_applies(&core, &device);
         device_at(&core, &time, &device, core.ticks(63_000_000));
@@ -6661,7 +6626,7 @@ mod tests {
         // S8 (R4): a configure that runs until 23 ms makes the burst booked at 20 ms late when its turn comes after the configure.
         // The late policy decides then: SendAsap moves it and sends it after the apply; Drop drops it, reported, with no send.
         for (policy, outcome) in [(LatePolicy::SendAsapAndFlag, "send_asap"), (LatePolicy::DropAndFlag, "drop")] {
-            let (core, device, time, mut tx, _frozen, events, _to_tx) = owner(1);
+            let (core, device, time, mut tx, _guard, events, _to_tx) = owner(1);
             let clock = tx.clock.expect("a clock");
             let (slow_core, slow_time, slow_device) = (core.clone(), time.clone(), device.clone());
             super::super::test_support::probe(&core, "apply", move |_| device_at(&slow_core, &slow_time, &slow_device, slow_core.ticks(23_000_000)));
@@ -6686,7 +6651,7 @@ mod tests {
     fn ur_22_a_provider_stop_during_the_configure_keeps_the_mark_and_cancels_the_burst() {
         // M2 (UR-25, UR-26): Provider::stop between the two channels' applies. Both are applied, so the mark is Some(1); the
         // claim is back; the burst is cancelled with ProviderStop; no payload follows.
-        let (core, device, time, mut tx, frozen, events, to_tx) = owner(2);
+        let (core, device, time, mut tx, _guard, events, to_tx) = owner(2);
         let clock = tx.clock.expect("a clock");
         let key = stream_key(Dir::Tx, 0);
         let stopper = core.clone();
@@ -6711,7 +6676,6 @@ mod tests {
             let claim = streams.claim_owner(key).expect("the configure's claim is released");
             streams.give_back(claim);
         }
-        let _driver = handed_over(frozen, &core.device.host());
         tx.shutdown();
         assert!(!traffic(&device, 2).iter().any(|call| call.starts_with("tx_send ")), "no payload after Provider::stop: {:?}", traffic(&device, 2));
         assert!(held_keys(&tx).is_empty(), "the burst is cancelled");
@@ -6722,9 +6686,8 @@ mod tests {
     #[test]
     fn ur_22_a_reopen_keeps_the_mark_and_a_loss_clears_it() {
         // F5: a reopen of the streamer keeps the values the device holds; a loss clears the mark.
-        let (core, device, _time, mut tx, frozen, _events, _to_tx) = owner(1);
+        let (core, device, _time, mut tx, _guard, _events, _to_tx) = owner(1);
         let key = stream_key(Dir::Tx, 0);
-        let _driver = handed_over(frozen, &device.host());
         lock(&core.streams).record_configured(key, Some(1));
         tx.chain().mark_reopen_needed();
         assert!(tx.pass(), "the reopen runs");
@@ -6738,9 +6701,8 @@ mod tests {
     #[test]
     fn ur_22_a_loss_during_the_reopen_clears_the_mark_the_reopen_read() {
         // F5, the reopen's own race: the device is lost after the reopen returned Ok and before its mark is written back.
-        let (core, device, _time, mut tx, frozen, _events, _to_tx) = owner(1);
+        let (core, device, _time, mut tx, _guard, _events, _to_tx) = owner(1);
         let key = stream_key(Dir::Tx, 0);
-        let _driver = handed_over(frozen, &device.host());
         lock(&core.streams).record_configured(key, Some(1));
         tx.chain().mark_reopen_needed();
         let lost = core.clone();
@@ -6753,7 +6715,7 @@ mod tests {
     #[test]
     fn ur_28_a_value_during_an_underflow_recovery_is_applied_after_the_recovery() {
         // S10 (R4): a value due while a recovery is pending waits for the reopen; the configure comes after it.
-        let (core, device, time, mut tx, frozen, _events, _to_tx) = owner(1);
+        let (core, device, time, mut tx, _guard, _events, _to_tx) = owner(1);
         let clock = tx.clock.expect("a clock");
         let applies = record_applies(&core, &device);
         tx.chain().mark_reopen_needed();
@@ -6761,9 +6723,8 @@ mod tests {
         turns(&core, &time, &device, &mut tx, 1, 15, 1);
         assert!(applies.lock().unwrap().is_empty(), "no configure during the recovery: {:?}", traffic(&device, 1));
         let before = device.calls().len();
-        // The reopen needs the device's clock to run: the test thread takes the clock from the frozen participant and holds it from then on. It is
-        // slow before the reopen on purpose: no device time passes while it is not waiting on the clock (note 51 §4.4).
-        let _driver = handed_over(frozen, &device.host());
+        // The reopen needs the device's clock to run: the test thread is its participant from the rig on. It is slow before the reopen on purpose:
+        // no device time passes while it is not waiting on the clock (note 51 §4.4).
         let held = device.host().now();
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(device.host().now(), held, "the clock ran while the test thread, which holds it, was slow");
@@ -6781,7 +6742,7 @@ mod tests {
         // alone, and stream 0's sends stay contiguous through it.
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let (core, time, events) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::new(), two_tx_description());
-        let _frozen = Frozen::of(&device);
+        let _guard = clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.tx_open(1, &[1]).unwrap();
@@ -6838,7 +6799,7 @@ mod tests {
         tx: Tx,
         clock: Clock,
         waves: Vec<ezsdr_kernel::manifest::ArtifactRef>,
-        _frozen: Frozen,
+        _guard: crate::host::Driver,
     }
 
     fn switch_rig(waves: Vec<Vec<Iq>>) -> SwitchRig {
@@ -6860,14 +6821,14 @@ mod tests {
             refs.push(wave);
         }
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let frozen = Frozen::of(&device);
+        let guard = clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(200e6 / n as f64), ..Settings::default() }).unwrap();
         let (control, cmds) = booking_control_on(&core, core.register(Dir::Tx, n, 0).unwrap());
         let clock = tx_clock(&core);
         let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        SwitchRig { core, device, time, events, control, tx, clock, waves: refs, _frozen: frozen }
+        SwitchRig { core, device, time, events, control, tx, clock, waves: refs, _guard: guard }
     }
 
     /// The switch mark (RM-37): `radio.repeat_operation = "switch"`.
@@ -7175,7 +7136,6 @@ mod tests {
         run(&mut rig, 0, 3);
         book_switch(&mut rig, 2, 3_000, 1);
         run(&mut rig, 3, 3);
-        let _driver = handed_over(rig._frozen, &rig.device.host());
         rig.tx.chain().mark_reopen_needed();
         assert!(rig.tx.pass(), "the reopen runs");
         assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled");

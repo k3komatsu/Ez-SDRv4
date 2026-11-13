@@ -216,7 +216,7 @@ fn n99_u7_a_stop_or_a_loss_that_comes_during_the_send_is_not_undone_by_its_aband
         [("a Stop, a short send", FakeFault::ShortSend(0), false), ("a Stop, a failed send", FakeFault::FailSend(0), false), ("a device loss, a short send", FakeFault::ShortSend(0), true)]
     {
         let rig = abc(vec![fault]);
-        let SwitchRig { core, device, time, mut control, mut tx, clock, waves, _frozen, .. } = rig;
+        let SwitchRig { core, device, time, mut control, mut tx, clock, waves, _guard, .. } = rig;
         for (id, wave, k) in [(1, 0, 10_000), (2, 1, 12_000)] {
             book_with(&mut control, &core, id, 0, clock, k, &waves[wave], false, LatePolicy::DropAndFlag, BTreeMap::new());
         }
@@ -278,7 +278,7 @@ fn n99_u10_a_receipt_at_the_seam_is_decided_by_the_record_it_finds() {
     // is accepted as a join: the abandon then frames it. A B received after the abandon's section (the fourth lock) is refused.
     for (nth, accepted_at_seam) in [(3, true), (4, false)] {
         let rig = abc(vec![FakeFault::ShortSend(0)]);
-        let SwitchRig { core, device, time, events, mut control, mut tx, clock, waves, _frozen } = rig;
+        let SwitchRig { core, device, time, events, mut control, mut tx, clock, waves, _guard } = rig;
         book_with(&mut control, &core, 1, 0, clock, 10_000, &waves[0], false, LatePolicy::DropAndFlag, BTreeMap::new());
         CONTROL.with(|slot| *slot.borrow_mut() = Some(control));
         let wave = waves[1].clone();

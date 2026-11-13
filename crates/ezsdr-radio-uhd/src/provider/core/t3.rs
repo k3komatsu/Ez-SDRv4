@@ -1,11 +1,11 @@
 //! The recovery flush (T3) as a confirmed, bounded retry (UR-22, #75): the strict attempt, the loop that runs it on fresh streamers, and the
-//! single attempt the open at `arm` keeps while `OPEN_FLUSH_CONFIRMED` is off. The device's clock is the fake's manual one, held still
-//! (`Frozen`) while the test reads it and run as a participant (`released`) while the Core waits on it, so every instant is exact.
+//! single attempt the open at `arm` keeps while `OPEN_FLUSH_CONFIRMED` is off. The device's clock is the fake's manual one, held by the test
+//! thread as a participant (`clock_guard`): it stands still while the test reads it and runs while the Core waits on it, so every instant is exact.
 
 use super::*;
 use crate::ClockMode;
 use crate::device::{FakeConfig, FakeDevice, FakeFault, TxCode, TxReport};
-use crate::provider::test_support::{Frozen, LockSpy, ReportFeed, flush_attempt_rows, probe, released, rig_on, rig_with, t3_calls};
+use crate::provider::test_support::{LockSpy, ReportFeed, clock_guard, flush_attempt_rows, probe, rig_on, rig_with, t3_calls};
 use ezsdr_kernel::event::EventCollector;
 use std::sync::atomic::AtomicUsize;
 
@@ -36,12 +36,12 @@ fn flush_acks(core: &Core) -> Vec<(Option<u64>, Option<i64>)> {
 }
 
 /// A manual-clock rig held still: the Core, the fake, the clock's hold and the events.
-fn held_rig(faults: Vec<FakeFault>) -> (Arc<Core>, Arc<FakeDevice>, Frozen, Arc<EventCollector>) {
+fn held_rig(faults: Vec<FakeFault>) -> (Arc<Core>, Arc<FakeDevice>, crate::host::Driver, Arc<EventCollector>) {
     // Held before the Core is built: the manual clock runs while nothing holds it, and the faults' instants count from the device's start.
     let device = Arc::new(FakeDevice::new(config(faults)));
-    let frozen = Frozen::of(&device);
+    let guard = clock_guard(&device.host());
     let (core, _time, events) = rig_on(device.clone(), Vec::new(), 2_000);
-    (core, device, frozen, events)
+    (core, device, guard, events)
 }
 
 /// Device time a clock run on a loaded host may add to an exact wait of the attempts (a sleep ends when its thread runs again): well under
@@ -77,7 +77,7 @@ fn strict(faults: Vec<FakeFault>, nch: usize, script: &[(usize, Option<i64>)], n
     let inner = Arc::new(FakeDevice::new(config(faults)));
     let feed = Arc::new(ReportFeed::new(inner.clone()));
     let (core, _time, _events) = rig_on(feed.clone(), Vec::new(), 2_000);
-    let frozen = Frozen::of(&inner);
+    let _guard = clock_guard(&inner.host());
     let channels: Vec<usize> = (0..nch).collect();
     feed.tx_open(0, &channels).unwrap();
     let p = inner.time_now().unwrap();
@@ -85,10 +85,7 @@ fn strict(faults: Vec<FakeFault>, nch: usize, script: &[(usize, Option<i64>)], n
         feed.give(TxReport { code: TxCode::BurstAck, tick: tick.map(|delta| p + delta), channel: *channel });
     }
     let attempt = Attempt { number: 1, not_before: not_before.map_or(i64::MIN, |delta| p + delta) };
-    let (result, _frozen) = released(frozen, &inner.host(), {
-        let core = core.clone();
-        move || core.tx_flush_attempt(0, &channels, Some(attempt))
-    });
+    let result = core.tx_flush_attempt(0, &channels, Some(attempt));
     let elapsed = inner.time_now().unwrap() - p;
     Strict { result, core, p, elapsed }
 }
@@ -97,15 +94,12 @@ fn strict(faults: Vec<FakeFault>, nch: usize, script: &[(usize, Option<i64>)], n
 fn ur_75_t3_ends_on_the_first_confirmed_attempt_on_a_fresh_streamer() {
     for reopen in [false, true] {
         for (k, faults) in [(1, vec![]), (2, vec![FakeFault::DropAckOfSend(0)]), (3, vec![FakeFault::DropAckOfSend(0), FakeFault::DropAckOfSend(1)])] {
-            let (core, device, frozen, events) = held_rig(faults.clone());
+            let (core, device, _guard, events) = held_rig(faults.clone());
             if reopen {
                 device.tx_open(0, &[0]).unwrap();
             }
             let start = device.time_now().unwrap();
-            let (confirmed, _frozen) = released(frozen, &device.host(), {
-                let core = core.clone();
-                move || if reopen { core.reopen_tx_streamer(0, Channels::first(1), i64::MIN) } else { core.open_tx_confirmed(0, Channels::first(1), i64::MIN) }
-            });
+            let confirmed = if reopen { core.reopen_tx_streamer(0, Channels::first(1), i64::MIN) } else { core.open_tx_confirmed(0, Channels::first(1), i64::MIN) };
             let confirmed = confirmed.unwrap_or_else(|error| panic!("{faults:?}: {error:?}"));
             let lead: &[&str] = if reopen { &["open", "close"] } else { &[] };
             assert_eq!(t3_calls(&device), shape(lead, k, false), "{faults:?} (reopen {reopen})");
@@ -133,12 +127,9 @@ fn ur_75_a_send_that_is_not_whole_ends_its_attempt_at_once() {
         let spy = Arc::new(LockSpy::new(config(vec![fault.clone()])));
         let (core, _time, events) = rig_on(spy.clone(), Vec::new(), 2_000);
         spy.watch(&core);
-        let frozen = Frozen::on(spy.host());
+        let _guard = clock_guard(&spy.host());
         let start = spy.time_now().unwrap();
-        let (result, _frozen) = released(frozen, &spy.host(), {
-            let core = core.clone();
-            move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-        });
+        let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
         assert!(result.is_ok(), "{fault:?}: attempt 2 confirms: {result:?}");
         let order = spy.order();
         let send = order.iter().position(|call| *call == "tx_send").unwrap();
@@ -165,15 +156,12 @@ fn ur_75_three_unconfirmed_attempts_fail_and_close_their_streamer() {
     ];
     for reopen in [false, true] {
         for (faults, waited, last) in &cases {
-            let (core, device, frozen, events) = held_rig(faults.clone());
+            let (core, device, _guard, events) = held_rig(faults.clone());
             if reopen {
                 device.tx_open(0, &[0]).unwrap();
             }
             let start = device.time_now().unwrap();
-            let (result, _frozen) = released(frozen, &device.host(), {
-                let core = core.clone();
-                move || if reopen { core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ()) } else { core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ()) }
-            });
+            let result = if reopen { core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ()) } else { core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ()) };
             let error = result.expect_err("three unconfirmed attempts end the loop");
             assert!(!error.lost && error.message.contains("after 3 attempts") && error.message.contains(last), "{faults:?}: {}", error.message);
             let lead: &[&str] = if reopen { &["open", "close"] } else { &[] };
@@ -226,22 +214,16 @@ fn ur_75_a_stray_ack_never_confirms_an_attempt_whose_send_put_nothing_out() {
 #[test]
 fn ur_75_a_whole_send_is_confirmed_only_by_every_channel_position() {
     // Attempt 1: channel 0's ack only; attempt 2 collects both itself, and attempt 1's ack is not carried.
-    let (core, device, frozen, _events) = held_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck)]);
-    let (confirmed, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(2), i64::MIN).map(|_| ())
-    });
+    let (core, _device, _guard, _events) = held_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck)]);
+    let confirmed = core.open_tx_confirmed(0, Channels::first(2), i64::MIN).map(|_| ());
     confirmed.unwrap();
     assert_eq!(flush_acks(&core).iter().map(|row| row.0).collect::<Vec<_>>(), [Some(0), Some(0), Some(1)]);
     let rows = flush_attempt_rows(&core);
     assert_eq!(rows.len(), 1);
     assert!(rows[0]["error"].as_str().unwrap().contains("channel positions [1]"), "{rows:?}");
 
-    let (core, device, frozen, _events) = held_rig(vec![FakeFault::DropBurstAck, FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck)]);
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(2), i64::MIN).map(|_| ())
-    });
+    let (core, _device, _guard, _events) = held_rig(vec![FakeFault::DropBurstAck, FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck)]);
+    let result = core.open_tx_confirmed(0, Channels::first(2), i64::MIN).map(|_| ());
     assert!(result.is_err(), "a partial ack never confirms");
     assert_eq!(flush_acks(&core).iter().map(|row| row.0).collect::<Vec<_>>(), [Some(0)]);
     assert_eq!(flush_attempt_rows(&core).len(), 3);
@@ -254,14 +236,11 @@ fn ur_75_the_confirmed_tick_is_the_largest_ack_tick_across_positions() {
         let feed = Arc::new(ReportFeed::new(inner.clone()));
         let (core, _time, _events) = rig_on(feed.clone(), Vec::new(), 2_000);
         feed.tx_open(0, &[0, 1]).unwrap();
-        let frozen = Frozen::of(&inner);
+        let _guard = clock_guard(&inner.host());
         let p = inner.time_now().unwrap();
         feed.give(TxReport { code: TxCode::BurstAck, tick: Some(p + first), channel: 0 });
         feed.give(TxReport { code: TxCode::BurstAck, tick: Some(p + second), channel: 1 });
-        let (confirmed, _frozen) = released(frozen, &inner.host(), {
-            let core = core.clone();
-            move || core.reopen_tx_streamer(0, Channels::first(2), i64::MIN).map(|confirmed| confirmed.ack_tick)
-        });
+        let confirmed = core.reopen_tx_streamer(0, Channels::first(2), i64::MIN).map(|confirmed| confirmed.ack_tick);
         assert_eq!(confirmed.unwrap(), p + 2_000, "({first}, {second})");
     }
 }
@@ -322,13 +301,10 @@ fn ur_75_a_stale_ack_stays_for_the_report_owner_across_the_loop() {
     let inner = Arc::new(FakeDevice::new(config(vec![FakeFault::DropAckOfSend(0)])));
     let feed = Arc::new(ReportFeed::new(inner.clone()));
     let (core, _time, _events) = rig_on(feed.clone(), Vec::new(), 2_000);
-    let frozen = Frozen::of(&inner);
+    let _guard = clock_guard(&inner.host());
     let p = inner.time_now().unwrap();
     feed.give(TxReport { code: TxCode::BurstAck, tick: Some(p - 1), channel: 0 });
-    let (result, _frozen) = released(frozen, &inner.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
     result.unwrap();
     assert_eq!(core.take_stashed_tx_report(0).map(|report| (report.code, report.tick)), Some((TxCode::BurstAck, Some(p - 1))));
     assert!(core.take_stashed_tx_report(0).is_none());
@@ -351,18 +327,15 @@ fn ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss
     // before the hold cannot move them past the attempts.
     let origin = |after_ms: u64| Wall::from_secs(10) + Wall::from_millis(after_ms);
     let run = |faults: Vec<FakeFault>| {
-        let (core, device, frozen, events) = held_rig(faults);
+        let (core, device, _guard, events) = held_rig(faults);
         device.set_time(core.ticks(10_000_000_000));
-        (core, device, frozen, events)
+        (core, device, _guard, events)
     };
     // (a) transient: attempt 2's reads at 100, 101 and 102 ms fail; the one at 103 ms sets the floor, and the attempt sends and confirms.
-    let (core, device, frozen, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_millis(3))]);
+    let (core, device, _guard, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_millis(3))]);
     let count = reads(&core);
     let start = device.time_now().unwrap();
-    let (confirmed, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|confirmed| confirmed.ack_tick)
-    });
+    let confirmed = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|confirmed| confirmed.ack_tick);
     assert!(confirmed.unwrap() >= start + ms(&core, 103), "the floor is the later read, not the first failed instant");
     assert_eq!(t3_calls(&device), shape(&[], 2, false));
     assert_eq!(count.load(Ordering::SeqCst), 3);
@@ -370,35 +343,26 @@ fn ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss
     assert!(device.time_now().unwrap() - start < ms(&core, 103 + SLACK_MS));
     // (b) a failing read is not the attempt's: it fails for 500 ms, then succeeds and the attempt's own 100 ms starts: it sends and confirms, and the
     // recovery ends with no rejection (attempt 3 is never needed).
-    let (core, device, frozen, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_millis(500))]);
+    let (core, device, _guard, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_millis(500))]);
     let count = reads(&core);
     let start = device.time_now().unwrap();
-    let (confirmed, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|confirmed| confirmed.ack_tick)
-    });
+    let confirmed = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|confirmed| confirmed.ack_tick);
     assert!(confirmed.unwrap() >= start + ms(&core, 600), "the floor is the first read that succeeded, after the 500 ms of failures");
     assert_eq!(t3_calls(&device), shape(&[], 2, false));
     assert!(count.load(Ordering::SeqCst) >= 400, "a read every 1 ms, not one per attempt");
     assert_eq!(flush_attempt_rows(&core).len(), 1, "no row for the failing reads");
     assert!(device.time_now().unwrap() - start < ms(&core, 600 + SLACK_MS));
     // (b2) the failing reads' time does not come out of the attempt's window: the send after them has its whole 100 ms for the ack.
-    let (core, device, frozen, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_millis(500)), FakeFault::DropAckOfSend(1)]);
+    let (core, device, _guard, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_millis(500)), FakeFault::DropAckOfSend(1)]);
     let start = device.time_now().unwrap();
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
     result.unwrap();
     assert_eq!(t3_calls(&device), shape(&[], 3, false), "attempt 2 sent and waited its 100 ms for an ack that never came; attempt 3 confirmed");
     assert!(device.time_now().unwrap() - start >= ms(&core, 100 + 500 + 100));
     // (c) the cap: reads that fail for more than 2 s end the recovery `Failed` (not lost) with the cause, no third attempt, and the streamer closed.
-    let (core, device, frozen, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_secs(10))]);
+    let (core, device, _guard, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_secs(10))]);
     let start = device.host().now();
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
     let error = result.expect_err("the reads never succeed");
     assert!(!error.lost && error.message.contains("flush time read failed: ") && !error.message.contains("Provider::stop"), "{}", error.message);
     assert_eq!(t3_calls(&device), ["open", "send", "close", "open", "close"]);
@@ -408,29 +372,23 @@ fn ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss
     let elapsed = device.host().now() - start;
     assert!(elapsed >= Wall::from_millis(2_100) && elapsed < Wall::from_millis(2_100 + SLACK_MS as u64), "{elapsed:?}");
     // (c2) a read that fails for 1.9 s and then succeeds is within the cap: the recovery goes on.
-    let (core, device, frozen, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_millis(1_900))]);
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let (core, device, _guard, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_millis(1_900))]);
+    let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
     result.unwrap();
     assert_eq!(t3_calls(&device), shape(&[], 2, false));
     // (c3) the cap counts from the first failure of one run of reads, and a read that succeeds ends the run: failures apart add up to nothing.
-    let (core, device, frozen, _events) = run(vec![
+    let (core, device, _guard, _events) = run(vec![
         FakeFault::DropAckOfSend(0),
         FakeFault::DropAckOfSend(1),
         FakeFault::TimeReadFailsFor(origin(100), Wall::from_millis(1_500)),
         FakeFault::TimeReadFailsFor(origin(1_650), Wall::from_millis(1_500)),
     ]);
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
     result.unwrap();
     assert_eq!(t3_calls(&device), shape(&[], 3, false));
     // (c) a Stop or a loss between the retries ends the attempt at once.
     for stop in [true, false] {
-        let (core, device, frozen, events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_secs(1))]);
+        let (core, device, _guard, events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_secs(1))]);
         let count = Arc::new(AtomicUsize::new(0));
         let (seen, owner) = (count.clone(), core.clone());
         probe(&core, "t3_time_read", move |_| {
@@ -443,10 +401,7 @@ fn ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss
             }
         });
         let start = device.host().now();
-        let (result, _frozen) = released(frozen, &device.host(), {
-            let core = core.clone();
-            move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-        });
+        let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
         let error = result.expect_err("interrupted");
         assert_eq!(error.lost, !stop, "{}", error.message);
         assert_eq!(error.message.contains("Provider::stop"), stop, "{}", error.message);
@@ -458,29 +413,23 @@ fn ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss
         assert_eq!(lost_events, usize::from(!stop));
     }
     // (d) lost at the read: attempt 2's read sleeps past the instant the device is lost.
-    let (core, device, frozen, events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::Lost(origin(250))]);
+    let (core, device, _guard, events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::Lost(origin(250))]);
     let slow = device.clone();
     probe(&core, "t3_between", move |_| *slow.slow_next_read.lock().unwrap() = Some(Wall::from_millis(200)));
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
     assert!(result.expect_err("lost at the read").lost);
     assert_eq!(t3_calls(&device), ["open", "send", "close", "open"], "no send after the lost read");
     assert_eq!(events.drain(core.at(core.now())).iter().filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST).count(), 1);
     // (d2) a loss while the reads fail ends the loop as a loss, not as a failed recovery: reads fail from 100 ms, the device is lost at 600 ms.
-    let (core, device, frozen, events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_secs(10)), FakeFault::Lost(origin(600))]);
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let (core, device, _guard, events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_secs(10)), FakeFault::Lost(origin(600))]);
+    let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
     let error = result.expect_err("lost while the reads fail");
     assert!(error.lost, "{}", error.message);
     assert_eq!(t3_calls(&device), ["open", "send", "close", "open"], "no send, no close and no third attempt");
     assert_eq!(flush_attempt_rows(&core).len(), 1, "no row for the reads");
     assert_eq!(events.drain(core.at(core.now())).iter().filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST).count(), 1);
     // (e) the read succeeds, but only after 100 ms: that time is not the attempt's, which sends and has its whole window.
-    let (core, device, frozen, _events) = run(vec![FakeFault::DropAckOfSend(0)]);
+    let (core, device, _guard, _events) = run(vec![FakeFault::DropAckOfSend(0)]);
     let slow = device.clone();
     let fired = Arc::new(AtomicUsize::new(0));
     let seen = fired.clone();
@@ -490,10 +439,7 @@ fn ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss
         }
     });
     let start = device.time_now().unwrap();
-    let (confirmed, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|confirmed| confirmed.ack_tick)
-    });
+    let confirmed = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|confirmed| confirmed.ack_tick);
     assert!(confirmed.unwrap() >= start + ms(&core, 200), "the floor is the read that returned at 200 ms");
     let rows = flush_attempt_rows(&core);
     assert_eq!(rows.iter().map(|row| row["attempt"].as_u64().unwrap()).collect::<Vec<_>>(), [1], "{rows:?}");
@@ -532,11 +478,8 @@ fn ur_75_stop_and_loss_at_each_boundary_of_the_retry() {
             probe(&core, "t3_time_read_returned", move |_| {
                 counted.fetch_add(1, Ordering::SeqCst);
             });
-            let frozen = Frozen::on(spy.host());
-            let (result, _frozen) = released(frozen, &spy.host(), {
-                let core = core.clone();
-                move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-            });
+            let _guard = clock_guard(&spy.host());
+            let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
             let error = result.expect_err("interrupted");
             let what = format!("{gate} stop {stop}");
             assert_eq!(reads.load(Ordering::SeqCst), 1, "{what}: attempt 1's pre-send read only: no device call of attempt 2 follows the publication");
@@ -563,7 +506,7 @@ fn ur_75_a_stop_or_loss_published_around_a_successful_pre_send_time_read_sends_n
     // The read returns its time, but the publication was made while it was in flight (the probe runs after it returned, before the attempt looks at
     // the result): the attempt must not send, in attempt 1 and in attempt 2 alike.
     for (nth, stop) in [(1, true), (1, false), (2, true), (2, false)] {
-        let (core, device, frozen, events) = held_rig(vec![FakeFault::DropAckOfSend(0)]);
+        let (core, device, _guard, events) = held_rig(vec![FakeFault::DropAckOfSend(0)]);
         let fired = Arc::new(AtomicUsize::new(0));
         let (owner, seen) = (core.clone(), fired.clone());
         probe(&core, "t3_time_read_returned", move |_| {
@@ -571,10 +514,7 @@ fn ur_75_a_stop_or_loss_published_around_a_successful_pre_send_time_read_sends_n
                 publish(&owner, stop);
             }
         });
-        let (result, _frozen) = released(frozen, &device.host(), {
-            let core = core.clone();
-            move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-        });
+        let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
         let what = format!("read {nth}, stop {stop}");
         let error = result.expect_err("interrupted");
         assert_eq!(error.lost, !stop, "{what}: {}", error.message);
@@ -621,24 +561,18 @@ fn ur_75_a_stop_between_the_close_and_the_open_opens_nothing() {
 #[test]
 fn ur_75_an_open_that_fails_between_attempts_ends_the_loop() {
     // The rig's own open is #0, attempt 1's #1, attempt 2's #2.
-    let (core, device, frozen, _events) = held_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::TxOpenFails(2)]);
+    let (core, device, _guard, _events) = held_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::TxOpenFails(2)]);
     device.tx_open(0, &[0]).unwrap();
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let result = core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ());
     let error = result.expect_err("the open is refused");
     assert!(error.message.contains("scripted refusal of transmit open") && !error.message.contains("after 3 attempts"), "{}", error.message);
     assert_eq!(t3_calls(&device).iter().filter(|call| **call == "send").count(), 1, "no T3 after the refused open");
     assert_eq!(flush_attempt_rows(&core).len(), 1);
     assert_eq!(lock(&core.streams).stream(stream_key(Dir::Tx, 0)).set, DeviceSet::Unknown);
     // The rate check runs once, on the confirmed streamer.
-    let (core, device, frozen, _events) = held_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::RatesMismatch(0)]);
+    let (core, device, _guard, _events) = held_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::RatesMismatch(0)]);
     device.tx_open(0, &[0]).unwrap();
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let result = core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ());
     assert!(result.expect_err("the rates differ").message.contains("UR-13"));
     assert_eq!(t3_calls(&device).iter().filter(|call| **call == "send").count(), 2, "the check came after the confirmed attempt 2");
 }
@@ -647,11 +581,8 @@ fn ur_75_an_open_that_fails_between_attempts_ends_the_loop() {
 fn ur_75_reports_stashed_in_an_attempt_survive_the_next_open_for_the_report_owner() {
     // The owner's normal report handling (UR-28) makes their events, so the loop keeps them, in order and ahead of the last attempt's own, rather
     // than writing them raw or letting the next open clear them.
-    let (core, device, frozen, _events) = held_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::TxReport(Wall::ZERO, TxCode::Other(77)), FakeFault::TxReport(Wall::ZERO, TxCode::SeqError)]);
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let (core, _device, _guard, _events) = held_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::TxReport(Wall::ZERO, TxCode::Other(77)), FakeFault::TxReport(Wall::ZERO, TxCode::SeqError)]);
+    let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
     result.unwrap();
     let kept: Vec<_> = std::iter::from_fn(|| core.take_stashed_tx_report(0)).map(|report| report.code).collect();
     assert_eq!(kept, [TxCode::Other(77), TxCode::SeqError], "{kept:?}");
@@ -691,11 +622,8 @@ fn ur_75_a_report_read_after_attempt_1_s_deadline_stays_for_the_report_owner() {
 /// All three attempts fail: attempt 1's stash and the later ones' are all the Run's, in order, none lost to an open.
 #[test]
 fn ur_75_after_three_failed_attempts_every_stash_stays_the_runs() {
-    let (core, device, frozen, _events) = held_rig(vec![FakeFault::DropBurstAck, FakeFault::TxReport(Wall::ZERO, TxCode::Other(77))]);
-    let (result, _frozen) = released(frozen, &device.host(), {
-        let core = core.clone();
-        move || core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ())
-    });
+    let (core, _device, _guard, _events) = held_rig(vec![FakeFault::DropBurstAck, FakeFault::TxReport(Wall::ZERO, TxCode::Other(77))]);
+    let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
     assert!(result.is_err());
     assert_eq!(core.take_stashed_tx_report(0).map(|report| report.code), Some(TxCode::Other(77)), "attempt 1's report survived the later opens");
     assert!(core.take_stashed_tx_report(0).is_none());
@@ -709,12 +637,9 @@ fn ur_75_with_the_switch_off_the_open_flush_is_todays() {
         let spy = Arc::new(LockSpy::new(config(vec![fault.clone()])));
         let (core, _time, events) = rig_on(spy.clone(), Vec::new(), 2_000);
         spy.watch(&core);
-        let frozen = Frozen::on(spy.host());
+        let _guard = clock_guard(&spy.host());
         let start = spy.time_now().unwrap();
-        let (result, _frozen) = released(frozen, &spy.host(), {
-            let core = core.clone();
-            move || core.open_streamer(Dir::Tx, 0, Channels::first(1))
-        });
+        let result = core.open_streamer(Dir::Tx, 0, Channels::first(1));
         assert!(result.is_ok(), "{fault:?}: the open flush never refuses: {result:?}");
         let order = spy.order();
         let send = order.iter().position(|call| *call == "tx_send").unwrap();
@@ -737,9 +662,9 @@ fn ur_75_with_the_switch_off_the_open_flush_is_todays() {
         vec![FakeFault::ShortSend(0), FakeFault::ShortSend(1), FakeFault::ShortSend(2)],
         vec![FakeFault::FailSend(0), FakeFault::FailSend(1), FakeFault::FailSend(2)],
     ] {
-        let (core, device, frozen, _events) = held_rig(faults.clone());
+        let (core, device, _guard, _events) = held_rig(faults.clone());
         device.tx_open(0, &[0]).unwrap();
-        let (result, _frozen) = released(frozen, &device.host(), move || core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ()));
+        let result = core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ());
         assert!(result.is_err(), "{faults:?}");
     }
 }

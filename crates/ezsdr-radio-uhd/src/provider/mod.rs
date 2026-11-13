@@ -1095,7 +1095,7 @@ mod tests {
         let mut radio = UhdRadio::from_binding(&binding, device).unwrap();
         let (core, time, _) = test_support::rig_on_description_links(inner.clone(), vec![vec![Arc::new(NoLink)], Vec::new()], BTreeMap::new(), radio.description.clone());
         // A start queued seconds ahead on a held clock: the radio keeps it until something cancels it.
-        let frozen = test_support::Frozen::of(&inner);
+        let _guard = test_support::clock_guard(&inner.host());
         test_support::device_at(&core, &time, &inner, 0);
         let origin = core.ticks(5_000_000_000);
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
@@ -1137,7 +1137,6 @@ mod tests {
         let calls = inner.calls();
         assert_eq!(&calls[close + 1..][..2], ["rx_open 0 [0]", "rx_stop 0 now"], "{calls:?}");
         test_support::device_at(&core, &time, &inner, origin - core.ticks(50_000_000));
-        let _driver = test_support::handed_over(frozen, &inner.host());
         for _ in 0..6 {
             assert_eq!(inner.rx_recv(0, 2_000, Wall::from_millis(100), false), crate::device::RxRecv::Timeout, "the orphaned start delivered: {:?}", inner.calls());
         }

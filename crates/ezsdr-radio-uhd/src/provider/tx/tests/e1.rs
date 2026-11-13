@@ -1,5 +1,5 @@
 //! E1a (design note 49 §5.4.4 item 6; plan `2026-11-10-e1/test-plan.md`): bookings and Stops in one receipt-ordered list, against the UHD
-//! owner on a frozen single-threaded rig. Receipt and owner turn are called from the test thread in the order written; device time
+//! owner on a single-threaded rig whose clock the test thread holds. Receipt and owner turn are called from the test thread in the order written; device time
 //! moves only through `device_at`, so no verdict depends on when a thread runs. Probes run on the test thread with no lock held.
 //!
 //! Units: one sample is 1 us (the rig's 1 MS/s), 200 root ticks; `MS` is a millisecond in root ticks.
@@ -72,20 +72,19 @@ fn rig_at(origin: i64, waves: Vec<Vec<Iq>>) -> SwitchRig {
         refs.push(wave);
     }
     let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-    let frozen = Frozen::of(&device);
+    let guard = crate::provider::test_support::clock_guard(&device.host());
     device_at(&core, &time, &device, 0);
     device.tx_open(0, &[0]).unwrap();
     device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
     let (control, cmds) = booking_control_at(&core, origin);
     let clock = tx_clock(&core);
     let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-    SwitchRig { core, device, time, events, control, tx, clock, waves: refs, _frozen: frozen }
+    SwitchRig { core, device, time, events, control, tx, clock, waves: refs, _guard: guard }
 }
 
-/// `Tx::shutdown`, with the manual clock released so that its 100 ms acknowledgement window can pass; returns the Core and the events.
+/// `Tx::shutdown`, its 100 ms acknowledgement window passing on the clock the rig's guard holds, which drops with it; returns the Core and the events.
 pub(super) fn shutdown(rig: SwitchRig) -> (Arc<Core>, Arc<EventCollector>) {
-    let SwitchRig { core, events, mut tx, _frozen, .. } = rig;
-    let _driver = crate::provider::test_support::handed_over(_frozen, &core.device.host());
+    let SwitchRig { core, events, mut tx, _guard, .. } = rig;
     tx.shutdown();
     (core, events)
 }
@@ -256,7 +255,7 @@ fn e1_q6b_shutdown_reads_the_list_before_it_cancels() {
 
 #[test]
 fn e1_q7_a_stop_received_while_a_configure_refuses_its_burst() {
-    let (core, device, time, mut tx, _frozen, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
+    let (core, device, time, mut tx, _guard, events, _to_tx) = owner_with(1, vec![FakeFault::TxApplyRefused(0, F2)]);
     let clock = tx.clock.expect("a clock");
     let stopper = Arc::downgrade(&core);
     crate::provider::test_support::probe(&core, "tx_configure_before_mark", move |_| {
@@ -332,7 +331,7 @@ fn e1_q13_a_refused_booking_is_not_on_the_list() {
 
 #[test]
 fn e1_q14_a_continuation_accepted_after_the_unread_check_keeps_the_burst_open() {
-    let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    let (core, device, time, events, clock, mut tx, _guard) = txp_rig(None, 2_000);
     txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
     device_at(&core, &time, &device, core.ticks(12_000_000));
     txp_drain(&mut tx);

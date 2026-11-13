@@ -54,7 +54,7 @@
 
 - 計画 30 は参加者を「uhd crate が起こすスレッド」に限り（M1），試験のスレッドの遅れは `hold()`（段階 B）に回して，負荷の表が 0 件だったので作らなかった。表は駆動役だけが遅れる形を作っていなかった（note 37 §1，INFERRED）。
 - note 37 は `hold()` を退けて書き手の規則にした。規則は機械で検査されず，#76・#87・#96 と 10-27 の 7 本が後から破った（VERIFIED：failure-mechanisms.md:19, :61）。
-- crate の中には止める手段がある（`Frozen`，`released`：`test_support.rs:139-186`）。統合の rig にだけ無い（`spawn` は `pub(crate)`：`host.rs:387`）。直近 3 件（#83・#87・#96）はすべて `UhdRig` で起きた。
+- crate の中には止める手段がある（段 4 の前は `Frozen`，`released`。段 4 で参加者の guard `test_support::clock_guard` に一本化し，この 3 つは消えた）。統合の rig にだけ無い（`spawn` は `pub(crate)`：`host.rs:387`）。直近 3 件（#83・#87・#96）はすべて `UhdRig` で起きた。
 - #96 の見立て：「`uhd-tx` が遅れた」は起きない。owner が busy なら時計は止まる（M3：`host.rs:118-128`，M4：`:228-252`）。遅れたのは試験のスレッドである（probe 1）。
 
 ### 1.3 probe（各設定 1 回）
@@ -151,10 +151,10 @@ A が後でできなくすること：登録していない別スレッドから
 | 型 | 場所 | release の後 | 扱い |
 |---|---|---|---|
 | N（4） | `tx/tests/o1.rs:755`，`tx.rs:4396, 4463`，`rx.rs:1000` | assert だけ | 変えない |
-| G（4） | `tx.rs:6555, 6570, 6593, 7003`（7003 は `drop(rig._frozen)`） | 試験のスレッドが owner のコードを自分で走らせる | guard：`test_support::handed_over(frozen, &clock)` = `let driver = clock.drive(); drop(frozen); driver`（試験のスレッドを先に参加者にしてから時計を渡す）。1d で入れた |
-| W1（5） | `tx.rs:5952, 6059, 6092`，`rx.rs:901, 946` | owner は参加者。試験のスレッドは channel か実時間の poll で待つだけ | 変えない（guard を足すと hang） |
+| G（4） | `tx.rs:6555, 6570, 6593, 7003`（7003 は `drop(rig._frozen)`） | 試験のスレッドが owner のコードを自分で走らせる | guard：`test_support::handed_over(frozen, &clock)` = `let driver = clock.drive(); drop(frozen); driver`（試験のスレッドを先に参加者にしてから時計を渡す）。1d で入れた。段 4 で `Frozen` ごと消え，試験のスレッドの guard が構築から終わりまで続く（`handed_over` は無い） |
+| W1（5） | `tx.rs:5952, 6059, 6092`，`rx.rs:901, 946` | owner は参加者。試験のスレッドは channel か実時間の poll で待つだけ | `Frozen` を放していた行で guard を放す（guard を持ったまま時計の外で待つと，owner が時計を要るとき hang する）。段 4 の後 |
 | W2（3） | `tx.rs:6542`，`tx/tests/e1.rs:88`（`drop(_frozen)`），`tx/tests/e2b.rs:88` | 150 ms 眠る参加者を起こし，`shutdown`，`join` | 眠る helper と join を消して `handed_over`（`join` は時計の外の待ちなので，joined な thread が残る限り guard は hang する）。1d で書き直し，9 本が通る（VERIFIED） |
-| H（1） | `provider/test_support.rs:182` | 仕事を参加者に渡す helper そのもの | 変えない |
+| H（1） | `provider/test_support.rs:182` | 仕事を参加者に渡す helper そのもの | 段 4 で `released` ごと消え，仕事は guard を持つ試験のスレッドで直に走る |
 
 ## 5. Run を通す rig（Q3 (c)）
 
@@ -380,7 +380,7 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 |---|---|---|---|
 | `ezsdr-acceptance/tests/parity.rs` | (v3.1) `1371ffa` で 49 本（`grep -c '#\[test\]'`），`wait_until` のある行は 52（`grep -c wait_until`）。v3 の「47 本，51 か所」は `fe86629` の数。#96（`aa478bc`）が 8 本を手順で直し，**受け取りの窓の 14 本**をこの設計に預けた（`plan/phase8/reviews/n96-dispositions.md:10`。名前は実装者の report `~/.cache/ezsdr-fixes/2026-11-11-n96/report.md:57-62`。14 本とも main にあることは grep で確かめた）：`s15_parity_booking_rule_both_receipt_orders`，`s15_parity_b_first_accepted_booking_rule`，`s1_parity_short_burst_front_s_s3_s5`，`s1_parity_stop_during_padded_device_burst`，`s1_parity_padded_front_survives_normal_close`，`s1_parity_short_head_region_is_end_plus_gap`，`f_parity_two_transmit_streams_front_at_their_own_gap`，`s1_parity_grouped_and_split_fronts`，`s1_parity_short_burst_then_adjacent_burst_before_and_after_dispatch`，`s3_parity_booking_after_a_closed_short_burst_follows_d5`，`s3_parity_booking_after_a_device_burst_s_short_tail_follows_d5`，`s5_parity_b_received_before_a_refuses_a`，`s13_parity_b_refused_at_receipt_and_the_value_answers`，`s14_transmit_values_on_an_empty_stream_decide_the_same_on_both_providers` | S1，直結 | 1b。rig だけ変える。#96 の直しは残してよい |
 | `ezsdr-radio-uhd/tests/fake.rs` の `Direct` | 41 本（`Direct::` を呼ぶ 38 と `refused_second_start_of_stream_1` 経由の 3） | S1，直結 | 1c。tests/README の例外が消える（済）。`Gated` を使う 2 本は実時間の fake で，`drive()` は何も登録しない |
-| `src/provider/{tx,rx}.rs`，`tx/tests/{e1,e2b,o1}.rs` | `drop(frozen)` 17，`Frozen` 約 75 | S1（`drive()` の `handed_over`） | 1d（G の 4，W2 の 3），4（残り） |
+| `src/provider/{tx,rx}.rs`，`tx/tests/{e1,e2b,o1}.rs` | `drop(frozen)` 17，`Frozen` 約 75（段 4 の表で 79 か所・350 本） | S1（`drive()` の `clock_guard`） | 1d（G の 4，W2 の 3），4（残り：済） |
 | `fake` binary の Run を通すテスト | 398 本中，注入で 11 本，うち予行 6 本 | S1，Run | 2a〜2c |
 | `ezsdr-acceptance/tests/uhd.rs`，`ezsdr-server/tests/protocol.rs` | 17 本（注入で 1 本），74 本（0 本） | S1，Run | 2a・2b |
 | Real の FakeDevice | `fake_real` ほか明示 12 か所，default の Real 66 か所（上限） | S2 | 3 |
@@ -401,7 +401,7 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 | 2b | R 表のとおり R1・R2 を直結へ移す／assert を外す。rows の filter を付け替え，同じ mutant が死ぬことを確かめる | 場面ごと |
 | 2c | 遅れの証拠の純関数 `iii::late_evidence` と印を書く `Rehearsal`，試験側の literal と本番の定数の一致の test，予行 9 本の trial と assert の組み替え（trial の記録と判定の分離，admit の assert を判定の後へ），held-tail の C = 1 000，`stop_next_trial` の N2（実機は N2 の行を 1 本足す），`stop_booking_verdict` の fault 先行，`long_close` の形の欠けを FAIL に，`mutate.py` の baseline を `judge` に。**production と Manifest は変えない**。**risky**：実機と共有する trial と判定。audit 表，fidelity の review，次の bench |
 | 3 | S2：印のついたテストを 1 本ずつ。S3：Kernel の 12 本（Q5） | 場面ごと |
-| 4 | `Frozen`／`released` の約 75 か所。分類表から（Q6） | 場面ごと |
+| 4 | `Frozen`／`released`／`handed_over`（79 か所・350 本）を `clock_guard` に替えて消す。分類表から（Q6）。**済**（段 1c-ii，4a〜4d） | 場面ごと |
 
 (v3.1) M と 2a の間の窓（2a の後は閉じた）：Run の途中で KC-21a が切れて後ろの assert で落ちる形，`finish()` の中で RS-8a が切れて section の読みで落ちる形，`session_with` 以外の生成 12 か所（§5.4 の一覧）の生成時の上限は，2a まで偽の kill のままだった（§8）。文書（UR-33，tests/README，failure-mechanisms，note 37 §4 に 1 行）は，それを偽にする段の diff に入れる。
 
@@ -511,7 +511,7 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 3. Q3 = (a) (owner 2026-11-11): Run-based rigs get an always-on real-time delay at every rig call that returns control to the test (reading time, after advancing, after waiting for events) plus a governance scan, so a violating test fails on its first run. Conditions the owner accepted as part of the decision: (i) the scan covers by crate/directory so new test files are included automatically, and forbids bypassing the rig's entry points (`.now(`, `Instant::now`, `thread::sleep`, …); (ii) the delay is longer than the largest lead a test relies on, set in one place; (iii) every rig call that returns control to the test is covered (Sol to check for gaps). Genuine races inside Provider/Kernel code are product bugs, outside this scheme. (b) only if some of the failing tests cannot be fixed.
 4. Q4 = finish #96 first (owner 2026-11-11): the per-test fix on `work/n96` (with the two extra tests from probe 1c) closes and lands; stage 1a follows. #96's observed-progress waits may stay after A.
 5. Q5 = include (owner 2026-11-11): the 12 wall-bound tests of Kernel `tests/device_paced.rs` (5 are phase7 mutation filters G05, G08, G36, C05, C06 and 1 is maintenance N47S3-28; C07 is `kc_36_`, which selects 8 tests and none holds a wall bound that judges a verdict apart from the two TTL tests pinned under P3a — corrected in stage 3c-2) are stage 3, classified by P3: the ms bounds and G05 become observations (#89 S1's park-probe shape) or second-scale "must end" bounds; the 1 s bounds that meet P3 stay.
-6. Q6 = both, staged (owner 2026-11-11): 1c-i in stage 1 — the 15 `drop(frozen)` sites become the participant guard; 1c-ii after stage 3 — the ~75 `Frozen`/`released` uses, starting from a classification table: replace with the guard where it fits, keep `Frozen` where time must stay stopped while the test waits for an owner's reaction (the guard cannot do that: a non-clock wait under it hangs); remove `Frozen` only if nothing needs it.
+6. Q6 = both, staged (owner 2026-11-11): 1c-i in stage 1 — the 15 `drop(frozen)` sites become the participant guard; 1c-ii after stage 3 — the ~75 `Frozen`/`released` uses, starting from a classification table: replace with the guard where it fits, ~~keep `Frozen` where time must stay stopped while the test waits for an owner's reaction~~ (struck 2026-11-14, decision Q2 of the stage-4 table: that case does not occur, because a guard holder blocked in a non-clock wait is busy and stops the clock exactly as the frozen participant did; the W1 rule is "drop the guard where the `Frozen` was dropped"); `Frozen` is removed.
 
 ### After Sol's design review (sol-design.md: FAIL, 4 majors) — owner 2026-11-11
 - Q3 reopened: Sol majors 2–3 refute its premise (a fixed real-time delay does not guarantee device-time lateness, since the manual clock stops while any participant is busy; a single large delay misses non-monotonic windows; the scan misses time sources such as server replies' `now`, raw `RunHandle`s, `device.time_now()`). **Q3 = (c)**: move timing-sensitive scenarios out of Run-based rigs into Provider-direct rigs (closed by A); Run-based rigs keep only wiring tests that do not depend on a receipt window; rigs stop handing out raw handles; delay injection stays as a diagnostic, not a proof. To check: whether the hardware-rehearsal tests (`n47s5_*` etc.) can move.
@@ -551,10 +551,14 @@ failure-mechanisms.md:94 の「既にある note の答えの局所的な適用�
 
 ### 段 1d の後（2026-11-12，`work/n51-1d`；記録は gate を閉じる commit の `reviews/n51-1d-*`）
 - `drop(frozen)` は 15 でなく 17 か所：G は 4（`drop(rig._frozen)` の `ur_22_f8_…` を落としていた），W2 は 3（`e2b.rs:88`，E2b が `e1::shutdown` を写した）。4 N / 4 G / 5 W1 / 3 W2 / 1 H。grep は `drop(_frozen)` と `drop(rig._frozen)` の綴りを含める。
-- guard は `released`（#76 の形：owner の仕事を参加者に渡す）でなく，表の言う `drive()`：`test_support::handed_over(frozen, &clock)`。試験のスレッドが owner の仕事を自分で走らせるので，その thread を **Frozen を放す前に**登録する（逆順は，その間に時計が進める）。順序は helper の試験 2 本（N51D-01，-02）が一度だけ固定する。
+- guard は `released`（#76 の形：owner の仕事を参加者に渡す）でなく，表の言う `drive()`：`test_support::handed_over(frozen, &clock)`。試験のスレッドが owner の仕事を自分で走らせるので，その thread を **Frozen を放す前に**登録する（逆順は，その間に時計が進める）。順序は helper の試験 2 本（N51D-01，-02）が一度だけ固定した。（段 4 で `Frozen` と `handed_over` は消え，順序の問題は構築の一点に畳まれた：N51D-02 は退け，N51D-01 は `clock_guard` の登録の行に付け替えた。）
 - 判定が試験のスレッドの走る時点に依存していたのは G の `ur_28_…` だけ（遅延の注入で，release と `tx.pass()` の間が 3 ms で落ちる）。ほかの G と W2 は，注入した点と長さでは依存が見えず（owner の操作の内側の遅れは全部は試していない），guard は構造のためで行は無い（guard の有無で結果が変わらない：同値）。`ur_28_…` は release の後に 50 ms 眠り，時計が動かないことを assert する（N51D-03）。
 - W2：眠る 150 ms の参加者と `join` を消した。`shutdown` の 100 ms の窓は時計の待ちなので，試験のスレッドが参加者なら窓は進む。
 - 見送り：`tx.rs` の `-deadline` の helper を持つ 3 か所（`Frozen` が無い）は 4 で扱う。
+
+### 段 4（1c-ii）の後（2026-11-14，`work/n51-1cii`；4a〜4d）
+- 分類表（79 か所・350 本）の結論：どの場所も `Frozen` を要さない。`Frozen::of`/`on` は `clock_guard(&clock)`（試験のスレッドを参加者にする guard）へ，`released(f, clock, work)` は `work` をその場で，`handed_over` は削除。W1 の 5 か所（`rx.rs` 2，`tx.rs` 3）は `Frozen` を放していた行で guard を放す。`Frozen`，`released`，`handed_over` と helper の試験 1 本は消え，N51D-02 は退け，N51D-01 は `clock_guard` の `clock.drive()` に付け替え，N51D-03 は guard を落とす形に付け替えた。
+- 受け入れた代償（Q1）：stepped の rig で試験のスレッドが時計を待っても，hang でなく時計が黙って進む（hold だけの 287 本で 0 件．`released`／`handed_over` の 63 本の stepped の区間は別には測っていない）。機構は足さない。
 
 ### 段 2a の後（2026-11-13，`work/n51-2a`；記録は gate を閉じる commit の `reviews/n51-2a-*`）
 - 包みは `tests/common/run.rs` の `Run`（`acceptance` の `uhd.rs` は `#[path]` で同じ file を取り込む）。raw の生成と `RunHandle` は `run.rs` の外から消え，走査が止める。84 か所の型の付け替えと，生成 12 か所の `Run::connect`／`Run::start_spec` への切り替えは 1 つの compile 単位（sub-step 2）。検査の規則と保証（Run を終わらせ得る呼び出しの戻り，`finish`，`Drop`。read-only の戻りは検査しない）は §6.2，宣言は §6.2 の `Expect`（`Refused`／`Policy`／`Any`）と `join_is_subject`，`rx_join_issue_67`（#67）。

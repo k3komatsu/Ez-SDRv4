@@ -1,7 +1,7 @@
 //! #75: a confirmed, bounded recovery flush (UR-22) seen from the Provider: what the retry's longer window does to bookings, to Stop and loss at its
-//! boundaries, to an ordinary Stop and to the record's receipt-side reservations. Every test is single-threaded on a frozen manual-clock rig:
-//! device time moves through `device_at` and through the owner's own waits (`pass_on` runs the owner as a participant of the clock, `handed_over`
-//! makes the test thread one, for a test whose probe books through uhd-control from the owner's thread), so no verdict depends on when a thread runs.
+//! boundaries, to an ordinary Stop and to the record's receipt-side reservations. Every test is single-threaded on a manual-clock rig whose clock the test thread holds:
+//! device time moves through `device_at` and through the owner's own waits (the test thread is a participant of the clock through `clock_guard`,
+//! so the owner's work, a probe that books through uhd-control included, runs on it), so no verdict depends on when a thread runs.
 //!
 //! Two clocks, never mixed: device time is `device.time_now()`, which a recovery's waits move; the Kernel's `core.now()` is the rig's
 //! `ManualTimeAuthority`, which moves only when a test moves it (`device_at`).
@@ -35,12 +35,12 @@ fn ur_75_a_retry_longer_window_leaves_held_bookings_to_their_late_policy() {
         for retried in [true, false] {
             let case = format!("{outcome}, retried {retried}");
             let faults = if retried { vec![FakeFault::DropAckOfSend(0)] } else { Vec::new() };
-            let (core, device, time, mut tx, clock, events, frozen) = retry_rig_without_burst(faults, true);
+            let (core, device, time, mut tx, clock, events, _guard) = retry_rig_without_burst(faults, true);
             let target = clock.at_or_after(core.now() + core.ticks(60_000_000));
             txp_book(&mut tx, &core, clock, txp_burst(&clock, target, 1, false, policy));
             tx.chain().mark_reopen_needed();
             let before = device.time_now().unwrap();
-            let (tx, worked, frozen) = pass_on(tx, frozen, &device);
+            let worked = tx.pass();
             let elapsed = device.time_now().unwrap() - before;
             assert!(worked, "{case}");
             assert_eq!(tx.chain().recovery(), Recovery::Clean, "{case}");
@@ -56,10 +56,8 @@ fn ur_75_a_retry_longer_window_leaves_held_bookings_to_their_late_policy() {
             }
 
             device_at(&core, &time, &device, device.time_now().unwrap());
-            let (mut tx, mut frozen) = (tx, frozen);
             for _ in 0..4 {
-                let (next, _, held) = pass_on(tx, frozen, &device);
-                (tx, frozen) = (next, held);
+                tx.pass();
             }
             let sent = timed_sends(&device, 0);
             if !retried {
@@ -76,7 +74,6 @@ fn ur_75_a_retry_longer_window_leaves_held_bookings_to_their_late_policy() {
                 assert!(!sent[0].1.contains(&format!("at={} ", clock.instant(target))), "{case}: it was moved past its target: {sent:?}");
                 assert_eq!(evs(&events), ["radio.TIME_ERROR \"send_asap\""], "{case}: the move is reported once");
             }
-            drop(frozen);
         }
     }
 }
@@ -87,7 +84,7 @@ fn ur_22_stop_and_loss_at_the_retry_boundary_release_the_claim() {
     // open or send after it, returns its claim and keeps the held burst for the Stop path, which settles it.
     for stop in [true, false] {
         let case = if stop { "Provider::stop" } else { "loss" };
-        let (core, device, _time, tx, _clock, events, frozen, target) = retry_rig(vec![FakeFault::DropAckOfSend(0)], true);
+        let (core, device, _time, mut tx, _clock, events, _guard, target) = retry_rig(vec![FakeFault::DropAckOfSend(0)], true);
         let at_gate = Arc::new(AtomicUsize::new(usize::MAX));
         {
             let (weak_core, weak_device, mark) = (Arc::downgrade(&core), Arc::downgrade(&device), at_gate.clone());
@@ -101,7 +98,7 @@ fn ur_22_stop_and_loss_at_the_retry_boundary_release_the_claim() {
                 }
             });
         }
-        let (mut tx, worked, _frozen) = pass_on(tx, frozen, &device);
+        let worked = tx.pass();
         assert!(worked, "{case}: the owner handled the interrupted recovery");
         assert_eq!(lock(&core.streams).holder(stream_key(Dir::Tx, 0)), Holder::Free, "{case}: the claim is returned");
         assert_eq!(tx.chain().recovery(), Recovery::Clean, "{case}: Stop and loss leave the chain Clean");
@@ -125,7 +122,7 @@ fn ur_75_a_stop_with_a_pending_recovery_then_three_unconfirmed_t3s() {
     for (faults, recovers) in [(Vec::new(), true), (vec![FakeFault::DropBurstAck], false)] {
         let case = format!("recovers {recovers}");
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() }));
-        let frozen = Frozen::of(&device);
+        let _guard = crate::provider::test_support::clock_guard(&device.host());
         let (core, _time, mut tx, clock, events) = recovery_rig(device.clone());
         tx.chain().open_device_burst(0, 100, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
         *device.eob_error.lock().unwrap() = Some(crate::DeviceError::failed("controlled Stop EOB failure"));
@@ -136,14 +133,14 @@ fn ur_75_a_stop_with_a_pending_recovery_then_three_unconfirmed_t3s() {
         let base = device.calls().len();
         let target = clock.at_or_after(core.now() + core.ticks(60_000_000));
         give(&mut tx, held(&clock, target, 1, LatePolicy::DropAndFlag));
-        let (tx, worked, frozen) = pass_on(tx, frozen, &device);
+        let worked = tx.pass();
         assert!(worked, "{case}");
         assert!(!tx.chain().needs_reopen(), "{case}");
         assert!(timed_sends(&device, base).is_empty(), "{case}: the reopen turn sent no payload: {:?}", device.calls());
         if recovers {
             assert!(tx.clock.is_some() && held_keys(&tx).contains(&target), "{case}");
             assert!(flush_attempt_rows(&core).is_empty(), "{case}");
-            let (_tx, _, _frozen) = pass_on(tx, frozen, &device);
+            tx.pass();
             let sent = timed_sends(&device, base);
             assert!(sent.len() == 1 && sent[0].1.contains(&format!("at={} sob=true", clock.instant(target))) && sent[0].0 > last_flush(&device), "{case}: {:?}", device.calls());
         } else {
@@ -151,7 +148,6 @@ fn ur_75_a_stop_with_a_pending_recovery_then_three_unconfirmed_t3s() {
             assert_eq!(flush_attempt_rows(&core).len(), 3, "{case}");
             assert_eq!(t3_calls(&device).last(), Some(&"close"), "{case}: the last streamer is closed");
             assert_eq!(rejected_kinds(&events), ["tx_burst", "tx_reopen"], "{case}");
-            drop(frozen);
         }
     }
 }
@@ -163,13 +159,13 @@ fn ur_75_a_report_an_unconfirmed_attempt_stashed_makes_its_event_after_the_recov
     // to the old generation (no burst of the replacement is abandoned for it) and recorded raw once.
     for (code, cause) in [(TxCode::SeqError, "lost"), (TxCode::SeqErrorInBurst, "lost"), (TxCode::UnderflowInPacket, "starved")] {
         let case = format!("{code:?}");
-        let (core, device, _time, tx, _clock, events, frozen, target) = retry_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::TxReport(Wall::ZERO, code)], true);
-        let (tx, worked, frozen) = pass_on(tx, frozen, &device);
+        let (core, _device, _time, mut tx, _clock, events, _guard, target) = retry_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::TxReport(Wall::ZERO, code)], true);
+        let worked = tx.pass();
         assert!(worked, "{case}");
         assert_eq!(flush_attempt_rows(&core).len(), 1, "{case}: attempt 1 was unconfirmed");
         assert_eq!(tx.chain().recovery(), Recovery::Clean, "{case}");
         assert!(lock(&core.rec).device_async.iter().all(|row| row["code"] != format!("{code:?}")), "{case}: nothing is recorded before the owner reads the report");
-        let (tx, _, _frozen) = pass_on(tx, frozen, &device);
+        tx.pass();
         let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
         let underflows: Vec<_> =
             events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TX_UNDERFLOW).map(|event| event.payload["cause"].as_str().unwrap_or_default().to_owned()).collect();
@@ -191,9 +187,9 @@ fn ur_75_the_owner_s_recovery_waits_out_failing_time_reads_and_ends_failed_only_
     for (window_ms, recovers) in [(500, true), (10_000, false)] {
         let case = format!("reads fail for {window_ms} ms");
         let faults = vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(Wall::from_millis(50), Wall::from_millis(window_ms))];
-        let (core, device, _time, tx, _clock, events, frozen, target) = retry_rig(faults, true);
+        let (core, device, _time, mut tx, _clock, events, _guard, target) = retry_rig(faults, true);
         let before = device.host().now();
-        let (mut tx, worked, frozen) = pass_on(tx, frozen, &device);
+        let worked = tx.pass();
         let elapsed = device.host().now() - before;
         assert!(worked, "{case}");
         assert!(!core.is_lost(), "{case}");
@@ -214,7 +210,6 @@ fn ur_75_the_owner_s_recovery_waits_out_failing_time_reads_and_ends_failed_only_
             assert!(elapsed >= Wall::from_millis(2_100), "{case}: the cap was waited out: {elapsed:?}");
         }
         halt(&mut tx);
-        drop(frozen);
     }
 }
 
@@ -228,7 +223,7 @@ fn ur_75_a_loss_or_a_stop_while_the_time_reads_fail_is_not_a_failed_recovery() {
         if !stop {
             faults.push(FakeFault::Lost(Wall::from_millis(600)));
         }
-        let (core, device, _time, tx, _clock, events, frozen, target) = retry_rig(faults, true);
+        let (core, device, _time, mut tx, _clock, events, _guard, target) = retry_rig(faults, true);
         let reads = Arc::new(AtomicUsize::new(0));
         {
             let (weak_core, seen) = (Arc::downgrade(&core), reads.clone());
@@ -239,7 +234,7 @@ fn ur_75_a_loss_or_a_stop_while_the_time_reads_fail_is_not_a_failed_recovery() {
                 }
             });
         }
-        let (mut tx, worked, _frozen) = pass_on(tx, frozen, &device);
+        let worked = tx.pass();
         assert!(worked, "{case}");
         assert_eq!(t3_calls(&device), ["open", "close", "open", "send", "close", "open"], "{case}: no send, no close and no third attempt");
         if stop {
@@ -258,7 +253,7 @@ fn ur_75_a_loss_or_a_stop_while_the_time_reads_fail_is_not_a_failed_recovery() {
 // ---------------------------------------------------------------------------------------------------------------- bookings and a Stop made inside the retry
 
 thread_local! {
-    /// uhd-control, parked for a probe that books from the owner's thread (the test thread, a participant of the clock through `handed_over`).
+    /// uhd-control, parked for a probe that books from the owner's thread (the test thread, a participant of the clock through `clock_guard`).
     static CONTROL: RefCell<Option<Control>> = const { RefCell::new(None) };
 }
 
@@ -291,9 +286,8 @@ fn abandoned(
     faults: Vec<FakeFault>,
     behind: bool,
 ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Tx, Clock, Vec<ezsdr_kernel::manifest::ArtifactRef>, crate::host::Driver) {
-    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _frozen } = rig(faults);
+    let SwitchRig { core, device, time, events, control, mut tx, clock, waves, _guard } = rig(faults);
     CONTROL.with(|slot| *slot.borrow_mut() = Some(control));
-    let driver = handed_over(_frozen, &device.host());
     book_at(&core, clock, &waves, 1, 0, 10_000);
     if behind {
         book_at(&core, clock, &waves, 6, 1, 12_000);
@@ -310,7 +304,7 @@ fn abandoned(
     assert_eq!(sends(&device), [(500, true, false), (2, false, true)], "X is abandoned by its short send: {:?}", device.calls());
     device_at(&core, &time, &device, 11 * MS);
     tx.chain().mark_reopen_needed();
-    (core, device, time, events, tx, clock, waves, driver)
+    (core, device, time, events, tx, clock, waves, _guard)
 }
 
 /// The turns of the owner, the way the run loop makes them, until it has nothing to do.
