@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-11-13-n67-records (private)
+asset:   2026-11-13-n67-records.tar.xz  1122028 bytes
+sha256:  95baccad8af8fd03ff7e987b6d7c5b10c0355bb87c77777e54308d3396843920
+source:  ~/.cache/ezsdr-bench/2026-11-13 (items 1-5 and the R1/R2 consoles, with the run script bench-1113.sh) and ~/ezsdr-bench/2026-11-13 (the two record runs, without the source snapshots) on usrp-lnx03, plus the session procedure
+fetch:   gh release download 2026-11-13-n67-records -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-11-13-n67-records bench/2026-11-13-n67-records/results

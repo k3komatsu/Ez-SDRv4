@@ -1,0 +1,23 @@
+{
+  "session": "2026-11-13-n67-records",
+  "commit": "3f1f87f (bench tree detached at 3f1f87f, prebuilt; #67 probe and note 51 stage 2a/#99 included)",
+  "tools": { "hardware tests": "crates/ezsdr-radio-uhd/tests/hardware.rs at 3f1f87f", "runner": "bench-1113.sh in the raw archive (items 1-5; hw() = docker cargo test --release --features uhd)", "record suite": "plan/phase8/tools/run-record.sh 3f1f87f addr=192.168.40.36 hw_b1_probe (R1 unloaded, R2 EZSDR_MEASUREMENT_LOAD=h4)" },
+  "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0)",
+  "boards": [
+    { "id": "#2", "board_arg": "37", "serial": "347D541", "fpga": "39.3 (HG)", "slot_a": "UBX-160 v2", "slot_b": "empty", "addr": "192.168.47.37", "nic": "enp1s0f0np0", "ref_locked": true },
+    { "id": "#1", "board_arg": "36", "serial": "347D545", "fpga": "39.3 (HG)", "slot_a": "OBX", "slot_b": "empty", "addr": "192.168.40.36", "nic": "enp1s0f1np1", "ref_locked": true }
+  ],
+  "rf": { "wiring": "each board's slot-A TX/RX -> 30 dB attenuator -> the same board's RX2", "attenuation_db": 30, "owner_confirmed": true, "frequency_hz": 1000000000, "tx_gain_db": 0 },
+  "reference": "internal",
+  "host": "usrp-lnx03; MTU 9000; frame 8000 bytes; governor performance",
+  "items": {
+    "1 probe": ["hw_b1_probe (both)"],
+    "2 #67": ["hw_67_stop_before_origin (both; 1, 10, 100 MS/s x 10 trials x stop_before_origin / close_before_origin / stop_after_origin)"],
+    "3 receive only": ["hw_ur17_receive_call_duration", "hw_b8_raw_restart_lead (#2)"],
+    "4 lead": ["hw_n47_rx_start_lead_group", "hw_iii_raw_rx_restart_fill (#2; 1,2,5,10,25,50,100,200 MS/s x 5)"],
+    "5 C2": ["hw_n47s5_repeat_switch (both)"],
+    "R1": "hw_measurements_record on #1, load none, 11:47-12:23",
+    "R2": "hw_measurements_record on #1, load h4, 12:25-13:04"
+  },
+  "power_cycles": "none"
+}

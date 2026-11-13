@@ -448,3 +448,12 @@ owner が電源を入れ直した後，att は三つの board とも 30 dB（own
 - Stop と切り替えの組（`hw_n47s5_held_tail_and_stop`，`hw_n47s5_repeat_switch`，`hw_b8_stop_end`）：二台とも PASS（Session の行は前と同じく INCONCLUSIVE）．
 - #89（配線 B：#1 OBX が送信，#2 UBX が独立の受信機）：(i-a) 旧い `8dd1016` で `sleep` は C1・C2 が FAIL（穴が再現），(i-b) `1231462` で C1・C2・C3 が PASS（server は +0 s で終了，Manifest に `client_disconnect`）．→ **#89 を閉じた**．
 - E9（server の死から，独立の受信機で tone が止まるまで）：`docker kill` で 81〜608 ms，非常停止で 54〜582 ms（括弧は最後の tone と最初の quiet の読みの間）．条件：1 MS/s，100 kHz の tone，振幅 0.4，1 GHz，#1 OBX，各 1 回．ほかの rate と board には当てはめない．→ owner が A1（server の fail-stop の backstop）を採った（2026-11-12）．
+
+## 2026-11-13：#67 の origin より前の停止，受信の lead と先頭の 0，C2 の切り替え，記録 suite の負荷なしと負荷つき（#2＝X300 347D541＋UBX，#1＝X300 347D545＋OBX，slot B は両方とも空，commit `3f1f87f`）
+
+条件と機械で読める結果は [bench/2026-11-13-n67-records](../../bench/2026-11-13-n67-records/README.md)（生の log は非公開の `k3komatsu/Ez-SDRv4-bench-raw` の release）．att は 30 dB（owner 確認）．基準は内部．
+
+- #67：時刻なしの rx_stop は，origin より前に積んだ時刻つきの start を取り消す（各 board 30/30）．close と開き直しでは取り消せず，古い start の block が開き直した streamer に origin で届く（30/30）．→ #67 の直しは close の前に rx_stop を送る．
+- 受信の start lead は最小 5 ms．開き直しの先頭の 0 は 1〜200 MS/s で 14/10/14/11/13/9〜10/3〜4/0（前回と同じ）．C2 の繰り返しの切り替えは二台とも PASS．
+- 記録 suite（#1 OBX）：負荷なしで受信 200 MS/s，送信 100 MS/s まで．`h4` の負荷の下では受信が 50 MS/s まで（100 と 200 MS/s は overflow），送信は同じ．profile の 1 GB/s は実測より緩い（段階 4）．
+- H1：遅れた burst は FPGA が packet ごとに捨てる（すべて時刻つきなら何も鳴らず，時刻なしの尾は鳴る）．Fake は burst ごと捨てる（保守表 3 の材料）．H2：途中で飢えると尾は届いた時に鳴る．#56 の Stop の遅れは負荷なしで最大 2.9 ms，負荷つきで最大 3.0 ms．H4 の余裕の最小は 4.6 ms と 3.9 ms．
