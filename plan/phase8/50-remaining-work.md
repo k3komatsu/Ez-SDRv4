@@ -60,15 +60,15 @@
 ### D. owner の判断だけで済むもの（実装は A の中）
 
 - `overflow_restart_gap_ns` の値（今は `unmeasured`）．
-- DDC/DUC に残った設定の扱い（段階 4 の前後）．
-- feature `uhd` の mutation（「1b-4c までに判断」が過ぎている）．
+- ~~DDC/DUC に残った設定の扱い~~：届かない（E の仕分け，2026-11-14）．
+- ~~feature `uhd` の mutation~~：A13 の変異の道具の選び方で（orchestrator，2026-11-14）．
 - 保守表の 3・4．
 
 ### E. 要確認
 
 
 
-- handoff §2 の 1 の ⑤：D9b-1b の残り（underflow の後の (a)）と実験の規則の取り込み（片付けの前の join，生成の失敗，受け付けの時刻）．中身を読んでから A か B に分ける．
+- ~~D9b-1b の残りと実験の規則の取り込み~~ → 仕分け済み（2026-11-14）：(a)〈underflow の後の残りを新しい burst で続ける〉は **owner が取りやめ**（2026-11-14．今のまま burst を捨てる，KL-13）．R1〈#71〉・送信の R2′・D の「DDC/DUC に残った設定」は，note 47 で周波数・gain・antenna が `cold` になり本番が時刻つきの DSP 命令を出さない〈`Device::apply` は即時，`tune_dsp`/`tune_auto` は bench の probe だけ〉ので届かない：外す（orchestrator，#71 は閉じた）．実験の規則の取り込み〈45-report-e4 の候補〉と feature `uhd` の mutation は A13〈締めの振り返り〉で（orchestrator）．
 
 ## 3. 規模の見当（INFERRED）
 
