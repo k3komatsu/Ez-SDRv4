@@ -1260,6 +1260,17 @@ impl ActionSubmitter for NoSubmit {
 
 /// A unit `prepare` of the UHD Provider with a hand-built context.
 fn direct_prepare(radio: &mut UhdRadio, device: Arc<FakeDevice>, class: ExecutionClass, links: Vec<AttachedPort>, constraints: &[(&str, Scalar)]) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
+    direct_prepare_events(radio, device, class, links, constraints).0
+}
+
+/// `direct_prepare`, and the collector of the events the Provider published during it.
+fn direct_prepare_events(
+    radio: &mut UhdRadio,
+    device: Arc<FakeDevice>,
+    class: ExecutionClass,
+    links: Vec<AttachedPort>,
+    constraints: &[(&str, Scalar)],
+) -> (Result<(), ezsdr_kernel::module_api::ModuleError>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let authority = DeviceAuthority::new(device, clocks.clone(), "internal", "internal", ARGS).unwrap();
     let mut registry = ModuleRegistry::new();
@@ -1270,6 +1281,7 @@ fn direct_prepare(radio: &mut UhdRadio, device: Arc<FakeDevice>, class: Executio
         .flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k)))
         .collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 1024, &Policy::default()));
+    let published = events.clone();
     let ctx = {
         let mut ctx = PrepareContext::testing(EventSource::Node { node: ResourceId::parse("usrp").unwrap() }, authority.time(), clocks, events, Arc::new(NoActions), Arc::new(NoSubmit));
         ctx.run = RunId::from_string("unit".to_owned());
@@ -1287,7 +1299,7 @@ fn direct_prepare(radio: &mut UhdRadio, device: Arc<FakeDevice>, class: Executio
         content: json!({ "selector": {}, "requested": request(constraints) }),
         after: Vec::new(),
     };
-    radio.prepare(&fragment, ctx).map(|_| ())
+    (radio.prepare(&fragment, ctx).map(|_| ()), published)
 }
 
 fn attached(policy: ezsdr_kernel::stream::BackPressure) -> AttachedPort {
@@ -1604,6 +1616,38 @@ fn ur_12_prepare_refusals() {
     assert_eq!(unknown.kind, ModuleErrorKind::Rejected);
     assert!(unknown.message.contains("RM-4:"), "{}", unknown.message);
     assert_eq!(applies(&unknown_device), before, "prepare called the device before rejecting the unknown key: {:?}", unknown_device.calls());
+}
+
+/// `direct_prepare_events` on a device that fails with `fault`: the refusal, the `DEVICE_LOST` events delivered and the device's calls.
+fn prepare_with_a_fault(fault: FakeFault) -> (ezsdr_kernel::module_api::ModuleError, usize, Vec<String>) {
+    let device = fake(FakeConfig { faults: vec![fault], ..FakeConfig::default() });
+    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).unwrap();
+    let (result, events) = direct_prepare_events(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &[("radio.rx.c0.stream", Scalar::from(0))]);
+    radio.cleanup();
+    radio.cleanup();
+    let lost = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind == kind(EventKind::DEVICE_LOST)).count();
+    (result.unwrap_err(), lost, device.calls())
+}
+
+#[test]
+fn ur_29_a_lost_apply_in_prepare_is_published_and_refused_with_the_devices_text() {
+    // UR-29, UR-12, #101: the first apply of `prepare`'s configure finds the device gone: `prepare` refuses with the device's own text, after the
+    // loss is published (the event and `mark_lost`), once; `cleanup` has nothing prepared to close.
+    let (error, lost, calls) = prepare_with_a_fault(FakeFault::LostOnCall("apply", 0));
+    assert_eq!((error.kind, error.message.as_str()), (ModuleErrorKind::Rejected, "fake: the device is gone (lost on apply)"));
+    assert_eq!(lost, 1);
+    assert_eq!(calls.iter().filter(|call| *call == "mark_lost").count(), 1, "{calls:?}");
+    assert_eq!(calls.last().map(String::as_str), Some("mark_lost"), "{calls:?}");
+    assert!(!calls.iter().any(|call| call == "close_streams"), "{calls:?}");
+}
+
+#[test]
+fn ur_12_a_refused_apply_in_prepare_that_is_not_a_loss_publishes_nothing() {
+    // UR-12, UR-29: the non-lost twin keeps its refusal and publishes nothing.
+    let (error, lost, calls) = prepare_with_a_fault(FakeFault::RxApplyFails);
+    assert_eq!((error.kind, error.message.as_str()), (ModuleErrorKind::Rejected, "fake: scripted refusal of the first receive apply"));
+    assert_eq!(lost, 0);
+    assert!(!calls.iter().any(|call| call == "mark_lost"), "{calls:?}");
 }
 
 #[test]
@@ -2630,6 +2674,38 @@ fn ur_29_a_failing_reference_sensor_alone_is_not_a_lost_device() {
     let manifest = run.finish();
     assert!(events_of(&manifest, EventKind::DEVICE_LOST).is_empty(), "{result:?} {:?}", events_of(&manifest, EventKind::DEVICE_LOST));
     assert!(section(&manifest, "timing").as_array().unwrap().iter().any(|r| r["what"] == "ref_locked_failed"), "{}", section(&manifest, "timing"));
+}
+
+#[test]
+fn ur_29_a_loss_at_prepare_or_arm_ends_the_run_as_a_lost_receive_open_does() {
+    // UR-29, UR-12, UR-13, #101: a Session whose device finds itself gone at `prepare`'s apply, at `arm`'s reference read, receive open, rate read
+    // or transmit open ends `Failed` at that stage with the device's own text, one delivered `DEVICE_LOST`, the device marked lost once and
+    // never closed (the receive open's row is #67's behaviour, which the other rows must equal); a rate read that was lost compared nothing.
+    let cases: [(&str, Stage, Json, bool, bool); 5] = [
+        ("rx_open", Stage::Arm, json!({}), false, false),
+        ("tx_open", Stage::Arm, json!({}), true, false),
+        ("rates", Stage::Arm, json!({}), false, true),
+        ("ref_locked", Stage::Arm, json!({ "clock_source": "external" }), false, false),
+        ("apply", Stage::Prepare, json!({}), false, false),
+    ];
+    for (call, stage, selector, transmit, device_section) in cases {
+        let dir = TempDir::new();
+        let device = fake(FakeConfig { faults: vec![FakeFault::LostOnCall(call, 0)], ..FakeConfig::default() });
+        let spec = if transmit { with_tx(receive_spec(1, 1e6, 1e9, None), 1e6) } else { receive_spec(1, 1e6, 1e9, None) };
+        let manifest = spec_run_ended(&spec, &profile(&dir, selector, json!({}), false), device.clone(), BTreeMap::new());
+        let at = |manifest: &Manifest| matches!(&manifest.termination.reason, Termination::Failed { stage: got, .. } if *got == stage);
+        assert!(at(&manifest), "{call}: {:?}", manifest.termination.reason);
+        assert!(failure(&manifest).contains(&format!("(lost on {call})")), "{call}: {}", failure(&manifest));
+        let lost = events_of(&manifest, EventKind::DEVICE_LOST);
+        assert_eq!(lost.len(), 1, "{call}: {lost:?}");
+        assert_eq!(lost[0].payload["message"], format!("fake: the device is gone (lost on {call})"));
+        let calls = device.calls();
+        assert_eq!(calls.iter().filter(|c| *c == "mark_lost").count(), 1, "{call}: {calls:?}");
+        assert!(!calls.iter().any(|c| c == "close_streams"), "{call}: {calls:?}");
+        if device_section {
+            assert_eq!(section(&manifest, "device")["rates_checked"], json!({ "rx": false, "tx": false }), "{call}");
+        }
+    }
 }
 
 #[test]

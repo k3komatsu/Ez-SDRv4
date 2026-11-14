@@ -5572,8 +5572,8 @@
     "id": "P372",
     "name": "arm leaves the receive streamer's record unknown, so the first segment opens it again (UR-25, S12)",
     "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-    "old": "            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| refuse_open(&core, e))?;",
-    "new": "            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| refuse_open(&core, e))?;\n            lock(&core.streams).record_open(self::core::stream_key(Dir::Rx, stream.k), None);",
+    "old": "            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| refuse(&core, e, open_refusal))?;",
+    "new": "            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| refuse(&core, e, open_refusal))?;\n            lock(&core.streams).record_open(self::core::stream_key(Dir::Rx, stream.k), None);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
     "filter": "ur_25_a_receive_session_follows_its_recorded_plan"
@@ -5904,8 +5904,8 @@
   "id": "P476",
   "name": "`start` swallows a lost `rx_start` without publishing it (UR-29, UR-15)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "                    if error.lost {\n                        core.device_lost(&error.message);\n                    }",
-  "new": "",
+  "old": "                    core.publish_loss(&error);\n                    failed = Some(format!(\"UR-15: {error}\"));",
+  "new": "                    failed = Some(format!(\"UR-15: {error}\"));",
   "scope": "fn start",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -6005,11 +6005,11 @@
       "id": "P500",
    "name": "an owner leaves its streamer open after a refused rate comparison (UR-13, UR-36)",
    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-      "old": "        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if opened.is_ok() && checked.is_err() && !self.is_lost() {\n            self.close_device(dir, k);\n        }",
-      "new": "        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if false {\n            self.close_device(dir, k);\n        }",
+      "old": "let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        self.close_if_refused(dir, k, &checked);",
+      "new": "let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_13_arm_refuses_a_pre_chain_rate_set_after_the_open"
+   "test_bin": "lib",
+   "filter": "ur_13_an_open_whose_rate_comparison_refuses_closes_the_streamer"
   },
   {
    "id": "P503",
@@ -6723,8 +6723,8 @@
   "id": "T42",
   "name": "UR-13: `arm` sends an empty buffer when it opens the transmit streamer",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;",
-  "new": "            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;\n            let _ = core.device.tx_send(stream.k, &[&[]], None, true, true, Wall::from_millis(1));",
+  "old": "            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| refuse(&core, e, open_refusal))?;",
+  "new": "            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| refuse(&core, e, open_refusal))?;\n            let _ = core.device.tx_send(stream.k, &[&[]], None, true, true, Wall::from_millis(1));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_13_arm_radiates_nothing"
@@ -22357,8 +22357,8 @@
   "id": "N75-27",
   "name": "a recovery that Provider::stop interrupts emits the failed-reopen rejection (#75)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "if !core.is_lost() && lock(&core.streams).stop.is_none() { self.core.device_failed(None, \"tx_reopen\", error); }",
-  "new": "if !core.is_lost() { self.core.device_failed(None, \"tx_reopen\", error); }",
+  "old": "if error.lost || (!core.is_lost() && lock(&core.streams).stop.is_none()) { self.core.device_failed(None, \"tx_reopen\", error); }",
+  "new": "if error.lost || !core.is_lost() { self.core.device_failed(None, \"tx_reopen\", error); }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_22_stop_and_loss_at_the_retry_boundary_release_the_claim"
@@ -23425,9 +23425,9 @@
  {
   "id": "N67F-29",
   "name": "a loss found by the open's stop at arm is not published before the refusal (UR-29)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "fn refuse_open(core: &Core, error: crate::device::DeviceError) -> ModuleError { if error.lost { core.device_lost(&error.message); }",
-  "new": "fn refuse_open(core: &Core, error: crate::device::DeviceError) -> ModuleError { if error.lost && false { core.device_lost(&error.message); }",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "pub fn publish_loss(&self, error: &DeviceError) -> bool { if error.lost { self.device_lost(&error.message); }",
+  "new": "pub fn publish_loss(&self, error: &DeviceError) -> bool { if error.lost && false { self.device_lost(&error.message); }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_29_a_loss_found_by_the_stop_on_open_at_arm_is_published_once_and_cleanup_closes_nothing"
@@ -24173,5 +24173,125 @@
   "crate": "ezsdr-acceptance",
   "test_bin": "governance",
   "filter": "kernel_wall_scan_finds_a_sleep_and_a_short_expiry_however_it_is_written"
+ },
+ {
+  "id": "N101-01",
+  "name": "prepare's configure drops a lost apply instead of publishing it (UR-29, UR-12, #101)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": ".map_err(|e| refuse(&core, e, |e| e.message))?",
+  "new": ".map_err(|e| rejected(e.message))?",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_29_a_lost_apply_in_prepare_is_published_and_refused_with_the_devices_text"
+ },
+ {
+  "id": "N101-02",
+  "name": "a lost ref_locked read at arm is refused without publishing the loss (UR-29, UR-13, #101)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "Err(error) => return Err(refuse(&core, error, |e| format!(\"UR-13: {e}\"))),",
+  "new": "Err(error) => return Err(rejected(format!(\"UR-13: {error}\"))),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_lost_reference_read_at_arm_is_published_before_any_open"
+ },
+ {
+  "id": "N101-03",
+  "name": "a lost transmit open at arm is refused without publishing the loss (UR-29, UR-13, #101)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| refuse(&core, e, open_refusal))?;",
+  "new": "core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_lost_transmit_open_at_arm_is_published_and_cleanup_closes_nothing"
+ },
+ {
+  "id": "N101-04",
+  "name": "a lost receive open or stop on open at arm is refused without publishing the loss (UR-29, #67)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| refuse(&core, e, open_refusal))?;",
+  "new": "core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_found_by_the_stop_on_open_at_arm_is_published_once_and_cleanup_closes_nothing"
+ },
+ {
+  "id": "N101-05",
+  "name": "the refusal of prepare and arm does not publish the loss it carries (UR-29, #101)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "core.publish_loss(&error); rejected(text(error))",
+  "new": "rejected(text(error))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_found_by_the_stop_on_open_at_arm_is_published_once_and_cleanup_closes_nothing"
+ },
+ {
+  "id": "N101-06",
+  "name": "an owner's failure of a lost device is reported as a refusal, not published (UR-29, #101)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "if !self.publish_loss(error) {",
+  "new": "if true {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_receive_owner_open_whose_rate_read_is_lost_publishes_it_and_closes_no_streamer"
+ },
+ {
+  "id": "N101-07",
+  "name": "a lost rate read is held as a refusal and replayed as one (UR-29, UR-13, #101)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "Err(error) if error.lost => return Err(error),",
+  "new": "Err(error) if false => return Err(error),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_lost_rate_read_is_the_devices_own_error_and_is_not_cached"
+ },
+ {
+  "id": "N101-08",
+  "name": "a streamer is closed on a device its own rate read found lost (UR-29, UR-13, #101)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "if matches!(checked, Err(error) if !error.lost) && !self.is_lost() {",
+  "new": "if checked.is_err() && !self.is_lost() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_an_open_whose_rate_read_is_lost_closes_no_streamer"
+ },
+ {
+  "id": "N101-09",
+  "name": "a transmit reopen whose comparison refuses leaves its streamer open (UR-13, UR-36)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "let checked = if opened.is_ok() { self.check_opened(Dir::Tx, set) } else { Ok(()) };\n        self.close_if_refused(Dir::Tx, k, &checked);",
+  "new": "let checked = if opened.is_ok() { self.check_opened(Dir::Tx, set) } else { Ok(()) };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_13_a_reopen_whose_comparison_refuses_closes_the_confirmed_streamer"
+ },
+ {
+  "id": "N101-10",
+  "name": "a lost transmit reopen is not published while a stop is booked (UR-29, UR-22, #101)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "if error.lost || (!core.is_lost() && lock(&core.streams).stop.is_none()) {",
+  "new": "if !core.is_lost() && lock(&core.streams).stop.is_none() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_lost_reopen_while_a_stop_is_booked_is_published"
+ },
+ {
+  "id": "N101-11",
+  "name": "FakeFault::LostOnCall leaves the device healthy after the named call (UR-33, #101)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "st.gone = true;",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_lost_on_call_fault_fails_that_call_and_every_call_after_it"
+ },
+ {
+  "id": "N101-12",
+  "name": "FakeFault::LostOnCall counts no call, so a later one is never the nth (UR-33, #101)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "*nth += 1;",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_lost_on_call_fault_fails_that_call_and_every_call_after_it"
  }
 ]

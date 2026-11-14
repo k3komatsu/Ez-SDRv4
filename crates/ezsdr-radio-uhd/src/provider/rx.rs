@@ -1176,6 +1176,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ur_29_a_receive_owner_open_whose_rate_read_is_lost_publishes_it_and_closes_no_streamer() {
+        // UR-29, UR-13, #101: the owner's first open of the direction compares its rates; a read that finds the device gone is the loss (not a
+        // refusal), published once by the owner's refusal path, with no device call between the read and the publication.
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            faults: vec![crate::device::FakeFault::LostOnCall("rates", 0)],
+            ..crate::device::FakeConfig::default()
+        }));
+        let (core, _time, events) = super::super::test_support::rig_on(spy.clone(), vec![link()], 2_000);
+        spy.watch(&core);
+        let (mut rx, _) = rx_unopened(&core, 1);
+        plan(&core, &[(10_000, None, Some(1))]);
+
+        assert!(rx.begin(), "the owner handled the lost open");
+        assert!(core.is_lost());
+        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Rx, 0)), Holder::Free);
+        let order = spy.order();
+        let rates = order.iter().position(|call| *call == "rates").expect("the open's rate comparison");
+        assert_eq!(&order[rates + 1..], ["mark_lost"], "{order:?}");
+        let delivered = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        let kinds: Vec<_> = delivered.iter().map(|event| event.kind.as_str()).collect();
+        assert_eq!(kinds.iter().filter(|kind| **kind == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{kinds:?}");
+        assert!(!kinds.contains(&ezsdr_radio::kinds::COMMAND_REJECTED), "a loss is no refusal: {kinds:?}");
+    }
+
     fn samples(first_tick: i64, n: usize) -> RxRecv {
         RxRecv::Samples { first_tick, samples: vec![vec![[0.0, 0.0]; n]] }
     }

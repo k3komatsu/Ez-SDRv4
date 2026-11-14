@@ -1099,11 +1099,18 @@ impl Core {
         self.emit(&self.id, EventKind::DEVICE_LOST, Severity::Fatal, json!({ "message": message }));
     }
 
-    /// A device failure: `DEVICE_LOST` when the device is gone, else the reason.
-    pub fn device_failed(&self, id: Option<ActionId>, action: &str, error: &DeviceError) {
+    /// UR-29: a device error that is the device's loss is published (`DEVICE_LOST`, `mark_lost`); whether it was. The one place a Provider path
+    /// turns an error's `lost` into the event, for a refusal of `prepare` or `arm` and for an owner's failure alike.
+    pub fn publish_loss(&self, error: &DeviceError) -> bool {
         if error.lost {
             self.device_lost(&error.message);
-        } else {
+        }
+        error.lost
+    }
+
+    /// A device failure: `DEVICE_LOST` when the device is gone, else the reason.
+    pub fn device_failed(&self, id: Option<ActionId>, action: &str, error: &DeviceError) {
+        if !self.publish_loss(error) {
             self.command_rejected(id, action, &error.message);
         }
     }
@@ -1139,6 +1146,8 @@ impl Core {
         let outcome = match self.device.rates(dir, chan) {
             Ok(ranges) if ezsdr_radio::device::rate_set_matches(&self.description.rates, &ranges) => Ok(()),
             Ok(_) => Err(format!("UR-13: the {} rates the device reports are not the profile's rate set", dir.name())),
+            // UR-29: a lost read is no outcome: nothing is held for it, and its caller publishes the loss.
+            Err(error) if error.lost => return Err(error),
             Err(error) => Err(format!("UR-13: {}", error.message)),
         };
         drop(device_gate);
@@ -1416,9 +1425,7 @@ impl Core {
         lock(&self.streams).record_open(stream, None);
         let opened = self.open_tx_confirmed_locked(k, set, &channels, not_before);
         let checked = if opened.is_ok() { self.check_opened(Dir::Tx, set) } else { Ok(()) };
-        if opened.is_ok() && checked.is_err() && !self.is_lost() {
-            self.close_device(Dir::Tx, k);
-        }
+        self.close_if_refused(Dir::Tx, k, &checked);
         let opened_for_record: Result<(), DeviceError> = opened.as_ref().map(|_| ()).map_err(Clone::clone);
         lock(&self.streams).record_opened(stream, set, &opened_for_record, &checked);
         match opened {
@@ -1549,11 +1556,17 @@ impl Core {
             Dir::Rx => self.open_device(dir, k, set),
         };
         let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };
-        if opened.is_ok() && checked.is_err() && !self.is_lost() {
-            self.close_device(dir, k);
-        }
+        self.close_if_refused(dir, k, &checked);
         lock(&self.streams).record_opened(stream, set, &opened, &checked);
         opened.and(checked)
+    }
+
+    /// UR-13, UR-36: the streamer a refused rate comparison left open is closed at once, never on a device the comparison found lost: its read
+    /// made the loss known, and no device call is made between it and the caller's publication (UR-29).
+    fn close_if_refused(&self, dir: Dir, k: usize, checked: &Result<(), DeviceError>) {
+        if matches!(checked, Err(error) if !error.lost) && !self.is_lost() {
+            self.close_device(dir, k);
+        }
     }
 
     pub fn close_device(&self, dir: Dir, k: usize) {
@@ -2310,6 +2323,61 @@ mod tests {
         let open = calls.iter().position(|call| call == "rx_open 0 [0]").unwrap();
         let close = calls.iter().position(|call| call == "rx_close 0").unwrap();
         assert!(open < close, "the opened streamer was closed before the record was refused: {calls:?}");
+    }
+
+    fn lost_rates_spy(nth_open_fault: Vec<crate::device::FakeFault>) -> (Arc<Core>, Arc<super::super::test_support::LockSpy>) {
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, faults: nth_open_fault, ..crate::device::FakeConfig::default() }));
+        let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+        spy.watch(&core);
+        (core, spy)
+    }
+
+    #[test]
+    fn ur_29_a_lost_rate_read_is_the_devices_own_error_and_is_not_cached() {
+        // UR-29, UR-13, #101: a rate read that finds the device gone is that error, unchanged; nothing is held for it, so the direction is not
+        // compared; once the loss is published a later comparison makes no device call.
+        let (core, spy) = lost_rates_spy(vec![crate::device::FakeFault::LostOnCall("rates", 0)]);
+        let error = core.check_rates(Dir::Rx, 0).unwrap_err();
+        assert!(error.lost);
+        assert_eq!(error.message, "fake: the device is gone (lost on rates)");
+        assert!(!core.rates_checked(Dir::Rx), "a lost read compared nothing");
+        assert_eq!(spy.seen("rates"), 1);
+        let again = core.check_rates(Dir::Rx, 0).unwrap_err();
+        assert!(again.lost, "the loss is not held as a refusal: {again:?}");
+        assert_eq!(spy.seen("rates"), 2, "and the read is made again");
+        core.device_lost("test: published");
+        let published = core.check_rates(Dir::Rx, 0).unwrap_err();
+        assert_eq!(published.message, "UR-29: the device is lost before the rate comparison");
+        assert_eq!(spy.seen("rates"), 2, "a published loss makes no device call");
+    }
+
+    #[test]
+    fn ur_29_an_open_whose_rate_read_is_lost_closes_no_streamer() {
+        // UR-29, UR-13, UR-36, #101: after a successful open the rate read finds the device gone; the loss is the caller's to publish and no device
+        // call (a close of the streamer just opened) is made between the read and it. One fresh device for each open: the loss lasts.
+        for dir in [Dir::Rx, Dir::Tx] {
+            let (core, spy) = lost_rates_spy(vec![crate::device::FakeFault::LostOnCall("rates", 0)]);
+            let error = core.open_streamer(dir, 0, Channels::first(1)).unwrap_err();
+            assert!(error.lost, "{dir:?}");
+            let order = spy.order();
+            assert_eq!(order.last(), Some(&"rates"), "{dir:?}: no close after the lost read: {order:?}");
+            let streams = lock(&core.streams);
+            let state = streams.stream(stream_key(dir, 0));
+            assert_eq!(state.set, DeviceSet::Unknown, "{dir:?}");
+            assert_eq!(state.configured, None, "{dir:?}");
+        }
+    }
+
+    #[test]
+    fn ur_13_an_open_whose_rate_comparison_refuses_closes_the_streamer() {
+        // UR-13, UR-36: the non-lost twin: a refused comparison closes the streamer it followed, last of the device's calls.
+        for dir in [Dir::Rx, Dir::Tx] {
+            let (core, spy) = lost_rates_spy(vec![crate::device::FakeFault::RatesMismatch(0)]);
+            let error = core.open_streamer(dir, 0, Channels::first(1)).unwrap_err();
+            assert!(!error.lost && error.message.starts_with("UR-13:"), "{dir:?}: {error:?}");
+            let order = spy.order();
+            assert_eq!(order.last(), Some(&if dir == Dir::Rx { "rx_close" } else { "tx_close" }), "{dir:?}: {order:?}");
+        }
     }
 
     #[test]

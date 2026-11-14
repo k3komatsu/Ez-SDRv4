@@ -297,6 +297,9 @@ pub enum FakeFault {
     DropAckOfSend(usize),
     /// Every call fails with `lost: true`.
     Lost(Duration),
+    /// The `nth` (0-based) call of the named `Device` method — `"apply"`, `"rates"`, `"ref_locked"`, `"rx_open"` or `"tx_open"` — fails with
+    /// `lost: true`, and so does every later call that checks for a lost device: the link is gone from that call on (UR-29).
+    LostOnCall(&'static str, usize),
     /// `tx_async` fails from this instant on, with this `lost` (UR-28).
     TxAsyncFails(Duration, bool),
     /// `ref_locked` reports an unlocked reference.
@@ -881,6 +884,10 @@ struct Fake {
     fired: Vec<bool>,
     rates_seen: Vec<f64>,
     calls: Vec<String>,
+    /// How many times each method `FakeFault::LostOnCall` can name was called.
+    named_calls: BTreeMap<&'static str, usize>,
+    /// A `FakeFault::LostOnCall` fired: the device is gone.
+    gone: bool,
     /// An open of a front end another stream's streamer held: UHD 4.10 refuses it, cuts the
     /// holder's edge and later aborts the process (`bench-results.md`, 2026-10-21), so the
     /// fake's drop fails the test unless the test takes it with `take_abort`.
@@ -956,6 +963,8 @@ impl FakeDevice {
                 fired,
                 rates_seen: Vec::new(),
                 calls: Vec::new(),
+                named_calls: BTreeMap::new(),
+                gone: false,
                 aborted: None,
             }),
             config,
@@ -1156,8 +1165,20 @@ impl FakeDevice {
 
     fn lost(&self, st: &Fake) -> Result<(), DeviceError> {
         let now = self.now(st);
-        let gone = self.config.faults.iter().any(|f| matches!(f, FakeFault::Lost(at) if now >= self.ticks_of(*at)));
+        let gone = st.gone || self.config.faults.iter().any(|f| matches!(f, FakeFault::Lost(at) if now >= self.ticks_of(*at)));
         if gone { Err(DeviceError { lost: true, message: "fake: the device is gone".to_owned() }) } else { Ok(()) }
+    }
+
+    /// `lost`, for a method `FakeFault::LostOnCall` can name: counts the call and trips the fault when it is the named one.
+    fn lost_at(&self, st: &mut Fake, call: &'static str) -> Result<(), DeviceError> {
+        let nth = st.named_calls.entry(call).or_default();
+        let this = *nth;
+        *nth += 1;
+        if self.config.faults.contains(&FakeFault::LostOnCall(call, this)) {
+            st.gone = true;
+            return Err(DeviceError { lost: true, message: format!("fake: the device is gone (lost on {call})") });
+        }
+        self.lost(st)
     }
 
     fn sleep_ticks(&self, ticks: i64) {
@@ -1297,7 +1318,7 @@ impl Device for FakeDevice {
 
     fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> {
         let mut st = self.lock();
-        self.lost(&st)?;
+        self.lost_at(&mut st, "rates")?;
         st.calls.push(format!("rates {} {chan}", dir.name()));
         if chan >= st.spec[dir as usize].len() {
             return Err(DeviceError::failed(format!("fake: no {} channel {chan}", dir.name())));
@@ -1395,8 +1416,8 @@ impl Device for FakeDevice {
         if self.unreachable() {
             return Err(self.timed_out());
         }
-        let st = self.lock();
-        self.lost(&st)?;
+        let mut st = self.lock();
+        self.lost_at(&mut st, "ref_locked")?;
         let now = self.now(&st);
         if self.config.faults.iter().any(|f| matches!(f, FakeFault::RefLockedFails(at) if now >= self.ticks_of(*at))) {
             return Err(DeviceError::failed("fake: the reference sensor read failed"));
@@ -1420,7 +1441,7 @@ impl Device for FakeDevice {
         };
         self.host.sleep(self.config.apply_delay);
         let mut st = self.lock();
-        self.lost(&st)?;
+        self.lost_at(&mut st, "apply")?;
         if chan >= st.spec[dir as usize].len() {
             return Err(DeviceError::failed(format!("fake: no {} channel {chan}", dir.name())));
         }
@@ -1475,7 +1496,7 @@ impl Device for FakeDevice {
 
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         let mut st = self.lock();
-        self.lost(&st)?;
+        self.lost_at(&mut st, "rx_open")?;
         st.calls.push(format!("rx_open {stream} {channels:?}"));
         // UHD reads an empty channel list as channel 0 (`sanitize_stream_args`, UR-33), and
         // `UhdDevice` sends it as channel 0: the streamer the fake opens is the device's.
@@ -1761,7 +1782,7 @@ impl Device for FakeDevice {
 
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         let mut st = self.lock();
-        self.lost(&st)?;
+        self.lost_at(&mut st, "tx_open")?;
         st.calls.push(format!("tx_open {stream} {channels:?}"));
         let nth = st.tx_opens;
         st.tx_opens += 1;
@@ -2523,6 +2544,30 @@ mod tests {
             let set = |name: &str| Settings { antenna: Some(name.to_owned()), ..Settings::default() };
             assert_eq!(device.apply(dir, 0, &set("TX/RX")).unwrap().antenna.as_deref(), Some("TX/RX"));
             assert_eq!(device.apply(dir, 0, &Settings::default()).unwrap().antenna, None, "a change that names none");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_lost_on_call_fault_fails_that_call_and_every_call_after_it() {
+        // UR-29, UR-33: the `nth` call of the named method finds the device gone, and so does every later call that checks; the calls before it
+        // are the healthy device's. The second `tx_open` is the one named, so the first one (an owner's setup) succeeds.
+        let device = manual(FakeConfig { faults: vec![FakeFault::LostOnCall("rates", 0), FakeFault::LostOnCall("tx_open", 1)], ..FakeConfig::default() });
+        participant(&device, |device| {
+            device.tx_open(0, &[0]).expect("the first tx_open is before the fault");
+            device.rx_open(0, &[0]).expect("a method the fault does not name");
+            let error = device.rates(Dir::Rx, 0).unwrap_err();
+            assert!(error.lost && error.message.contains("lost on rates"), "{error:?}");
+            assert!(!device.calls().iter().any(|call| call.starts_with("rates")), "the lost call is not recorded: {:?}", device.calls());
+            for later in [device.rx_open(1, &[1]), device.tx_open(1, &[1]), device.apply(Dir::Rx, 0, &Settings::default()).map(|_| ())] {
+                assert!(later.unwrap_err().lost, "every later call fails lost");
+            }
+            assert!(device.time_now().unwrap_err().lost);
+        });
+        let device = manual(FakeConfig { faults: vec![FakeFault::LostOnCall("tx_open", 1)], ..FakeConfig::default() });
+        participant(&device, |device| {
+            device.tx_open(0, &[0]).unwrap();
+            let error = device.tx_open(0, &[0]).unwrap_err();
+            assert!(error.lost && error.message.contains("lost on tx_open"), "{error:?}");
         });
     }
 

@@ -853,7 +853,8 @@ impl Tx {
             }
         }
         if let Err(error) = &result {
-            if !core.is_lost() && lock(&core.streams).stop.is_none() {
+            // UR-29: a loss is published whether or not a stop is booked; the stop only suppresses a refusal's report.
+            if error.lost || (!core.is_lost() && lock(&core.streams).stop.is_none()) {
                 self.core.device_failed(None, "tx_reopen", error);
             }
         }
@@ -6710,6 +6711,40 @@ mod tests {
         tx.pass();
         assert!(device.calls().iter().any(|call| call.starts_with("tx_open")), "the reopen ran: {:?}", device.calls());
         assert_eq!(lock(&core.streams).stream(key).configured, None, "a loss during the reopen clears the mark the reopen read");
+    }
+
+    /// The owner's recovery reopen on a device whose second `tx_open` (the recovery's: the rig's own setup open is the first) fails with `fault`, with
+    /// `Provider::stop` booked once the owner has claimed the reopen: the `DEVICE_LOST` events and the rejection kinds reported, and the core.
+    fn reopen_with_a_stop_booked(fault: FakeFault) -> (Arc<Core>, Arc<FakeDevice>, Vec<String>) {
+        let (core, device, _time, mut tx, _guard, events, _to_tx) = owner_with(1, vec![fault]);
+        assert_eq!(device.calls().iter().filter(|call| call.starts_with("tx_open")).count(), 1, "the setup's open succeeded: {:?}", device.calls());
+        tx.chain().mark_reopen_needed();
+        let stopping = core.clone();
+        super::super::test_support::probe(&core, "tx_reopen_claimed", move |_| {
+            lock(&stopping.streams).stop = Some((stopping.now(), ezsdr_kernel::module_api::StopMode::Abort));
+        });
+        tx.pass();
+        let kinds = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().map(|event| event.kind.as_str().to_owned()).collect();
+        (core, device, kinds)
+    }
+
+    #[test]
+    fn ur_29_a_lost_reopen_while_a_stop_is_booked_is_published() {
+        // UR-29, UR-22, #101: the recovery's `tx_open` finds the device gone after `Provider::stop` was booked; the booked stop suppresses a
+        // refusal's report, not the loss: it is published once, and no device call follows it.
+        let (core, device, kinds) = reopen_with_a_stop_booked(FakeFault::LostOnCall("tx_open", 1));
+        assert!(core.is_lost(), "the recovery open was reached and its loss published");
+        assert_eq!(kinds.iter().filter(|kind| *kind == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{kinds:?}");
+        assert_eq!(device.calls().last().map(String::as_str), Some("mark_lost"), "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_22_a_refused_reopen_while_a_stop_is_booked_reports_nothing() {
+        // UR-22, UR-29: the non-lost twin: a booked stop explains a refused recovery open, so nothing is reported and nothing is lost.
+        let (core, device, kinds) = reopen_with_a_stop_booked(FakeFault::TxOpenFails(1));
+        assert!(!core.is_lost());
+        assert!(kinds.iter().all(|kind| kind != ezsdr_kernel::event::EventKind::DEVICE_LOST && kind != ezsdr_radio::kinds::COMMAND_REJECTED), "{kinds:?}");
+        assert!(!device.calls().iter().any(|call| call == "mark_lost"), "{:?}", device.calls());
     }
 
     #[test]

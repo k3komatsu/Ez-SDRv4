@@ -26,6 +26,7 @@ mod ffi {
     pub const UHD_ERROR_IO: uhd_error = 30;
     pub const UHD_ERROR_OS: uhd_error = 31;
     pub const UHD_ERROR_RUNTIME: uhd_error = 44;
+    pub const UHD_ERROR_EXCEPT: uhd_error = 47;
 
     pub type uhd_usrp_handle = *mut c_void;
     pub type uhd_rx_streamer_handle = *mut c_void;
@@ -260,12 +261,15 @@ fn text(read: impl FnOnce(*mut c_char, usize) -> uhd_error) -> String {
 }
 
 /// A `uhd_error` as a [`DeviceError`] whose text `message` reads; `streaming` says
-/// whether a `RUNTIME` error counts as a lost device (UR-29, INFERRED).
+/// whether a `RUNTIME` error counts as a lost device (UR-29, INFERRED). An `EXCEPT` counts as one only at the two stream opens, where a dead
+/// link's transport timeout surfaces as one (UHD 4.10 `error_c.cpp:20-35`; UR-29).
+// shortcut: the two opens are named by their call text, so a renamed call literal silently loses the rule; `uhd_47_at_a_stream_open_is_a_lost_device` goes through the real opens.
 fn check_with(call: &str, code: uhd_error, streaming: bool, message: impl FnOnce() -> String) -> Result<(), DeviceError> {
     if code == UHD_ERROR_NONE {
         return Ok(());
     }
-    let lost = matches!(code, UHD_ERROR_IO | UHD_ERROR_USB | UHD_ERROR_OS) || (streaming && code == UHD_ERROR_RUNTIME);
+    let stream_open = matches!(call, "uhd_usrp_get_rx_stream" | "uhd_usrp_get_tx_stream");
+    let lost = matches!(code, UHD_ERROR_IO | UHD_ERROR_USB | UHD_ERROR_OS) || (streaming && code == UHD_ERROR_RUNTIME) || (stream_open && code == UHD_ERROR_EXCEPT);
     Err(DeviceError { lost, message: format!("{call}: UHD error {code}: {}", message()) })
 }
 
@@ -1189,6 +1193,10 @@ mod ffi_tests {
     static ENTERED: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
     static RX_STREAM_FREES: AtomicUsize = AtomicUsize::new(0);
     static OPEN_STREAM_FAILS: AtomicBool = AtomicBool::new(false);
+    /// The code the replaced `uhd_usrp_get_rx_stream` and `uhd_usrp_get_tx_stream` answer when a test sets one; `NO_CODE` leaves their defaults
+    /// (receive: success unless `OPEN_STREAM_FAILS`, transmit: `UHD_ERROR_RUNTIME`).
+    static OPEN_STREAM_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(NO_CODE);
+    const NO_CODE: i32 = -1;
     static PRIORITY_CALLS: AtomicUsize = AtomicUsize::new(0);
     static PRIORITY_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
     static PRIORITY_ARGS: Mutex<Option<(f32, bool)>> = Mutex::new(None);
@@ -1589,13 +1597,20 @@ mod ffi_tests {
     #[unsafe(no_mangle)]
     unsafe extern "C" fn uhd_usrp_get_rx_stream(_usrp: uhd_usrp_handle, _args: *mut uhd_stream_args_t, _h: uhd_rx_streamer_handle) -> c_int {
         native_entry();
-        if OPEN_STREAM_FAILS.load(Ordering::SeqCst) { UHD_ERROR_RUNTIME } else { UHD_ERROR_NONE }
+        match OPEN_STREAM_CODE.load(Ordering::SeqCst) {
+            NO_CODE if OPEN_STREAM_FAILS.load(Ordering::SeqCst) => UHD_ERROR_RUNTIME,
+            NO_CODE => UHD_ERROR_NONE,
+            code => code,
+        }
     }
 
     /// Every test that opens a transmit streamer wants it to fail, so that no real graph is needed.
     #[unsafe(no_mangle)]
     unsafe extern "C" fn uhd_usrp_get_tx_stream(_usrp: uhd_usrp_handle, _args: *mut uhd_stream_args_t, _h: uhd_tx_streamer_handle) -> c_int {
-        UHD_ERROR_RUNTIME
+        match OPEN_STREAM_CODE.load(Ordering::SeqCst) {
+            NO_CODE => UHD_ERROR_RUNTIME,
+            code => code,
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -1621,6 +1636,44 @@ mod ffi_tests {
             let error = error.unwrap_err();
             assert!(error.message.starts_with(&format!("{call}: UHD error 44: ")) && error.message.ends_with(texts), "{}", error.message);
             assert!(!error.message.contains("the usrp set failed"), "the device handle's text was read: {}", error.message);
+        }
+    }
+
+    #[test]
+    fn uhd_47_is_lost_only_at_the_two_stream_opens() {
+        // UR-29: `UHD_ERROR_EXCEPT` counts as a lost device at `uhd_usrp_get_rx_stream` and `uhd_usrp_get_tx_stream` alone; the streamer calls that
+        // share their `streaming` flag, and the device handle's, keep the rule they had.
+        let lost = |call: &str, code: uhd_error, streaming: bool| check_with(call, code, streaming, || "text".to_owned()).unwrap_err().lost;
+        for call in ["uhd_usrp_get_rx_stream", "uhd_usrp_get_tx_stream"] {
+            assert!(lost(call, UHD_ERROR_EXCEPT, true), "{call}: 47 is lost at a stream open");
+            assert!(lost(call, UHD_ERROR_RUNTIME, true), "{call}: 44 stays lost");
+        }
+        for call in ["uhd_rx_streamer_max_num_samps", "uhd_tx_streamer_max_num_samps", "uhd_tx_streamer_send", "uhd_tx_streamer_recv_async_msg", "uhd_rx_streamer_recv", "uhd_usrp_get_time_now"] {
+            assert!(!lost(call, UHD_ERROR_EXCEPT, true), "{call}: 47 is not lost off the stream opens");
+            assert!(!lost(call, UHD_ERROR_EXCEPT, false), "{call}: nor without `streaming`");
+            assert!(lost(call, UHD_ERROR_RUNTIME, true), "{call}: 44 on a streaming call stays lost");
+            assert!(!lost(call, UHD_ERROR_RUNTIME, false), "{call}: and is not lost without `streaming`");
+            for code in [UHD_ERROR_IO, UHD_ERROR_USB, UHD_ERROR_OS] {
+                assert!(lost(call, code, false), "{call}: {code} is lost anywhere");
+            }
+        }
+        assert!(check_with("uhd_usrp_get_tx_stream", UHD_ERROR_NONE, true, || "text".to_owned()).is_ok());
+    }
+
+    #[test]
+    fn uhd_47_at_a_stream_open_is_a_lost_device() {
+        // UR-29: through the real `rx_open` and `tx_open`, which name the two calls the rule is keyed on.
+        let _test = lock(&TEST_LOCK);
+        for (code, lost) in [(UHD_ERROR_EXCEPT, true), (UHD_ERROR_RUNTIME, true), (UHD_ERROR_IO, true), (20, false)] {
+            OPEN_STREAM_CODE.store(code, Ordering::SeqCst);
+            let rx = rx_dummy(true).rx_open(0, &[0]);
+            let tx = dummy(1).tx_open(0, &[0]);
+            OPEN_STREAM_CODE.store(NO_CODE, Ordering::SeqCst);
+            for (call, error) in [("uhd_usrp_get_rx_stream", rx), ("uhd_usrp_get_tx_stream", tx)] {
+                let error = error.unwrap_err();
+                assert!(error.message.starts_with(&format!("{call}: UHD error {code}: ")), "{}", error.message);
+                assert_eq!(error.lost, lost, "{call}: code {code}");
+            }
         }
     }
 

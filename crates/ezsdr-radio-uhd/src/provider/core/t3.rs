@@ -528,6 +528,34 @@ fn ur_75_a_stop_or_loss_published_around_a_successful_pre_send_time_read_sends_n
     }
 }
 
+/// The transmit reopen on a device with `fault`, after the rig's own open; the reopen's result and the device's calls, in order.
+fn reopen_on(fault: FakeFault) -> (Result<(), DeviceError>, Vec<&'static str>) {
+    let spy = Arc::new(LockSpy::new(config(vec![fault])));
+    let _guard = clock_guard(&spy.host());
+    let (core, _time, _events) = rig_on(spy.clone(), Vec::new(), 2_000);
+    spy.watch(&core);
+    spy.tx_open(0, &[0]).unwrap();
+    let result = core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ());
+    (result, spy.order())
+}
+
+#[test]
+fn ur_29_a_reopen_whose_rate_read_is_lost_closes_no_streamer() {
+    // UR-29, UR-13, #101: the confirmed streamer's rate read finds the device gone; the loss is the caller's to publish, and no close of the
+    // streamer just confirmed reaches the gone device before it.
+    let (result, order) = reopen_on(FakeFault::LostOnCall("rates", 0));
+    assert!(result.expect_err("the read is lost").lost);
+    assert_eq!(order.last(), Some(&"rates"), "{order:?}");
+}
+
+#[test]
+fn ur_13_a_reopen_whose_comparison_refuses_closes_the_confirmed_streamer() {
+    // UR-13: the non-lost twin: the refused comparison closes the streamer, last of the device's calls.
+    let (result, order) = reopen_on(FakeFault::RatesMismatch(0));
+    assert!(!result.expect_err("the rates differ").lost);
+    assert_eq!(order.last(), Some(&"tx_close"), "{order:?}");
+}
+
 #[test]
 fn ur_75_a_stop_between_the_close_and_the_open_opens_nothing() {
     // The Stop arrives while attempt 2's close is held in the device (it holds `device_gate`, which a loss would wait for: only a Stop is

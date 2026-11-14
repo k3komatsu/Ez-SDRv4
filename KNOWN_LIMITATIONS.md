@@ -22,11 +22,11 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 - **Status:** Device behaviour. That a second open in the same process locks as a new process would is INFERRED: the automatic re-open has not yet been seen working on the bench.
 
 ### KL-2 Unplugging the 10 GbE link
-- **Symptom:** the Run or Session ends `Stopped { policy { DEVICE_LOST } }` with its Manifest written, about 1.1 s after the link drops while receiving and about 3.0 s after in a transmit-only Session; Session calls made meanwhile wait until then. On a direct cable the process then aborts at exit (`terminate called after throwing an instance of 'uhd::io_error'`).
-- **When:** the link to the X300 goes down during a Run (cable, switch port, device power).
+- **Symptom:** the Run or Session ends `Stopped { policy { DEVICE_LOST } }` with its Manifest written, about 1.1 s after the link drops while receiving and about 3.0 s after in a transmit-only Session; Session calls made meanwhile wait until then. On a direct cable the process then aborts at exit (`terminate called after throwing an instance of 'uhd::io_error'`). A device lost during `connect` (its `prepare` or `arm` stage) ends it `Failed { prepare }` or `Failed { arm }` with the device's own error text and one `DEVICE_LOST` in the Manifest.
+- **When:** the link to the X300 goes down during a Run or during `connect` (cable, switch port, device power).
 - **Workaround:** none needed for the data: the Manifest is written before the abort. Through an L2 switch the process exited normally (INFERRED why). In Rust, opening the same `args` again in the same process once the link is back frees the kept device, and the process then exits normally.
 - **Evidence:** UR-29 (`design/18-uhd-radio.md`); `plan/phase7/bench-results.md:1380, 1486–1497, 1520, 1535, 1584, 1616`.
-- **Status:** Ceiling (UHD's static teardown, UR-29). Which UHD errors mean a lost device is INFERRED (UR-29).
+- **Status:** Ceiling (UHD's static teardown, UR-29). Which UHD errors mean a lost device is INFERRED (UR-29), except at the stream opens (`get_*_stream`), where IO, RUNTIME and 47 were checked in the UHD 4.10 source ([n101-dispositions](plan/phase8/reviews/n101-dispositions.md)).
 
 ### KL-3 LO phase after a tune is random on OBX, UBX and CBX
 - **Symptom:** after a tune the loop phase is random (spread 142°–180° over six untimed retunes on the bench); a timed tune returned it to within 0.1° in Phase 7 and within 0.9° in BP5, but spread 99°–156° in three shake-out runs on 2026-10-27 (0.8° in the fourth), for a reason not known. A receive tune settles within about 60 µs.

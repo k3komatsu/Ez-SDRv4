@@ -55,12 +55,10 @@ fn open_refusal(error: crate::device::DeviceError) -> String {
     if error.message.starts_with("UR-13:") { error.message } else { format!("UR-13: {}", error.message) }
 }
 
-/// `arm`'s refusal of a failed receive open, after a loss it found is published (UR-29): `cleanup` then closes no streamer.
-fn refuse_open(core: &Core, error: crate::device::DeviceError) -> ModuleError {
-    if error.lost {
-        core.device_lost(&error.message);
-    }
-    rejected(open_refusal(error))
+/// The refusal `prepare` and `arm` make from a device error, after a loss it carries is published (UR-29): `cleanup` then makes no device call.
+fn refuse(core: &Core, error: crate::device::DeviceError, text: impl FnOnce(crate::device::DeviceError) -> String) -> ModuleError {
+    core.publish_loss(&error);
+    rejected(text(error))
 }
 
 /// `ezsdr.radio.uhd.<suffix>`; the Kernel files it under the instance's source root (RS-39).
@@ -527,7 +525,7 @@ impl Provider for UhdRadio {
                             (chan as usize, settings)
                         })
                         .collect();
-                    let n = core.configure(dir, &entries, rate, k).map_err(|e| rejected(e.message))?;
+                    let n = core.configure(dir, &entries, rate, k).map_err(|e| refuse(&core, e, |e| e.message))?;
                     let node = self.description.stream_node(&self.instance.id, dir, k);
                     let ratio = ezsdr_kernel::time::Rational::new(n as u64, 1).map_err(|e| rejected(format!("UR-12: {e}")))?;
                     stream.handle = Some(ctx.clocks.declare_sample_clock(node, root, ratio).map_err(|e| rejected(format!("UR-12: {e}")))?);
@@ -553,7 +551,7 @@ impl Provider for UhdRadio {
             match self.device.ref_locked() {
                 Ok(Some(false)) => return Err(rejected(format!("UR-13: the {clock_source} reference is not locked"))),
                 Ok(_) => {}
-                Err(error) => return Err(rejected(format!("UR-13: {error}"))),
+                Err(error) => return Err(refuse(&core, error, |e| format!("UR-13: {e}"))),
             }
         }
         // UR-13: the receive streamer of every stream with channels, when its port has a
@@ -565,13 +563,13 @@ impl Provider for UhdRadio {
                 continue;
             }
             // UR-13: the record says what the streamer now holds; a failed open or rate check holds none.
-            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| refuse_open(&core, e))?;
+            core.open_streamer(Dir::Rx, stream.k, stream.channels).map_err(|e| refuse(&core, e, open_refusal))?;
         }
         for stream in &mut prepared.tx {
             if stream.channels.is_empty() {
                 continue;
             }
-            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;
+            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| refuse(&core, e, open_refusal))?;
             // RM-21: the open keeps the connect values the device was configured with, generation 0.
             lock(&core.streams).record_configured(stream_key(Dir::Tx, stream.k), Some(0));
             // RM-25: the first lattice instant at or after the arm instant.
@@ -645,9 +643,7 @@ impl Provider for UhdRadio {
                 if let Err(error) = self.device.rx_start(stream.k, t0) {
                     // UR-29: a lost device is published before those owners are stopped, so
                     // that no thread calls the device after it.
-                    if error.lost {
-                        core.device_lost(&error.message);
-                    }
+                    core.publish_loss(&error);
                     failed = Some(format!("UR-15: {error}"));
                     break;
                 }
@@ -1034,6 +1030,128 @@ mod tests {
         assert!(order[stop + 1..].iter().all(|name| *name == "mark_lost"), "no device call but the loss's follows the lost stop: {order:?}");
         let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
         assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{delivered:?}");
+    }
+
+    /// `arm`'s rig: one `LockSpy` is the radio's device and the core's, so `ref_locked` and `cleanup`'s `close_streams` (the radio's) and the
+    /// opens, `rates` and `mark_lost` (the core's) land in one `order()`. A receive stream has a link and one channel; a transmit stream one channel.
+    struct ArmRig {
+        radio: UhdRadio,
+        spy: Arc<test_support::LockSpy>,
+        core: Arc<Core>,
+        events: Arc<ezsdr_kernel::event::EventCollector>,
+    }
+
+    fn arm_rig(rx: bool, tx: bool, clock_source: &str, faults: Vec<crate::device::FakeFault>) -> ArmRig {
+        let list = |on: bool| if on { json!(["0:A:ubx:0"]) } else { json!([]) };
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig", "clock_source": clock_source, "rx": list(rx), "tx": list(tx) }
+        }))
+        .unwrap();
+        let spy = Arc::new(test_support::LockSpy::new(FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() }));
+        let mut radio = UhdRadio::from_binding(&binding, spy.clone()).unwrap();
+        let links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>> = if rx { vec![Arc::new(NoLink)] } else { Vec::new() };
+        let (core, _time, events) = test_support::rig_on_description(spy.clone(), links, BTreeMap::new(), radio.description.clone());
+        spy.watch(&core);
+        let stream = |on: bool| if on { vec![PreparedStream { k: 0, handle: None, channels: Channels::first(1), clock: None }] } else { Vec::new() };
+        radio.prepared = Some(Prepared { core: core.clone(), actions: Arc::new(NoActions), config: BTreeMap::new(), rx: stream(rx), tx: stream(tx) });
+        ArmRig { radio, spy, core, events }
+    }
+
+    impl ArmRig {
+        fn device_lost_events(&self) -> Vec<ezsdr_kernel::event::Event> {
+            let delivered = self.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+            delivered.into_iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).collect()
+        }
+    }
+
+    /// UR-29: `arm` met the fake's `LostOnCall(call, _)`: it refuses `UR-13:` with the device's own text, after the loss is published (the state at its
+    /// return), once; and `cleanup`, twice, makes no device call — after the lost one only `mark_lost` was called.
+    fn assert_loss_published_at_arm(mut rig: ArmRig, call: &str) {
+        let message = format!("fake: the device is gone (lost on {call})");
+        let error = rig.radio.arm().unwrap_err();
+        assert_eq!(error.kind, ModuleErrorKind::Rejected);
+        assert_eq!(error.message, format!("UR-13: {message}"));
+        assert!(rig.core.is_lost(), "the loss is published before `arm` refuses");
+        assert_eq!(rig.spy.seen("mark_lost"), 1);
+        rig.radio.cleanup();
+        rig.radio.cleanup();
+        let order = rig.spy.order();
+        // `ref_locked` is not one of the spy's recorded calls: nothing was tried before it.
+        let after = order.iter().rposition(|name| *name == call).map_or(&order[..], |at| &order[at + 1..]);
+        assert_eq!(after, ["mark_lost"], "{order:?}");
+        let lost = rig.device_lost_events();
+        assert_eq!(lost.len(), 1, "{lost:?}");
+        assert_eq!(lost[0].payload["message"], message);
+    }
+
+    #[test]
+    fn ur_29_a_lost_transmit_open_at_arm_is_published_and_cleanup_closes_nothing() {
+        // UR-29, #101: a transmit-only Run whose transmit open finds the device gone.
+        let rig = arm_rig(false, true, "internal", vec![crate::device::FakeFault::LostOnCall("tx_open", 0)]);
+        assert_loss_published_at_arm(rig, "tx_open");
+    }
+
+    #[test]
+    fn ur_29_a_lost_transmit_open_after_the_receive_open_at_arm_is_published_once() {
+        // UR-29, #101: the receive open and its rate check complete, then the transmit open finds the device gone.
+        let rig = arm_rig(true, true, "internal", vec![crate::device::FakeFault::LostOnCall("tx_open", 0)]);
+        let ArmRig { mut radio, spy, core, events } = rig;
+        let error = radio.arm().unwrap_err();
+        assert_eq!(error.message, "UR-13: fake: the device is gone (lost on tx_open)");
+        assert!(core.is_lost());
+        radio.cleanup();
+        assert_eq!(spy.order(), ["rx_open", "rx_stop", "rates", "tx_open", "mark_lost"]);
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{delivered:?}");
+    }
+
+    #[test]
+    fn ur_29_a_lost_reference_read_at_arm_is_published_before_any_open() {
+        // UR-29, #101: the external reference's sensor read is the first device call of `arm`; nothing is opened after the loss.
+        let rig = arm_rig(true, true, "external", vec![crate::device::FakeFault::LostOnCall("ref_locked", 0)]);
+        assert_loss_published_at_arm(rig, "ref_locked");
+    }
+
+    #[test]
+    fn ur_29_a_lost_rate_read_at_arm_is_published_and_the_streamer_is_not_closed() {
+        // UR-29, UR-13, #101: the open succeeded and the direction's first rate read finds the device gone: the loss is published, no `rx_close` or
+        // `tx_close` reaches the gone device, and the direction is not recorded as compared.
+        for tx in [false, true] {
+            let rig = arm_rig(!tx, tx, "internal", vec![crate::device::FakeFault::LostOnCall("rates", 0)]);
+            let dir = if tx { Dir::Tx } else { Dir::Rx };
+            let core = rig.core.clone();
+            assert_loss_published_at_arm(rig, "rates");
+            assert!(!core.rates_checked(dir), "{dir:?}: a lost read compared nothing");
+        }
+    }
+
+    #[test]
+    fn ur_13_a_refusal_at_arm_that_is_not_a_loss_is_unchanged() {
+        // UR-13: a refusal that is not a loss keeps its text and kind, publishes nothing, and `cleanup` closes the device's streams once.
+        use crate::device::FakeFault;
+        let cases: [(&str, bool, bool, &str, FakeFault, &str); 4] = [
+            ("reference sensor", true, true, "external", FakeFault::RefLockedFails(std::time::Duration::ZERO), "UR-13: fake: the reference sensor read failed"),
+            ("transmit open", false, true, "internal", FakeFault::TxOpenFails(0), "UR-13: fake: scripted refusal of transmit open"),
+            ("rx rates", true, false, "internal", FakeFault::RatesMismatch(0), "UR-13: the rx rates the device reports are not the profile's rate set"),
+            ("tx rates", false, true, "internal", FakeFault::RatesMismatch(0), "UR-13: the tx rates the device reports are not the profile's rate set"),
+        ];
+        for (name, rx, tx, clock_source, fault, text) in cases {
+            let mut rig = arm_rig(rx, tx, clock_source, vec![fault]);
+            let error = rig.radio.arm().unwrap_err();
+            assert_eq!((error.kind, error.message.as_str()), (ModuleErrorKind::Rejected, text), "{name}");
+            assert!(!rig.core.is_lost(), "{name}");
+            rig.radio.cleanup();
+            let order = rig.spy.order();
+            assert_eq!(order.iter().filter(|call| **call == "close_streams").count(), 1, "{name}: {order:?}");
+            assert!(!order.contains(&"mark_lost"), "{name}: {order:?}");
+            if name.ends_with("rates") {
+                let rates = order.iter().position(|call| *call == "rates").unwrap();
+                assert!(order[rates + 1..].iter().any(|call| call.ends_with("_close") && !call.starts_with("close")), "{name}: the refused streamer is closed at once: {order:?}");
+            }
+            assert!(rig.device_lost_events().is_empty(), "{name}");
+        }
     }
 
     #[test]
