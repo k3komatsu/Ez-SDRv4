@@ -2584,10 +2584,141 @@ fn ur_28_the_device_reports_a_late_burst() {
     wait(&mut run, ms(100));
     let manifest = run.finish();
     let late: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::LateAtDevice).collect();
-    assert_eq!(late.len(), 1, "{:?}", time_errors(&manifest));
-    let record = &bursts(&manifest)[0];
-    assert_eq!(late[0].target, record.target, "the late report names the moved start");
+    // UR-22: the repeat resumes at its lattice after the first drop, and `SlowSend` makes every send late, so the part is dropped too, plays nothing, and the
+    // repeat ends there: the first event carries the resume point, the second names the part and carries none.
+    assert_eq!(late.len(), 2, "{:?}", time_errors(&manifest));
+    let records = bursts(&manifest);
+    assert_eq!(late[0].target, records[0].target, "the late report names the moved start");
     assert!(late[0].late_by_ns > 0);
+    assert_eq!(late[0].resumes_at, Some(late[1].target), "the plan is the part's start");
+    assert_eq!((late[1].resumes_at, records.len()), (None, 2), "{records:?}");
+    assert_eq!(records[1].target, late[1].target);
+    assert_eq!(section(&manifest, "timing").as_array().unwrap().iter().filter(|row| row["what"] == "tx_resume").count(), 1);
+}
+
+#[test]
+fn ur_22_a_repeat_the_device_reports_late_resumes_on_its_lattice() {
+    // UR-22, UR-28 (V1, V8, V10): a late report (scripted, so that only the first send is late) reaches the open repeat. The Module closes its device burst and
+    // sends the repeat's next device burst at `resumes_at`, a lattice point 100 samples apart from the start: the event names the span, the record splits, and
+    // one `timing` row says why.
+    let device = Arc::new(Descheduled::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })));
+    device.hold_reports(true);
+    let (mut run, _dir) = tx_session_on(device.clone());
+    let start = tx_at(&run, ms(30));
+    assert!(admitted(&send_at(&mut run, "start_repeat", Some(start), &tone(100))));
+    wait(&mut run, ms(40));
+    let first = device
+        .sends()
+        .iter()
+        .find(|call| call.contains(" sob=true") && !call.contains(" at=- "))
+        .and_then(|call| call.split_whitespace().find_map(|word| word.strip_prefix("at=")))
+        .expect("a timed start")
+        .parse::<i64>()
+        .unwrap();
+    device.inject(ezsdr_radio_uhd::TxReport { code: ezsdr_radio_uhd::TxCode::TimeError, tick: Some(first + 1_000), channel: 0 });
+    device.hold_reports(false);
+    wait(&mut run, ms(80));
+    let manifest = run.finish();
+    let late: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::LateAtDevice).collect();
+    assert_eq!(late.len(), 1, "{:?}", time_errors(&manifest));
+    let resumes_at = late[0].resumes_at.expect("the repeat resumes");
+    let (origin, at) = (start.ticks_in(start.domain()).unwrap(), resumes_at.ticks_in(start.domain()).unwrap());
+    assert!(at > origin && (at - origin) % 100 == 0, "R {at} is on the lattice from {origin}");
+    let records = bursts(&manifest);
+    assert!(records.len() >= 2 && records[0].end == ezsdr_kernel::stream::BurstEnd::Discontinuity, "{records:?}");
+    assert_eq!(records[1].target, resumes_at, "the part's record opens where it really started");
+    let timing: Vec<_> = section(&manifest, "timing").as_array().unwrap().iter().filter(|row| row["what"] == "tx_resume").cloned().collect();
+    assert_eq!(timing.len(), 1, "{timing:?}");
+    assert_eq!(timing[0]["resumes_at"].as_i64(), Some(at));
+    assert!(section(&manifest, "rejected").as_array().unwrap().iter().all(|row| !row["reason"].as_str().unwrap_or("").contains("not resumed")));
+    let sends = device.sends();
+    let resume_tick = first + (at - origin) * 200;
+    assert!(sends.iter().any(|call| call.contains(" sob=true") && call.contains(&format!("at={resume_tick} "))), "a start of burst at R: {sends:?}");
+}
+
+#[test]
+fn ur_22_a_late_send_asap_repeat_resumes() {
+    // UR-22, UR-28 (O3, RT25): a `start_repeat` is booked at 8 ms and its first send reaches the device 20 ms late, once (the device then keeps up). The device drops
+    // the whole device burst; the repeat is flagged and resumes on its lattice instead of ending: one `late_at_device` carrying `resumes_at`, one record split at
+    // it, and the loopback hears silence from the start to `resumes_at` and the waveform from there.
+    let device = Arc::new(Descheduled::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })));
+    device.slow_first_send(Wall::from_millis(20));
+    let (mut run, _dir) = tx_session_on(device.clone());
+    let _ = send(&mut run, "start_repeat", Some(ms(8)), &tone(100));
+    wait(&mut run, ms(150));
+    let manifest = run.finish();
+    let late: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::LateAtDevice).collect();
+    assert_eq!(late.len(), 1, "{:?}", time_errors(&manifest));
+    let resumes_at = late[0].resumes_at.expect("the repeat resumes");
+    let records = bursts(&manifest);
+    assert!(records.len() >= 2 && records[0].end == ezsdr_kernel::stream::BurstEnd::Discontinuity, "{records:?}");
+    assert_eq!((late[0].target, records[1].target), (records[0].target, resumes_at), "the part's record opens at R");
+    let domain = resumes_at.domain();
+    let (start, at) = (records[0].target.ticks_in(domain).unwrap(), resumes_at.ticks_in(domain).unwrap());
+    let sends = tx_sends(&device.inner);
+    let first = sends[0].at.expect("a timed start");
+    let tick = |sample: i64| first + (sample - start) * 200;
+    assert!(device.inner.transmitted(tick(start), (at - start) as usize).iter().all(Option::is_none), "silence from the start to R: {:?}", calls(&device.inner, "tx_send"));
+    assert!(device.inner.transmitted(tick(at), 100).iter().all(Option::is_some), "the waveform from R");
+    assert_eq!(section(&manifest, "timing").as_array().unwrap().iter().filter(|row| row["what"] == "tx_resume").count(), 1);
+    // A repeat that stalled and resumed is not a trial the timing precondition of the loopback tests lets through: its `tx_resume` row says so even when no report
+    // did (V24: the event lost). With every delivered event removed the row is the only evidence left.
+    let mut eventless = manifest.clone();
+    eventless.events.delivered.clear();
+    assert!(section(&eventless, "rejected").as_array().unwrap().iter().all(|row| !row["reason"].as_str().unwrap_or("").contains("timeline expired")));
+    assert!(std::panic::catch_unwind(|| require_stream_timing(&eventless, "a resumed repeat whose events were lost", true)).is_err());
+}
+
+#[test]
+fn ur_28_a_finite_burst_the_device_receives_late_is_dropped_whole() {
+    // UR-22, UR-28 (S1): the first send reaches the device 20 ms after it was handed over, past the burst's start. The device drops the whole device
+    // burst, not only that packet: nothing of the 20 000 samples plays, no BurstAck comes, the burst is told once and ends at the cursor.
+    let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::SlowSend(Wall::from_millis(20))], ..FakeConfig::default() });
+    let _ = send(&mut run, "send", Some(ms(30)), &tone(20_000));
+    wait(&mut run, ms(100));
+    let manifest = run.finish();
+    let late: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::LateAtDevice).collect();
+    assert_eq!(late.len(), 1, "{:?}", time_errors(&manifest));
+    assert!(late[0].late_by_ns > 0);
+    assert_eq!(late[0].target, bursts(&manifest)[0].target, "the event names the burst");
+    let first = tx_sends(&device)[0].at.expect("a timed start");
+    assert!(device.transmitted(first, 20_000).iter().all(Option::is_none), "{:?}", calls(&device, "tx_send"));
+    let rows = section(&manifest, "async").as_array().unwrap().clone();
+    assert!(!rows.iter().any(|row| row["code"] == "BurstAck" && row["tx_flush"] != true), "{rows:?}");
+    assert_eq!(section(&manifest, "bursts")[0]["end"], "stop");
+}
+
+#[test]
+fn ur_28_two_joined_bursts_a_late_report_reaches_are_both_told() {
+    // UR-28 (S4): B starts at A's end, so it continues A's device burst: one start of burst for both. The reports are held until both were handed over, then a
+    // TimeError at the device burst's first instant is let through (the fake cannot be late here: with `SlowSend` the host's own clock expires A's timeline
+    // before B can join, which is `ur_28_a_finite_burst_the_device_receives_late_is_dropped_whole`'s case): the one device burst names both Kernel bursts.
+    let device = Arc::new(Descheduled::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })));
+    device.hold_reports(true);
+    let (mut run, _dir) = tx_session_on(device.clone());
+    let a = tx_at(&run, ms(30));
+    let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + 3_000);
+    assert!(admitted(&send_at(&mut run, "send", Some(a), &tone(3_000))));
+    assert!(admitted(&send_at(&mut run, "send", Some(b), &tone(1_000))));
+    wait(&mut run, ms(60));
+    let sends = device.sends();
+    let first = sends
+        .iter()
+        .find(|call| call.contains(" sob=true") && !call.contains(" at=- "))
+        .and_then(|call| call.split_whitespace().find_map(|word| word.strip_prefix("at=")))
+        .expect("a timed start")
+        .parse::<i64>()
+        .unwrap();
+    device.inject(ezsdr_radio_uhd::TxReport { code: ezsdr_radio_uhd::TxCode::TimeError, tick: Some(first + 1_000), channel: 0 });
+    let handed = device.hold_reports(false);
+    wait(&mut run, ms(20));
+    let manifest = run.finish();
+    assert_eq!(sends.iter().filter(|call| call.contains(" sob=true") && !call.contains(" at=- ")).count(), 1, "one device burst for both: {sends:?}");
+    assert_eq!(handed, 3_999, "both bursts were handed over before any report was read (B's last sample is held): {sends:?}");
+    let late: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::LateAtDevice).collect();
+    let records = bursts(&manifest);
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(late.iter().map(|p| p.target).collect::<Vec<_>>(), records.iter().map(|record| record.target).collect::<Vec<_>>(), "{late:?}");
 }
 
 #[test]
@@ -3545,11 +3676,40 @@ struct Descheduled {
     entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     /// The last `rx_recv` returned samples, so the next one is the stall's own position.
     after_block: std::sync::atomic::AtomicBool,
+    /// While set, `tx_async` hands out no report (T2): the owner reads none until the test lets it.
+    reports_held: std::sync::atomic::AtomicBool,
+    injected: Mutex<Vec<ezsdr_radio_uhd::TxReport>>,
+    /// The first timed `tx_send` takes this long on the device's host clock before the device sees it; the later ones do not (`SlowSend` delays every one).
+    slow_first: Mutex<Option<Wall>>,
 }
 
 impl Descheduled {
     fn new(inner: FakeDevice) -> Descheduled {
-        Descheduled { inner, plan: Mutex::new(None), entered: Mutex::new(None), after_block: Default::default() }
+        Descheduled {
+            inner,
+            plan: Mutex::new(None),
+            entered: Mutex::new(None),
+            after_block: Default::default(),
+            reports_held: Default::default(),
+            injected: Default::default(),
+            slow_first: Default::default(),
+        }
+    }
+
+    /// Holds (or lets go) the transmit reports; returns the payload samples handed over so far, the first report's position.
+    fn hold_reports(&self, held: bool) -> usize {
+        self.reports_held.store(held, std::sync::atomic::Ordering::SeqCst);
+        self.sends().iter().filter(|call| !call.contains("eob=true")).map(|call| call.split_whitespace().find_map(|word| word.strip_prefix("n=")).unwrap().parse::<usize>().unwrap()).sum()
+    }
+
+    /// The first timed send is slow, once (a manual-clock sleep: deterministic).
+    fn slow_first_send(&self, delay: Wall) {
+        *self.slow_first.lock().unwrap() = Some(delay);
+    }
+
+    /// A report the next released read hands out before the fake's own.
+    fn inject(&self, report: ezsdr_radio_uhd::TxReport) {
+        self.injected.lock().unwrap().push(report);
     }
 
     /// Arms the planned hold; the receiver fires when the hold begins.
@@ -3667,11 +3827,24 @@ impl Device for Descheduled {
     }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> {
         self.hold(Step::TxSend, at.is_some());
+        if at.is_some() {
+            if let Some(delay) = self.slow_first.lock().unwrap().take() {
+                self.inner.host().sleep(delay);
+            }
+        }
         self.inner.tx_send(s, b, at, sob, eob, t)
     }
     fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> {
         if self.hold(Step::TxAsync, !t.is_zero()) {
             return Ok(None);
+        }
+        if self.reports_held.load(std::sync::atomic::Ordering::SeqCst) {
+            // A read that returns at once must still cost its timeout, or a wait on the manual clock would spin and stop the clock it measures.
+            self.inner.host().sleep(t);
+            return Ok(None);
+        }
+        if let Some(report) = self.injected.lock().unwrap().pop() {
+            return Ok(Some(report));
         }
         self.inner.tx_async(s, t)
     }
@@ -3722,6 +3895,10 @@ fn ur_21_a_descheduled_timed_send_is_on_time_on_the_manual_clock_and_late_on_the
         assert_eq!(errors.iter().any(|p| p.outcome == TimeErrorOutcome::LateAtDevice), late, "{mode:?}: {errors:?}");
         if !late {
             assert_eq!(bursts(&manifest).len(), 1, "{mode:?}: {:?}", device.sends());
+        } else {
+            // UR-28: the device dropped the whole device burst, so no BurstAck follows.
+            let rows = section(&manifest, "async").as_array().unwrap().clone();
+            assert!(!rows.iter().any(|row| row["code"] == "BurstAck" && row["tx_flush"] != true), "{mode:?}: {rows:?}");
         }
     }
 }
@@ -7795,6 +7972,38 @@ fn ur_33_d9_raw_probes_match_the_x3xx_tx_model() {
     let reset_ack = ack_tick(&d70[1]);
     assert!(failed_close_ack < d70[0].start + 30 * ms(1) - ms(100), "D70 one-sample EOB leaves the next timed burst early: ack={failed_close_ack}, start={}", d70[0].start);
     assert!((reset_ack - (d70[1].start + 30 * ms(1))).abs() <= 200, "D70 two-zero control honors the requested start: ack={reset_ack}, start={}", d70[1].start);
+}
+
+// ---------------------------------------------------------------- maintenance table 3, sub-step C: cell C1's rehearsal
+
+#[test]
+fn mt3_c1_rehearsal_the_fake_plays_the_on_time_control_and_drops_the_late_chunked_burst_whole() {
+    // The body of `hw_mt3_c1_chunked_late_burst` on the FakeDevice (AGENTS section 9), at the bench's two rates: a control burst of the Module's chunks
+    // on time (heard) and the same burst late (its first sample is timed 1 ms before the host sends it: late by construction on the fake's own clock; a TimeError, no BurstAck, nothing heard). A burst that is not heard proves nothing without the
+    // control and the receive coverage, so an INCONCLUSIVE verdict fails here as it fails on the bench. The loopback is delayed by 44 samples, as the bench's is.
+    for rate in common::mt3::C1_RATES {
+        let device = fake(FakeConfig { loopback_delay_samples: common::n47s5::LOOPBACK_DELAY_SAMPLES, ..FakeConfig::default() });
+        let trials = common::mt3::late_chunked_cell(&*device, rate, 2, common::mt3::LATE_MS);
+        for trial in &trials {
+            println!("MT3 C1 trace {}", trial.trace());
+        }
+        let verdict = common::mt3::cell_verdict(&trials);
+        assert!(matches!(verdict, common::tone::Verdict::Pass(_)), "C1 on the fake at {rate} S/s: {verdict:?}");
+    }
+}
+
+#[test]
+fn mt3_c1_rehearsal_a_failed_time_read_before_the_late_burst_is_inconclusive_and_sends_nothing() {
+    // The time read fails from 100 ms on (the trial starts well before that and sends its control burst; the wait for the late burst's reference instant
+    // then fails): the trial sends no late burst, so nothing is heard or acknowledged, and its verdict is INCONCLUSIVE. A wait that is skipped on a failed read
+    // would send a burst meant to be late out on time, which plays: a correct device would FAIL.
+    let device = fake(FakeConfig { faults: vec![FakeFault::TimeReadFailsFor(Wall::from_millis(100), Wall::from_secs(2))], ..FakeConfig::default() });
+    let trials = common::mt3::late_chunked_cell(&*device, 1e6, 1, common::mt3::LATE_MS);
+    let evidence = &trials[0].evidence;
+    assert!(evidence.errors.iter().any(|error| error.starts_with("the wait for the late burst: time_now")), "the failed wait is recorded as such: {:?}", evidence.errors);
+    assert_eq!(evidence.late_last, None, "no late send after a wait that did not happen");
+    let verdict = common::mt3::late_chunked_verdict(evidence);
+    assert!(matches!(verdict, common::tone::Verdict::Inconclusive(_)), "{verdict:?}");
 }
 
 #[test]

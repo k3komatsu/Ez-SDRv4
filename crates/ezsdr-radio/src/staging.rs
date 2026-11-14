@@ -281,7 +281,7 @@ pub struct SwitchRecord {
     pub old_period: i64,
     /// The period of the new waveform.
     pub new_period: i64,
-    /// The boundary chosen at receipt, on the stream's clock (RM-37).
+    /// The boundary chosen at receipt, on the stream's clock (RM-37), or the one a repeat's gap moved it to (UR-22) once the switch settles.
     pub boundary: i64,
     /// `pending` until the record settles it: [`SwitchOutcome::label`].
     pub outcome: &'static str,
@@ -376,12 +376,31 @@ pub struct Open<P> {
     pub next: i64,
     /// No send of the booking has completed.
     pub first: bool,
+    /// The booking waits to resume after its device burst was dropped (UR-22); `next` is then the resume point.
+    pub paused: Option<Paused>,
+}
+
+/// A repeat that waits to resume (UR-22): the first sample the device has nothing past, and the Provider's own figure for the stall part of
+/// the gap, kept for the part that resumes it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Paused {
+    /// The handed cursor `H`: the first sample the device has nothing past, which an end of the repeat cuts at.
+    pub handed: i64,
+    /// The stall part of the gap, in root ticks (UR-22).
+    pub stall: i64,
+    /// The sample the repeat was to resume at: the plan the drop's event announced. The part's start differing from it (a missed resume point) is told
+    /// once, when the part is sent (UR-22).
+    pub planned: i64,
+    /// The lattice `(origin, period)` the resume point, a missed one and a switch's boundary the gap passed are taken on: the replaced repeat's.
+    pub lattice: (i64, i64),
+    /// The first instant of the device burst this pause closed: a late report that reaches the part that burst carried is about this pause, and no other's.
+    pub source: Option<i64>,
 }
 
 impl<P> Open<P> {
     /// A booking open at `next`.
     pub fn new(booking: P, next: i64, first: bool) -> Open<P> {
-        Open { booking, next, first }
+        Open { booking, next, first, paused: None }
     }
 }
 
@@ -720,6 +739,9 @@ pub struct TxBook<P, T = ()> {
     pub ops: Ops,
     /// When the Provider's repeats count as started (UR-38).
     pub started_rule: Started,
+    /// The Provider's own bound, in root ticks, on when the device finishes all it was handed (UR-22): kept by [`TxBook::note_sent`], it outlives the
+    /// executor that wrote it.
+    pub busy: i64,
     /// The device burst the executor has open, its safe front and its recovery. The executor writes it only with the operation that changes it,
     /// in that operation's own section: [`TxBook::complete`] (a whole send), [`TxBook::end_open`] (an end, a close's result) and
     /// [`TxBook::complete_reopen`]; the few writes with no booking operation (a loss, `Provider::stop`) go through [`DeviceChain`]'s transitions.
@@ -730,12 +752,69 @@ pub struct TxBook<P, T = ()> {
 impl<P: Booked, T: Copy> TxBook<P, T> {
     /// An empty book of a Provider whose repeats start by `started_rule`.
     pub fn new(started_rule: Started) -> TxBook<P, T> {
-        TxBook { record: Bookings::unarmed(), list: TxList::default(), playing: None, open: None, ops: Ops::default(), started_rule, device: DeviceChain::default() }
+        TxBook { record: Bookings::unarmed(), list: TxList::default(), playing: None, open: None, ops: Ops::default(), started_rule, busy: 0, device: DeviceChain::default() }
     }
 
-    /// The first sample the device has nothing past: the open booking's next sample, or the open device burst's.
+    /// UR-22: the device took a send whole. `busy` moves to the later of its old value, `returned` (the instant the send returned) and `first` (the
+    /// send's first sample; none for an untimed one), plus the send's `ticks`.
+    pub fn note_sent(&mut self, returned: i64, first: Option<i64>, ticks: i64) {
+        self.busy = self.busy.max(returned).max(first.unwrap_or(i64::MIN)).saturating_add(ticks);
+    }
+
+    /// The first sample the device has nothing past: the open booking's next sample (a paused one's handed cursor, not its resume point), or the
+    /// open device burst's.
     pub fn cursor(&self) -> Option<i64> {
-        self.open.as_ref().map(|open| open.next).or_else(|| self.device.next())
+        self.open.as_ref().map(|open| open.paused.map_or(open.next, |paused| paused.handed)).or_else(|| self.device.next())
+    }
+
+    /// UR-22, UR-23: the repeat switch held at the open device burst's cursor. Between a switch's join and its open no booking is open, and this switch is
+    /// the replaced repeat's successor.
+    pub fn switch_at_cursor(&self) -> Option<&P> {
+        self.device.next().and_then(|cursor| self.list.held.get(&cursor)).filter(|held| held.is_switch())
+    }
+
+    /// UR-22: the open repeat's device burst was dropped. `end` is what the executor's close made of the device burst; the booking stays open,
+    /// paused at its handed cursor. It resumes only at [`TxBook::resume_at`].
+    pub fn pause(&mut self, end: DeviceEnd, lattice: (i64, i64)) {
+        assert!(self.ops.inflight.is_none(), "an open booking is paused with an operation in flight");
+        let source = self.device.first();
+        self.device.end(end);
+        let open = self.open.as_mut().expect("a booking is open");
+        open.paused = Some(Paused { handed: open.next, stall: 0, planned: open.next, lattice, source });
+    }
+
+    /// UR-22: the paused booking resumes at the sample `at`, its next, with the stall part `stall` of the gap before it. Its first whole send there
+    /// ends the pause.
+    pub fn resume_at(&mut self, at: i64, stall: i64) {
+        let open = self.open.as_mut().expect("a booking is open");
+        let paused = open.paused.as_mut().expect("the booking is paused");
+        paused.stall = stall;
+        paused.planned = at;
+        open.next = at;
+    }
+
+    /// UR-22: the paused repeat's resume point is missed and moves to `at`, which no plan follows: the part's start is told once (`Paused::planned`).
+    pub fn move_resume_point(&mut self, at: i64) {
+        let open = self.open.as_mut().expect("a booking is open");
+        assert!(open.paused.is_some(), "the booking is paused");
+        open.next = at;
+    }
+
+    /// UR-22: a repeat switch the gap passed replaces the repeat at its resume point: its new waveform's first send is the part's, still to come.
+    /// The switch's boundary moves with the resume point ([`TxBook::move_switch`]).
+    pub fn replace_paused(&mut self, booking: P) {
+        assert!(self.ops.inflight.is_none(), "a paused booking is replaced with an operation in flight");
+        let open = self.open.as_mut().expect("a booking is open");
+        let paused = open.paused.expect("the booking is paused");
+        *open = Open { booking, next: open.next, first: true, paused: Some(paused) };
+    }
+
+    /// UR-22: the pending switch `id` moves to the boundary `to`, past the gap of the repeat it replaces: its new waveform's lattice starts there.
+    pub fn move_switch(&mut self, id: ActionId, to: i64) {
+        self.record.move_switch(id, to);
+        if let Some(playing) = self.playing.as_mut().filter(|playing| playing.id == id) {
+            playing.origin = to;
+        }
     }
 
     /// The executor opens `booking` at its first sample `next`.
@@ -813,6 +892,7 @@ impl<P: Booked, T: Copy> TxBook<P, T> {
             Outcome::Accepted(accepted) if accepted == send.device_count => {
                 open.next += send.count;
                 open.first = false;
+                open.paused = None;
                 if send.ends {
                     self.open = None;
                 }
@@ -986,10 +1066,12 @@ impl<P: Booked, T: Copy> TxBook<P, T> {
             self.playing = None;
         }
         let ours = |booking: &P| booking.is_switch() && booking.id() == Some(id);
+        // A switch the gap of a repeat made the open booking, with none of it sent (UR-22), is cancelled with it: the owner's abandon ends the open booking.
+        let open = self.open.as_ref().is_some_and(|open| open.first && open.paused.is_some() && ours(&open.booking));
         let before = self.list.held.len() + self.list.unread.len();
         self.list.held.retain(|_, booking| !ours(booking));
         self.list.unread.retain(|arrival| !matches!(arrival, Arrival::Booking(booking) if ours(booking)));
-        self.list.held.len() + self.list.unread.len() < before
+        open || self.list.held.len() + self.list.unread.len() < before
     }
 
     /// RM-37: the record applies a pending switch once device time `now_k` reaches its boundary.
@@ -1331,6 +1413,13 @@ impl Bookings {
         }
     }
 
+    /// UR-22: the pending switch `id` takes the boundary `to`, past the gap of the repeat it replaces.
+    pub fn move_switch(&mut self, id: ActionId, to: i64) {
+        if let Some(switch) = self.pending.as_mut().filter(|switch| switch.id == id) {
+            switch.boundary = to;
+        }
+    }
+
     /// The Action of the switch that is still pending, if any.
     pub fn pending_switch(&self) -> Option<ActionId> {
         self.pending.map(|switch| switch.id)
@@ -1606,6 +1695,8 @@ pub fn write_settled(rows: &mut [serde_json::Value], settled: impl IntoIterator<
         let id = serde_json::to_value(settled.id).expect("an action id");
         if let Some(row) = rows.iter_mut().rev().find(|row| row["action_id"] == id) {
             row["outcome"] = serde_json::json!(settled.outcome.label());
+            // A boundary the gap of a repeat moved (UR-22) is the one the switch settled at.
+            row["boundary"] = serde_json::json!(settled.boundary);
         }
     }
 }

@@ -1560,3 +1560,51 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 - stop：`EZSDR-INFRA`，`Control operation timed out`，`Reference Clock PLL failed to lock`，`S2 stop`／`S4 stop`（handle の latch，streamer の取り残し）→ **電源を入れ直し owner へ**．T200 の ① で INCONCLUSIVE の run（RF 読み戻しの abort，summary の欠け，期限切れ）→ 装置を確かめ直す（期限切れは container を kill してあり，その script は以降の run を流さない．ほかに `docker ps` で `ezsdr-t200-bare-*` が残っていないかを見る）．
 - orchestrator に返すもの：commit，各 log の path（`~/.cache/ezsdr-bench/<日付>/`），**決定の行**（`S2 decision`×cell，`S5 decision`×pass，`S4 decision`（cell ごと，`D5 bound`，`stall length`），`T200 decision`，`T200 bare summary`），2 台分，host の設定（H0/H1/H2）ごとの `bench-host.sh` の出力，電源の入れ直しの有無，att の型番（owner の確認）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．
 - 結果から決まること（orchestrator と owner が決める．**今日は値を変えない**）：D1（`rx_bytes_per_s` 8e8 の確認：#1・#2 の `rx-200msps` が 10/10 か．落ちれば 4e8），D2（TX 200 MS/s の admission：`tx-200msps` の 10 s の窓の figure と T200），D3（command lead 5 ms），D4（受信 start lead 10 ms），D5（gap の 140 ms と RM-17：4b の design の step への入力）．
+
+## 11-15 の後の手順（保守表 3：遅れた device burst の cell C1〜C7．**11-15 には流さない**）
+
+出典：保守表 3 の design（`~/.cache/ezsdr-fixes/2026-11-14-mt3/`：C1〜C6 は `fable-review.md` §2.4，C7 は `addendum.md` §2.4），owner の決定 O7（2026-11-14：bench は 11-15 の後．code は source で確かめた「遅れた device burst は device ごと捨てられる」規則で先に進める）．**今あるのは C1 の道具だけ**：`hw_mt3_c1_chunked_late_burst`（body は `tests/common/mt3.rs`，判定の純関数 `late_chunked_verdict`，FakeDevice の rehearsal は default の suite の `mt3_c1_rehearsal_…`）．C2〜C7 は**道具がまだ無い**（bench-tools の step で書く）ので，下の表は何を測るかの定義で，流す command も test の名前も無い．**結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．**
+
+### 問い（INFERRED のもの）
+
+- 規則：X310 の radio は遅れた packet を 1 sample / tick で捨て，DUC は最初の時刻を burst の終わりまで運ぶので，最初の時刻つき packet が遅れた device burst は EOB まで全部捨てられ，BurstAck が来ない（FPGA の source で VERIFIED．H1 が #1 の 1 MS/s，1 回の 20 000-sample 送信で VERIFIED）．Module が送る形（chunk ごとに時刻つき，SOB と EOB），他の rate，#2，後ろに積んだ burst（cascade）は INFERRED．fake はこの規則に合わせて drain し，pad で device より厳しくしてある（UR-33：pad の各項は INFERRED で，C3・C4 が測る）．
+- 結果の使い道：C1 が全 PASS なら Module の形でも device burst ごと捨てられる（この board・rate・条件で）．FAIL（一部が鳴った，または BurstAck が来た）なら規則の前提が崩れる：すぐ orchestrator へ（fake・UR-22 の abandon・UR-28 の retire が前提にしている）．INCONCLUSIVE は何も示さない：理由（受信の穴，control が聞こえない，TimeError が来ない）を直して流し直す．
+
+### 流す項目
+
+| cell | 形 | 測ること | 道具 | TX |
+|---|---|---|---|---|
+| C1 | raw UHD．Module の chunk の形（`segment::send_cap`：1 MS/s で 2 500，10 MS/s で 20 000 sample）の時刻つき send × 8（最初に SOB，最後に EOB，各 send に最初の sample の時刻）．**前に on-time の control の burst**（同じ形，聞く）．late burst は最初の sample の時刻を host の基準の時刻の 1 ms 前にし，host はその基準の時刻以後に最初の chunk を送る（最初の send は少なくとも 1 ms 遅れる．最後の chunk が自分の時刻の 1 ms 以上前に渡されたことを判定が確かめる）．1・10 MS/s × 10 trial | chunk の形でも device burst ごと捨てられるか | `hw_mt3_c1_chunked_late_burst`（書いてある） | あり |
+| C2 | C1 を 100・200 MS/s で，#2 でも（200 MS/s では packet + 2 の間隔が残るか） | rate と board | 未（C1 の rate を増やす） | あり |
+| C3 | C1 の最初の send を 32 sample に | DUC の出力 packet が短く始まるときの overhead（pad の `2 × P`） | 未 | あり |
+| C4 | cascade：A を遅らせ，B（時刻つき，1 burst）を A の名目の終わり + gap に置く．gap を A の遅れをまたいで掃引し，境界の近くは 1 cell ≥ 10 trial | drain の終わりの境界，fake の pad が覆うか（UR-33，M3） | 未 | あり |
+| C5 | 2 channel で，開始の遅れた burst | 片方の channel だけ鳴ることがあるか（RM-11 の「何も送られなかった」） | 未．**slot B にも送信する**：slot B の board と att を owner が確かめ，`EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1` を付けた 1 本だけ（11-15 の (4) と同じ規則．配線が無ければ走らせない） | あり（slot A と B） |
+| C6 | 負荷の下で，保持した尾の飢え（Underflow）の report の順 | channel ごとに Underflow，その後 TimeError，ACK なしか（M2） | 未 | あり |
+| C7 | Module の水準（Session）で，`start_repeat` を開始で遅らせた場合と，途中で飢えさせた場合（`tests/fake.rs` の `Descheduled` を `UhdDevice` に）．m = 10・1・0.2 ms の掃引，1 cell ≥ 10 trial，**両 board** | [from, R) の無音，R で波形が位相連続で戻る，cap に達しない．τ（Module の道での host から radio への遅れ）を測るのは C7 だけ．そのあと owner が m を決める | 未．repeat の再開の段階（段階 D）の後 | あり |
+
+### C1 の流し方
+
+- 条件：slot A（channel 0）にだけ送信する．1 GHz（`SAFE_TX_HZ`），gain 0 dB，振幅 0.4（0.5 以下．`tone_wave` が確かめる），rate は 1・10 MS/s，tone は搬送波から 100 kHz（他の tool と同じ．rate / 10 にすると 10 MS/s で 1.001 GHz になり `SAFE_TX_HZ` を出る）．**1 本の command ごとの前に，owner が「その board の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2」を確かめる**（毎回．続けて流さない）．`pin_slot_a` が CBX と `SAFE_TX_HZ` の外を拒む．`EZSDR_D9_CHANNEL` は付けない（slot B には送信しない）．
+- 板は H1 と同じ #1（OBX）を先に，次に #2（UBX）．`hw` は「2026-11-15 の手順」の「共通の準備」の定義（この test は環境変数を足さない）．device の一生全体（開く・全 trial・teardown・失敗の unwind）を **15 分**の期限（`bounded`）で囲む：過ぎると `EZSDR-INFRA:` の行を書いて abort する（hang の印．電源を入れ直して owner へ．期待は約 3 分）．約 3 分 / 台（estimate：build の後．2 rate × 10 trial，1 trial は約 0.2 s 〜 1 s）．
+
+  ```sh
+  # --- owner が att を確かめた（#1 OBX）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_mt3_c1_chunked_late_burst
+  # --- owner が att を確かめた（#2 UBX）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_mt3_c1_chunked_late_burst
+  grep -h 'VERDICT\|MT3 C1\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_mt3_c1_chunked_late_burst.$BOARD.log
+  ```
+
+- 1 trial：device の時刻 d0 を読み，受信を d0 + 20 ms に start，control の burst を d0 + 60 ms に（各 chunk は時刻の 10 ms 前に送る：Module の window），late burst を d0 + 130 ms の host の時刻（基準）に送る（最初の sample の時刻は 1 ms 前．間で report は読まない：静かな 20 ms の読み 3 回（control の report の後）だけで late の送信が 60 ms 以上遅れ，20 ms の burst の全 chunk が自分の時刻の後に渡されて，packet ごとに捨てる device でも全部捨てて PASS しうる）．report は全部最後に読む（tick で control と late に分ける）．受信は専用の thread が late burst の終わり + 2 chunk + 1 ms まで読む（送信を待たない）．最後に rx_stop と drain．
+- **VERDICT**（`VERDICT mt3 c1 <rate> MS/s trial <i>: …`，定義は `mt3::late_chunked_verdict`．cell の行 `MT3 C1 cell <rate> MS/s: …` は全 trial の合成で，1 つの FAIL で FAIL，PASS でない trial があれば INCONCLUSIVE）：
+  - FAIL（正の証拠．受信の欠けや control の有無に関わらない）：late burst の最初の sample 以後の tick の BurstAck（control の ACK は前の tick），または，loopback の delay（control の onset から trial ごとに測る．25 sample の粒度）を引いた聞こえた区間が late burst の区間と**重なる**（中にあるだけではない）．
+  - INCONCLUSIVE：device 呼び出しの失敗，受信 block が late の区間 ± 1 chunk を穴なしで覆わない，その範囲に samples 以外の受信の結果（overflow など），control が聞こえない（90 % 以上の sample，onset が最初の sample から 1 chunk 以内）か control 自身が TimeError・Underflow，tick の無い report，late burst の最後の send が自分の時刻の 1 ms 以上前に渡されていない（渡した時刻を device の時刻で読む：packet に届いた時刻ではない．packet ごとに捨てる device なら，時刻に間に合った chunk は鳴るはずで，後ろの chunk が時刻の後に渡されると無音の説明にならない），late の区間に TimeError が無い（遅れていない：何も示さない）．
+  - PASS：上のすべてが揃い，late の区間に何も聞こえず BurstAck も無く，TimeError が来た．
+  - **この test は INCONCLUSIVE でも失敗する**（rehearsal と同じ）．`hw` の exit 0 は全 cell が PASS のとき．
+- 聞こえた区間の判定は tone の形（25 sample の窓の coherence 0.9 超，周波数が 100 kHz の ±20 %，電力が 4 LSB の床より上．`tone_intervals`）．H1 の「sample の大きさ 0.001 超」ではない：FakeDevice の受信は送信の無い所で ramp を返し，大きさでは tone と区別できないため．**閾値は bench の前に実機で確かめていない**（INFERRED：C3 の quiet check と同じ床と窓．**10 MS/s では 1 sample の位相の進みが 0.063 rad と小さく，周波数の推定と 25 sample の窓の coherence が 1 MS/s より雑音に弱い**：INFERRED，C1 の 10 MS/s の trace で確かめる）．trial の `MT3 C1 trace {json}` に区間・受信の覆い・report の数が出る．
+- **条件を超えて一般化しない**：1 GHz，この 2 rate，8 chunk，最初の send は少なくとも 1 ms 遅れ，1 cell 10 trial，この board．全 PASS でも「他の rate・board・cascade」は C2〜C7 が測る．
+
+### 流した後・記録
+
+- stop：`EZSDR-INFRA`，`Control operation timed out`，`Reference Clock PLL failed to lock`，装置が応答しない → 電源を入れ直して owner へ．
+- orchestrator に返すもの：commit，各 log の path，`MT3 C1 cell` と `VERDICT mt3 c1` の行（2 台分），`MT3 C1 trace` の dump（`head`），電源の入れ直しの有無，att の型番（owner の確認）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．C2〜C7 は道具ができてから，この節を更新して流す．

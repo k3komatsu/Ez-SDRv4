@@ -7,8 +7,8 @@ use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_radio::CancelReason;
 use ezsdr_radio::staging::{
-    Booked, Bookings, Carried, DeviceChain, DeviceEnd, DeviceSend, OpId, Outcome, Overlap, Playing, Read, Recovery, Refusal, Reopen, STOP_FRONT, Settle, Settled, Staging, Started, SwitchAccepted,
-    SwitchOutcome, SwitchRefusal, TxBook, TxList, TxSend, Until, closed_short_gap, ordinary_k, repeat_boundary, stop_bound, stop_fits,
+    Booked, Bookings, Carried, DeviceChain, DeviceEnd, DeviceSend, OpId, Outcome, Overlap, Paused, Playing, Read, Recovery, Refusal, Reopen, STOP_FRONT, Settle, Settled, Staging, Started,
+    SwitchAccepted, SwitchOutcome, SwitchRefusal, TxBook, TxList, TxSend, Until, closed_short_gap, ordinary_k, repeat_boundary, stop_bound, stop_fits, write_settled,
 };
 
 fn key(name: &str) -> Key {
@@ -3147,4 +3147,89 @@ fn txbook_complete_applies_the_deferred_halt_by_its_loss_sample() {
             assert_eq!(settled(&mut book.record).first().map(|s| s.1), Some(SwitchOutcome::Applied), "a whole send after a Stop below b waits for device time: the Manifest applies it");
         }
     }
+}
+
+/// UR-22 (maintenance table 3, D2): R (id 1, period 10, from 0) handed up to sample 20, paused with its resume point 50 and a stall part of 100 ticks, and the switch 2
+/// (period 7, boundary 20) pending.
+fn paused_repeat() -> TxBook<Pl> {
+    let mut book = book_with_switch(Started::AtFirstIssue);
+    book.take(Pl { n: 0, id: Some(ActionId(1)), switch: false }, 10);
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    assert_eq!(book.complete(id, Outcome::Accepted(10), None), Settle::Sent);
+    book.pause(DeviceEnd::Closed, (0, 10));
+    book.resume_at(50, 100);
+    book
+}
+
+#[test]
+fn txbook_a_paused_repeat_keeps_its_handed_cursor_and_its_plan_when_its_resume_point_moves() {
+    let mut book = paused_repeat();
+    assert_eq!(book.cursor(), Some(20), "an end of the repeat cuts at the handed cursor, not at its resume point");
+    assert_eq!(book.open.as_ref().map(|open| (open.next, open.paused)), Some((50, Some(Paused { handed: 20, stall: 100, planned: 50, lattice: (0, 10), source: None }))));
+    book.move_resume_point(60);
+    assert_eq!(
+        book.open.as_ref().map(|open| (open.next, open.paused)),
+        Some((60, Some(Paused { handed: 20, stall: 100, planned: 50, lattice: (0, 10), source: None }))),
+        "a missed resume point moves; the plan, the stall and the handed cursor stay"
+    );
+    assert_eq!(book.cursor(), Some(20));
+}
+
+#[test]
+fn txbook_a_switch_replaces_a_paused_repeat_and_its_boundary_moves_with_the_resume_point() {
+    let mut book = paused_repeat();
+    book.move_switch(ActionId(2), 50);
+    book.replace_paused(switch_pl(1, 2));
+    let open = book.open.as_ref().expect("the switch is the open booking");
+    assert_eq!(
+        (open.booking, open.next, open.first, open.paused),
+        (switch_pl(1, 2), 50, true, Some(Paused { handed: 20, stall: 100, planned: 50, lattice: (0, 10), source: None })),
+        "nothing of it is sent yet"
+    );
+    assert_eq!(book.playing.map(|playing| (playing.id, playing.origin)), Some((ActionId(2), 50)), "its lattice starts at the moved boundary");
+    // The record's pending switch took the moved boundary: it is applied there, not at 20, and the row says so.
+    let id = book.issue(TxSend { count: 7, device_count: 7, ends: false });
+    assert_eq!(book.complete(id, Outcome::Accepted(7), None), Settle::Sent);
+    assert!(book.open.as_ref().is_some_and(|open| open.paused.is_none() && !open.first), "its first whole send ends the pause");
+    book.advance(49);
+    assert_eq!(settled(&mut book.record), [], "pending until device time reaches the moved boundary");
+    book.advance(50);
+    assert_eq!(book.record.take_settled(), [Settled { id: ActionId(2), outcome: SwitchOutcome::Applied, boundary: 50 }]);
+}
+
+#[test]
+fn txbook_the_abandon_of_a_repeat_a_switch_replaced_cancels_it_with_one_report() {
+    let mut book = paused_repeat();
+    book.move_switch(ActionId(2), 50);
+    book.replace_paused(switch_pl(1, 2));
+    assert_eq!(book.abandon(true, Some(ActionId(2)), 20, 0, 20 * 200, None), 1, "the switch, nothing of which was sent, is cancelled and told");
+    assert_eq!(book.playing, None);
+    assert_eq!(book.record.take_settled().iter().map(|settled| (settled.id, settled.outcome, settled.boundary)).collect::<Vec<_>>(), [(ActionId(2), SwitchOutcome::Cancelled, 50)]);
+    // A switch whose first send went (the pause ended) is not counted: the device failed it and said so.
+    let mut sent = paused_repeat();
+    sent.move_switch(ActionId(2), 50);
+    sent.replace_paused(switch_pl(1, 2));
+    let id = sent.issue(TxSend { count: 7, device_count: 7, ends: false });
+    assert_eq!(sent.complete(id, Outcome::Accepted(7), None), Settle::Sent);
+    assert_eq!(sent.abandon(true, Some(ActionId(2)), 57, 0, 57 * 200, None), 0);
+}
+
+#[test]
+fn txbook_a_settled_switch_s_row_takes_the_boundary_it_settled_at() {
+    let id = serde_json::to_value(ActionId(2)).unwrap();
+    let mut rows = vec![serde_json::json!({ "action_id": id, "boundary": 20, "outcome": "pending" })];
+    write_settled(&mut rows, [Settled { id: ActionId(2), outcome: SwitchOutcome::Applied, boundary: 50 }]);
+    assert_eq!((rows[0]["outcome"].as_str(), rows[0]["boundary"].as_i64()), (Some("applied"), Some(50)));
+}
+
+#[test]
+fn txbook_a_pause_remembers_the_first_instant_of_the_device_burst_it_closed() {
+    // UR-22 (sol-code major 2): a report of the part that produced a pause is about that pause; the pause names the part by its device burst's first instant.
+    let mut book = new_book();
+    book.take(Pl { n: 0, id: Some(ActionId(1)), switch: false }, 10);
+    let id = book.issue(TxSend { count: 10, device_count: 10, ends: false });
+    let effect = DeviceSend { sob: true, eob: false, first: 2_000, next: 20, tail: None, front: None };
+    assert_eq!(book.complete(id, Outcome::Accepted(10), Some(effect)), Settle::Sent);
+    book.pause(DeviceEnd::Closed, (0, 10));
+    assert_eq!(book.open.as_ref().and_then(|open| open.paused).map(|paused| paused.source), Some(Some(2_000)));
 }

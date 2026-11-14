@@ -9,6 +9,9 @@ pub const MASTER_CLOCK_HZ: u64 = x3xx::MASTER_CLOCK_HZ;
 /// The lead the device needs from receipt (§3, INFERRED; B8).
 /// The profile's in-flight window must cover this lead for uhd-tx to dispatch a burst.
 pub const DEVICE_LEAD_NS: i64 = 2_000_000;
+/// The margin a repeat's resume point keeps past the Module's own bound on when the device finishes what it was handed (UR-22, INFERRED until
+/// bench cells C4 and C7 measure it): its own constant, not the in-flight window.
+pub const RESUME_MARGIN_NS: i64 = 10_000_000;
 /// The delivery allowance: the poll period plus booking the Actions ahead (UR-14).
 pub const DELIVERY_ALLOWANCE_NS: i64 = 3_000_000;
 /// The default samples per receive block (UR-5, UR-9).

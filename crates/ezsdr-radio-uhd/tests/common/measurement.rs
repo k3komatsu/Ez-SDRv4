@@ -3088,7 +3088,8 @@ fn tx_throughput_evidence(input: TxThroughputInput<'_>) -> TxThroughputEvidence 
     let burst_rows = bursts.as_array().cloned().unwrap_or_default();
     let burst_count = burst_rows.len();
     let burst_blocks: Vec<u64> = burst_rows.iter().filter_map(|row| row["blocks"].as_u64()).collect();
-    let burst = (burst_count == 1).then(|| &burst_rows[0]);
+    // The first record: a repeat that resumed after an underflow or a late drop has one record per part (UR-22); only a single record is a complete burst.
+    let burst = burst_rows.first();
     let burst_target = burst.and_then(|row| serde_json::from_value::<TimePoint>(row["target"].clone()).ok());
     let tx_suffix = format!("usrp/tx/s{stream}");
     let tx_clocks: Vec<_> = clocks.iter().filter(|clock| clock.stream.to_string().ends_with(&tx_suffix)).collect();

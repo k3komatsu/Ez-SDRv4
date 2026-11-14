@@ -216,7 +216,7 @@ fn e1_q5_a_booking_waiting_when_the_repeat_is_abandoned_still_plays() {
     let mut rig = playing();
     stop_receipt(&mut rig);
     book(&mut rig, 3, 2, 30_000);
-    rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(2_500)), channel: 0 });
+    rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
     // #80: the abandon keeps B's chain, so a booking overlapping B is refused at receipt; R, the abandoned repeat, is no longer playing.
     rejected(&rig.events);
     book(&mut rig, 4, 2, 30_100);

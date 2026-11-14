@@ -334,7 +334,7 @@ pub type Slot = Option<(i64, ezsdr_radio_uhd::Iq)>;
 const DROP_TONE_HZ: f64 = 100e3;
 
 /// The mean power of one window.
-fn mean_power(w: &[(i64, ezsdr_radio_uhd::Iq)]) -> f64 {
+pub fn mean_power(w: &[(i64, ezsdr_radio_uhd::Iq)]) -> f64 {
     w.iter().map(|(_, s)| f64::from(s[0]).powi(2) + f64::from(s[1]).powi(2)).sum::<f64>() / w.len() as f64
 }
 
@@ -352,7 +352,7 @@ pub fn is_drop_tone_window(w: &[(i64, ezsdr_radio_uhd::Iq)]) -> bool {
 
 /// C3's amplitude floor, 4 LSB as a mean power (sc16 counts are 1/32768 of full scale). The loopback tone is about −49 dBFS, roughly 30 dB
 /// above it (INFERRED from bench-results.md:27-28); noise at 1 LSB has about 2 LSB² of window power.
-const QUIET_CHECK_MIN_POWER: f64 = (4.0 / 32768.0) * (4.0 / 32768.0);
+pub const QUIET_CHECK_MIN_POWER: f64 = (4.0 / 32768.0) * (4.0 / 32768.0);
 
 /// What C3 (`hw_noise_floor_receive`) reads of a quiet receive: its 25-sample windows, how many carry the drop's tone above the amplitude floor,
 /// and the largest amplitude in LSB of a window with the drop's shape (0 when there is none).

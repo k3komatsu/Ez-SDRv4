@@ -465,6 +465,7 @@ impl Control {
                 late_by_ns: late_by.ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap_or(i64::MAX),
                 target: at.time_point,
                 action: None,
+                resumes_at: None,
             })
             .expect("a payload");
             // The burst's own stream (RM-29).
@@ -598,8 +599,20 @@ impl Control {
                         lock(&self.core.rec).switches.push(serde_json::to_value(row).expect("a switch row"));
                     }
                     let open = BurstOpen { waveform_len: u32::try_from(len).ok(), late: (!matches!(outcome, LateOutcome::OnTime {})).then_some(outcome), requested_target: requested };
-                    let held =
-                        Held { k: start, domain: clock.domain, samples: Arc::new(samples), waveform_len: len, repeat, switch, untimed, open, policy: late_policy, target: at.time_point, settings };
+                    let held = Held {
+                        k: start,
+                        domain: clock.domain,
+                        samples: Arc::new(samples),
+                        waveform_len: len,
+                        repeat,
+                        switch,
+                        untimed,
+                        open,
+                        policy: late_policy,
+                        target: at.time_point,
+                        settings,
+                        moved_from: None,
+                    };
                     stream.book.play(repeat, id, start, len as i64);
                     stream.book.book(held, end.flatten());
                 }

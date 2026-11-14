@@ -4928,7 +4928,7 @@
    "id": "P222",
    "name": "a refused transmit reopen leaves the stream's old streamer open (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        // As on the receive side, this stream's old streamer goes before the new one is\n        // made, and the graph refuses a second streamer on one front end: \"Attempting to\n        // reconnect input port!\" (`graph.cpp:188-197`; UR-33).\n        if let Some(old) = st.tx.remove(&stream) {\n            stale_tx_header(&mut st, &old.channels);\n        }",
+   "old": "        // As on the receive side, this stream's old streamer goes before the new one is\n        // made, and the graph refuses a second streamer on one front end: \"Attempting to\n        // reconnect input port!\" (`graph.cpp:188-197`; UR-33).\n        retire_tx(&mut st, stream);",
    "new": "        // As on the receive side, this stream's old streamer goes before the new one is\n        // made, and the graph refuses a second streamer on one front end: \"Attempting to\n        // reconnect input port!\" (`graph.cpp:188-197`; UR-33).\n        if let Some(channels) = st.tx.get(&stream).map(|old| old.channels.clone()) {\n            stale_tx_header(&mut st, &channels);\n        }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -4948,8 +4948,8 @@
    "id": "P224",
    "name": "close_streams leaves the transmit streamers (UR-33, UR-2)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        st.tx.clear();",
-   "new": "        // st.tx.clear();",
+   "old": "for stream in streams { retire_tx(&mut st, stream); }",
+   "new": "for stream in streams { let _ = stream; }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_33_one_channel_is_opened_by_one_streamer"
@@ -5532,8 +5532,8 @@
    "id": "P350",
    "name": "a pending transmit report is retained by the device channels, not the streamer's positions (UR-28)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        self.unacked.push_back(PendingReport { target, channels: (0..self.channels.count() as usize).collect() });",
-   "new": "        self.unacked.push_back(PendingReport { target, channels: self.channels.iter().map(|chan| chan as usize).collect() });",
+   "old": "self.unacked.push_back(PendingReport { target, joined: Vec::new(), channels: (0..self.channels.count() as usize).collect(), told: false, resumes_at: None, resumed: stall });",
+   "new": "self.unacked.push_back(PendingReport { target, joined: Vec::new(), channels: self.channels.iter().map(|chan| chan as usize).collect(), told: false, resumes_at: None, resumed: stall });",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_28_a_report_is_correlated_by_its_position_in_the_streamer"
@@ -10341,16 +10341,6 @@
       "filter": "ur_22_t3_missing_ack_is_bounded_and_read_faults_keep_progressing"
      },
      {
-      "id": "P1180",
-      "name": "ambiguous TimeErrors claim no pending target (D9b-1a)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "        let target = targets.next()?;\n        if tick.is_some() && targets.next().is_some() { None } else { Some(target) }",
-      "new": "        let target = targets.next()?;\n        Some(target)",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "ur_28_ambiguous_time_errors_leave_each_channel_pending"
-     },
-     {
       "id": "P1181",
       "name": "an untimed two-zero EOB clears the stale DUC header (D9b-1a)",
       "file": "crates/ezsdr-radio-uhd/src/device.rs",
@@ -10370,16 +10360,6 @@
       "test_bin": "lib",
       "filter": "ur_33_a_one_sample_eob_has_no_burst_ack"
      },
-      {
-      "id": "P1184",
-       "name": "a TimeError after abandonment cannot claim the next burst (D9b-1a)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "        let target = targets.next()?;\n        if tick.is_some() && targets.next().is_some() { None } else { Some(target) }",
-      "new": "        let target = targets.next()?;\n        Some(target)",
-       "crate": "ezsdr-radio-uhd",
-       "test_bin": "lib",
-       "filter": "ur_28_time_error_after_abandoned_burst_does_not_claim_the_next_burst"
-      },
       {
        "id": "P1185",
        "name": "a burst acknowledgement waits until its last sample plays (D9b-1a)",
@@ -10414,8 +10394,8 @@
        "id": "P1188",
        "name": "a ticked BurstAck does not retire a future burst (D9b-1a)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "(pending.channels.contains(&channel) && root_tick < tick).then_some(index)",
-       "new": "pending.channels.contains(&channel).then_some(index)",
+       "old": "if reach == Reach::Ack { start < tick }",
+       "new": "if reach == Reach::Ack { true }",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_28_a_ticked_ack_does_not_retire_a_future_burst"
@@ -10541,16 +10521,6 @@
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_33_a_duc_timeline_survives_radio_underflow"
-      },
-      {
-        "id": "P1202",
-        "name": "streamer generation clears TimeError deduplication (D9b-1a fix 2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "if streamer != self.streamer {\n            self.unacked.clear();\n            self.late_reported.clear();\n        }",
-        "new": "if streamer != self.streamer {\n            self.unacked.clear();\n        }",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "ur_28_streamer_generation_clears_late_report_deduplication"
       },
       {
         "id": "P1203",
@@ -12822,8 +12792,8 @@
       "id": "N48S1-01",
       "name": "a BurstAck retires a burst whose first instant is at its tick (UR-28, N4)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "(pending.channels.contains(&channel) && root_tick < tick).then_some(index)",
-      "new": "(pending.channels.contains(&channel) && root_tick <= tick).then_some(index)",
+      "old": "if reach == Reach::Ack { start < tick }",
+      "new": "if reach == Reach::Ack { start <= tick }",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_28_an_ack_at_a_bursts_end_plus_one_tick_keeps_the_burst_at_the_next_sample"
@@ -13302,8 +13272,8 @@
     "id": "N48S3-23",
     "name": "FakeDevice arms a refused SOB packet",
     "file": "crates/ezsdr-radio-uhd/src/device.rs",
-    "old": "if !self.active && packet.radio_time.is_some_and(|t| t < now || t <= self.cursor) {",
-    "new": "if !self.active && packet.radio_time.is_some_and(|t| t < now || t <= self.cursor) {\n            if packet.sob && !packet.eob && (1..OPEN_FAULT_BELOW).contains(&packet.n) && packet.ratio >= OPEN_FAULT_MIN_RATIO {\n                self.burst = Burst::Armed(now);\n            }",
+    "old": "if !self.active && packet.radio_time.is_some_and(|t| t < now || t <= self.cursor) {\n            self.drop_late(packet, now, channel_count);",
+    "new": "if !self.active && packet.radio_time.is_some_and(|t| t < now || t <= self.cursor) {\n            self.drop_late(packet, now, channel_count);\n            if packet.sob && !packet.eob && (1..OPEN_FAULT_BELOW).contains(&packet.n) && packet.ratio >= OPEN_FAULT_MIN_RATIO {\n                self.burst = Burst::Armed(now);\n            }",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_33_a_refused_sob_packet_does_not_arm_the_short_rule"
@@ -15069,7 +15039,7 @@
     "new": ".partition(|c| (c.start >= stop || c.end == i64::MAX));",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_21_s4_an_underflow_ends_the_repeat_so_a_later_switch_is_refused_at_receipt"
+    "filter": "ur_21_s4_a_sequence_error_ends_the_repeat_so_a_later_switch_is_refused_at_receipt"
   },
   {
     "id": "N47S5-137",
@@ -15175,7 +15145,7 @@
     "id": "N47S5-151",
     "name": "rev 32 (S4 neighbour, fix round 7): an abandon with no open burst does not end the repeat a switch joined at the cursor continues",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": ".unwrap_or_else(|| (self.with_held(|map| map.get(&cursor).is_some_and(|held| held.switch)), None, Some(cursor)));",
+    "old": ".unwrap_or_else(|| (self.with_book(|book| book.switch_at_cursor().is_some_and(|held| held.k == cursor)), None, Some(cursor)));",
     "new": ".unwrap_or_else(|| (false, None, Some(cursor)));",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -16334,8 +16304,8 @@
   "id": "N49F-23",
   "name": "step F: the FakeDevice's gap has no floor of three samples",
   "file": "crates/ezsdr-radio-uhd/src/device.rs",
-  "old": ".unwrap_or(i64::MAX).max(LONG_CLOSE_GAP)",
-  "new": ".unwrap_or(i64::MAX)",
+  "old": "self.samples_in(SHORT_GAP_NANOS, ratio).max(LONG_CLOSE_GAP)",
+  "new": "self.samples_in(SHORT_GAP_NANOS, ratio)",
   "filter": "ur_33_the_fake_guard_has_a_floor_of_three_samples_at_a_slow_rate",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib"
@@ -16595,8 +16565,8 @@
   "id": "E2A2B-10",
   "name": "A5 (F4): an underflow with no device burst open abandons the open booking, with a stray end-of-burst (UR-22)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "if self.with_device(|device| device.underflowed(tick)) { self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device burst underflowed; burst not resumed\" }));",
-  "new": "if self.with_book(|book| book.open.is_some()) || self.with_device(|device| device.underflowed(tick)) { self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device burst underflowed; burst not resumed\" }));",
+  "old": "book.device.underflowed(tick)",
+  "new": "book.open.is_some() || book.device.underflowed(tick)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "e2a_f4_a_late_underflow_with_nothing_issued_sends_nothing_and_keeps_the_booking"
@@ -16729,7 +16699,7 @@
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "e2a_f1_an_underflow_cancels_a_switch_whose_payload_is_unread"
+  "filter": "e2a_f1_a_sequence_error_cancels_a_switch_whose_payload_is_unread"
  },
  {
   "id": "E2A3-12",
@@ -16739,7 +16709,7 @@
   "new": "for _ in 0..0 {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "e2a_f1_an_underflow_cancels_a_switch_whose_payload_is_unread"
+  "filter": "e2a_f1_a_sequence_error_cancels_a_switch_whose_payload_is_unread"
  },
  {
   "id": "E2A3-13",
@@ -16825,7 +16795,7 @@
   "id": "E2A4-03",
   "name": "#93 (UR-22): a new start-of-burst does not take its own first tick (it stays at the clock's origin), so a late report of the burst before cuts it",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "first: clock.instant(start)",
+  "old": "first: clock.instant(next)",
   "new": "first: clock.origin",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -18834,8 +18804,8 @@
   "file": "crates/ezsdr-radio/src/staging.rs",
   "crate": "ezsdr-radio",
   "test_bin": "staging",
-  "old": "self.open.as_ref().map(|open| open.next).or_else(|| self.device.next())",
-  "new": "self.device.next().or_else(|| self.open.as_ref().map(|open| open.next))",
+  "old": "self.open.as_ref().map(|open| open.paused.map_or(open.next, |paused| paused.handed)).or_else(|| self.device.next())",
+  "new": "self.device.next().or_else(|| self.open.as_ref().map(|open| open.paused.map_or(open.next, |paused| paused.handed)))",
   "filter": "e3b_b7_cursor_is_the_open_booking_s_next_sample_else_the_device_burst_s"
  },
  {
@@ -19084,8 +19054,8 @@
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "old": "first: clock.instant(start), next: end, tail,",
-  "new": "first: clock.instant(start), next: end, tail: None,",
+  "old": "first: clock.instant(next), next: end, tail,",
+  "new": "first: clock.instant(next), next: end, tail: None,",
   "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it"
  },
  {
@@ -19124,8 +19094,8 @@
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "old": "let (ended, front) = self.with_book(|book| (book.end_open(end), book.device.front()));",
-  "new": "let (ended, front) = self.with_book(|book| { let front = book.device.front(); (book.end_open(end), front) });",
+  "old": "let front = self.with_book(|book| { book.end_open(end); book.device.front() });",
+  "new": "let front = self.with_book(|book| { let front = book.device.front(); book.end_open(end); front });",
   "filter": "e3b_c4c_the_stat_reads_the_front_the_close_leaves"
  },
  {
@@ -24313,5 +24283,1345 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "timeline",
   "filter": "rm_26_the_timeline_against_mockradio"
+ },
+ {
+  "id": "MT3-01",
+  "name": "the drain does not advance past a dropped packet",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "end: from + n * ratio",
+  "new": "end: from",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_dropped_packets_drain_at_real_time"
+ },
+ {
+  "id": "MT3-02",
+  "name": "an idle timed SOB before the drain's limit is not late",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "t < self.drain_limit(drain, packet.ratio)",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_device_burst_inside_a_drain_is_late_and_one_past_it_plays"
+ },
+ {
+  "id": "MT3-03",
+  "name": "a late head does not hold its device burst",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "self.late = true; self.burst = Burst::Timed;",
+  "new": "self.late = true;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_late_timed_head_takes_the_first_untimed_continuation_as_timed"
+ },
+ {
+  "id": "MT3-04",
+  "name": "a dropped packet is read before the drain has consumed what is ahead of it",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "from = from.max(held.end);",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_dropped_packets_drain_at_real_time"
+ },
+ {
+  "id": "MT3-05",
+  "name": "a late drop reports channel 0 only",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "0..channel_count { self.reports.push_back(TxReport { code: TxCode::TimeError, tick, channel });",
+  "new": "0..1 { self.reports.push_back(TxReport { code: TxCode::TimeError, tick, channel });",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_late_burst_drops_one_time_error_per_channel_per_send"
+ },
+ {
+  "id": "MT3-06",
+  "name": "a clock reset keeps the drain",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "self.drain = None;",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_clock_reset_clears_a_drain"
+ },
+ {
+  "id": "MT3-21",
+  "name": "the drain's pad has no share of the samples",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "(drain.samples + 99) / 100 + 2 * drain.packets",
+  "new": "2 * drain.packets",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fake_s_drain_pad_grows_with_the_drained_length"
+ },
+ {
+  "id": "MT3-22",
+  "name": "the drain's pad has no share for its device bursts",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "+ drain.bursts * (g + self.samples_in(DUC_WAIT_NANOS, ratio))",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fake_s_drain_pad_adds_the_guard_and_the_duc_wait_per_burst"
+ },
+ {
+  "id": "MT3-23",
+  "name": "the drain's limit has no guard after the pad",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "drain.end + (pad + g) * ratio",
+  "new": "drain.end + pad * ratio",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fake_s_drain_guard_follows_the_pad"
+ },
+ {
+  "id": "MT3-24",
+  "name": "the drain counts the last packet's samples, not all it took",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "samples: drain.samples + n",
+  "new": "samples: n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fake_s_drain_pad_grows_with_the_drained_length"
+ },
+ {
+  "id": "MT3-31",
+  "name": "the drain's pad does not count two samples a send",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "+ 2 * drain.packets",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fake_s_drain_pad_counts_two_samples_per_packet"
+ },
+ {
+  "id": "MT3-32",
+  "name": "a late packet is read before its own time",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "from = from.max(at.unwrap_or(from));",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fake_s_drain_pad_grows_with_the_drained_length"
+ },
+ {
+  "id": "MT3-33",
+  "name": "a late packet is read at the device's time, not behind the samples queued before it",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "let mut from = now.max(self.cursor);",
+  "new": "let mut from = now;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_late_packet_is_read_behind_the_samples_queued_before_it"
+ },
+ {
+  "id": "MT3-34",
+  "name": "only a start of burst is checked against the drain's limit",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "if !self.active && packet.radio_time.is_some_and(|t| self.drain.is_some_and(",
+  "new": "if !self.active && packet.sob && packet.radio_time.is_some_and(|t| self.drain.is_some_and(",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_an_idle_timed_packet_without_a_start_inside_a_drain_is_late"
+ },
+ {
+  "id": "MT3-35",
+  "name": "an expired drain is continued",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "from < self.drain_limit(held, ratio)",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_drain_ends_with_real_time"
+ },
+ {
+  "id": "MT3-36",
+  "name": "a late head's later packets are not drained",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "self.late.then(|| self.drain(now, packet.n as i64, packet.ratio, packet.radio_time, packet.eob))",
+  "new": "None",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_dropped_packets_drain_at_real_time"
+ },
+ {
+  "id": "MT3-37",
+  "name": "the drain's pad takes the larger of the samples' share and the sends' two clocks",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "(drain.samples + 99) / 100 + 2 * drain.packets",
+  "new": "((drain.samples + 99) / 100).max(2 * drain.packets)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fake_s_drain_pad_sums_its_terms"
+ },
+ {
+  "id": "MT3-38",
+  "name": "an open does not pick up the stream's drain",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.radio.drain = st.tx_drains.remove(&stream);",
+  "new": "let _ = st.tx_drains.remove(&stream);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_drain_survives_a_reopen_of_its_stream"
+ },
+ {
+  "id": "MT3-39",
+  "name": "the drain counts the last device burst only",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "bursts: drain.bursts + i64::from(eob)",
+  "new": "bursts: i64::from(eob)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_closely_spaced_closed_bursts_behind_a_late_one_stay_dropped"
+ },
+ {
+  "id": "MT3-40",
+  "name": "a dropped device burst adds nothing to the drain's pad",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "bursts: drain.bursts + i64::from(eob)",
+  "new": "bursts: drain.bursts",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_closely_spaced_closed_bursts_behind_a_late_one_stay_dropped"
+ },
+ {
+  "id": "MT3-41",
+  "name": "a close drops the stream's drain",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "st.tx_drains.insert(stream, drain);",
+  "new": "let _ = drain;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_drain_survives_a_reopen_of_its_stream"
+ },
+ {
+  "id": "MT3-42",
+  "name": "close_streams drops the streamers' drains",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "for stream in streams { retire_tx(&mut st, stream); }",
+  "new": "for stream in streams { st.tx.remove(&stream); }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_drain_survives_a_reopen_of_its_stream"
+ },
+ {
+  "id": "MT3-07",
+  "name": "a TimeError retires no burst and names none (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let reached = self.retire(report.channel, Some(tick), Reach::Late);",
+  "new": "let reached = Vec::<Reached>::new();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_time_error_retires_every_pending_burst_it_reaches"
+ },
+ {
+  "id": "MT3-08",
+  "name": "a TimeError's reach is strictly before its tick (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "else { start <= tick }",
+  "new": "else { start < tick }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_time_error_retires_every_pending_burst_it_reaches"
+ },
+ {
+  "id": "MT3-09",
+  "name": "a late device burst names only its first Kernel burst (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "std::iter::once(pending.target).chain(pending.joined.iter().copied()).collect()",
+  "new": "std::iter::once(pending.target).collect()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_late_device_burst_names_every_kernel_burst_joined_into_it"
+ },
+ {
+  "id": "MT3-10",
+  "name": "late_by is not from the device burst's own start (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "(i128::from(tick) - i128::from(reached.start))",
+  "new": "(i128::from(tick))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_time_error_retires_every_pending_burst_it_reaches"
+ },
+ {
+  "id": "MT3-11",
+  "name": "a device burst on two channels is told once per channel (UR-28, m1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let tell = !std::mem::replace(&mut pending.told, true) && reach == Reach::Late;",
+  "new": "let tell = reach == Reach::Late;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_two_channel_burst_gets_one_event_and_one_channel_alone_retires_it"
+ },
+ {
+  "id": "MT3-12",
+  "name": "an Underflow retires no burst (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let reached = self.retire(report.channel, tick, Reach::Underflow);",
+  "new": "let reached = Vec::<Reached>::new(); let _ = tick;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_an_underflowed_closed_burst_is_never_told_late"
+ },
+ {
+  "id": "MT3-14",
+  "name": "an abandon retires every correlation (UR-28, Fable M1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "fn abandon(&mut self, device_open: bool, cursor: Option<i64>, eob_failed: bool) -> bool {",
+  "new": "fn abandon(&mut self, device_open: bool, cursor: Option<i64>, eob_failed: bool) -> bool { self.unacked.clear();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_the_expired_timeline_abandon_runs_before_the_first_time_error_and_the_burst_is_still_named"
+ },
+ {
+  "id": "MT3-15",
+  "name": "a TimeError never abandons the open device burst (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "if dropped == Dropped::Ended { self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device dropped the burst late; burst not resumed\" }));",
+  "new": "if false { self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device dropped the burst late; burst not resumed\" }));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_finite_burst_handed_late_transmits_nothing_and_is_told_once"
+ },
+ {
+  "id": "MT3-16",
+  "name": "a TimeError abandons whatever device burst there is (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.dropped(reached.last(), Some(tick), true, true)",
+  "new": "self.dropped(reached.last(), None, true, true)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_time_error_abandons_the_open_device_burst_only_when_its_tick_reaches_it"
+ },
+ {
+  "id": "MT3-17",
+  "name": "a tickless TimeError reaches every burst (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let Some(tick) = report.tick else { return };",
+  "new": "let tick = report.tick.unwrap_or(i64::MAX);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_28_a_tickless_time_error_names_and_retires_nothing"
+ },
+ {
+  "id": "MT3-18",
+  "name": "a burst joining on a whole send is not added to the correlation (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "else if continuing { self.join_burst(TimePoint::new(clock.domain, start)); } if first {",
+  "new": "if first {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_late_device_burst_names_every_kernel_burst_joined_into_it"
+ },
+ {
+  "id": "MT3-19",
+  "name": "a burst joining on a failed send is not added to the correlation (UR-28, Q6)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "else if continuing { self.join_burst(TimePoint::new(clock.domain, start)); } let result = self.abandon(true, Some(cursor), device_eob);",
+  "new": "let result = self.abandon(true, Some(cursor), device_eob);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_joined_burst_whose_first_send_failed_is_still_named"
+ },
+ {
+  "id": "MT3-20",
+  "name": "a burst joining on a short send is not added to the correlation (UR-28, Q6)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "else if continuing && accepted > 0 {",
+  "new": "else if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_joined_burst_whose_first_send_failed_is_still_named"
+ },
+ {
+  "id": "MT3-51",
+  "name": "a TimeError's retirement order is newest first (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "reached.reverse();",
+  "new": "let _ = &reached;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_time_error_retires_every_pending_burst_it_reaches"
+ },
+ {
+  "id": "MT3-13",
+  "name": "an Underflow does not set told (UR-28, O4)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let tell = !std::mem::replace(&mut pending.told, true) && reach == Reach::Late;",
+  "new": "let tell = reach == Reach::Late && !std::mem::replace(&mut pending.told, true);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3_a_two_channel_burst_gets_one_event_and_one_channel_alone_retires_it"
+ },
+ {
+  "id": "MT3-25",
+  "name": "incomplete receive coverage of the late interval is not inconclusive (C1 verdict, M1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "if !covers(&e.blocks, e.per, want_from, want_to) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_incomplete_receive_is_inconclusive"
+ },
+ {
+  "id": "MT3-26",
+  "name": "the control burst's being heard is not required (C1 verdict, M1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "if delay.is_none() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_without_the_control_is_inconclusive"
+ },
+ {
+  "id": "MT3-27",
+  "name": "a heard interval in the late burst's interval does not fail the verdict (C1 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "if !played.is_empty() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_a_heard_interval_inside_the_late_interval_fails"
+ },
+ {
+  "id": "MT3-28",
+  "name": "a heard interval fails only when it lies inside the late interval, not when it overlaps it (C1 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": ".filter(|(first, end)| *first < to && *end > from)",
+  "new": ".filter(|(first, end)| *first >= from && *end <= to)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_a_heard_interval_that_straddles_the_late_interval_fails"
+ },
+ {
+  "id": "MT3-29",
+  "name": "a BurstAck for the late burst does not fail the verdict (C1 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "if !acks.is_empty() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_a_burst_ack_attributed_by_tick"
+ },
+ {
+  "id": "MT3-30",
+  "name": "a burst with no TimeError is not inconclusive (C1 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "if !e.reports.iter().any(|r| r.code == TxCode::TimeError && r.tick.is_some_and(|tick| tick >= from)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_without_a_time_error_is_inconclusive"
+ },
+ {
+  "id": "MT3-43",
+  "name": "a BurstAck is the late burst's whatever its tick, so the control's fails the verdict (C1 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": ".filter_map(|r| r.tick).filter(|tick| *tick >= from)",
+  "new": ".filter_map(|r| r.tick)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_passes_with_complete_evidence"
+ },
+ {
+  "id": "MT3-44",
+  "name": "a last chunk handed after its own time is not inconclusive (C1 verdict, the per-packet-drop device)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "Some((handed, own)) if handed + LAST_CHUNK_MARGIN_TICKS <= own => {}",
+  "new": "Some(_) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_a_last_chunk_handed_after_its_own_time_is_inconclusive"
+ },
+ {
+  "id": "MT3-45",
+  "name": "the tone detector does not check the window's frequency (C1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "(hz - tone_hz).abs() > tone_hz / 5.0",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_the_tone_detector_hears_a_tone_and_neither_noise_nor_a_ramp"
+ },
+ {
+  "id": "MT3-46",
+  "name": "the tone detector has no amplitude floor (C1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "mean_power(w) <= QUIET_CHECK_MIN_POWER",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_the_tone_detector_hears_a_tone_and_neither_noise_nor_a_ramp"
+ },
+ {
+  "id": "MT3-47",
+  "name": "the tone detector does not check the window's coherence (C1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "coherence <= 0.9",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_the_tone_detector_hears_a_tone_and_neither_noise_nor_a_ramp"
+ },
+ {
+  "id": "MT3-48",
+  "name": "a receive outcome inside the late range is not inconclusive (C1 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "if e.other.iter().any(|at| at.is_some_and(|at| at >= want_from && at < want_to)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_a_receive_outcome_inside_the_range_is_inconclusive"
+ },
+ {
+  "id": "MT3-49",
+  "name": "a report without a tick is attributed rather than inconclusive (C1 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "if e.reports.iter().any(|r| r.tick.is_none() && (r.code == TxCode::BurstAck || is_late_report(r.code))) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_a_burst_ack_attributed_by_tick"
+ },
+ {
+  "id": "MT3-50",
+  "name": "a control that was itself late is not inconclusive (C1 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "if e.reports.iter().any(|r| is_late_report(r.code) && r.tick.is_some_and(|tick| tick < from)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_without_the_control_is_inconclusive"
+ },
+ {
+  "id": "MT3-53",
+  "name": "the late burst is sent although the wait for its reference instant failed (C1 trial)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "Ok(()) => match send_chunked(device, wave, late_at, per, chunk) {",
+  "new": "_ => match send_chunked(device, wave, late_at, per, chunk) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_rehearsal_a_failed_time_read_before_the_late_burst_is_inconclusive_and_sends_nothing"
+ },
+ {
+  "id": "MT3-54",
+  "name": "the last chunk needs no margin before its own time (C1 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "handed + LAST_CHUNK_MARGIN_TICKS <= own",
+  "new": "handed < own",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c1_verdict_a_last_chunk_handed_after_its_own_time_is_inconclusive"
+ },
+ {
+  "id": "MT3D-01",
+  "name": "the resume point is the plain bound, not a lattice point (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "and_then(|bound| repeat_boundary(origin, period, bound))",
+  "new": "and_then(Some)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_late_started_repeat_resumes_on_its_lattice_after_busy_plus_m"
+ },
+ {
+  "id": "MT3D-02",
+  "name": "the resume point keeps no margin past busy (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let unaligned = book.busy.saturating_add(margin);",
+  "new": "let unaligned = book.busy;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_late_started_repeat_resumes_on_its_lattice_after_busy_plus_m"
+ },
+ {
+  "id": "MT3D-03",
+  "name": "busy ignores the instant a send returned (UR-22)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.busy = self.busy.max(returned).max(first.unwrap_or(i64::MIN)).saturating_add(ticks);",
+  "new": "self.busy = self.busy.max(first.unwrap_or(i64::MIN)).saturating_add(ticks);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_second_stall_inside_the_send_moves_busy_and_so_the_resume_point"
+ },
+ {
+  "id": "MT3D-04",
+  "name": "busy ignores a send's first sample (UR-22)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.busy = self.busy.max(returned).max(first.unwrap_or(i64::MIN)).saturating_add(ticks);",
+  "new": "self.busy = self.busy.max(returned).saturating_add(ticks);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_an_underflow_resumes_a_repeat_and_names_the_span_with_busy_from_x"
+ },
+ {
+  "id": "MT3D-05",
+  "name": "busy ignores a send's samples (UR-22)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.busy = self.busy.max(returned).max(first.unwrap_or(i64::MIN)).saturating_add(ticks);",
+  "new": "self.busy = self.busy.max(returned).max(first.unwrap_or(i64::MIN)).saturating_add(0 * ticks);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_second_stall_inside_the_send_moves_busy_and_so_the_resume_point"
+ },
+ {
+  "id": "MT3D-06",
+  "name": "the resume point ignores the decision instant plus the lead (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "[Some(unaligned), Some(decided), front].into_iter().flatten().max()?",
+  "new": "[Some(unaligned), front].into_iter().flatten().max()?",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_late_wake_resumes_no_earlier_than_now_plus_the_lead"
+ },
+ {
+  "id": "MT3D-07",
+  "name": "the resume point ignores the device front (UR-22; killed by the pure function's test only)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "[Some(unaligned), Some(decided), front].into_iter().flatten().max()?",
+  "new": "[Some(unaligned), Some(decided), None].into_iter().flatten().max()?",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_the_resume_point_function"
+ },
+ {
+  "id": "MT3D-08",
+  "name": "a one-shot burst resumes too (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "Some(open) => open.booking.repeat && open.paused.is_none(),",
+  "new": "Some(open) => open.paused.is_none(),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_what_still_ends_a_repeat"
+ },
+ {
+  "id": "MT3D-09",
+  "name": "a lost sequence resumes a repeat (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let dropped = self.dropped(reached.last(), tick, cause == TxUnderflowCause::Starved, false);",
+  "new": "let dropped = self.dropped(reached.last(), tick, true, false);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_what_still_ends_a_repeat"
+ },
+ {
+  "id": "MT3D-10",
+  "name": "a late drop that reaches a part resumes it again (UR-22, b')",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let played = if late { 0 } else { tick.map_or(0, |tick| tick - reached.start) };",
+  "new": "let played = if late { stall } else { tick.map_or(0, |tick| tick - reached.start) };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
+ },
+ {
+  "id": "MT3D-11",
+  "name": "equality ends a repeat (UR-22, b')",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "played < stall",
+  "new": "played <= stall",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
+ },
+ {
+  "id": "MT3D-12",
+  "name": "the stall part is measured to the resume point (UR-22, b')",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "book.resume_at(at, unaligned.saturating_sub(clock.instant(handed)));",
+  "new": "book.resume_at(at, clock.instant(at).saturating_sub(clock.instant(handed)));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
+ },
+ {
+  "id": "MT3D-13",
+  "name": "an Underflow on a part always ends the repeat (UR-22, b')",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "played < stall",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
+ },
+ {
+  "id": "MT3D-14",
+  "name": "a device burst's first instant is the booking's start, not its own start of burst (UR-22, M2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "first: clock.instant(next), next: end, tail, front:",
+  "new": "first: clock.instant(start), next: end, tail, front:",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_stale_report_of_the_dropped_burst_does_not_drop_the_resumed_part"
+ },
+ {
+  "id": "MT3D-15",
+  "name": "the cursor of a paused booking is its resume point (UR-22, M3)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.open.as_ref().map(|open| open.paused.map_or(open.next, |paused| paused.handed)).or_else(|| self.device.next())",
+  "new": "self.open.as_ref().map(|open| open.next).or_else(|| self.device.next())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_second_drop_found_in_the_gap_abandons_at_the_handed_cursor"
+ },
+ {
+  "id": "MT3D-16",
+  "name": "a device burst starts only at a booking's first send (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let device_sob = !book.device.continues_at(open.next);",
+  "new": "let device_sob = first && !book.device.continues_at(start);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_late_started_repeat_resumes_on_its_lattice_after_busy_plus_m"
+ },
+ {
+  "id": "MT3D-17",
+  "name": "a send counts the device burst open after the booking's first (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let was_open = device_open;",
+  "new": "let was_open = !first || continuing;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_stalled_start_of_the_part_ends_the_repeat_with_no_stray_close"
+ },
+ {
+  "id": "MT3D-18",
+  "name": "a Stop in the gap closes a device burst there is none of (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let device_open = continuing.is_some();",
+  "new": "let device_open = continuing.is_some() || open_next.is_some();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_stop_in_the_gap_sends_nothing_and_ends_the_record"
+ },
+ {
+  "id": "MT3D-19",
+  "name": "a resume's Underflow event carries no resume point (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "Dropped::Resumed(at) => Some(at),\n                    Dropped::Ended => None,",
+  "new": "Dropped::Resumed(_) => None,\n                    Dropped::Ended => None,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_an_underflow_resumes_a_repeat_and_names_the_span_with_busy_from_x"
+ },
+ {
+  "id": "MT3D-20",
+  "name": "a resume's late event carries no resume point (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "(true, Dropped::Resumed(at)) => Some(at),",
+  "new": "(true, Dropped::Resumed(_)) => None,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_late_started_repeat_resumes_on_its_lattice_after_busy_plus_m"
+ },
+ {
+  "id": "MT3D-21",
+  "name": "a resume writes no timing row (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.timing(json!({ \"what\": \"tx_resume\", \"stream\": self.k, \"cause\": cause, \"from\": handed, \"resumes_at\": planned, \"at\": now }));",
+  "new": "let _ = (cause, handed, planned);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_late_started_repeat_resumes_on_its_lattice_after_busy_plus_m"
+ },
+ {
+  "id": "MT3D-22",
+  "name": "a resume writes its timing row twice (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.timing(json!({ \"what\": \"tx_resume\", \"stream\": self.k, \"cause\": cause, \"from\": handed, \"resumes_at\": planned, \"at\": now }));",
+  "new": "self.core.timing(json!({ \"what\": \"tx_resume\", \"stream\": self.k, \"cause\": cause, \"from\": handed, \"resumes_at\": planned, \"at\": now })); self.core.timing(json!({ \"what\": \"tx_resume\", \"stream\": self.k, \"cause\": cause, \"from\": handed, \"resumes_at\": planned, \"at\": now }));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_late_started_repeat_resumes_on_its_lattice_after_busy_plus_m"
+ },
+ {
+  "id": "MT3D-23",
+  "name": "the timing row names the resume point as the drop point (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "\"from\": handed, \"resumes_at\": planned,",
+  "new": "\"from\": planned, \"resumes_at\": planned,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_an_underflow_resumes_a_repeat_and_names_the_span_with_busy_from_x"
+ },
+ {
+  "id": "MT3D-24",
+  "name": "the part at the resume point opens no burst record (UR-22, SC-24)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let part = first || paused.is_some();",
+  "new": "let part = first;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_late_started_repeat_resumes_on_its_lattice_after_busy_plus_m"
+ },
+ {
+  "id": "MT3D-25",
+  "name": "a new owner resets the stream's busy (UR-22, n2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "stream.book.device = DeviceChain::default();",
+  "new": "stream.book.device = DeviceChain::default(); stream.book.busy = 0;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_busy_survives_a_new_owner"
+ },
+ {
+  "id": "MT3D-26",
+  "name": "the part's device burst is not remembered (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "if device_sob { self.remember_part(TimePoint::new(clock.domain, next), paused.map(|paused| paused.stall)); } else if continuing { self.join_burst(TimePoint::new(clock.domain, start)); } if first { self.core.stat(\"tx_bursts\", 1); }",
+  "new": "if device_sob && paused.is_none() { self.remember_part(TimePoint::new(clock.domain, next), paused.map(|paused| paused.stall)); } else if continuing { self.join_burst(TimePoint::new(clock.domain, start)); } if first { self.core.stat(\"tx_bursts\", 1); }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
+ },
+ {
+  "id": "MT3D-27",
+  "name": "a delayed report's stutter rule uses the newer gap's stall part (UR-22, b')",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "newest.and_then(|reached| reached.resumed.map(|stall| (stall, reached)))",
+  "new": "newest.and_then(|reached| reached.resumed.map(|stall| (self.with_book(|book| book.open.as_ref().and_then(|open| open.paused)).map_or(stall, |paused| paused.stall), reached)))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_delayed_underflow_that_retires_two_entries_applies_the_stutter_rule"
+ },
+ {
+  "id": "MT3D-28",
+  "name": "a running part is not judged by the stutter rule: the pause's part alone is ours (UR-22, b')",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let ours = hit || paused.is_some_and(|paused| paused.source == Some(reached.start));",
+  "new": "let ours = paused.is_some_and(|paused| paused.source == Some(reached.start));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
+ },
+ {
+  "id": "MT3D-29",
+  "name": "a stale Underflow's event is suppressed (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.emit_at(&self.core.stream_node(Dir::Tx, self.k), kinds::TX_UNDERFLOW, Severity::Warning, payload, time);",
+  "new": "if dropped != Dropped::Nothing { self.core.emit_at(&self.core.stream_node(Dir::Tx, self.k), kinds::TX_UNDERFLOW, Severity::Warning, payload, time); }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_stale_report_of_the_dropped_burst_does_not_drop_the_resumed_part"
+ },
+ {
+  "id": "MT3D-30",
+  "name": "the resume point keeps no margin past busy, on the five-geometry cases (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let unaligned = book.busy.saturating_add(margin);",
+  "new": "let unaligned = book.busy;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_the_margin_is_ten_milliseconds_and_the_lattice_rounds_up"
+ },
+ {
+  "id": "MT3D-31",
+  "name": "a bound on a lattice point rounds to the next one (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "and_then(|bound| repeat_boundary(origin, period, bound))",
+  "new": "and_then(|bound| repeat_boundary(origin, period, bound + 1))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_the_margin_is_ten_milliseconds_and_the_lattice_rounds_up"
+ },
+ {
+  "id": "MT3D-32",
+  "name": "a resume point past the clock is taken (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": ".filter(|at| clock.try_instant(*at).is_some())",
+  "new": ".filter(|_| true)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_more_that_ends_a_repeat_a_resume_point_past_the_clock_and_a_failed_continuation"
+ },
+ {
+  "id": "MT3D-33",
+  "name": "the expired check's plan is not kept for the report to come (UR-22, UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "entry.resumes_at = Some(at);",
+  "new": "let _ = (entry, at);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_the_expired_timeline_resumes_and_the_report_that_comes_later_carries_the_event"
+ },
+ {
+  "id": "MT3D-34",
+  "name": "a whole send leaves the booking paused (UR-22)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "open.paused = None;",
+  "new": "let _ = &open.paused;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_late_started_repeat_resumes_on_its_lattice_after_busy_plus_m"
+ },
+ {
+  "id": "MT3D-35",
+  "name": "the resume's close does not move busy (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.with_book(|book| book.note_sent(self.core.now(), Some(clock.instant(first)), CLOSE_SAMPLES * clock.n));",
+  "new": "let _ = first;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_late_started_repeat_resumes_on_its_lattice_after_busy_plus_m"
+ },
+ {
+  "id": "MT3D-36",
+  "name": "the expired check's abandon of a paused repeat closes a device burst there is none of (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the transmit timeline expired; burst not resumed\" })); self.abandon(self.with_device(|device| device.burst_is_open()), self.cursor(), false);",
+  "new": "self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the transmit timeline expired; burst not resumed\" })); self.abandon(true, self.cursor(), false);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_an_expired_timeline_whose_resume_point_is_past_the_clock_ends_the_repeat_with_a_note"
+ },
+ {
+  "id": "MT3D-37",
+  "name": "an underflow's abandon of a paused repeat closes a device burst there is none of (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device burst underflowed; burst not resumed\" })); self.abandon(self.with_device(|device| device.burst_is_open()), self.cursor(), false);",
+  "new": "self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device burst underflowed; burst not resumed\" })); self.abandon(true, self.cursor(), false);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_delayed_underflow_that_retires_two_entries_applies_the_stutter_rule"
+ },
+ {
+  "id": "MT3D-38",
+  "name": "a late report's abandon of a paused repeat closes a device burst there is none of (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device dropped the burst late; burst not resumed\" })); self.abandon(self.with_device(|device| device.burst_is_open()), self.cursor(), false);",
+  "new": "self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device dropped the burst late; burst not resumed\" })); self.abandon(true, self.cursor(), false);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_second_drop_found_in_the_gap_abandons_at_the_handed_cursor"
+ },
+ {
+  "id": "MT3D-39",
+  "name": "an underflow read after the expired check's resume carries no plan (UR-28)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "Dropped::Nothing => reached.last().and_then(|reached| reached.resumes_at),",
+  "new": "Dropped::Nothing => None,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_the_expired_timeline_resumes_and_a_later_underflow_carries_the_plan"
+ },
+ {
+  "id": "MT3D-40",
+  "name": "a missed resume point is judged at the decision instant, not a device lead past it (UR-22, V18)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let decided = now.saturating_add(lead);",
+  "new": "let decided = now;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_once"
+ },
+ {
+  "id": "MT3D-41",
+  "name": "the device front past the resume point is not a miss (UR-22, V18)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "if clock.instant(next) < decided.max(front.unwrap_or(i64::MIN)) {",
+  "new": "if clock.instant(next) < decided {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_resume_point_the_device_front_has_passed_is_missed"
+ },
+ {
+  "id": "MT3D-42",
+  "name": "a missed resume point moves on the booking's own lattice, not the replaced repeat's (UR-22, V17, M5)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let lattice = book.open.as_ref().and_then(|open| open.paused).expect(\"a booking is paused\").lattice;",
+  "new": "let lattice = book.open.as_ref().map(|open| (open.booking.k, open.booking.waveform_len as i64)).expect(\"a booking is open\");",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_missed_resume_point_reruns_the_switch_rule"
+ },
+ {
+  "id": "MT3D-43",
+  "name": "a moved resume point leaves the switch's boundary in the record (UR-22, M5)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "open.booking.k = at; if let Some(id) = open.booking.settings.action() { book.move_switch(id, at); } } });",
+  "new": "open.booking.k = at; } });",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_missed_resume_point_reruns_the_switch_rule"
+ },
+ {
+  "id": "MT3D-44",
+  "name": "a moved resume point does not start the switch's lattice (UR-22, M5)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "if open.booking.switch { open.booking.k = at;",
+  "new": "if open.booking.switch {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_missed_resume_point_reruns_the_switch_rule"
+ },
+ {
+  "id": "MT3D-45",
+  "name": "a switch that replaces the repeat keeps its old boundary in the record (UR-22, V17)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "held.k = to; self.with_book(|book| { if let Some(id) = id { book.move_switch(id, to); }",
+  "new": "held.k = to; self.with_book(|book| {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_held_across_a_late_first_send_moves_to_the_resume_point_and_plays_from_there"
+ },
+ {
+  "id": "MT3D-46",
+  "name": "a switch at the resume point is moved past it (UR-22, V17)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let to = if h <= next { Some(next) }",
+  "new": "let to = if h < next { Some(next) }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_at_the_resume_point_replaces_the_repeat_there_and_is_not_late"
+ },
+ {
+  "id": "MT3D-47",
+  "name": "a switch within the shortest first send after the resume point is not moved (UR-22, V17)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let shortest = PACKETS.min_open_first_send;",
+  "new": "let shortest = 0;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_within_32_samples_after_the_resume_point_moves_to_the_next_safe_boundary"
+ },
+ {
+  "id": "MT3D-48",
+  "name": "a switch's gap rule stops at the resume point (UR-22, V17)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": ".filter(|h| *h < next.saturating_add(shortest))",
+  "new": ".filter(|h| *h <= next)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_within_32_samples_after_the_resume_point_moves_to_the_next_safe_boundary"
+ },
+ {
+  "id": "MT3D-49",
+  "name": "a switch the gap moved again is told from its last boundary, not the one it was received at (UR-22, V17)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "held.moved_from.get_or_insert(h);",
+  "new": "held.moved_from = Some(h);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_moved_within_32_is_told_from_its_own_boundary_when_the_resume_point_then_moves_past_it"
+ },
+ {
+  "id": "MT3D-50",
+  "name": "a part that starts later than planned is not told (UR-22, V17, V18)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.time_error(TimeErrorOutcome::SendAsap, late_by, target);",
+  "new": "let _ = (late_by, target);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_held_across_a_late_first_send_moves_to_the_resume_point_and_plays_from_there"
+ },
+ {
+  "id": "MT3D-51",
+  "name": "a switch booking is told late on each of its sends (UR-22, V17)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let planned = if first { open.booking.moved_from } else { None }.or(paused.map(|paused| paused.planned));",
+  "new": "let planned = open.booking.moved_from.or(paused.map(|paused| paused.planned));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_within_32_samples_after_the_resume_point_moves_to_the_next_safe_boundary"
+ },
+ {
+  "id": "MT3D-52",
+  "name": "a moved resume point is the plan: nothing is told (UR-22, V18)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "assert!(open.paused.is_some(), \"the booking is paused\"); open.next = at;",
+  "new": "assert!(open.paused.is_some(), \"the booking is paused\"); open.next = at; open.paused.as_mut().expect(\"paused\").planned = at;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_once"
+ },
+ {
+  "id": "MT3D-53",
+  "name": "the wait to a missed resume point is counted by the stutter rule (UR-22, V18)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "assert!(open.paused.is_some(), \"the booking is paused\"); open.next = at;",
+  "new": "assert!(open.paused.is_some(), \"the booking is paused\"); let moved = at - open.next; open.next = at; open.paused.as_mut().expect(\"paused\").stall += moved;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_once"
+ },
+ {
+  "id": "MT3D-54",
+  "name": "a switch that replaces a paused repeat is not a booking with nothing sent (UR-22, V15)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "*open = Open { booking, next: open.next, first: true, paused: Some(paused) };",
+  "new": "*open = Open { booking, next: open.next, first: false, paused: Some(paused) };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_halt_in_the_gap_after_a_switch_replaced_the_repeat_sends_nothing_and_cancels_the_switch"
+ },
+ {
+  "id": "MT3D-55",
+  "name": "a switch that replaces a paused repeat loses the stutter bound of the gap (UR-22, b')",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "*open = Open { booking, next: open.next, first: true, paused: Some(paused) };",
+  "new": "*open = Open { booking, next: open.next, first: true, paused: None };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_part_keeps_the_stutter_bound_of_the_gap_it_replaced"
+ },
+ {
+  "id": "MT3D-56",
+  "name": "the abandon of a repeat a switch replaced does not cancel the switch's open booking (UR-22)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "let open = self.open.as_ref().is_some_and(|open| open.first && open.paused.is_some() && ours(&open.booking));",
+  "new": "let open = false;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_the_abandon_of_a_repeat_a_switch_replaced_cancels_it_with_one_report"
+ },
+ {
+  "id": "MT3D-57",
+  "name": "a settled switch's row keeps its boundary at receipt (UR-22, RM-37)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "row[\"boundary\"] = serde_json::json!(settled.boundary);",
+  "new": "let _ = settled.boundary;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_settled_switch_s_row_takes_the_boundary_it_settled_at"
+ },
+ {
+  "id": "MT3D-58",
+  "name": "a moved switch leaves the playing repeat's lattice at its old boundary (UR-22, V17)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "playing.origin = to;",
+  "new": "let _ = to;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_switch_replaces_a_paused_repeat_and_its_boundary_moves_with_the_resume_point"
+ },
+ {
+  "id": "MT3D-59",
+  "name": "the record's pending switch keeps its boundary when moved (UR-22, V17)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "switch.boundary = to;",
+  "new": "let _ = to;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_switch_replaces_a_paused_repeat_and_its_boundary_moves_with_the_resume_point"
+ },
+ {
+  "id": "MT3D-60",
+  "name": "a switch the gap moved keeps its old first sample as its lattice origin (UR-22, V17)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "held.k = to;",
+  "new": "let _ = to;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_held_across_a_late_first_send_moves_to_the_resume_point_and_plays_from_there"
+ },
+ {
+  "id": "MT3D-61",
+  "name": "a report between a switch's join and its open is not a resumable drop (UR-22, V22, carry (c))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "None => book.switch_at_cursor().is_some(),",
+  "new": "None => false,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_report_between_a_switch_s_join_and_its_open_resumes_the_repeat"
+ },
+ {
+  "id": "MT3D-62",
+  "name": "the switch taken between its join and its open keeps its boundary in the record (UR-22, V22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "open.booking.moved_from.get_or_insert(handed); if let Some(id) = open.booking.settings.action() { book.move_switch(id, at); }",
+  "new": "open.booking.moved_from.get_or_insert(handed);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_report_between_a_switch_s_join_and_its_open_resumes_the_repeat"
+ },
+ {
+  "id": "MT3D-63",
+  "name": "the switch taken between its join and its open is not told from its own boundary (UR-22, V22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "open.booking.moved_from.get_or_insert(handed);",
+  "new": "open.booking.moved_from = None;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_report_between_a_switch_s_join_and_its_open_resumes_the_repeat"
+ },
+ {
+  "id": "MT3D-64",
+  "name": "a switch received while the repeat waits to resume is refused as not started (UR-38, V17)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.record.switch(id, boundary, now_k, playing.started, carried)?;",
+  "new": "self.record.switch(id, boundary, now_k, playing.started && self.open.as_ref().is_none_or(|open| open.paused.is_none()), carried)?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_received_in_the_gap_is_accepted_and_moves_late"
+ },
+ {
+  "id": "MT3D-65",
+  "name": "a switch the gap passed is not told from the boundary it was received at (UR-22, V17)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "held.moved_from.get_or_insert(h);",
+  "new": "let _ = h;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_held_across_a_late_first_send_moves_to_the_resume_point_and_plays_from_there"
+ },
+ {
+  "id": "MT3D-66",
+  "name": "a halt in the gap with a switch as the open booking leaves the repeat's record open (UR-22, V15)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let front = self.with_book(|book| { book.end_open(end); book.device.front() });",
+  "new": "let (ended, front) = self.with_book(|book| (book.end_open(end), book.device.front())); let Some(_) = ended else { return front };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_halt_in_the_gap_after_a_switch_replaced_the_repeat_sends_nothing_and_cancels_the_switch"
+ },
+ {
+  "id": "MT3D-67",
+  "name": "any held repeat, not a switch, at the device burst's cursor is the repeat that resumes (UR-22, V22)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "self.device.next().and_then(|cursor| self.list.held.get(&cursor)).filter(|held| held.is_switch())",
+  "new": "self.device.next().and_then(|cursor| self.list.held.get(&cursor))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_repeat_joined_behind_a_finite_burst_is_not_resumed_by_a_report_in_the_join_window"
+ },
+ {
+  "id": "MT3D-68",
+  "name": "a switch taken and not yet sent is not the repeat's successor for a report (UR-22, V22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "Some(open) if open.first => open.booking.switch && book.device.continues_at(open.next),",
+  "new": "Some(open) if open.first => false,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_report_after_a_switch_s_open_and_before_its_first_send_resumes_the_repeat"
+ },
+ {
+  "id": "MT3D-69",
+  "name": "the plan of a resume is not its resume point (UR-22, V18)",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "paused.planned = at;",
+  "new": "paused.planned = 0;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_once"
+ },
+ {
+  "id": "MT3D-70",
+  "name": "a missed resume point that does not fit the clock does not end the repeat (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "\"reason\": \"UR-22: the resume point does not fit the clock; burst not resumed\" })); return self.abandon(false, self.cursor(), false);",
+  "new": "\"reason\": \"UR-22: the resume point does not fit the clock; burst not resumed\" })); return true;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_resume_point_or_a_switch_boundary_the_clock_cannot_hold_ends_the_repeat_with_a_note"
+ },
+ {
+  "id": "MT3D-71",
+  "name": "a switch boundary that does not fit the clock does not end the repeat (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "\"reason\": \"UR-22: the switch's boundary does not fit the clock; burst not resumed\" })); return self.abandon(false, self.cursor(), false);",
+  "new": "\"reason\": \"UR-22: the switch's boundary does not fit the clock; burst not resumed\" })); return true;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_resume_point_or_a_switch_boundary_the_clock_cannot_hold_ends_the_repeat_with_a_note"
+ },
+ {
+  "id": "MT3D-72",
+  "name": "a repeat's part sent after a missed resume point opens a record without its late start (RM-14, UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "paused.map(|_| BurstOpen { waveform_len: burst_open.waveform_len, late: started_late, requested_target: started_late.map(|_| target) })",
+  "new": "paused.map(|_| BurstOpen { waveform_len: burst_open.waveform_len, late: None, requested_target: started_late.map(|_| target) })",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_once"
+ },
+ {
+  "id": "MT3D-73",
+  "name": "a repeat's part sent after a missed resume point records no requested target (RM-14, UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "paused.map(|_| BurstOpen { waveform_len: burst_open.waveform_len, late: started_late, requested_target: started_late.map(|_| target) })",
+  "new": "paused.map(|_| BurstOpen { waveform_len: burst_open.waveform_len, late: started_late, requested_target: None })",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_once"
+ },
+ {
+  "id": "MT3D-74",
+  "name": "a switch's part sent across a gap opens a record without its late start (RM-14, UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "late: started_late.or(burst_open.late),",
+  "new": "late: burst_open.late,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_held_across_a_late_first_send_moves_to_the_resume_point_and_plays_from_there"
+ },
+ {
+  "id": "MT3D-75",
+  "name": "a switch's part sent across a gap records the receipt's requested target only (RM-14, UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "requested_target: if started_late.is_some() { burst_open.requested_target.or(Some(target)) } else { burst_open.requested_target },",
+  "new": "requested_target: burst_open.requested_target,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_held_across_a_late_first_send_moves_to_the_resume_point_and_plays_from_there"
+ },
+ {
+  "id": "MT3D-76",
+  "name": "a switch the gap moved twice is told from the boundary it was last moved to, at a resume between its join and its open (UR-22)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "open.booking.moved_from.get_or_insert(handed);",
+  "new": "open.booking.moved_from = Some(handed);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_the_gap_moved_and_a_report_then_resumed_is_told_from_its_receipt_boundary"
+ },
+ {
+  "id": "MT3D-77",
+  "name": "a resume's timing row is not stall evidence for the loopback timing precondition (UR-22, V24)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+  "old": ".filter(|r| r[\"what\"] == \"tx_resume\").cloned());",
+  "new": ".filter(|r| r[\"what\"] == \"tx_resume\" && false).cloned());",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_22_a_late_send_asap_repeat_resumes"
+ },
+ {
+  "id": "MT3D-78",
+  "name": "a lost sequence does not end a repeat that waits to resume (UR-22, V14)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "if !resumes && paused.is_some() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_lost_sequence_while_the_repeat_is_paused_ends_it"
+ },
+ {
+  "id": "MT3D-79",
+  "name": "any paused booking is the pause a late report's part belongs to (UR-22, b')",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let ours = hit || paused.is_some_and(|paused| paused.source == Some(reached.start));",
+  "new": "let ours = hit || paused.is_some();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_stopped_repeat_s_delayed_report_does_not_end_a_newer_repeat_that_waits_to_resume"
+ },
+ {
+  "id": "MT3D-80",
+  "name": "a late report of the part that made the pause does not apply the stall rule (UR-22, V3b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "let ours = hit || paused.is_some_and(|paused| paused.source == Some(reached.start));",
+  "new": "let ours = hit;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_delayed_underflow_that_retires_two_entries_applies_the_stutter_rule"
+ },
+ {
+  "id": "MT3D-81",
+  "name": "a pause does not remember the device burst it closed (UR-22, b')",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "let source = self.device.first();",
+  "new": "let source = None;",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_pause_remembers_the_first_instant_of_the_device_burst_it_closed"
  }
 ]

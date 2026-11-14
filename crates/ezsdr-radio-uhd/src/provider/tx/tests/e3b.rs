@@ -688,16 +688,17 @@ fn e3b_c4_the_streams_lock_sections() {
 }
 
 /// The chain's reads and writes are inside the sections the operation already had (E3b-4), so the counts are those of E3b-1, before the chain
-/// moved into the book (E3b-3 had made each its own section).
+/// moved into the book (E3b-3 had made each its own section), except that a two-sample close the device took whole adds one section for the
+/// stream's `busy` (UR-22: maintenance table 3, D1): a named change.
 const C4: Expected = &[
     ("an idle step", &["[(false, 3)]"]),
     ("a first send of a finite burst, held tail", &["[(true, 10), (false, 4)]"]),
-    ("close_unjoined: the owner's close at the join deadline", &["[(true, 10), (false, 4)]", "[(true, 6), (false, 3)]"]),
+    ("close_unjoined: the owner's close at the join deadline", &["[(true, 10), (false, 4)]", "[(true, 7), (false, 3)]"]),
     ("a first send and its continuations", &["[(true, 10), (true, 7), (false, 6)]"]),
     ("a joined piece", &["[(true, 10), (true, 12), (false, 4)]"]),
-    ("abandon: a short send", &["[(true, 13), (false, 3)]"]),
-    ("end_open: a Stop with a tail", &["4"]),
-    ("end_open: a Stop of a repeat", &["4"]),
+    ("abandon: a short send", &["[(true, 14), (false, 3)]"]),
+    ("end_open: a Stop with a tail", &["5"]),
+    ("end_open: a Stop of a repeat", &["5"]),
     ("a failed padded EOB", &["[(true, 13), (false, 3)]"]),
     ("reopen_streamer: a recovery", &["(true, 10)"]),
 ];

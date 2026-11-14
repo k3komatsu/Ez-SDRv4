@@ -977,7 +977,7 @@ impl MockRadio {
 
     fn emit_late_burst(&self, k: usize, late_by: Duration, target: TimePoint, now_tx: TimePoint, outcome: ezsdr_radio::payloads::TimeErrorOutcome) -> Result<(), ModuleError> {
         let late_by_ns = time::to_ns(self.clocks.as_ref().expect("prepared clocks"), late_by).unwrap_or(i64::MAX);
-        let payload = serde_json::to_value(ezsdr_radio::payloads::TimeErrorPayload { cause: ezsdr_radio::payloads::TimeErrorCause::Late, outcome, late_by_ns, target, action: None })
+        let payload = serde_json::to_value(ezsdr_radio::payloads::TimeErrorPayload { cause: ezsdr_radio::payloads::TimeErrorCause::Late, outcome, late_by_ns, target, action: None, resumes_at: None })
             .expect("time error payload");
         self.emit_event(&self.tx[k].path, ezsdr_radio::kinds::TIME_ERROR, Severity::Error, payload, now_tx)
     }
@@ -1902,6 +1902,7 @@ impl MockRadio {
                     late_by_ns: 0,
                     target: header.first_sample_time,
                     action: None,
+                    resumes_at: None,
                 })
                 .expect("device error payload");
                 self.emit_event(&self.tx[k].path, ezsdr_radio::kinds::TIME_ERROR, Severity::Error, payload, header.first_sample_time)?;

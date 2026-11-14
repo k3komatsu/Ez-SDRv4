@@ -35,7 +35,7 @@
 | 11 | 受信の再開の先頭の 0 を FakeDevice と MockRadio に | 2（Mock の側） | 実機に合わせる．小さい |
 | 12 | 実機をまとめて（2〜3 回）：#89 の後〈(i) `sleep` を `8dd1016` と `fe86629` で，(ii) `kill` で E9 → A1 を owner が決める．2026-11-12 に済，A1 も済〈`reviews/a1-*`〉〉，(b) T1 の回帰 9 試験，B1，#56，H1〜H5，受信の start lead，段階 4 の値（queue の深さ，throughput），TXP の B3 | — | Phase 8 の目的（測った値で Mock を縛る）の本体．機材が使えるときに順番によらず挟む．送信の前に毎回 att を確かめる |
 | 13 | Phase 8 の締めのコードとテストの組み立ての振り返り | — | owner の決定済み（handoff §2 の 2）．`Frozen` の整理の残り，持ち越し，Provider が id を名乗る処理の重複もここで受ける |
-| 14 | 保守表 3（実機に遅れて届いた burst） | 2（worktree `Ez-SDRv4-e3`，`work/mt3`） | 設計は決定（2026-11-14，owner）：遅れて捨てられる単位は device burst（FakeDevice は実機の読み流しを真似る，UR-28 は報告だけが対応付けを消す〈A′〉，Module は underflow と同じ道で打ち切る），`late_at_device` は「1 sample も送られなかった」，**repeat は終わらず，遅れでも underflow でも安全側の周期の境目から再開**（続けて捨てられたら終える），KL に装置の振る舞いの項目．Fable 5.2 のレビュー済み．危険な段：試験の計画 → Sol → 実装．実機の cell C1〜C6〈Module の分け方の遅れ，10・100・200 MS/s，#2，32 sample の先頭，連鎖の境目，2 channel，負荷下の underflow の報告の順〉は 11-15 の次の bench（O7） |
+| 14 | 保守表 3（実機に遅れて届いた burst） | 2 | 済（2026-11-14，記録 `reviews/mt3-*`）．実機の cell C1〈道具あり〉と C2〜C7〈Module の分け方の遅れ，10・100・200 MS/s，#2，32 sample の先頭，連鎖の境目，2 channel，負荷下の underflow の報告の順，repeat の再開〈m の掃引〉〉は 11-15 の次の bench（O7） |
 
 ### B. Phase 8 の後へ回す（推奨）
 

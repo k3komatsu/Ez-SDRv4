@@ -7,6 +7,7 @@
 //! Units: one sample is 1 us (the rig's 1 MS/s), 200 root ticks; `MS` is a millisecond in root ticks.
 
 use super::e1::{MS, at, book, handed_end, last_send_eob, notes, params, playing, rejection_events, rows, shutdown, stop_receipt};
+use super::mt3::targets;
 use super::*;
 use crate::provider::tx::oracle as o;
 use ezsdr_radio::staging::STOP_FRONT;
@@ -15,7 +16,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The sends carrying an end-of-burst, as the fake recorded them.
-fn closing_sends(device: &FakeDevice) -> Vec<String> {
+pub(super) fn closing_sends(device: &FakeDevice) -> Vec<String> {
     device.calls().into_iter().filter(|call| call.starts_with("tx_send ") && call.ends_with("eob=true")).collect()
 }
 
@@ -189,7 +190,7 @@ fn turn(rig: &mut SwitchRig) {
 }
 
 /// The ids of the Actions refused since the last call.
-fn refused_ids(events: &EventCollector) -> Vec<u64> {
+pub(super) fn refused_ids(events: &EventCollector) -> Vec<u64> {
     rejected(events).iter().filter_map(|event| event.payload["action"].as_u64()).collect()
 }
 
@@ -289,7 +290,7 @@ fn e2a_f3_the_pending_twin_answers_the_same() {
     book_switch(&mut rig, 2, 3_000, 1);
     drain_tx(&mut rig.tx);
     rig.tx.with_book(|book| book.open.as_mut().expect("the repeat is handed").next = b);
-    rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(b)), channel: 0 });
+    rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
     assert_eq!(book_both_at(&mut rig, b + 1), [5, 6], "both refused at receipt: {:?}", lock(&rig.core.rec).rejected);
     assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled");
 }
@@ -359,7 +360,7 @@ fn switch_notes(core: &Core) -> usize {
 }
 
 #[test]
-fn e2a_f1_an_underflow_cancels_a_switch_whose_payload_is_unread() {
+fn e2a_f1_a_sequence_error_cancels_a_switch_whose_payload_is_unread() {
     // F1, A1 (RM-37, UR-22): R plays; a switch S to NEW (boundary 15 000) is received and not yet read when an underflow abandons R at
     // its cursor, before the boundary. The abandon cancels S and its unread payload with it: the row reads cancelled, one note says so,
     // and no sample of NEW sounds (a payload read after the abandon would start a burst of its own at 15 000). The record holds nothing
@@ -371,7 +372,7 @@ fn e2a_f1_an_underflow_cancels_a_switch_whose_payload_is_unread() {
     book_switch(&mut rig, 2, 3_000, 1);
     let cursor = rig.tx.open_next().expect("R is handed");
     assert!(cursor < 15_000, "the cursor {cursor} is before the boundary");
-    rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(cursor)), channel: 0 });
+    rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
     rig.tx.read_list();
     assert!(!held_keys(&rig.tx).contains(&15_000), "S's payload went with S: {:?}", held_keys(&rig.tx));
     assert_eq!(switch_notes(&rig.core), 1, "{:?}", lock(&rig.core.rec).rejected);
@@ -555,7 +556,7 @@ fn e2a_s11_a_stop_after_a_switch_whose_boundary_is_before_the_bound_cancels_it_a
 /// #93 (UR-22): A (500 samples at 10 000) ends with its own end-of-burst; B (20 000 samples at 11 000) is a new device burst whose first
 /// sends are issued by 7 ms, so it is open on the device when a `code` report whose tick is sample `k`'s is read. Returns the rig after the
 /// report.
-fn late_report_after_a_closed_burst(code: crate::device::TxCode, k: i64) -> SwitchRig {
+pub(super) fn late_report_after_a_closed_burst(code: crate::device::TxCode, k: i64) -> SwitchRig {
     let mut rig = switch_rig(vec![o::ramp(31, 500), o::ramp(32, 20_000)]);
     book(&mut rig, 1, 0, 10_000);
     book(&mut rig, 2, 1, 11_000);
@@ -584,6 +585,7 @@ fn e2a_93_a_late_underflow_of_the_burst_before_does_not_cut_the_next_device_burs
     // two-sample close before its own end.
     let mut rig = late_report_after_a_closed_burst(crate::device::TxCode::Underflow, 10_400);
     assert_eq!(underflow_events(&rig.events), 1);
+    assert_eq!(targets(&rig.tx), [11_000], "the Underflow retires A, which its tick reaches, silently, and not B (UR-28)");
     run(&mut rig, 7, 40);
     assert_eq!(underflow_notes(&rig.core), 0, "{:?}", lock(&rig.core.rec).rejected);
     assert_eq!(closing_sends(&rig.device).len(), 2, "A's close and B's own: {:?}", rig.device.calls());
@@ -595,6 +597,7 @@ fn e2a_93_an_underflow_at_the_open_burst_s_first_tick_abandons_it() {
     // #93's twin (UR-22): a report whose tick is B's first sample's is B's own, and abandons B at its cursor as before.
     let mut rig = late_report_after_a_closed_burst(crate::device::TxCode::Underflow, 11_000);
     assert_eq!(underflow_events(&rig.events), 1);
+    assert!(rig.tx.unacked.is_empty(), "both bursts' starts are reached: both are retired, silently");
     assert_eq!(underflow_notes(&rig.core), 1, "{:?}", lock(&rig.core.rec).rejected);
     assert_eq!(rig.tx.open_next(), None, "B is abandoned");
     run(&mut rig, 7, 40);
@@ -608,6 +611,7 @@ fn e2a_93_a_sequence_error_before_the_open_burst_s_first_tick_still_abandons_it(
     // in-flight window ahead of its play time, so one whose tick is before B's first sample still abandons B.
     let mut rig = late_report_after_a_closed_burst(crate::device::TxCode::SeqError, 10_400);
     assert_eq!(underflow_events(&rig.events), 1);
+    assert_eq!(targets(&rig.tx), [10_000, 11_000], "a sequence error's tick is unmeasured: it retires nothing");
     assert_eq!(underflow_notes(&rig.core), 1, "{:?}", lock(&rig.core.rec).rejected);
     assert_eq!(rig.tx.open_next(), None, "B is abandoned");
     run(&mut rig, 7, 40);

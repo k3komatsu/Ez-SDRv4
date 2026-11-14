@@ -127,6 +127,17 @@
       "$ref": "#/$defs/TimeErrorOutcome",
       "description": "How the Provider handled it (RM-22)."
     },
+    "resumes_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TimePoint"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The instant a repeat resumes at, where the Provider paused it after a late drop (RM-11, UR-22): nothing from the burst's start (a resumed part's, for a part) to it was transmitted. Absent when the repeat ended and for a burst that is not a repeat."
+    },
     "target": {
       "$ref": "#/$defs/TimePoint",
       "description": "The requested burst target (RM-22)."

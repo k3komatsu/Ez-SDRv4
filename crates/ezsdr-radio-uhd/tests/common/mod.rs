@@ -39,6 +39,7 @@ pub mod d9;
 pub mod e3;
 pub mod iii;
 pub mod measurement;
+pub mod mt3;
 pub mod n47;
 pub mod n47s5;
 pub mod observations;
@@ -596,6 +597,8 @@ pub fn require_stream_timing(manifest: &Manifest, trial: &str, tx: bool) {
         .collect();
     if tx {
         evidence.extend(section(manifest, "rejected").as_array().unwrap().iter().filter(|r| r["reason"].as_str().is_some_and(|s| s.contains("transmit timeline expired"))).cloned());
+        // A repeat that resumed (UR-22) is a stall as much as one that was abandoned: the expired timeline's `tx_resume` row, which has no report to wait for.
+        evidence.extend(section(manifest, "timing").as_array().unwrap().iter().filter(|r| r["what"] == "tx_resume").cloned());
     }
     assert!(
         evidence.is_empty(),

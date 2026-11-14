@@ -700,6 +700,9 @@ pub mod payloads {
     pub struct TxUnderflowPayload {
         /// Why (RM-11).
         pub cause: TxUnderflowCause,
+        /// The instant a repeat resumes at, where the Provider paused it (RM-11, UR-22): nothing is transmitted before it from the event's instant. Absent when the repeat ended and for a burst that is not a repeat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resumes_at: Option<TimePoint>,
     }
 
     /// `radio.ALIGNMENT_ERROR` data (RM-11, VE-3).
@@ -741,6 +744,9 @@ pub mod payloads {
         /// The Action the event is about, where the Provider names it (UR-38: a repeat switch's `send_asap`); absent otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub action: Option<ezsdr_kernel::event::ActionId>,
+        /// The instant a repeat resumes at, where the Provider paused it after a late drop (RM-11, UR-22): nothing from the burst's start (a resumed part's, for a part) to it was transmitted. Absent when the repeat ended and for a burst that is not a repeat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resumes_at: Option<TimePoint>,
     }
 
     /// Timed control-command lateness data (RM-22).

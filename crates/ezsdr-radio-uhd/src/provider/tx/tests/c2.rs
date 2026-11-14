@@ -216,11 +216,9 @@ fn c2_s8_a_short_boundary_send_is_applied_when_it_took_a_sample_and_cancelled_wh
     }
 }
 
-#[test]
-fn c2_s10_an_underflow_after_the_boundary_send_does_not_unsend_it() {
-    // The send that carries b is whole; an underflow whose tick is b is reported before device time reaches b. The owner abandons the
-    // repeat at its cursor, past b, at device time short of b: the sample at b was sent, so the row waits like a Stop's and is applied once
-    // device time reaches b, and no note is written for the new waveform.
+/// The send that carries b is whole; `code` is reported before device time reaches b; the row waits like a Stop's and is applied once device time reaches b.
+/// Returns the `tx_resume` rows written.
+fn s10(code: crate::device::TxCode, tick: Option<i64>) -> usize {
     let mut rig = switched(Vec::new());
     let mut ms = 3;
     while !boundary_send_is_on_the_device(&rig) {
@@ -228,11 +226,27 @@ fn c2_s10_an_underflow_after_the_boundary_send_does_not_unsend_it() {
         ms += 1;
         assert!(ms < 12, "{:?}", rig.device.calls());
     }
-    rig.tx.report(TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(B)), channel: 0 });
+    rig.tx.report(TxReport { code, tick: tick.map(|sample| rig.clock.instant(sample)), channel: 0 });
     assert_eq!(switch_row(&rig.core, 0)["outcome"], "pending", "device time is short of b");
     run(&mut rig, ms, 30);
     assert_eq!(switch_row(&rig.core, 0)["outcome"], "applied");
     assert!(!notes(&rig.core).iter().any(|note| note.contains("Stop")), "{:?}", lock(&rig.core.rec).rejected);
+    let timing = lock(&rig.core.rec).timing.clone();
+    timing.iter().filter(|row| row["what"] == "tx_resume").count()
+}
+
+#[test]
+fn c2_s10_an_underflow_after_the_boundary_send_does_not_unsend_it() {
+    // The send that carries b is whole; an underflow whose tick is b is reported before device time reaches b. The repeat resumes (UR-22) instead of being
+    // abandoned, and the sample at b was sent either way: the row waits like a Stop's and is applied once device time reaches b, and no note is written for the
+    // new waveform. (The abandon's own footprint body is the sequence-error twin below; the switch across the gap is D2's.)
+    assert_eq!(s10(crate::device::TxCode::Underflow, Some(B)), 1, "the underflow resumed the repeat");
+}
+
+#[test]
+fn c2_s10_a_sequence_error_after_the_boundary_send_does_not_unsend_it() {
+    // As above with a lost sequence, which ends a repeat by the abandon at its cursor, past b, at device time short of b: no resume.
+    assert_eq!(s10(crate::device::TxCode::SeqError, None), 0);
 }
 
 #[test]
@@ -243,7 +257,8 @@ fn c2_s11_a_host_late_switch_is_pending_until_the_turn_then_cancelled() {
     at(&rig, 15 * MS);
     rig.tx.read_list();
     assert_eq!(switch_row(&rig.core, 0)["outcome"], "pending", "device time is past b, nothing sent");
-    rig.tx.step();
+    // A lost sequence ends the repeat as the expired timeline did before a repeat resumed (UR-22).
+    rig.tx.report(TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
     assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled");
     run(&mut rig, 16, 30);
     assert!(!heard_new(&rig), "{:?}", rig.device.calls());

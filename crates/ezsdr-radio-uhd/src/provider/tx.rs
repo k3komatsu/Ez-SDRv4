@@ -3,7 +3,7 @@
 //! burst at the open one's next sample, ends its clock at its cut, and reads the
 //! asynchronous reports (UR-21…UR-23, UR-25, UR-28).
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration as Wall;
@@ -16,14 +16,14 @@ use ezsdr_kernel::time::{Duration, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload};
 use ezsdr_radio::segment::{self, CLOSE_SAMPLES, SEND_CAP_MAX, Waveform, close_front, plan_send, send_cap};
-use ezsdr_radio::staging::{CLOSE_GAP, DeviceChain, DeviceEnd, DeviceSend, OpId, Outcome, Read, Reopen, Settle, TxBook, TxSend, handover_horizon};
+use ezsdr_radio::staging::{CLOSE_GAP, DeviceChain, DeviceEnd, DeviceSend, OpId, Outcome, Read, Reopen, Settle, TxBook, TxSend, handover_horizon, repeat_boundary};
 use serde_json::json;
 
 use super::control::ColdConfig;
 use super::core::{Clock, Core, Locked, Streams, lock, stream_key};
 use crate::device::{Dir, Iq, TxCode, TxReport};
 use crate::host::HostClock;
-use crate::profile::DEVICE_LEAD_NS;
+use crate::profile::{DEVICE_LEAD_NS, RESUME_MARGIN_NS};
 use ezsdr_radio::timeline::{Channels, StreamKey};
 use ezsdr_radio::x3xx::PACKETS;
 
@@ -43,6 +43,8 @@ pub(crate) struct Held {
     pub target: TimePoint,
     /// The values the burst takes, booked with it (RM-21); the owner applies them at its turn.
     pub settings: Arc<ColdConfig>,
+    /// A repeat switch the gap of the repeat it replaces moved (UR-22): the boundary it had before the first move. Its first send says it started late.
+    pub moved_from: Option<i64>,
 }
 
 impl ezsdr_radio::staging::Booked for Held {
@@ -87,8 +89,47 @@ pub(crate) enum TxCmd {
 }
 
 struct PendingReport {
+    /// The device burst's first Kernel burst: its first instant is the device burst's (UR-28).
     target: TimePoint,
+    /// The Kernel bursts that joined the device burst after the first, in send order.
+    joined: Vec<TimePoint>,
     channels: BTreeSet<usize>,
+    /// The burst's `late_at_device` was emitted: one event per burst, whichever channel reports it first.
+    told: bool,
+    /// The repeat resumes at this sample after this device burst was dropped, planned by the expired-timeline check before any report was read: the
+    /// first report that reaches the burst takes it for its event (UR-22, UR-28).
+    resumes_at: Option<i64>,
+    /// This device burst is a part that resumed a repeat: the stall part of the gap before it, in root ticks (UR-22).
+    resumed: Option<i64>,
+}
+
+/// What a report retires (UR-28): `Ack` the bursts starting before its tick, `Underflow` and `Late` those starting at or before it and marking them told (a `Late` one also telling them).
+#[derive(Clone, Copy, PartialEq)]
+enum Reach {
+    Ack,
+    Underflow,
+    Late,
+}
+
+/// A device burst a report retired (UR-28): its Kernel bursts, its first instant in the root domain, whether this report is the first to tell it late,
+/// the resume point it carried and, for a part that resumed a repeat, the stall part of the gap before it.
+struct Reached {
+    targets: Vec<TimePoint>,
+    start: i64,
+    tell: bool,
+    resumes_at: Option<i64>,
+    resumed: Option<i64>,
+}
+
+/// What a report that reached the device burst did to its burst (UR-22).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dropped {
+    /// Nothing: no open device burst was reached, or the repeat's gap is already planned.
+    Nothing,
+    /// The repeat resumes at this sample.
+    Resumed(i64),
+    /// The burst ends: the caller abandons it.
+    Ended,
 }
 
 #[derive(Clone, Copy)]
@@ -123,8 +164,6 @@ pub(crate) struct Tx {
     /// read it (UR-25): the origin when a loss or `Provider::stop` ended the clock at or before it.
     cut: Option<i64>,
     unacked: VecDeque<PendingReport>,
-    /// One radio TIME_ERROR per late packet can name one Kernel burst more than once.
-    late_reported: HashSet<TimePoint>,
     contract: Option<DataContractId>,
 }
 
@@ -146,6 +185,14 @@ enum Values {
     Start,
     Configure(u64),
     Wait,
+}
+
+/// UR-22: the resume point `R` of a repeat on the lattice `origin + j * period`: the first lattice point at or after the latest of `unaligned` (the
+/// stream's `busy` plus the margin), `decided` (the decision instant plus the device lead) and the device's `front`, the three in root ticks. `None`
+/// when it does not fit the clock.
+fn resume_boundary(clock: Clock, origin: i64, period: i64, unaligned: i64, decided: i64, front: Option<i64>) -> Option<i64> {
+    let bound = [Some(unaligned), Some(decided), front].into_iter().flatten().max()?;
+    clock.try_at_or_after(bound).and_then(|bound| repeat_boundary(origin, period, bound)).filter(|at| clock.try_instant(*at).is_some())
 }
 
 impl Tx {
@@ -171,7 +218,6 @@ impl Tx {
             streamer,
             cut: None,
             unacked: VecDeque::new(),
-            late_reported: HashSet::new(),
             contract: Some(DataContractId::parse("ezsdr.stream.cf32").expect("cf32")),
         }
     }
@@ -300,60 +346,65 @@ impl Tx {
         self.report_cancelled_burst("UR-25: its transmit clock ended before the burst could start", ezsdr_radio::CancelReason::ClockEnded);
     }
 
+    #[cfg(test)]
     fn remember_burst(&mut self, target: TimePoint) {
+        self.remember_part(target, None);
+    }
+
+    /// [`Tx::remember_burst`] for a device burst that is the part resuming a repeat when `stall` is given (UR-22).
+    fn remember_part(&mut self, target: TimePoint, stall: Option<i64>) {
         // UR-28: a pending report's channels are the positions in the streamer — the
         // numbers UHD's asynchronous reports carry (4.10's `rfnoc_tx_streamer.cpp:152-159,
         // 312-319`; `FakeDevice`, `device.rs:1515-1516,1555-1556`) —, not the device
         // channels the stream runs: a stream opened for `{1}` reports channel 0. The set is
         // never empty: a burst is booked only on a stream this Module opened, and a stream
         // with no channel is refused (UR-21).
-        self.unacked.push_back(PendingReport { target, channels: (0..self.channels.count() as usize).collect() });
+        self.unacked.push_back(PendingReport { target, joined: Vec::new(), channels: (0..self.channels.count() as usize).collect(), told: false, resumes_at: None, resumed: stall });
     }
 
-    /// Each channel's reports are ordered independently in UHD's shared queue.
-    fn reported_targets(&mut self, channel: usize, tick: Option<i64>) -> Vec<TimePoint> {
-        let matching: Vec<usize> = if let Some(tick) = tick {
-            self.unacked
-                .iter()
-                .enumerate()
-                .filter_map(|(index, pending)| {
-                    let root_tick = self.core.clocks.convert(pending.target, self.core.root).and_then(|converted| converted.floor().ticks_in(self.core.root)).ok()?;
-                    // Strictly before the tick: at 200 MS/s a burst one sample after the previous end starts at the ACK's own tick (UR-28).
-                    (pending.channels.contains(&channel) && root_tick < tick).then_some(index)
+    /// A Kernel burst whose first send continues the open device burst: the last correlation is that device burst's (UR-28).
+    fn join_burst(&mut self, target: TimePoint) {
+        if let Some(pending) = self.unacked.back_mut() {
+            pending.joined.push(target);
+        }
+    }
+
+    /// Each channel's reports are ordered independently in UHD's shared queue. A tickless report retires only an `Ack`'s first pending burst.
+    fn retire(&mut self, channel: usize, tick: Option<i64>, reach: Reach) -> Vec<Reached> {
+        let root = self.core.root;
+        let start = |pending: &PendingReport| self.core.clocks.convert(pending.target, root).and_then(|converted| converted.floor().ticks_in(root)).ok();
+        let matching: Vec<usize> = match tick {
+            // Ack: strictly before the tick, since at 200 MS/s a burst one sample after the previous end starts at the ACK's own tick (UR-28).
+            Some(tick) => (0..self.unacked.len())
+                .filter(|&index| {
+                    let pending = &self.unacked[index];
+                    pending.channels.contains(&channel) && start(pending).is_some_and(|start| if reach == Reach::Ack { start < tick } else { start <= tick })
                 })
-                .collect()
-        } else {
-            self.unacked.iter().position(|pending| pending.channels.contains(&channel)).into_iter().collect()
+                .collect(),
+            None if reach == Reach::Ack => self.unacked.iter().position(|pending| pending.channels.contains(&channel)).into_iter().collect(),
+            None => Vec::new(),
         };
-        let mut retired = Vec::with_capacity(matching.len());
+        let mut reached = Vec::new();
         for index in matching.into_iter().rev() {
+            let starts = start(&self.unacked[index]);
             let pending = &mut self.unacked[index];
-            retired.push(pending.target);
             pending.channels.remove(&channel);
+            if reach != Reach::Ack {
+                let tell = !std::mem::replace(&mut pending.told, true) && reach == Reach::Late;
+                reached.push(Reached {
+                    targets: std::iter::once(pending.target).chain(pending.joined.iter().copied()).collect(),
+                    start: starts.expect("a reached burst has a start"),
+                    tell,
+                    resumes_at: pending.resumes_at.take(),
+                    resumed: pending.resumed,
+                });
+            }
             if pending.channels.is_empty() {
                 self.unacked.remove(index);
             }
         }
-        for target in &retired {
-            if !self.target_pending(*target) {
-                self.late_reported.remove(target);
-            }
-        }
-        retired
-    }
-
-    fn time_error_target(&self, channel: usize, tick: Option<i64>) -> Option<TimePoint> {
-        let mut targets = self.unacked.iter().filter(|pending| pending.channels.contains(&channel)).filter_map(|pending| {
-            let target = pending.target;
-            let root_tick = self.core.clocks.convert(target, self.core.root).and_then(|converted| converted.floor().ticks_in(self.core.root)).ok()?;
-            tick.is_none_or(|tick| root_tick <= tick).then_some(target)
-        });
-        let target = targets.next()?;
-        if tick.is_some() && targets.next().is_some() { None } else { Some(target) }
-    }
-
-    fn target_pending(&self, target: TimePoint) -> bool {
-        self.unacked.iter().any(|pending| pending.target == target)
+        reached.reverse();
+        reached
     }
 
     /// One unit of work; false when there was nothing to do.
@@ -383,22 +434,27 @@ impl Tx {
         let window_cut = handover_horizon(now, self.core.tx_in_flight(), |t| clock.at_or_after(t));
         // The device chain is read with the open booking, in one section: this owner is its one writer and writes it only in the sections of an
         // operation that returns this turn, so the copy holds for the rest of it.
-        let (open, device) = self.with_book(|book| (book.open.as_ref().map(|open| (open.next, open.first, open.booking.k, open.booking.policy)), book.device));
+        let (open, device) = self.with_book(|book| (book.open.as_ref().map(|open| (open.next, open.first, open.booking.k, open.booking.policy, open.paused.is_some())), book.device));
         if open.is_none() && self.cut.is_some_and(|cut| now >= cut) {
             self.end_clock();
             return true;
         }
-        if let Some((next, first, k, policy)) = open {
-            // UR-21: a first send not yet handed over, whose start is no longer a device lead away, is judged by its late policy again.
-            let late_start = first && !device.continues_at(next) && !matches!(self.start_outcome(clock, k, policy), Ok(LateOutcome::OnTime {}));
-            if late_start {
-                self.with_book(TxBook::untake);
-                return true;
-            }
-            if clock.instant(next) < now {
-                self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
-                self.abandon(true, self.cursor(), false);
-                return true;
+        if let Some((next, first, k, policy, paused)) = open {
+            if paused {
+                // UR-22: a repeat that waits to resume is judged as a device burst's start, not as a burst that ran out of timeline.
+                if self.gap_turn(clock, now, next) {
+                    return true;
+                }
+            } else {
+                // UR-21: a first send not yet handed over, whose start is no longer a device lead away, is judged by its late policy again.
+                let late_start = first && !device.continues_at(next) && !matches!(self.start_outcome(clock, k, policy), Ok(LateOutcome::OnTime {}));
+                if late_start {
+                    self.with_book(TxBook::untake);
+                    return true;
+                }
+                if clock.instant(next) < now {
+                    return self.timeline_expired(clock);
+                }
             }
             if self.held_first() == Some(next) {
                 self.join_open(next, device.burst_is_open());
@@ -418,9 +474,7 @@ impl Tx {
         }
         if let Some(c) = device.next() {
             if clock.instant(c) < now {
-                self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
-                self.abandon(true, self.cursor(), false);
-                return true;
+                return self.timeline_expired(clock);
             }
             match self.held_first() {
                 Some(k) if k == c && self.device_holds(k) => {}
@@ -552,12 +606,16 @@ impl Tx {
         let held_tail = book.device.tail();
         let open = book.open.as_ref().expect("a burst is open");
         let (start, first) = (open.booking.k, open.first);
-        let device_sob = first && !book.device.continues_at(start);
+        // The device chain alone says whether a device burst is open (UR-23): a booking past its first send has none open while it waits to resume.
+        let device_open = book.device.burst_is_open();
+        let device_first = book.device.first();
+        let device_sob = !book.device.continues_at(open.next);
         debug_assert!(
             !device_sob || open.booking.settings.generation().is_none_or(|wanted| configured == Some(wanted)) || self.core.is_lost(),
             "a device burst starts only with the values of its generation configured (UR-26)"
         );
         let next = open.next;
+        let paused = open.paused;
         let len = open.booking.waveform_len as i64;
         let tiled = open.booking.repeat && open.booking.samples[0].len() > len as usize;
         let waveform = Waveform { start, len, repeat: open.booking.repeat, tiled };
@@ -578,10 +636,21 @@ impl Tx {
         };
         let (count, eob, hold, device_eob) = (plan.count, plan.eob, plan.hold, plan.device_eob);
         let (sending, pad, device_count) = (plan.sending as usize, plan.pad as usize, plan.device_count as usize);
-        let (samples, burst_open) = (open.booking.samples.clone(), open.booking.open);
+        let (samples, burst_open, target) = (open.booking.samples.clone(), open.booking.open, open.booking.target);
+        let planned = if first { open.booking.moved_from } else { None }.or(paused.map(|paused| paused.planned));
+        let mut busy = (clock.instant(next), device_count as i64);
         let op = book.issue(TxSend { count, device_count: device_count as i64, ends: eob });
         drop(streams);
         self.core.probe("tx_send_planned", None);
+        // UR-22: a part that starts later than it was planned to (a missed resume point, a switch the gap moved) says so, once, and its burst record carries
+        // the same `send_asap` outcome and the Kernel burst's own target as `requested_target`, as a head the dispatch moved does (RM-14).
+        let mut started_late = None;
+        if let Some(planned) = planned.filter(|planned| *planned != next) {
+            if let Ok(late_by) = self.core.late_by(clock, next - planned) {
+                self.time_error(TimeErrorOutcome::SendAsap, late_by, target);
+                started_late = Some(LateOutcome::SendAsap { late_by });
+            }
+        }
         let mut slices = [&[][..]; TX_CHANNELS_MAX];
         for (slice, channel) in slices.iter_mut().zip(samples.iter()) {
             *slice = &channel[offset as usize..(offset + count) as usize];
@@ -596,7 +665,10 @@ impl Tx {
                 let buffers = tail.buffers();
                 let at = Some(clock.instant(next.saturating_sub(1)));
                 let tail_sent = match self.core.device.tx_send(self.k, &buffers[..tail.channels], at, false, false, SEND_TIMEOUT) {
-                    Ok(1) => true,
+                    Ok(1) => {
+                        busy = (clock.instant(next.saturating_sub(1)), busy.1 + 1);
+                        true
+                    }
                     Ok(_) => {
                         self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
                         false
@@ -607,7 +679,7 @@ impl Tx {
                     }
                 };
                 if !tail_sent {
-                    let Settle::Abandon { cursor } = self.complete_send(op, Outcome::TailShort, None) else { unreachable!("a failed tail abandons the burst") };
+                    let Settle::Abandon { cursor } = self.complete_send(op, Outcome::TailShort, None, (0, 0)) else { unreachable!("a failed tail abandons the burst") };
                     return self.abandon(true, Some(cursor), false);
                 }
             }
@@ -641,16 +713,23 @@ impl Tx {
         // UR-22 closing send that is also the device burst's first, of at most 32 padded samples, fronts at its padded end plus the gap of the
         // stream's rate; any other closing send at its end plus three. (A Kernel end the device burst outlives leaves it open at the next sample.)
         let end = next + count;
-        let effect = DeviceSend { sob: device_sob, eob: device_eob, first: clock.instant(start), next: end, tail, front: plan.front(next, self.short_gap(clock)).map(|front| (clock.domain, front)) };
-        let settle = self.complete_send(op, result.as_ref().map_or(Outcome::Failed, |accepted| Outcome::Accepted(*accepted as i64)), Some(effect));
+        let effect = DeviceSend { sob: device_sob, eob: device_eob, first: clock.instant(next), next: end, tail, front: plan.front(next, self.short_gap(clock)).map(|front| (clock.domain, front)) };
+        let settle = self.complete_send(op, result.as_ref().map_or(Outcome::Failed, |accepted| Outcome::Accepted(*accepted as i64)), Some(effect), (busy.0, busy.1 * clock.n));
         // The device burst is open when it was before this send, or this one's start went.
-        let was_open = !first || continuing;
+        let was_open = device_open;
+        // A joiner is named with the last correlation: after a resume that is still the open device burst's, or none (UR-28).
+        debug_assert!(
+            !continuing || self.unacked.back().is_none_or(|pending| pending.target.ticks_in(clock.domain).is_ok_and(|k| Some(clock.instant(k)) == device_first)),
+            "the last correlation is the open device burst's"
+        );
         if let Settle::Abandon { cursor } = settle {
             match result {
                 Ok(accepted) => {
                     self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
                     if device_sob && accepted > 0 {
-                        self.remember_burst(TimePoint::new(clock.domain, start));
+                        self.remember_part(TimePoint::new(clock.domain, next), paused.map(|paused| paused.stall));
+                    } else if continuing && accepted > 0 {
+                        self.join_burst(TimePoint::new(clock.domain, start));
                     }
                     let result = self.abandon(was_open || accepted > 0, Some(cursor), device_eob);
                     if device_eob {
@@ -664,7 +743,9 @@ impl Tx {
                     // gone is counted for its report, then closed by the two-sample EOB below.
                     self.core.device_failed(None, "tx_burst", &error);
                     if device_sob {
-                        self.remember_burst(TimePoint::new(clock.domain, start));
+                        self.remember_part(TimePoint::new(clock.domain, next), paused.map(|paused| paused.stall));
+                    } else if continuing {
+                        self.join_burst(TimePoint::new(clock.domain, start));
                     }
                     let result = self.abandon(true, Some(cursor), device_eob);
                     if device_eob {
@@ -674,8 +755,10 @@ impl Tx {
                 }
             }
         }
+        // The part that resumes a repeat opens its own burst record (UR-22): the one before it ends in a discontinuity (SC-24).
+        let part = first || paused.is_some();
         let mut flags = BlockFlags::NONE;
-        if first {
+        if part {
             flags = flags | BlockFlags::START_OF_BURST;
         }
         if eob {
@@ -691,9 +774,19 @@ impl Tx {
             lost: None,
             contract: self.contract.take().expect("contract is available"),
         };
-        let open_record = first.then_some(burst_open);
+        let open_record = if first {
+            Some(BurstOpen {
+                late: started_late.or(burst_open.late),
+                requested_target: if started_late.is_some() { burst_open.requested_target.or(Some(target)) } else { burst_open.requested_target },
+                ..burst_open
+            })
+        } else {
+            paused.map(|_| BurstOpen { waveform_len: burst_open.waveform_len, late: started_late, requested_target: started_late.map(|_| target) })
+        };
         if device_sob {
-            self.remember_burst(TimePoint::new(clock.domain, start));
+            self.remember_part(TimePoint::new(clock.domain, next), paused.map(|paused| paused.stall));
+        } else if continuing {
+            self.join_burst(TimePoint::new(clock.domain, start));
         }
         if first {
             self.core.stat("tx_bursts", 1);
@@ -709,8 +802,15 @@ impl Tx {
 
     /// A send's device outcome, in its own section under the streams lock: the book settles it, and a whole send's `effect` on the device burst
     /// with it (UR-22).
-    fn complete_send(&self, op: OpId, outcome: Outcome, effect: Option<DeviceSend<Tail>>) -> Settle {
-        self.lock_for_send().stream_mut(stream_key(Dir::Tx, self.k)).book.complete(op, outcome, effect)
+    /// A whole send also moves the stream's `busy` (UR-22): `busy` is the send's first sample's instant and the root ticks it carries.
+    fn complete_send(&self, op: OpId, outcome: Outcome, effect: Option<DeviceSend<Tail>>, busy: (i64, i64)) -> Settle {
+        let mut streams = self.lock_for_send();
+        let book = &mut streams.stream_mut(stream_key(Dir::Tx, self.k)).book;
+        let settle = book.complete(op, outcome, effect);
+        if settle == Settle::Sent {
+            book.note_sent(self.core.now(), Some(busy.0), busy.1);
+        }
+        settle
     }
 
     fn record(&self, step: Result<BurstStep, ezsdr_kernel::stream::StreamError>) {
@@ -736,8 +836,8 @@ impl Tx {
 
     /// [`Tx::end_open`], where a held burst at `join` continues the device burst the open one leaves open (`device_eob` false).
     fn end_open_at(&mut self, device_eob: bool, join: Option<i64>) -> Option<(ClockDomainId, i64)> {
-        let (continuing, tail, open) = self.with_book(|book| (book.device.next(), book.device.tail(), book.open.as_ref().map(|open| (open.first, open.booking.k, open.next))));
-        let device_open = open.map_or(continuing.is_some(), |(first, k, _)| !first || continuing == Some(k));
+        let (continuing, tail, open_next) = self.with_book(|book| (book.device.next(), book.device.tail(), book.open.as_ref().map(|open| open.next)));
+        let device_open = continuing.is_some();
         let mut end = match (device_eob, join) {
             (false, Some(next)) => DeviceEnd::Continue { next },
             (false, None) => DeviceEnd::Keep,
@@ -746,13 +846,16 @@ impl Tx {
         if device_eob && self.core.is_lost() {
             end = DeviceEnd::Lost;
         } else if device_eob && device_open {
-            let cursor = open.map_or(continuing, |(_, _, next)| Some(next));
+            let cursor = open_next.or(continuing);
             if let (Some(clock), Some(cursor)) = (self.clock, cursor) {
                 end = self.close_device_burst(tail, cursor, clock, CLOSE_GAP);
             }
         }
-        let (ended, front) = self.with_book(|book| (book.end_open(end), book.device.front()));
-        let Some(_) = ended else { return front };
+        let front = self.with_book(|book| {
+            book.end_open(end);
+            book.device.front()
+        });
+        // A switch that replaced a paused repeat is cancelled by a halt with nothing of it sent (UR-22): the repeat's record is the tracker's open one.
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
             lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
         }
@@ -778,7 +881,10 @@ impl Tx {
         let first = cursor.saturating_sub(if has_tail { 1 } else { 0 });
         let at = Some(clock.instant(first));
         match self.core.device.tx_send(self.k, &buffers, at, false, true, SEND_TIMEOUT) {
-            Ok(2) => DeviceEnd::Sent { domain: clock.domain, front: close_front(first, CLOSE_SAMPLES, gap) },
+            Ok(2) => {
+                self.with_book(|book| book.note_sent(self.core.now(), Some(clock.instant(first)), CLOSE_SAMPLES * clock.n));
+                DeviceEnd::Sent { domain: clock.domain, front: close_front(first, CLOSE_SAMPLES, gap) }
+            }
             Ok(n) => {
                 self.core.reject_note(json!({ "call": "tx_close", "stream": self.k, "error": format!("EOB close accepted {n} of 2 samples") }));
                 if self.core.is_lost() { DeviceEnd::Lost } else { DeviceEnd::Uncertain }
@@ -873,6 +979,170 @@ impl Tx {
         self.tracker = None;
     }
 
+    /// `at` as the instant of the stream's clock the payloads carry.
+    fn point(&self, at: Option<i64>) -> Option<TimePoint> {
+        at.zip(self.clock).map(|(at, clock)| TimePoint::new(clock.domain, at))
+    }
+
+    /// Whether a drop of the open device burst resumes its booking (UR-22): a repeat past its first send, with its device burst open. Between a switch's
+    /// join and its open (UR-23) the device burst is open with no booking: the repeat's successor is the switch held at the burst's cursor.
+    fn resumable(&self) -> bool {
+        self.clock.is_some()
+            && !self.core.is_lost()
+            && self.with_book(|book| {
+                book.device.burst_is_open()
+                    && match book.open.as_ref() {
+                        // A switch taken but not yet sent continues the device burst it joined: it is the repeat's successor until its first send.
+                        Some(open) if open.first => open.booking.switch && book.device.continues_at(open.next),
+                        Some(open) => open.booking.repeat && open.paused.is_none(),
+                        None => book.switch_at_cursor().is_some(),
+                    }
+            })
+    }
+
+    /// UR-22: the open booking's timeline passed before it was handed over. A repeat resumes (its device burst's report, not yet read, carries the plan,
+    /// UR-28); any other booking is abandoned.
+    fn timeline_expired(&mut self, clock: Clock) -> bool {
+        if self.resumable() {
+            if let Some(at) = self.resume_repeat(clock, "expired") {
+                if let Some(entry) = self.unacked.back_mut() {
+                    entry.resumes_at = Some(at);
+                }
+                return true;
+            }
+        }
+        self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
+        self.abandon(self.with_device(|device| device.burst_is_open()), self.cursor(), false);
+        true
+    }
+
+    /// UR-22: one turn of a repeat that waits to resume at the sample `next` (`R`): true when it did work.
+    /// - `R` is judged as any device burst's start (RM-14): less than a device lead past `now` it is missed, and moves to the next boundary of its
+    ///   lattice that is on time (never through `dispatch_start`, which would move the repeat off its lattice). The start is told once, when the part is
+    ///   sent (`Paused::planned`).
+    /// - A switch the gap passed (its boundary before `R + 32`, the shortest first send of an open device burst) takes effect at the first safe boundary of
+    ///   the replaced lattice at or after its own, flagged late: the resume point itself when its boundary is at or before it (the switch replaces the
+    ///   repeat there), otherwise the first boundary at least 32 samples past it. A resume point that moves runs the rule again.
+    fn gap_turn(&mut self, clock: Clock, now: i64, next: i64) -> bool {
+        let lead = self.core.device_lead();
+        let (lattice, front) = self.with_book(|book| {
+            let lattice = book.open.as_ref().and_then(|open| open.paused).expect("a booking is paused").lattice;
+            (lattice, book.device.front().filter(|(domain, _)| *domain == clock.domain).map(|(_, front)| clock.instant(front)))
+        });
+        let decided = now.saturating_add(lead);
+        if clock.instant(next) < decided.max(front.unwrap_or(i64::MIN)) {
+            let Some(at) = resume_boundary(clock, lattice.0, lattice.1, clock.instant(next), decided, front) else {
+                self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the resume point does not fit the clock; burst not resumed" }));
+                return self.abandon(false, self.cursor(), false);
+            };
+            self.with_book(|book| {
+                book.move_resume_point(at);
+                let open = book.open.as_mut().expect("a booking is open");
+                // A switch's lattice starts at its boundary, which is the resume point (UR-22).
+                if open.booking.switch {
+                    open.booking.k = at;
+                    if let Some(id) = open.booking.settings.action() {
+                        book.move_switch(id, at);
+                    }
+                }
+            });
+            return true;
+        }
+        let shortest = PACKETS.min_open_first_send;
+        let Some(h) = self.with_held(|held| held.iter().next().filter(|(_, held)| held.switch).map(|(k, _)| *k)).filter(|h| *h < next.saturating_add(shortest)) else { return false };
+        let mut held = self.take_held(h).expect("the first key");
+        let id = held.settings.action();
+        // The boundary the switch was received at is what its lateness is measured from, however often the gap moves it.
+        held.moved_from.get_or_insert(h);
+        let to = if h <= next { Some(next) } else { repeat_boundary(lattice.0, lattice.1, next.saturating_add(shortest)).filter(|to| clock.try_instant(*to).is_some()) };
+        let Some(to) = to else {
+            self.hold(held);
+            self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the switch's boundary does not fit the clock; burst not resumed" }));
+            return self.abandon(false, self.cursor(), false);
+        };
+        held.k = to;
+        self.with_book(|book| {
+            if let Some(id) = id {
+                book.move_switch(id, to);
+            }
+            // At the resume point the switch replaces the repeat there; past it, it waits for its own boundary, where the repeat's part joins it.
+            if h <= next {
+                book.replace_paused(held);
+            } else {
+                book.list.held.insert(to, held);
+            }
+        });
+        true
+    }
+
+    /// UR-22: the open repeat's device burst was dropped or starved (`cause`, the `timing` row's): closes it at the handed cursor `H` and pauses the
+    /// booking until `R`, the first point of its lattice at or after `max(busy + m, now + the device lead, the device front)`, where `busy` is the
+    /// stream's own bound on when the device finishes what it was handed. Returns `R`, or `None` when it does not fit the clock or the close lost the
+    /// device: the caller then abandons the booking, paused at `H` (the booking is not resumable then, as before).
+    fn resume_repeat(&mut self, clock: Clock, cause: &'static str) -> Option<i64> {
+        // The repeat is the open booking, or a switch of which nothing was sent (UR-23): held at the open device burst's cursor between its join and its open,
+        // or open and not yet sent. The switch is then the booking that resumes, paused, and its lattice starts at the resume point (UR-22).
+        let (origin, period, handed, unsent) = self.with_book(|book| match book.open.as_ref() {
+            Some(open) => Some((open.booking.k, open.booking.waveform_len as i64, open.next, open.first)),
+            None => book.switch_at_cursor().map(|held| (held.k, held.waveform_len as i64, held.k, true)),
+        })?;
+        let end = self.close_device_burst(None, handed, clock, self.short_gap(clock));
+        let (margin, lead, now) = (self.core.ticks(RESUME_MARGIN_NS), self.core.device_lead(), self.core.now());
+        let planned = self.with_book(|book| {
+            if book.open.is_none() {
+                let held = book.list.held.remove(&handed).expect("the switch is held at the cursor");
+                book.take(held, handed);
+            }
+            book.pause(end, (origin, period));
+            if end == DeviceEnd::Lost {
+                return None;
+            }
+            let front = book.device.front().filter(|(domain, _)| *domain == clock.domain).map(|(_, front)| clock.instant(front));
+            let unaligned = book.busy.saturating_add(margin);
+            let at = resume_boundary(clock, origin, period, unaligned, now.saturating_add(lead), front)?;
+            // The stall part of the gap: from the drop point to the unaligned resume candidate; the wait to the period boundary is not counted.
+            book.resume_at(at, unaligned.saturating_sub(clock.instant(handed)));
+            if unsent {
+                let open = book.open.as_mut().expect("a booking is open");
+                open.booking.k = at;
+                open.booking.moved_from.get_or_insert(handed);
+                if let Some(id) = open.booking.settings.action() {
+                    book.move_switch(id, at);
+                }
+            }
+            Some(at)
+        })?;
+        self.core.timing(json!({ "what": "tx_resume", "stream": self.k, "cause": cause, "from": handed, "resumes_at": planned, "at": now }));
+        Some(planned)
+    }
+
+    /// UR-22: what a report that retired `newest` (the newest device burst it reached, if any) does to the burst. `tick` is the report's instant, none
+    /// for a lost sequence; `resumes` whether the report's kind lets a repeat resume (an underflow or a late drop, not a lost sequence); `late` whether
+    /// it is a late drop, which no sample of a part survives. A part that resumed a repeat and plays less than the stall part before it ends the repeat.
+    fn dropped(&mut self, newest: Option<&Reached>, tick: Option<i64>, resumes: bool, late: bool) -> Dropped {
+        let (hit, paused) = self.with_book(|book| (book.device.underflowed(tick), book.open.as_ref().and_then(|open| open.paused)));
+        // A lost sequence ends a repeat that waits to resume as it ends one that runs: no device burst is open then, so nothing else would reach it.
+        if !resumes && paused.is_some() {
+            return Dropped::Ended;
+        }
+        if let Some((stall, reached)) = newest.and_then(|reached| reached.resumed.map(|stall| (stall, reached))) {
+            let played = if late { 0 } else { tick.map_or(0, |tick| tick - reached.start) };
+            // The part is the open device burst's, or the one whose drop made the pause the booking is in now (its burst was closed by that pause, so none is open): a
+            // report of another repeat's part, read while this one waits, is none of this pause's business.
+            let ours = hit || paused.is_some_and(|paused| paused.source == Some(reached.start));
+            if ours && played < stall {
+                return Dropped::Ended;
+            }
+        }
+        if !hit {
+            return Dropped::Nothing;
+        }
+        match self.clock.filter(|_| resumes && self.resumable()) {
+            Some(clock) => self.resume_repeat(clock, if late { "late_at_device" } else { "underflow" }).map_or(Dropped::Ended, Dropped::Resumed),
+            None => Dropped::Ended,
+        }
+    }
+
     /// Always true: abandoning a burst at `cursor`, the first sample the device has nothing past, is work, which `send`'s callers return.
     /// `eob_failed`: the send that failed was the device burst's own end-of-burst, so no close is sent and the device burst waits for the reopen.
     fn abandon(&mut self, device_open: bool, cursor: Option<i64>, eob_failed: bool) -> bool {
@@ -888,7 +1158,7 @@ impl Tx {
             // cursor; a lost device ends nothing, as its loss already ended every chain.
             let (repeat, id, finite_end) = self
                 .with_book(|book| book.open.as_ref().map(|open| (open.booking.repeat, open.booking.settings.action(), open.booking.record_len().map(|len| open.booking.k + len))))
-                .unwrap_or_else(|| (self.with_held(|map| map.get(&cursor).is_some_and(|held| held.switch)), None, Some(cursor)));
+                .unwrap_or_else(|| (self.with_book(|book| book.switch_at_cursor().is_some_and(|held| held.k == cursor)), None, Some(cursor)));
             let now = clock.at_or_after(self.core.now());
             let cancelled = self.with_book(|book| book.abandon(repeat, id, cursor, now, clock.instant(close_front(cursor, CLOSE_SAMPLES, CLOSE_GAP)), finite_end.filter(|_| !self.core.is_lost())));
             for _ in 0..cancelled {
@@ -917,9 +1187,15 @@ impl Tx {
     }
 
     fn time_error(&self, outcome: TimeErrorOutcome, late_by: Duration, target: TimePoint) {
+        self.time_error_resuming(outcome, late_by, target, None);
+    }
+
+    /// [`Tx::time_error`] for a repeat that resumes at the sample `resumes_at` (UR-22).
+    fn time_error_resuming(&self, outcome: TimeErrorOutcome, late_by: Duration, target: TimePoint, resumes_at: Option<i64>) {
         // SC-27's late_by is a host.monotonic duration, so its ticks are nanoseconds.
         let late_by_ns = late_by.ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap_or(i64::MAX);
-        let payload = serde_json::to_value(TimeErrorPayload { cause: TimeErrorCause::Late, outcome, late_by_ns, target, action: None }).expect("a payload");
+        let resumes_at = self.point(resumes_at);
+        let payload = serde_json::to_value(TimeErrorPayload { cause: TimeErrorCause::Late, outcome, late_by_ns, target, action: None, resumes_at }).expect("a payload");
         self.core.emit(&self.core.stream_node(Dir::Tx, self.k), kinds::TIME_ERROR, Severity::Error, payload);
     }
 
@@ -1015,7 +1291,7 @@ impl Tx {
     fn join_open(&mut self, next: i64, device_open: bool) {
         // UR-23: a burst at the open one's next sample continues the device burst without end-of-burst, as the X300 needs (§11 F3).
         // Otherwise nothing was sent and the new one starts on its own (Review L, P1-4).
-        if device_open || self.with_book(|book| book.open.as_ref().is_some_and(|open| !open.first)) {
+        if device_open {
             self.end_open_at(false, Some(next));
         } else {
             self.end_open(true);
@@ -1061,7 +1337,6 @@ impl Tx {
         let streamer = lock(&self.core.streams).stream(stream_key(Dir::Tx, self.k)).generation;
         if streamer != self.streamer {
             self.unacked.clear();
-            self.late_reported.clear();
         }
         self.streamer = streamer;
     }
@@ -1128,48 +1403,63 @@ impl Tx {
             (Some(clock), Some(tick)) => TimePoint::new(clock.domain, (tick - clock.origin).div_euclid(clock.n)),
             _ => self.core.at(self.core.now()),
         };
-        let underflow = |cause| {
-            let payload = serde_json::to_value(TxUnderflowPayload { cause }).expect("a payload");
-            self.core.emit_at(&self.core.stream_node(Dir::Tx, self.k), kinds::TX_UNDERFLOW, Severity::Warning, payload, time);
-        };
         match report.code {
             TxCode::BurstAck => {
-                self.reported_targets(report.channel, report.tick);
+                self.retire(report.channel, report.tick, Reach::Ack);
             }
             TxCode::Underflow | TxCode::UnderflowInPacket | TxCode::SeqError | TxCode::SeqErrorInBurst => {
                 let cause = if matches!(report.code, TxCode::Underflow | TxCode::UnderflowInPacket) { TxUnderflowCause::Starved } else { TxUnderflowCause::Lost };
-                underflow(cause);
                 // Its nominal next sample no longer bounds actual playback. Do not
                 // resume untimed payload on the shifted device timeline (UR-22).
                 // A5 (F4): with no device burst open nothing was handed that could underflow, so the open booking waits for its own send.
                 // An underflow's tick before the open device burst's first sample is the burst before's (#93, note 39 §6.6): reported, no
                 // abandon. A sequence error's tick is not compared: its meaning is unmeasured, and it may be ahead of its packet's play time.
                 let tick = if cause == TxUnderflowCause::Starved { report.tick } else { None };
-                if self.with_device(|device| device.underflowed(tick)) {
+                // UR-28: the report retires the bursts it reaches, silently: a burst that underflowed is not late.
+                let reached = self.retire(report.channel, tick, Reach::Underflow);
+                // The resume point is decided before the event that carries it is made.
+                let dropped = self.dropped(reached.last(), tick, cause == TxUnderflowCause::Starved, false);
+                let resumes_at = match dropped {
+                    Dropped::Resumed(at) => Some(at),
+                    Dropped::Ended => None,
+                    Dropped::Nothing => reached.last().and_then(|reached| reached.resumes_at),
+                };
+                let payload = serde_json::to_value(TxUnderflowPayload { cause, resumes_at: self.point(resumes_at) }).expect("a payload");
+                self.core.emit_at(&self.core.stream_node(Dir::Tx, self.k), kinds::TX_UNDERFLOW, Severity::Warning, payload, time);
+                if dropped == Dropped::Ended {
                     self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the device burst underflowed; burst not resumed" }));
-                    self.abandon(true, self.cursor(), false);
+                    self.abandon(self.with_device(|device| device.burst_is_open()), self.cursor(), false);
                 }
             }
             TxCode::TimeError => {
-                // The report tick is radio-current-time, not the rejected packet's timestamp.
-                // Only a unique pending burst whose first sample is no later than that tick fits.
-                let Some(target) = self.time_error_target(report.channel, report.tick) else { return };
-                let late_by_ns = match report.tick {
-                    Some(tick) => {
-                        let root = self.core.root;
-                        let start = match self.core.clocks.convert(target, root).and_then(|c| c.floor().ticks_in(root)) {
-                            Ok(start) => start,
-                            Err(error) => return self.core.command_rejected(None, "tx_report", &format!("UR-28: {error}")),
-                        };
-                        match i64::try_from((i128::from(tick) - i128::from(start)) * 1_000_000_000 / i128::from(self.core.mcr)) {
-                            Ok(ns) => ns,
-                            Err(_) => return self.core.command_rejected(None, "tx_report", "UR-28: lateness overflow"),
-                        }
+                // The report tick is radio-current-time, not the rejected packet's timestamp. A tickless report is only the raw row.
+                let Some(tick) = report.tick else { return };
+                let reached = self.retire(report.channel, Some(tick), Reach::Late);
+                // UR-22: a late report that reaches the open device burst abandons it as an underflow does, but a repeat resumes.
+                let dropped = self.dropped(reached.last(), Some(tick), true, true);
+                let count = reached.len();
+                for (index, reached) in reached.into_iter().enumerate() {
+                    if !reached.tell {
+                        continue;
                     }
-                    None => 0,
-                };
-                if self.late_reported.insert(target) {
-                    self.time_error(TimeErrorOutcome::LateAtDevice, Duration::new(ClockDomainId::HOST_MONOTONIC, late_by_ns), target);
+                    // The newest burst's plan is what this report did; an older one's is the one it was given when its drop was found.
+                    let resumes_at = match (index + 1 == count, dropped) {
+                        (true, Dropped::Resumed(at)) => Some(at),
+                        (true, Dropped::Ended) => None,
+                        _ => reached.resumes_at,
+                    };
+                    // UR-28: the device burst's own start, for every Kernel burst of it.
+                    let late_by_ns = match i64::try_from((i128::from(tick) - i128::from(reached.start)) * 1_000_000_000 / i128::from(self.core.mcr)) {
+                        Ok(ns) => ns,
+                        Err(_) => return self.core.command_rejected(None, "tx_report", "UR-28: lateness overflow"),
+                    };
+                    for target in reached.targets {
+                        self.time_error_resuming(TimeErrorOutcome::LateAtDevice, Duration::new(ClockDomainId::HOST_MONOTONIC, late_by_ns), target, resumes_at);
+                    }
+                }
+                if dropped == Dropped::Ended {
+                    self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the device dropped the burst late; burst not resumed" }));
+                    self.abandon(self.with_device(|device| device.burst_is_open()), self.cursor(), false);
                 }
             }
             TxCode::Other(_) => {}
@@ -1317,6 +1607,8 @@ mod tests {
     mod e2b;
     mod e3;
     mod e3b;
+    mod mt3;
+    mod mt3d;
     mod n75;
     mod n99;
     mod o1;
@@ -1334,6 +1626,7 @@ mod tests {
             policy,
             target: TimePoint::new(clock.domain, k),
             settings: Arc::new(super::ColdConfig::new(BTreeMap::new())),
+            moved_from: None,
         }
     }
 
@@ -1892,7 +2185,8 @@ mod tests {
             let (_to_tx, cmds) = std::sync::mpsc::channel();
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
             let mut burst = held(&clock, 20_000, 10_000, LatePolicy::DropAndFlag);
-            burst.repeat = true;
+            // A repeat resumes after an underflow (UR-22): it ends here only by a lost sequence, a one-shot burst by any of the four.
+            burst.repeat = matches!(code, crate::device::TxCode::SeqError | crate::device::TxCode::SeqErrorInBurst);
             give(&mut tx, burst);
             time.advance_to(core.at(core.ticks(11_000_000))).unwrap();
             assert!(tx.step());
@@ -1965,8 +2259,7 @@ mod tests {
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        let mut burst = held(&clock, 0, 100_000, LatePolicy::SendAsapAndFlag);
-        burst.repeat = true;
+        let burst = held(&clock, 0, 100_000, LatePolicy::SendAsapAndFlag);
         // Prime an untimed device burst to make starvation independent of a
         // host deadline for the initial timed SOB (covered by UR-21 tests).
         device.tx_send(0, &[&burst.samples[0][..2_000]], None, true, false, std::time::Duration::from_secs(1)).unwrap();
@@ -3716,7 +4009,7 @@ mod tests {
     }
 
     #[test]
-    fn ur_28_ambiguous_time_errors_leave_each_channel_pending() {
+    fn ur_28_a_time_error_names_each_burst_it_reaches_and_retires_its_own_channel() {
         let (core, _, _, events) = super::super::test_support::rig();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
@@ -3728,9 +4021,18 @@ mod tests {
 
         tx.report(TxReport { code: TxCode::TimeError, tick: Some(clock.instant(25_000)), channel: 0 });
 
-        assert!(time_errors(&events).is_empty(), "a current-time tick matching both bursts is ambiguous");
-        let channels = std::collections::BTreeSet::from([0, 1]);
-        assert_eq!(tx.unacked.iter().map(|pending| (pending.target, pending.channels.clone())).collect::<Vec<_>>(), [(a, channels.clone()), (b, channels)]);
+        let errors = time_errors(&events);
+        assert_eq!(
+            errors.iter().map(|event| event.payload["target"].clone()).collect::<Vec<_>>(),
+            [serde_json::to_value(a).unwrap(), serde_json::to_value(b).unwrap()],
+            "a tick reaching both bursts names both, oldest first"
+        );
+        let only_channel_one = std::collections::BTreeSet::from([1]);
+        assert_eq!(
+            tx.unacked.iter().map(|pending| (pending.target, pending.channels.clone())).collect::<Vec<_>>(),
+            [(a, only_channel_one.clone()), (b, only_channel_one)],
+            "channel 0's report retires channel 0 only"
+        );
         assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "TimeError").count(), 1, "the raw radio-current-time report is retained");
     }
 
@@ -3747,12 +4049,12 @@ mod tests {
 
         tx.report(TxReport { code: TxCode::TimeError, tick: Some(clock.instant(15_000)), channel: 0 });
         let errors = time_errors(&events);
-        assert_eq!(errors.len(), 1, "the current-time report uniquely names the late burst");
+        assert_eq!(errors.len(), 1, "the current-time report names the burst it reaches, not the future one");
         assert_eq!(errors[0].payload["target"], serde_json::to_value(late).unwrap());
-        assert_eq!(tx.unacked.len(), 2, "a TimeError does not retire its burst");
+        assert_eq!(tx.unacked.iter().map(|pending| pending.target).collect::<Vec<_>>(), [future], "a TimeError retires the burst it names and no later one");
 
         tx.report(TxReport { code: TxCode::BurstAck, tick: Some(clock.instant(1_000_100)), channel: 0 });
-        assert!(tx.unacked.is_empty(), "the later burst's ack also retires the earlier unacknowledged burst");
+        assert!(tx.unacked.is_empty(), "the later burst's ack retires it");
     }
 
     #[test]
@@ -3789,7 +4091,7 @@ mod tests {
     }
 
     #[test]
-    fn ur_28_tickless_time_errors_keep_the_first_pending_target() {
+    fn ur_28_a_tickless_time_error_names_and_retires_nothing() {
         use crate::device::{TxCode, TxReport};
         for channels in [1, 2] {
             let (core, _, _, events) = super::super::test_support::rig();
@@ -3814,16 +4116,15 @@ mod tests {
                 tx.report(TxReport { code: TxCode::TimeError, tick: None, channel });
             }
             let errors = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
-            assert_eq!(errors.len(), 1, "repeated reports are deduplicated for the first pending target: {errors:?}");
-            assert_eq!(errors[0].payload["target"], serde_json::to_value(a).unwrap());
-            assert_eq!(tx.unacked.len(), 2, "TimeErrors do not retire their report correlations");
+            assert!(errors.is_empty(), "a tickless TimeError names no burst: {errors:?}");
+            assert_eq!(tx.unacked.len(), 2, "TimeErrors without a tick retire nothing");
             assert!(tx.unacked.iter().all(|pending| pending.channels.contains(&channel)));
             assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "TimeError").count(), 2, "both raw reports remain recorded");
         }
     }
 
     #[test]
-    fn ur_28_time_error_after_abandoned_burst_does_not_claim_the_next_burst() {
+    fn ur_28_a_time_error_after_an_abandoned_burst_names_the_burst_behind_its_drain() {
         let (core, _, _, events) = super::super::test_support::rig();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
@@ -3837,28 +4138,9 @@ mod tests {
         tx.remember_burst(b);
 
         tx.report(TxReport { code: TxCode::TimeError, tick: Some(clock.instant(25_000)), channel: 0 });
-        assert!(time_errors(&events).is_empty(), "A's late report was assigned to B");
-        assert_eq!(tx.unacked.iter().map(|pending| pending.target).collect::<Vec<_>>(), [a, b], "the ambiguous report claimed neither correlation");
+        assert_eq!(time_errors(&events).len(), 2, "A's report names A and B, which starts inside A's drain");
+        assert!(tx.unacked.is_empty(), "both correlations are retired");
         assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "TimeError").count(), 1, "the raw radio-current-time report is retained");
-    }
-
-    #[test]
-    fn ur_28_streamer_generation_clears_late_report_deduplication() {
-        let (core, device, _, events) = super::super::test_support::rig();
-        device.tx_open(0, &[0]).unwrap();
-        let clock = core.register(Dir::Tx, 200, 0).unwrap();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        let target = TimePoint::new(clock.domain, 100);
-        tx.remember_burst(target);
-        tx.report(TxReport { code: TxCode::TimeError, tick: Some(clock.instant(101)), channel: 0 });
-        assert!(tx.late_reported.contains(&target));
-        assert_eq!(time_errors(&events).len(), 1, "the pending target was reported late");
-
-        lock(&core.streams).record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
-        tx.sync_streamer();
-        assert!(tx.unacked.is_empty(), "the previous generation's correlation remains");
-        assert!(!tx.late_reported.contains(&target), "the previous generation's deduplication entry remains");
     }
 
     /// The TIME_ERROR events the rig has emitted since the last call.
@@ -3900,15 +4182,15 @@ mod tests {
         tx.remember_burst(target);
         tx.end_clock();
         tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(old.instant(target.ticks_in(old.domain).unwrap()) + 200_000), channel: 0 });
-        // This channel's report has no tick; it is still the same Kernel burst, so it is deduplicated.
+        // This channel's report has no tick: raw only.
         tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: None, channel: 1 });
         let errors: Vec<_> =
             events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
-        assert_eq!(errors.len(), 1, "only the uniquely attributable old burst reports: {errors:?}");
+        assert_eq!(errors.len(), 1, "the ticked report names the old burst: {errors:?}");
         assert_eq!(errors[0].payload["late_by_ns"], 1_000_000);
         assert_eq!(errors[0].payload["target"], serde_json::to_value(target).unwrap());
-        assert_eq!(tx.unacked.len(), 1, "TimeErrors leave correlations pending");
-        assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "TimeError").count(), 2, "ambiguous reports remain visible in the raw log");
+        assert_eq!(tx.unacked.len(), 1, "channel 1's tickless report retired nothing");
+        assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "TimeError").count(), 2, "the tickless report remains visible in the raw log");
     }
 
     #[test]
@@ -3959,13 +4241,12 @@ mod tests {
         assert_eq!(tx.unacked.len(), 2);
         assert_eq!(tx.unacked[0].channels.iter().copied().collect::<Vec<_>>(), [0], "the position, not the device channel");
         // The first burst's ACK retires that position; with only B pending, its TIME_ERROR is
-        // attributable to B. The TIME_ERROR itself never consumes the BurstAck correlation.
+        // attributable to B, and it retires B (UR-28).
         tx.report(crate::device::TxReport { code: crate::device::TxCode::BurstAck, tick: Some(clock.instant(30_000)), channel: 0 });
         assert_eq!(tx.unacked.len(), 1, "the ACK retired no report");
         assert_eq!(tx.unacked[0].target, second);
         tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(clock.instant(41_000)), channel: 0 });
-        assert_eq!(tx.unacked.len(), 1, "TIME_ERROR is not an acknowledgement");
-        assert_eq!(tx.unacked[0].target, second);
+        assert!(tx.unacked.is_empty(), "the TIME_ERROR retires the burst it names (UR-28)");
         let late: Vec<_> = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
         assert_eq!(late.len(), 1, "{late:?}");
         assert_eq!(late[0].payload["target"], serde_json::to_value(second).unwrap(), "the report names the second burst");
@@ -3976,7 +4257,7 @@ mod tests {
             "duplicate packet errors produce one burst event"
         );
         tx.report(crate::device::TxReport { code: crate::device::TxCode::BurstAck, tick: None, channel: 0 });
-        assert!(tx.unacked.is_empty(), "the BurstAck retires B");
+        assert!(tx.unacked.is_empty(), "the closing tickless BurstAck has nothing left to retire");
     }
 
     // ------------------------------------------------------------ 1b-4d-1b: ownership, reading, stop
@@ -4144,6 +4425,7 @@ mod tests {
             policy: LatePolicy::DropAndFlag,
             target: TimePoint::new(clock.domain, k),
             settings: Arc::new(super::ColdConfig::new(BTreeMap::new())),
+            moved_from: None,
         }
     }
 
@@ -4385,7 +4667,7 @@ mod tests {
             assert!(tx.step(), "{what}: B's timed send");
             device_at(&core, &time, &device, core.ticks(70_000_000));
             tx.reports(Wall::ZERO);
-            assert_eq!(tx.unacked.iter().map(|pending| pending.target).collect::<Vec<_>>(), [TimePoint::new(clock.domain, safe)], "{what}: A's close ack retires A, not B");
+            assert!(tx.unacked.is_empty(), "{what}: A's close ack retires A and B's TimeError retires B");
             let late: Vec<_> =
                 events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
             assert_eq!(late.len(), 1, "{what}: {:?}", lock(&core.rec).device_async);
@@ -6029,7 +6311,7 @@ mod tests {
     #[test]
     fn ur_23_m10_a_waiting_burst_whose_timeline_passed_is_abandoned() {
         let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
-        txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
+        txp_give(&mut tx, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         device_at(&core, &time, &device, txp_ticks(9_001));
         assert!(tx.step());
@@ -6935,13 +7217,13 @@ mod tests {
     }
 
     #[test]
-    fn ur_21_s4_an_underflow_ends_the_repeat_so_a_later_switch_is_refused_at_receipt() {
+    fn ur_21_s4_a_sequence_error_ends_the_repeat_so_a_later_switch_is_refused_at_receipt() {
         // S4 (note 47 stage 5, sol-code): an underflow abandons the repeat, and the record ends it as a Stop at that point would. A
         // switch received after it is refused at receipt, so no switch is accepted and left pending for a repeat that is gone.
         let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 500], vec![NEW; 300]]);
         book_repeat(&mut rig, 1, 2_000, 0);
         run(&mut rig, 0, 3);
-        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(2_500)), channel: 0 });
+        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
         drain_tx(&mut rig.tx);
         let reason = "UR-21: a repeat switch needs a playing repeat and no pending switch";
         book_switch(&mut rig, 2, 3_000, 1);
@@ -6961,7 +7243,7 @@ mod tests {
         book_repeat(&mut rig, 1, 2_000, 0);
         run(&mut rig, 0, 3);
         let cursor = rig.tx.open_next().expect("the repeat is handed");
-        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(2_500)), channel: 0 });
+        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
         drain_tx(&mut rig.tx);
         book_with(&mut rig.control, &rig.core, 4, 0, rig.clock, cursor + 5_000, &rig.waves[2], false, LatePolicy::DropAndFlag, BTreeMap::new());
         assert_eq!(refusals(&rig.events), Vec::<String>::new(), "{:?}", lock(&rig.core.rec).rejected);
@@ -6978,7 +7260,7 @@ mod tests {
         run(&mut rig, 3, 4);
         let cursor = rig.tx.open_next().expect("the repeat is handed");
         assert!(cursor < 15_000, "the cursor {cursor} is before the boundary 15 000");
-        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(cursor)), channel: 0 });
+        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
         drain_tx(&mut rig.tx);
         assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled", "{:?}", lock(&rig.core.rec).rejected);
     }
@@ -6993,7 +7275,7 @@ mod tests {
         book_switch(&mut rig, 2, 3_000, 1);
         drain_tx(&mut rig.tx);
         rig.tx.with_book(|book| book.open.as_mut().expect("the repeat is handed").next = 15_000);
-        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(15_000)), channel: 0 });
+        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
         drain_tx(&mut rig.tx);
         assert!(held_keys(&rig.tx).is_empty(), "the switch's held burst goes with the switch");
         run(&mut rig, 3, 20);
@@ -7011,7 +7293,7 @@ mod tests {
         book_switch(&mut rig, 2, 3_000, 1);
         drain_tx(&mut rig.tx);
         rig.tx.with_book(|book| book.open.as_mut().expect("the repeat is handed").next = 14_000);
-        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(14_000)), channel: 0 });
+        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
         drain_tx(&mut rig.tx);
         run(&mut rig, 3, 20);
         assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled", "{:?}", lock(&rig.core.rec).rejected);
@@ -7030,7 +7312,7 @@ mod tests {
         rig.tx.with_book(|book| book.open.as_mut().expect("the repeat is handed").next = 15_000);
         assert!(rig.tx.step(), "the held switch joins the open burst at its boundary");
         assert!(rig.tx.open_next().is_none());
-        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::Underflow, tick: Some(rig.clock.instant(15_000)), channel: 0 });
+        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
         drain_tx(&mut rig.tx);
         assert!(held_keys(&rig.tx).is_empty(), "the switch's held burst goes with the switch");
         book_with(&mut rig.control, &rig.core, 4, 0, rig.clock, 20_000, &rig.waves[0], false, LatePolicy::DropAndFlag, BTreeMap::new());
@@ -7062,7 +7344,8 @@ mod tests {
     fn ur_21_s4_a_switch_joined_then_abandoned_late_is_cancelled_not_applied() {
         // S4 (note 47 stage 5, Opus re-check of round 7, Minor A): the switch joins the open repeat at its boundary, and the host is late past
         // that boundary. The record applies the switch, then the timeline's expiry abandons the repeat at the joined cursor. No sample of the
-        // new waveform is sent, so the switch is settled cancelled and its held burst is not sent late.
+        // new waveform is sent, so the switch is settled cancelled and its held burst is not sent late. (An expired timeline resumes the repeat
+        // (UR-22), so the abandon here is a lost sequence's; the resume is `mt3d_a_switch_joined_then_found_expired_is_moved_past_the_gap`.)
         let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
         book_repeat(&mut rig, 1, 2_000, 0);
         run(&mut rig, 0, 3);
@@ -7071,7 +7354,7 @@ mod tests {
         rig.tx.with_book(|book| book.open.as_mut().expect("the repeat is handed").next = 15_000);
         assert!(rig.tx.step(), "the held switch joins the open burst at its boundary");
         device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(16_000_000));
-        assert!(rig.tx.step());
+        rig.tx.report(crate::device::TxReport { code: crate::device::TxCode::SeqError, tick: None, channel: 0 });
         drain_tx(&mut rig.tx);
         assert!(held_keys(&rig.tx).is_empty(), "the switch's held burst goes with the switch");
         assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled", "{:?}", lock(&rig.core.rec).rejected);

@@ -1771,6 +1771,37 @@ fn hw_h1_late_multi_packet_burst() {
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_mt3_c1_chunked_late_burst() {
+    // Cell C1 (maintenance table 3; `common::mt3`, rehearsed on the FakeDevice by `mt3_c1_rehearsal_...`): the Module's chunk shape, every send timed with its
+    // first sample's time (SOB on the first, EOB on the last), the first sample timed `mt3::LATE_MS` before the host's reference instant, so the first send is at
+    // least that late (the verdict also needs the last chunk handed at least 1 ms before its own time). The X310 should drop the whole device burst: TimeErrors,
+    // no BurstAck, nothing heard. Each trial first sends and hears an on-time control burst, so that silence in the late burst's interval means something
+    // (INFERRED until this runs: the chunked shape, 10 MS/s, board #2, the tone detector's thresholds at 10 MS/s). Transmits on slot A only, at 1 GHz, 0 dB, a
+    // 100 kHz tone, into the 30 dB loopback; the owner confirms the attenuator before every run (bench.md). INCONCLUSIVE fails the test as FAIL does: read
+    // the `VERDICT` and `MT3 C1 trace` lines. The device's whole life is bounded to 15 min: a bound that passes writes `EZSDR-INFRA:` and aborts (a hang).
+    bounded(Wall::from_secs(900), "hw_mt3_c1_chunked_late_burst", || {
+        let device = raw();
+        pin_slot_a(&*device);
+        assert_eq!(d9_channel(), 0, "C1 transmits on slot A only (channel 0)");
+        let mut failures = Vec::new();
+        for rate in mt3::C1_RATES {
+            let trials = mt3::late_chunked_cell(&*device, rate, mt3::C1_TRIALS, mt3::LATE_MS);
+            for trial in &trials {
+                println!("MT3 C1 trace {}", trial.trace());
+                println!("VERDICT mt3 c1 {} MS/s trial {}: {:?}", rate / 1e6, trial.trial, mt3::late_chunked_verdict(&trial.evidence));
+            }
+            let verdict = mt3::cell_verdict(&trials);
+            println!("MT3 C1 cell {} MS/s: {verdict:?}", rate / 1e6);
+            if !matches!(verdict, Verdict::Pass(_)) {
+                failures.push(format!("{} MS/s: {verdict:?}", rate / 1e6));
+            }
+        }
+        assert!(failures.is_empty(), "C1: {failures:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_h2_underflow_mid_burst() {
     // H2 starves an open burst, then resumes with untimed PN samples and records their alignment.
     let device = raw();

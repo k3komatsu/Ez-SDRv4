@@ -18,7 +18,7 @@ Record suite on #1 OBX (`hw_measurements_record`; R1 unloaded 2154 s, R2 under t
 | transmit throughput | to 100 MS/s (400 MB/s); 200 MS/s underflows | the same |
 | #56 Stop lag, submit → rx_stop start / end (20) | median 0.98 / 1.59 ms, max 1.93 / 2.89 ms | median 0.20 / 1.83 ms, max 1.36 / 3.00 ms |
 | #56 Stop between starts (3) | clean (no refusal, no TIME_ERROR) | clean |
-| H1 late 20 000-sample burst (late 1/5/10 ms × 3) | all-timed: nothing heard, ~366 TIME_ERROR per burst; timed head + untimed tail: ~19 545 of 20 000 heard, ~40 TIME_ERROR — the FPGA drops late packets one by one, not the burst | — |
+| H1 late 20 000-sample burst (late 1/5/10 ms × 3) | all-timed (9): nothing heard, no BurstAck, 365–368 TIME_ERROR reports delivered per burst (a count of delivered reports, not of packets: the 32-entry error FIFO loses most); timed head + untimed tail (9): 19 544–19 545 of 20 000 heard, 39–40 TIME_ERROR reports, one BurstAck — the FPGA drops late packets one by one, at one sample per tick, and the DUC carries the first time to the burst's end, so an all-timed burst is dropped whole | all-timed (9): nothing heard, no BurstAck, 313–454 TIME_ERROR reports; timed head + untimed tail (9): 19 544–19 545 heard, 36–39 TIME_ERROR reports, one BurstAck (the same outcome; rows in the raw archive) |
 | H2 10 ms starvation mid-burst (3) | Underflow at the head's end (−6 ticks); the untimed tail plays on arrival (10 244–10 276 samples after the head's start), one TIME_ERROR at its start, BurstAck at the end | — |
 | H4 transmit headroom proxy, 10 MS/s rx+tx, 2 s | median 5.93 ms, min 4.61 ms, 0 underflow | median 5.90 ms, min 3.92 ms, 0 underflow |
 | H5 held last sample | 600 bursts, 0 TIME_ERROR, 0 underflow | PASS |
@@ -30,5 +30,5 @@ Notes:
 
 Decisions it fed:
 - #67: a fix must send an untimed rx_stop before close (close/reopen alone lets the old timed start's data arrive at the origin).
-- H1: input to maintenance table 3 (the fake drops a late burst whole; the FPGA drops packet by packet) — a later owner decision on UR-33 and the fake.
+- H1: input to maintenance table 3. The X310 drops a late all-timed device burst whole (it drops packet by packet, at one sample per tick, and the DUC carries the first time to the burst's end); the fake had dropped only the late packet since D9b-1a (`80dd2f6`) and table 3 makes it drain the whole device burst. The Module's chunked shape, other rates, board #2 and a burst behind a late one are not measured (bench.md, cells C1–C7).
 - Stage 4: the profile's `rx_bytes_per_s` / `tx_bytes_per_s` (1e9) are looser than measured (8e8 / 4e8 unloaded; 2e8 receive under load).

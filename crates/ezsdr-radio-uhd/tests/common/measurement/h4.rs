@@ -277,6 +277,13 @@ fn cpu_delta(before: Option<Json>, after: Option<Json>) -> Json {
     json!({ "total_ticks": total, "busy_ticks": busy, "busy_percent": if total == 0 { Json::Null } else { json!(100.0 * busy as f64 / total as f64) } })
 }
 
+/// Whether the Module's repeat was dropped late and resumed (UR-22): a `late_at_device` event or a `tx_resume` row of the `timing` section. The part's
+/// start of burst at the resume point is far ahead of the send before it, so its headroom is no measurement of the steady repeat, and a late drop that
+/// resumes writes no `TX_UNDERFLOW` to say so.
+fn repeat_resumed(late_at_device_events: usize, timing: &Json) -> bool {
+    late_at_device_events > 0 || timing.as_array().is_some_and(|rows| rows.iter().any(|row| row["what"] == "tx_resume"))
+}
+
 /// Runs the H4 probe: a repeat for `window_ms` (`H4_WINDOW_MS` on hardware, short in the fake rehearsal), the transmit headroom of each send and the CPU and thread load meanwhile.
 pub fn measure_h4_load(probe: Arc<ProbeDevice>, window_ms: i64) -> Result<MeasurementGroup, String> {
     let trials = observation_trials(1)?;
@@ -317,7 +324,9 @@ pub fn measure_h4_load(probe: Arc<ProbeDevice>, window_ms: i64) -> Result<Measur
     };
     let headroom_lower: Vec<i64> = headroom_rows.iter().filter_map(|row| row["headroom_ns"]["lower"].as_i64()).collect();
     let headroom_upper: Vec<i64> = headroom_rows.iter().filter_map(|row| row["headroom_ns"]["upper"].as_i64()).collect();
-    let partial = start_anchor.is_none() || end_anchor.is_none() || headroom_rows.is_empty() || !underflow_ticks.is_empty() || !underflow_unconvertible.is_empty() || probe_rows_dropped > 0;
+    let late_at_device = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == "radio.TIME_ERROR" && event.payload["outcome"] == "late_at_device").count();
+    let resumed = repeat_resumed(late_at_device, common::section(&manifest, "timing"));
+    let partial = start_anchor.is_none() || end_anchor.is_none() || headroom_rows.is_empty() || !underflow_ticks.is_empty() || !underflow_unconvertible.is_empty() || probe_rows_dropped > 0 || resumed;
     let result = json!({
         "status": if partial { "partial" } else { "complete" },
         "master_clock_hz": master, "sample_rate_hz": H4_RATE_HZ, "window_ms": window_ms,
@@ -342,6 +351,15 @@ mod tests {
 
     fn anchors() -> [ClockAnchor; 2] {
         [ClockAnchor { device_tick: 0, host_before_ns: 90, host_after_ns: 110 }, ClockAnchor { device_tick: 200, host_before_ns: 1_090, host_after_ns: 1_110 }]
+    }
+
+    #[test]
+    fn h4_a_resumed_repeat_makes_the_run_partial() {
+        let timing = json!([{ "what": "start" }, { "what": "tx_resume", "cause": "late_at_device" }]);
+        assert!(repeat_resumed(0, &timing), "a tx_resume row");
+        assert!(repeat_resumed(1, &json!([{ "what": "start" }])), "a late_at_device event");
+        assert!(!repeat_resumed(0, &json!([{ "what": "start" }])));
+        assert!(!repeat_resumed(0, &Json::Null));
     }
 
     #[test]

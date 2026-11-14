@@ -540,6 +540,16 @@ fn freq_constant(st: &Fake, dir: Dir, chan: usize, from: i64, to: i64) -> Option
     }
 }
 
+/// A transmit streamer goes: its channels' header goes stale and its drain waits for the stream's next open (UR-33).
+fn retire_tx(st: &mut Fake, stream: usize) {
+    if let Some(old) = st.tx.remove(&stream) {
+        stale_tx_header(st, &old.channels);
+        if let Some(drain) = old.radio.drain {
+            st.tx_drains.insert(stream, drain);
+        }
+    }
+}
+
 /// A closed streamer's start that has not reached its origin stays queued on each of its channels
 /// (`Fake::orphans`).
 fn orphan_queued_start(st: &mut Fake, old: Option<RxStreamer>, now: i64) {
@@ -665,7 +675,21 @@ struct Radio {
     mcr: i64,
     /// Whether the current device burst's SOB was accepted. Only an accepted burst's dropped close arms the guard (UR-33).
     accepted: bool,
+    /// The current device burst's head was dropped late, so the DUC keeps consuming its later packets, which drain too (UR-33). Cleared by an SOB and by the burst's EOB.
+    late: bool,
+    /// What the radio has dropped late and the DUC is still consuming, if anything (UR-33).
+    drain: Option<Drain>,
     reports: VecDeque<TxReport>,
+}
+
+/// Dropped packets the DUC consumes at one sample per `ratio` ticks (UR-33): `end` is the tick its samples reach, `samples`, `packets` (sends) and `bursts` (device bursts
+/// closed by their EOB) how many it has taken since the drain began.
+#[derive(Clone, Copy)]
+struct Drain {
+    end: i64,
+    samples: i64,
+    packets: i64,
+    bursts: i64,
 }
 
 /// A device burst's fault state (UR-33). `Armed` is an open first packet of fewer than `OPEN_FAULT_BELOW` samples: the next
@@ -691,6 +715,8 @@ const SHORT_BURST_MAX: i64 = 32;
 /// short one it keeps `max(3, ceil(15 µs × rate))` samples. Stricter than the bench at interpolation 4 and up, never looser at the rates the Modules allow, 1 MS/s and up; at 0.4 MS/s and below the bench saw closed bursts of at most four samples underflow themselves, which no gap models (UR-33).
 const LONG_CLOSE_GAP: i64 = 3;
 const SHORT_GAP_NANOS: i128 = 15_000;
+/// The DUC's wait after a burst's EOB before the next burst starts, in the drain's pad (UR-33; INFERRED, bench cell C3).
+const DUC_WAIT_NANOS: i128 = 10_000;
 
 /// The model's threshold for that bench result (UR-33): an open first packet of fewer samples faults at interpolation 80 or more.
 /// 29 samples are not measured (design note 48, G3); the model keeps the bench's 30.
@@ -703,12 +729,54 @@ impl Radio {
         self.cursor = i64::MIN;
         self.active = false;
         self.short_until = None;
+        self.drain = None;
+    }
+
+    /// The tick before which an idle timed packet is late while `drain` runs: its end, then a pad and the guard `g` (UR-33). The pad sums the costs the evidence names: a share
+    /// of the samples, two clocks a send, and for each device burst the guard and the DUC's wait after its EOB. It is the fake's own margin over the device, INFERRED to cover it.
+    fn drain_limit(&self, drain: Drain, ratio: i64) -> i64 {
+        let g = self.short_gap(ratio);
+        let pad = (drain.samples + 99) / 100 + 2 * drain.packets + drain.bursts * (g + self.samples_in(DUC_WAIT_NANOS, ratio));
+        drain.end + (pad + g) * ratio
+    }
+
+    /// The radio drops a packet of `n` samples, timed `at`, late: the DUC consumes it behind the samples queued before it and the drain's, so the device reads it, and its
+    /// TimeErrors carry the tick this returns: the latest of the device's time, the radio's cursor, the drain's end and the packet's own time. The drain grows.
+    fn drain(&mut self, now: i64, n: i64, ratio: i64, at: Option<i64>, eob: bool) -> i64 {
+        let mut from = now.max(self.cursor);
+        let mut drain = Drain { end: 0, samples: 0, packets: 0, bursts: 0 };
+        if let Some(held) = self.drain.filter(|&held| from < self.drain_limit(held, ratio)) {
+            from = from.max(held.end);
+            drain = held;
+        }
+        from = from.max(at.unwrap_or(from));
+        if n > 0 {
+            self.drain = Some(Drain { end: from + n * ratio, samples: drain.samples + n, packets: drain.packets + 1, bursts: drain.bursts + i64::from(eob) });
+        }
+        from
+    }
+
+    /// UR-33: a late packet is dropped with one TimeError per channel; if its burst goes on, the rest is dropped through the EOB as a refused SOB's is.
+    fn drop_late(&mut self, packet: &DucPacket, now: i64, channel_count: usize) {
+        let tick = Some(self.drain(now, packet.n as i64, packet.ratio, packet.radio_time, packet.eob));
+        for channel in 0..channel_count {
+            self.reports.push_back(TxReport { code: TxCode::TimeError, tick, channel });
+        }
+        if !packet.eob {
+            self.late = true;
+            self.burst = Burst::Timed;
+        }
     }
 
     /// The samples a closed short burst's successor keeps: `max(3, ceil(15 µs × rate))`, the rate being `mcr / ratio` (UR-22, UR-33).
     fn short_gap(&self, ratio: i64) -> i64 {
-        let ticks = (SHORT_GAP_NANOS * i128::from(self.mcr) + 999_999_999) / 1_000_000_000;
-        i64::try_from((ticks + i128::from(ratio) - 1) / i128::from(ratio.max(1))).unwrap_or(i64::MAX).max(LONG_CLOSE_GAP)
+        self.samples_in(SHORT_GAP_NANOS, ratio).max(LONG_CLOSE_GAP)
+    }
+
+    /// The samples of a stream at `ratio` master ticks a sample that `nanos` takes, rounded up.
+    fn samples_in(&self, nanos: i128, ratio: i64) -> i64 {
+        let ticks = (nanos * i128::from(self.mcr) + 999_999_999) / 1_000_000_000;
+        i64::try_from((ticks + i128::from(ratio) - 1) / i128::from(ratio.max(1))).unwrap_or(i64::MAX)
     }
 
     /// Arms the guard after a closed device burst that ended at `end`: the short gap past it when it transmitted at most 32, three samples
@@ -723,6 +791,7 @@ impl Radio {
             self.burst = Burst::Clean;
             self.burst_samples = 0;
             self.accepted = false;
+            self.late = false;
         }
         // Every packet of a device burst counts toward its length, refused or dropped ones too (UR-33).
         self.burst_samples += packet.n as i64;
@@ -759,11 +828,13 @@ impl Radio {
             }
             return None;
         }
+        // UR-33: an idle timed packet before the drain's limit is late too, whatever its own time.
+        if !self.active && packet.radio_time.is_some_and(|t| self.drain.is_some_and(|drain| t < self.drain_limit(drain, packet.ratio))) {
+            self.drop_late(packet, now, channel_count);
+            return None;
+        }
         if !self.active && packet.radio_time.is_some_and(|t| t < now || t <= self.cursor) {
-            let tick = packet.radio_time.map(|t| t.max(now));
-            for channel in 0..channel_count {
-                self.reports.push_back(TxReport { code: TxCode::TimeError, tick, channel });
-            }
+            self.drop_late(packet, now, channel_count);
             return None;
         }
         if !self.active {
@@ -826,12 +897,15 @@ impl Radio {
             burst => burst,
         };
         let timed = packet.stamped;
+        // A late head's burst drains whatever each later packet's own timing; a refused one's does not.
+        let drained = self.late.then(|| self.drain(now, packet.n as i64, packet.ratio, packet.radio_time, packet.eob));
         if burst != Burst::Silent {
             for channel in 0..channel_count {
-                self.reports.push_back(TxReport { code: TxCode::TimeError, tick: Some(packet.radio_time.unwrap_or(now).max(now)), channel });
+                self.reports.push_back(TxReport { code: TxCode::TimeError, tick: Some(drained.unwrap_or_else(|| packet.radio_time.unwrap_or(now).max(now))), channel });
             }
         }
         self.burst = if packet.eob {
+            self.late = false;
             Burst::Clean
         } else if burst == Burst::Timed && timed {
             Burst::Timed
@@ -844,7 +918,7 @@ impl Radio {
 
 impl TxStreamer {
     fn new(channels: Vec<usize>, mcr: i64) -> TxStreamer {
-        let mut radio = Radio { cursor: 0, active: true, burst: Burst::Clean, burst_samples: 0, short_until: None, mcr, accepted: false, reports: VecDeque::new() };
+        let mut radio = Radio { cursor: 0, active: true, burst: Burst::Clean, burst_samples: 0, short_until: None, mcr, accepted: false, late: false, drain: None, reports: VecDeque::new() };
         radio.reset_clock();
         TxStreamer { channels, duc: Duc { burst: false, has_time: false, time: None, eob_lost: false }, radio }
     }
@@ -870,6 +944,9 @@ struct Fake {
     /// on that streamer cancels it.
     orphans: BTreeMap<usize, (i64, i64)>,
     tx: BTreeMap<usize, TxStreamer>,
+    /// What a closed transmit stream's radio was still draining, by stream number: the FPGA keeps draining, so the stream's next `tx_open` picks it up (UR-33). Cleared by
+    /// `set_time_zero`.
+    tx_drains: BTreeMap<usize, Drain>,
     /// The shortest timeout an `rx_recv` was given.
     rx_min_timeout: Duration,
     /// What the device transmitted per transmit channel: at each start instant, its ratio
@@ -953,6 +1030,7 @@ impl FakeDevice {
                 rx: BTreeMap::new(),
                 orphans: BTreeMap::new(),
                 tx: BTreeMap::new(),
+                tx_drains: BTreeMap::new(),
                 rx_min_timeout: Duration::MAX,
                 tx_samples: BTreeMap::new(),
                 tx_sends: 0,
@@ -1366,6 +1444,7 @@ impl Device for FakeDevice {
             streamer.duc.time = None;
             streamer.duc.eob_lost = false;
         }
+        st.tx_drains.clear();
         st.tx_samples.clear();
         st.orphans.clear();
         for streamer in st.rx.values_mut() {
@@ -1791,9 +1870,7 @@ impl Device for FakeDevice {
         // As on the receive side, this stream's old streamer goes before the new one is
         // made, and the graph refuses a second streamer on one front end: "Attempting to
         // reconnect input port!" (`graph.cpp:188-197`; UR-33).
-        if let Some(old) = st.tx.remove(&stream) {
-            stale_tx_header(&mut st, &old.channels);
-        }
+        retire_tx(&mut st, stream);
         if let Some(index) = self.config.faults.iter().position(|fault| *fault == FakeFault::TxOpenFails(nth)).filter(|index| !st.fired[*index]) {
             st.fired[index] = true;
             return Err(DeviceError::failed("fake: scripted refusal of transmit open"));
@@ -1812,7 +1889,10 @@ impl Device for FakeDevice {
             }
             seen.push(*chan);
         }
-        st.tx.insert(stream, TxStreamer::new(channels.to_vec(), self.mcr()));
+        // The FPGA keeps draining what the old streamer's radio dropped (UR-33).
+        let mut streamer = TxStreamer::new(channels.to_vec(), self.mcr());
+        streamer.radio.drain = st.tx_drains.remove(&stream);
+        st.tx.insert(stream, streamer);
         st.opened[Dir::Tx as usize].extend(channels.iter().copied());
         Ok(())
     }
@@ -2064,9 +2144,7 @@ impl Device for FakeDevice {
     fn tx_close(&self, stream: usize) {
         let mut st = self.lock();
         st.calls.push(format!("tx_close {stream}"));
-        if let Some(old) = st.tx.remove(&stream) {
-            stale_tx_header(&mut st, &old.channels);
-        }
+        retire_tx(&mut st, stream);
     }
 
     fn close_streams(&self) {
@@ -2077,11 +2155,10 @@ impl Device for FakeDevice {
         for streamer in std::mem::take(&mut st.rx).into_values() {
             orphan_queued_start(&mut st, Some(streamer), now);
         }
-        let tx_channels: Vec<Vec<usize>> = st.tx.values().map(|streamer| streamer.channels.clone()).collect();
-        for channels in tx_channels {
-            stale_tx_header(&mut st, &channels);
+        let streams: Vec<usize> = st.tx.keys().copied().collect();
+        for stream in streams {
+            retire_tx(&mut st, stream);
         }
-        st.tx.clear();
     }
 
     fn mark_lost(&self) {
@@ -2679,6 +2756,293 @@ mod tests {
         }
     }
 
+    // The device burst is the unit of a late drop (UR-33): the radio drops a late packet, the DUC keeps consuming the burst's later ones at real time, and a burst handed
+    // before the drain's limit is late too. The pad and the guard in the limit are the fake's own margin, never a device value (INFERRED, bench cell C4).
+
+    /// A stream on `channels` at 1 MS/s whose device clock stands 1 ms past `t0`, the instant the first burst is booked for.
+    fn late_stream(device: &FakeDevice, channels: &[usize]) -> i64 {
+        device.set_time_zero(false).unwrap();
+        device.tx_open(0, channels).unwrap();
+        let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+        device.set_time(t0 + ms(1));
+        t0
+    }
+
+    /// Sends `chunks` (samples each) as one device burst from `t0` on, every packet timed with its first sample's instant.
+    fn send_chunked(device: &FakeDevice, channels: usize, t0: i64, chunks: &[usize]) {
+        let mut at = t0;
+        for (i, n) in chunks.iter().enumerate() {
+            send_channels(device, channels, Some(at), *n, i == 0, i + 1 == chunks.len());
+            at += *n as i64 * 200;
+        }
+    }
+
+    /// A late device burst of `chunks` leaves a drain whose raw end is `D` and whose limit is `D + limit` samples. Then a closed 100-sample burst B timed `offset` samples past `D`
+    /// is dropped (one TimeError at or after `D`, nothing sent), and B′, 1 000 samples past the limit, plays whole and is acknowledged.
+    fn assert_drain_band(chunks: &[usize], offset: i64, limit: i64) {
+        let device = manual(FakeConfig::default());
+        let chunks = chunks.to_vec();
+        participant(&device, move |device| {
+            let t0 = late_stream(&device, &[0]);
+            let end = t0 + ms(1) + chunks.iter().sum::<usize>() as i64 * 200;
+            send_chunked(&device, 1, t0, &chunks);
+            let (inside, past) = (end + offset * 200, end + (limit + 1_000) * 200);
+            send(&device, Some(inside), 100, true, true);
+            send(&device, Some(past), 100, true, true);
+            let reports = reports_until(&device, past + ms(1));
+            let codes: Vec<_> = reports.iter().map(|r| r.code).collect();
+            let mut expected = vec![TxCode::TimeError; chunks.len() + 1];
+            expected.push(TxCode::BurstAck);
+            assert_eq!(codes, expected, "the late burst's packets and B are dropped, B′ is acknowledged: {reports:?}");
+            assert!(reports[chunks.len()].tick.unwrap() >= end.max(inside), "B is reported after the drain's raw end and its own time: {reports:?}");
+            assert_eq!(device.transmitted(inside, 100), vec![None; 100], "B sent nothing");
+            assert_eq!(device.transmitted(past, 100), vec![Some(BURST); 100], "B′ plays at its time");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_late_first_chunk_drops_the_whole_device_burst() {
+        // The first chunk is 1 ms late; its later chunks are in the future by their own times and are dropped with it, and the closing one has no BurstAck.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let t0 = late_stream(&device, &[0]);
+            send_chunked(&device, 1, t0, &[2_500, 2_500, 100]);
+            let reports = reports_until(&device, t0 + ms(1) + 5_100 * 200 + ms(2));
+            assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::TimeError; 3], "one TimeError per packet, no acknowledgement: {reports:?}");
+            assert_eq!(device.transmitted(t0, 5_100), vec![None; 5_100], "nothing of the burst is sent");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_late_burst_drops_one_time_error_per_channel_per_send() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let t0 = late_stream(&device, &[0, 1]);
+            send_chunked(&device, 2, t0, &[2_500, 2_500, 100]);
+            let reports = reports_until(&device, t0 + ms(1) + 5_100 * 200 + ms(2));
+            assert_eq!(reports.len(), 6, "{reports:?}");
+            for pair in reports.chunks(2) {
+                assert_eq!((pair[0].code, pair[0].channel, pair[1].code, pair[1].channel), (TxCode::TimeError, 0, TxCode::TimeError, 1), "{reports:?}");
+                assert_eq!(pair[0].tick, pair[1].tick, "the channels share a packet's tick: {reports:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn ur_33_dropped_packets_drain_at_real_time() {
+        // The DUC consumes one sample per tick of the rate: each dropped packet is read when the previous one has been consumed, not all at once. No clock moves between the sends.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let t0 = late_stream(&device, &[0]);
+            let now = t0 + ms(1);
+            send_chunked(&device, 1, t0, &[2_500, 2_500, 100]);
+            let ticks: Vec<_> = std::iter::from_fn(|| device.tx_async(0, Duration::ZERO).unwrap()).map(|r| r.tick.unwrap()).collect();
+            assert_eq!(ticks, [now, now + 2_500 * 200, now + 5_000 * 200]);
+        });
+    }
+
+    #[test]
+    fn ur_33_a_device_burst_inside_a_drain_is_late_and_one_past_it_plays() {
+        // The drain of 5 100 samples in 3 sends and one burst: B is 1 000 samples before its raw end, B′ 1 000 after its limit (a pad of 51 + 6 + 25, a guard of 15: 97 samples past the end).
+        assert_drain_band(&[2_500, 2_500, 100], -1_000, 97);
+    }
+
+    #[test]
+    fn ur_33_the_fake_s_drain_pad_grows_with_the_drained_length() {
+        // The fake's own margin: 20 000 samples in 8 sends and one burst, a pad of 200 + 16 + 25 and a guard of 15 (limit +256). B at +120 is inside the pad; without its share of the
+        // samples the limit is +56.
+        assert_drain_band(&[2_500; 8], 120, 256);
+    }
+
+    #[test]
+    fn ur_33_the_fake_s_drain_guard_follows_the_pad() {
+        // The fake's own margin: B at +248 is 7 samples past the pad (+241) and 8 before the limit (+256).
+        assert_drain_band(&[2_500; 8], 248, 256);
+    }
+
+    #[test]
+    fn ur_33_the_fake_s_drain_pad_adds_the_guard_and_the_duc_wait_per_burst() {
+        // The fake's own margin: a closed 200-sample burst, a pad of 2 + 2 for samples and send and 15 + 10 for the burst (the guard and the DUC's wait), a guard of 15: limit +44.
+        // B at +30 is 11 samples past the limit without the burst's share (+19) and 14 before the limit.
+        assert_drain_band(&[200], 30, 44);
+    }
+
+    #[test]
+    fn ur_33_the_fake_s_drain_pad_counts_two_samples_per_packet() {
+        // The fake's own margin: 20 000 samples in 200 sends of one burst. The device lags about two clocks a send, so the pad is 200 + 400 + 25 and the limit +640. B at +300 is 60
+        // samples past the limit without the two clocks (+240).
+        assert_drain_band(&[100; 200], 300, 640);
+    }
+
+    #[test]
+    fn ur_33_the_fake_s_drain_pad_sums_its_terms() {
+        // The fake's own margin: a 10 000-sample send and 100 sends of 100 in one burst: the samples' share (200) and the sends' two clocks (202) both count, a pad of 200 + 202 + 25 and a
+        // guard of 15 is +442; taking the larger of the two gives +242. B at +300 is between.
+        assert_drain_band(&[vec![10_000], vec![100; 100]].concat(), 300, 442);
+    }
+
+    #[test]
+    fn ur_33_closely_spaced_closed_bursts_behind_a_late_one_stay_dropped() {
+        // Four closed 200-sample bursts A-D, each 5 samples after the one before, A 20 µs late, then E (100 samples): each dropped burst adds its guard and the DUC's wait, so the
+        // limit is 131 samples past the drain's raw end (820). E 35 samples past it (40 after D) is late, and without the bursts' share (limit +31) it would play; E 100 past it is
+        // late too, and with the share of one burst only (limit +56) it would play.
+        for past_end in [35, 100] {
+            let device = manual(FakeConfig::default());
+            participant(&device, move |device| {
+                let t0 = late_stream(&device, &[0]);
+                device.set_time(t0 + 20 * 200);
+                for k in 0..4 {
+                    send(&device, Some(t0 + k * 205 * 200), 200, true, true);
+                }
+                let e = t0 + (820 + past_end) * 200;
+                send(&device, Some(e), 100, true, true);
+                let reports = reports_until(&device, e + ms(1));
+                assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::TimeError; 5], "A-D and E at +{past_end} are dropped: {reports:?}");
+                assert_eq!(device.transmitted(t0, 1_100), vec![None; 1_100], "nothing is sent");
+            });
+        }
+    }
+
+    #[test]
+    fn ur_33_a_drain_survives_a_reopen_of_its_stream() {
+        // The FPGA keeps draining what the radio dropped: after an open that replaces the stream's streamer, a close and an open (as the Module reopens) or a close of every
+        // streamer, a burst before the limit is late.
+        for how in ["replace", "close", "close_streams"] {
+            let device = manual(FakeConfig::default());
+            participant(&device, move |device| {
+                let t0 = late_stream(&device, &[0]);
+                send_chunked(&device, 1, t0, &[2_500, 2_500, 100]);
+                let end = t0 + ms(1) + 5_100 * 200;
+                match how {
+                    "close" => device.tx_close(0),
+                    "close_streams" => device.close_streams(),
+                    _ => {}
+                }
+                device.tx_open(0, &[0]).unwrap();
+                send(&device, Some(end - 1_000 * 200), 100, true, true);
+                let reports = reports_until(&device, end + ms(2));
+                assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::TimeError], "{how}: {reports:?}");
+                assert_eq!(device.transmitted(end - 1_000 * 200, 100), vec![None; 100], "the burst inside the drain sent nothing");
+            });
+        }
+    }
+
+    #[test]
+    fn ur_33_a_late_packet_is_read_behind_the_samples_queued_before_it() {
+        // A closed burst A is queued ahead of the device's clock; a timed packet without a start of burst before A's end is late, and the DUC reads it when A has played: its report is at
+        // A's end and a burst 60 samples after A's end is inside its drain (the probe is read when the drain's 100 samples are consumed). Read at the device's time, the drain would be over.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let a = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            let a_end = a + 1_000 * 200;
+            send(&device, Some(a), 1_000, true, true);
+            send(&device, Some(a + 100 * 200), 100, false, true);
+            send(&device, Some(a_end + 60 * 200), 100, true, true);
+            let reports = reports_until(&device, a_end + ms(2));
+            assert_eq!(
+                reports.iter().map(|r| (r.code, r.tick)).collect::<Vec<_>>(),
+                [(TxCode::BurstAck, Some(a_end + 1)), (TxCode::TimeError, Some(a_end)), (TxCode::TimeError, Some(a_end + 100 * 200))],
+                "{reports:?}"
+            );
+            assert_eq!(device.transmitted(a_end, 200), vec![None; 200], "nothing after A's end is sent");
+        });
+    }
+
+    #[test]
+    fn ur_33_an_idle_timed_packet_without_a_start_inside_a_drain_is_late() {
+        // After a late burst's EOB the DUC starts a new burst with a timed packet that has no start of burst; inside the drain it is late, and outside it plays.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let t0 = late_stream(&device, &[0]);
+            send_chunked(&device, 1, t0, &[2_500, 100]);
+            let end = t0 + ms(1) + 2_600 * 200;
+            send(&device, Some(end - 1_000 * 200), 100, false, true);
+            let past = end + 1_100 * 200;
+            send(&device, Some(past), 100, false, true);
+            let reports = reports_until(&device, past + ms(1));
+            assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::TimeError, TxCode::TimeError, TxCode::TimeError, TxCode::BurstAck], "{reports:?}");
+            assert_eq!(device.transmitted(end - 1_000 * 200, 100), vec![None; 100], "the packet inside the drain sent nothing");
+            assert_eq!(device.transmitted(past, 100), vec![Some(BURST); 100], "the packet past it plays");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_drain_ends_with_real_time() {
+        // Once the device clock passes the limit the drain is over: a second late burst starts a drain of its own (its pad is that of 100 samples, not of both), and a burst past it plays.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let t0 = late_stream(&device, &[0]);
+            send_chunked(&device, 1, t0, &[2_500, 2_500, 100]);
+            let first = reports_until(&device, t0 + ms(1) + 5_100 * 200 + ms(2));
+            assert_eq!(first.len(), 3, "{first:?}");
+            let now = t0 + ms(1) + (5_100 + 66 + 5_000) * 200;
+            device.set_time(now);
+            send(&device, Some(t0), 100, true, true);
+            // The drop's end is `now + 100` samples; its limit is 43 samples past it (pad 1 + 2 + 25, guard 15), 126 if the first drain's samples still counted. P is 60 past the end.
+            let probe = now + 160 * 200;
+            send(&device, Some(probe), 100, true, true);
+            let reports = reports_until(&device, probe + ms(1));
+            assert_eq!(reports.iter().map(|r| (r.code, r.tick)).collect::<Vec<_>>(), [(TxCode::TimeError, Some(now)), (TxCode::BurstAck, Some(probe + 100 * 200 + 1))], "{reports:?}");
+            assert_eq!(device.transmitted(probe, 100), vec![Some(BURST); 100]);
+        });
+    }
+
+    #[test]
+    fn ur_33_a_clock_reset_clears_a_drain() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let t0 = late_stream(&device, &[0]);
+            send_chunked(&device, 1, t0, &[2_500, 2_500, 100]);
+            assert_eq!(reports_until(&device, t0 + ms(1) + 5_100 * 200 + ms(2)).len(), 3);
+            device.set_time_zero(false).unwrap();
+            let start = ms(1);
+            send(&device, Some(start), 100, true, true);
+            let reports = reports_until(&device, start + 100 * 200 + ms(1));
+            assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::BurstAck], "the drain did not survive the reset: {reports:?}");
+            assert_eq!(device.transmitted(start, 100), vec![Some(BURST); 100]);
+        });
+    }
+
+    #[test]
+    fn ur_33_a_late_timed_head_takes_the_first_untimed_continuation_as_timed() {
+        // A refused head's rule (UR-33): a timed continuation, and the first untimed one, get a TimeError; later untimed packets through the EOB are silent. The X310 plays the
+        // untimed tail late (bench 2026-11-13, H1's second cell), so the fake is stricter there.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let t0 = late_stream(&device, &[0]);
+            send(&device, Some(t0), 500, true, false);
+            send(&device, None, 100, false, false);
+            send(&device, None, 50, false, true);
+            let reports = reports_until(&device, t0 + ms(1) + 700 * 200 + ms(2));
+            assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::TimeError, TxCode::TimeError], "{reports:?}");
+            assert_eq!(device.transmitted(t0, 1_000), vec![None; 1_000], "nothing of the burst is sent");
+        });
+    }
+
+    #[test]
+    fn ur_33_after_a_starvation_the_timed_rest_drains() {
+        // An accepted open burst runs dry (Underflow); the timed rest of its device burst is late and drains, so a burst inside it is late too, and no BurstAck follows.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let start = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            send(&device, Some(start), 32, true, false);
+            let dry = start + 32 * 200;
+            device.set_time(dry + ms(5));
+            let now = dry + ms(5);
+            send(&device, Some(now), 500, false, false);
+            send(&device, Some(now + 500 * 200), 500, false, true);
+            let end = now + 1_000 * 200;
+            send(&device, Some(end - 300 * 200), 100, true, true);
+            let reports = reports_until(&device, end + ms(2));
+            assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::Underflow, TxCode::TimeError, TxCode::TimeError, TxCode::TimeError], "{reports:?}");
+            assert_eq!(device.transmitted(now, 1_000), vec![None; 1_000], "nothing of the rest, nor of the burst inside its drain, is sent");
+        });
+    }
+
     #[test]
     fn ur_33_a_one_sample_eob_loses_the_next_timed_header() {
         let device = manual(FakeConfig::default());
@@ -2717,7 +3081,7 @@ mod tests {
             assert!(device.time_now().unwrap() > late + 200);
 
             device.tx_send(0, &[&[[0.25f32, 0.0]; 4]], Some(late), true, false, Duration::from_secs(1)).unwrap();
-            // The dropped continuation still reaches its DUC EOB; the next no-SOB packet gets a fresh timed header.
+            // The late head holds its device burst, so the continuation is dropped with a TimeError of its own and reaches its DUC EOB; the next no-SOB packet gets a fresh timed header.
             device.tx_send(0, &[&wave], Some(late + 200), false, true, Duration::from_secs(1)).unwrap();
             let future = (device.time_now().unwrap() / 200 + 5_000) * 200;
             device.tx_send(0, &[&wave], Some(future), false, true, Duration::from_secs(1)).unwrap();
@@ -2729,7 +3093,7 @@ mod tests {
             while let Some(report) = device.tx_async(0, Duration::ZERO).unwrap() {
                 reports.push(report);
             }
-            assert_eq!(reports.iter().filter(|report| report.code == TxCode::TimeError).count(), 2, "each idle packet has its own late report: {reports:?}");
+            assert_eq!(reports.iter().filter(|report| report.code == TxCode::TimeError).count(), 2, "the late head and its dropped EOB have a report each: {reports:?}");
             assert_eq!(reports.iter().filter(|report| report.code == TxCode::BurstAck).count(), 1, "the future no-SOB packet starts and closes playback: {reports:?}");
             assert_eq!(device.transmitted(future, wave.len()), wave.map(Some), "the acceptable future continuation is played");
         });
@@ -3642,8 +4006,13 @@ mod tests {
     }
 
     fn send(device: &FakeDevice, at: Option<i64>, n: usize, sob: bool, eob: bool) {
+        send_channels(device, 1, at, n, sob, eob);
+    }
+
+    fn send_channels(device: &FakeDevice, channels: usize, at: Option<i64>, n: usize, sob: bool, eob: bool) {
         let wave = vec![BURST; n];
-        device.tx_send(0, &[&wave], at, sob, eob, Duration::from_secs(1)).unwrap();
+        let buffers: Vec<&[Iq]> = (0..channels).map(|_| &wave[..]).collect();
+        device.tx_send(0, &buffers, at, sob, eob, Duration::from_secs(1)).unwrap();
     }
 
     #[test]

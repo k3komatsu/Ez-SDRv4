@@ -370,7 +370,7 @@ fn rm_22_payloads_round_trip() {
     let target_json = serde_json::to_value(target).unwrap();
     assert_payload_round_trip(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 3 }, json!({"cause": "overrun", "lost": 3}));
     assert_payload_round_trip(
-        TimeErrorPayload { cause: TimeErrorCause::UnclosedBurst, outcome: TimeErrorOutcome::PlanViolation, late_by_ns: 7, target, action: None },
+        TimeErrorPayload { cause: TimeErrorCause::UnclosedBurst, outcome: TimeErrorOutcome::PlanViolation, late_by_ns: 7, target, action: None, resumes_at: None },
         json!({
             "cause": "unclosed_burst",
             "outcome": "plan_violation",
@@ -401,14 +401,29 @@ fn rm_22_payloads_round_trip() {
     );
     assert_payload_round_trip(CommandRejectedPayload { action: None, kind: "tx_burst".to_owned(), reason: "cancelled".to_owned() }, json!({"kind": "tx_burst", "reason": "cancelled"}));
     // VE-3 (radio 1.3.0).
-    assert_payload_round_trip(TxUnderflowPayload { cause: TxUnderflowCause::Starved }, json!({"cause": "starved"}));
-    assert_payload_round_trip(TxUnderflowPayload { cause: TxUnderflowCause::Lost }, json!({"cause": "lost"}));
+    assert_payload_round_trip(TxUnderflowPayload { cause: TxUnderflowCause::Starved, resumes_at: None }, json!({"cause": "starved"}));
+    assert_payload_round_trip(TxUnderflowPayload { cause: TxUnderflowCause::Lost, resumes_at: None }, json!({"cause": "lost"}));
     assert_payload_round_trip(AlignmentErrorPayload { lost: 12 }, json!({"lost": 12}));
     assert_payload_round_trip(ClockLostPayload { reference: ClockReference::Frequency }, json!({"reference": "frequency"}));
     assert_payload_round_trip(
-        TimeErrorPayload { cause: TimeErrorCause::Late, outcome: TimeErrorOutcome::LateAtDevice, late_by_ns: 0, target, action: None },
+        TimeErrorPayload { cause: TimeErrorCause::Late, outcome: TimeErrorOutcome::LateAtDevice, late_by_ns: 0, target, action: None, resumes_at: None },
         json!({"cause": "late", "outcome": "late_at_device", "late_by_ns": 0, "target": target_json}),
     );
+}
+
+#[test]
+fn rm_22_resumes_at_round_trips() {
+    // UR-22: `resumes_at` is optional on both payloads: written when a repeat resumes, absent (never `null`) when it ended, and a document without it parses.
+    let target = TimePoint::new(ClockDomainId::UTC, 5);
+    let at = TimePoint::new(ClockDomainId::UTC, 9);
+    let at_json = serde_json::to_value(at).unwrap();
+    assert_payload_round_trip(TxUnderflowPayload { cause: TxUnderflowCause::Starved, resumes_at: Some(at) }, json!({"cause": "starved", "resumes_at": at_json}));
+    assert_payload_round_trip(
+        TimeErrorPayload { cause: TimeErrorCause::Late, outcome: TimeErrorOutcome::LateAtDevice, late_by_ns: 1, target, action: None, resumes_at: Some(at) },
+        json!({"cause": "late", "outcome": "late_at_device", "late_by_ns": 1, "target": serde_json::to_value(target).unwrap(), "resumes_at": at_json}),
+    );
+    assert!(serde_json::to_value(TxUnderflowPayload { cause: TxUnderflowCause::Lost, resumes_at: None }).unwrap().get("resumes_at").is_none());
+    assert!(serde_json::from_value::<TxUnderflowPayload>(json!({"cause": "starved", "resumes_at": null, "extra": 1})).is_err(), "unknown fields stay refused");
 }
 
 #[test]
