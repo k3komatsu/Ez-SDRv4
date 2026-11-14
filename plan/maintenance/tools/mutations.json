@@ -24293,5 +24293,25 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_33_a_lost_on_call_fault_fails_that_call_and_every_call_after_it"
+ },
+ {
+  "id": "N77-01",
+  "name": "MockRadio records the faults a loss, stop or cleanup leaves pending in booking order, not instant order (MR-20, SE-4, #77)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "pending.sort_by_key(|&index| self.faults[index].tick);",
+  "new": "pending.sort_by_key(|&index| self.faults[index].order);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_the_faults_a_loss_leaves_are_recorded_in_instant_order"
+ },
+ {
+  "id": "N77-02",
+  "name": "MockRadio records the faults a loss leaves pending in booking order, not instant order: the generator's Fault class holds a loss (MR-20, #77)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "pending.sort_by_key(|&index| self.faults[index].tick);",
+  "new": "pending.sort_by_key(|&index| self.faults[index].order);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_against_mockradio"
  }
 ]

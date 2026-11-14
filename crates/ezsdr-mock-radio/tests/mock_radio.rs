@@ -2525,6 +2525,44 @@ fn mr_20_a_loss_ends_its_receive_stream_at_its_instant() {
     assert_eq!(received(&harness).iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
 }
 
+/// Every row of `ezsdr.radio.mock.faults`, in the order written: `(fault, applied, at ticks)`.
+fn all_fault_rows(harness: &Harness) -> Vec<(String, bool, i64)> {
+    let faults = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.faults").unwrap()];
+    faults.as_array().unwrap().iter().map(|row| (row["fault"].as_str().unwrap().to_owned(), row["applied"].as_bool().unwrap(), row["at"]["ticks"].as_i64().unwrap())).collect()
+}
+
+#[test]
+fn mr_20_the_faults_a_loss_leaves_are_recorded_in_instant_order() {
+    // MR-20, SE-4, MR-27 (#77): the faults a loss leaves unfired, and those a `stop` or `cleanup` leaves, are recorded by instant, document order breaking ties,
+    // not in the order they were booked.
+    let at = |at_ns: i64, fault: &str| serde_json::json!({ "at_ns": at_ns, "fault": fault, "target": "radio" });
+    let ms = 1_000_000;
+    for (profile, t0) in [("ideal", 0), ("x3xx", 2_000_000_000)] {
+        let run = |faults: &[serde_json::Value], lose: bool| {
+            let env = [("sim.faults", serde_json::Value::Array(faults.to_vec()))];
+            let mut harness = Harness::new(profile, &[], &[], &env, Some((BackPressure::DropOldest, 64)));
+            harness.arm_start(t0).unwrap();
+            if lose {
+                assert_eq!(harness.step(t0 + ms).unwrap_err().kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+                harness.mock.stop(StopMode::Abort).unwrap();
+            } else {
+                harness.mock.cleanup();
+            }
+            all_fault_rows(&harness)
+        };
+        let row = |fault: &str, applied: bool, at_ms: i64| (fault.to_owned(), applied, t0 + at_ms * ms);
+        // The minimal sequence: booked overrun 3 ms, sequence error 2 ms, loss 1 ms.
+        let rows = run(&[at(3 * ms, "rx_overflow"), at(2 * ms, "rx_sequence_error"), at(ms, "device_lost")], true);
+        assert_eq!(rows, [row("device_lost", true, 1), row("rx_sequence_error", false, 2), row("rx_overflow", false, 3)], "{profile}");
+        // Two of one kind, booked later first; and a tie, which keeps document order.
+        let rows = run(&[at(3 * ms, "rx_overflow"), at(2 * ms, "rx_overflow"), at(2 * ms, "rx_sequence_error"), at(ms, "device_lost")], true);
+        assert_eq!(rows, [row("device_lost", true, 1), row("rx_overflow", false, 2), row("rx_sequence_error", false, 2), row("rx_overflow", false, 3)], "{profile}");
+        // No loss: `cleanup` records what never fired, by instant.
+        let rows = run(&[at(3 * ms, "rx_overflow"), at(2 * ms, "rx_sequence_error")], false);
+        assert_eq!(rows, [row("rx_sequence_error", false, 2), row("rx_overflow", false, 3)], "{profile}");
+    }
+}
+
 #[test]
 fn mr_21_overrun_shape() {
     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];

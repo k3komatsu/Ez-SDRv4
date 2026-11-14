@@ -775,12 +775,13 @@ impl MockRadio {
         }
     }
 
+    /// MR-20: the faults not yet fired are recorded in the order they would have fired (SE-4): by instant, document order (`self.faults`' own) breaking ties.
     fn record_pending_faults(&mut self) {
-        for index in 0..self.faults.len() {
-            if !self.faults[index].resolved {
-                self.faults[index].resolved = true;
-                self.record_fault(index, 0);
-            }
+        let mut pending: Vec<usize> = (0..self.faults.len()).filter(|&index| !self.faults[index].resolved).collect();
+        pending.sort_by_key(|&index| self.faults[index].tick);
+        for index in pending {
+            self.faults[index].resolved = true;
+            self.record_fault(index, 0);
         }
     }
 

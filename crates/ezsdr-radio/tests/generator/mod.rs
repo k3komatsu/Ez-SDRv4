@@ -18,9 +18,9 @@ pub enum Class {
     StartRx,
     /// A receive value (frequency or gain) set on stream 0's channel 0, accepted on a stopped stream and refused on a streaming one (RM-21).
     Value,
-    /// Overruns and sequence errors.
+    /// Overruns and sequence errors, and half the time a device loss.
     Fault,
-    /// A device loss.
+    /// A device loss, always.
     Loss,
 }
 
@@ -304,7 +304,8 @@ pub fn sequence(seed: u64) -> Sequence {
             faults.push((at, fault));
         }
     }
-    if class == Class::Loss {
+    // The Loss class always holds a loss; the Fault class half the time, so a loss with faults still pending after it is generated (#77).
+    if class == Class::Loss || (class == Class::Fault && rng.below(2) == 0) {
         let at = if rng.below(2) == 0 { shared[rng.below(4) as usize] } else { rng.instant() };
         faults.push((at, Fault::Loss));
     }
