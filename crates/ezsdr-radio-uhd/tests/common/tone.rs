@@ -26,6 +26,23 @@ pub enum Verdict {
     Fail(String),
 }
 
+impl Verdict {
+    /// `"PASS"`, `"INCONCLUSIVE"` or `"FAIL"`: what the cells' unit tests compare.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Verdict::Pass(_) => "PASS",
+            Verdict::Inconclusive(_) => "INCONCLUSIVE",
+            Verdict::Fail(_) => "FAIL",
+        }
+    }
+
+    /// Panics unless this is of kind `want`, with the verdict in the message.
+    #[cfg(test)]
+    pub fn assert_kind(&self, want: &str, what: &str) {
+        assert_eq!(self.kind(), want, "{what}: {self:?}");
+    }
+}
+
 /// What a capture says about a tone that may shift at `e` (design note 42's probes): the windows
 /// of 25 samples (a tone's coherence, not its magnitude: the loopback attenuates a 0.4 tone to
 /// about 0.008), the power of the noise before the burst, how many windows carry the tone on

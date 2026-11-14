@@ -24,24 +24,34 @@ use ezsdr_radio_uhd::{Device, Iq, RxRecv, TxCode, TxReport};
 use serde_json::{Value as Json, json};
 
 use super::observations::HeardInterval;
-use super::raw::{Read, TICKS_PER_MS, align_to, drain_without_clock, raw_rx, raw_tx, read_with, tone_wave};
+use super::raw::{TICKS_PER_MS, align_to, d9_channel, drain_without_clock, iq, raw_rx_on, raw_tx_on, tone_wave};
 use super::tone::{QUIET_CHECK_MIN_POWER, Verdict, contiguous_windows_at, mean_power, window_tone_at};
 use super::{MCR, iii};
 
 /// The rates cell C1 runs at (bench.md: C2 adds 100 and 200 MS/s and board #2).
 pub const C1_RATES: [f64; 2] = [1e6, 10e6];
+/// C2's transmit rates (the receive stays at `C2_RX_RATE`, which keeps C1's tone window and threshold).
+pub const C2_RATES: [f64; 2] = [100e6, 200e6];
+pub const C2_RX_RATE: f64 = 10e6;
+/// C3's rates.
+pub const C3_RATES: [f64; 2] = [1e6, 10e6];
+/// C3's first send: UR-22's minimum first send of an open burst (`ezsdr_radio::x3xx::PACKETS.min_open_first_send`).
+pub const C3_HEAD: usize = 32;
 /// Trials per rate on the bench.
 pub const C1_TRIALS: usize = 10;
 /// How long before the host's reference instant the late burst's first sample is timed: the host sends the first chunk at or after that instant, so the
 /// first send is at least this late (the verdict checks what matters, that the last chunk was handed well before its own time: `Evidence::late_last`).
 pub const LATE_MS: i64 = 1;
 /// The transmit tone's offset from the carrier at every rate: the 100 kHz the other bench tools use, so the carrier plus the tone stays inside `SAFE_TX_HZ`.
-const TONE_HZ: f64 = 100e3;
+pub const TONE_HZ: f64 = 100e3;
 /// How long before its own time the late burst's last chunk must have been handed: 1 ms. The check measures when the host's send returned, not when the
 /// packet reached the radio, so the margin covers the host-to-radio delay and the read's own latency (INFERRED to be far under it).
 const LAST_CHUNK_MARGIN_TICKS: i64 = TICKS_PER_MS;
-/// Sends per burst: the Module's chunks (`segment::send_cap`) of a 20 ms burst at 1 MS/s.
+/// Sends per C1 burst: the Module's chunks (`segment::send_cap`) of a 20 ms burst at 1 MS/s (16 ms at 10 MS/s: C1 stays as it is).
 pub const CHUNKS: usize = 8;
+/// The length of every burst after C1, at every rate: the last chunk can then be handed well before its own time even when the host feeds only a little
+/// faster than real time (INFERRED: 10 GbE at 200 MS/s is about 1.5x).
+pub const BURST_MS: i64 = 20;
 /// The Module's in-flight window (`x3xx` timing, 10 ms): a chunk is sent once it is inside it, as the Module does.
 const WINDOW_TICKS: i64 = 10 * TICKS_PER_MS;
 /// The samples of a tone window (the probes' window, `tone.rs`).
@@ -52,8 +62,10 @@ const TX_TIMEOUT: Wall = Wall::from_millis(500);
 /// heard intervals on the receive axis, which the loopback delays.
 #[derive(Clone, Debug)]
 pub struct Evidence {
-    /// Root ticks a sample.
+    /// Root ticks a receive sample: the axis of the heard intervals, the receive blocks and the tone windows.
     pub per: i64,
+    /// Root ticks a transmit sample (C2 receives at 10 MS/s whatever it transmits at).
+    pub tx_per: i64,
     /// Root ticks of one send (the chunk).
     pub chunk_ticks: i64,
     /// The late burst's expected interval `[first sample, end)`.
@@ -74,6 +86,9 @@ pub struct Evidence {
     /// plays a chunk handed before its own time, so silence means something only if this one was handed at least `LAST_CHUNK_MARGIN_TICKS` before it (`None`: it
     /// was not handed).
     pub late_last: Option<(i64, i64)>,
+    /// The late burst's first send (a two-channel trial records it: where the host's latency put the first send against the first sample's time, which decides C5's
+    /// transition): the device time read when it had been handed, and its own first sample's time.
+    pub late_first: Option<(i64, i64)>,
 }
 
 /// The delay the control tone arrived with: its heard onset less its first sample's tick, when the control was heard (at least 90 % of its samples, its
@@ -126,6 +141,22 @@ pub fn late_chunked_verdict(e: &Evidence) -> Verdict {
     if !played.is_empty() {
         return Verdict::Fail(format!("heard {played:?} (loopback delay {shift} ticks taken off) inside the late burst's interval {from}..{to}: part of a late burst played"));
     }
+    let reasons = inconclusive_reasons(e, delay);
+    if reasons.is_empty() {
+        Verdict::Pass(format!("no 100 kHz tone window was detected in the late burst's interval, no BurstAck for it, a TimeError came; the control was heard (delay {shift} ticks)"))
+    } else {
+        Verdict::Inconclusive(reasons.join("; "))
+    }
+}
+
+/// Why the verdict is INCONCLUSIVE (empty: nothing is missing), given the control's `delay`.
+pub fn late_chunked_reasons(e: &Evidence) -> Vec<String> {
+    inconclusive_reasons(e, control_delay(e))
+}
+
+fn inconclusive_reasons(e: &Evidence, delay: Option<i64>) -> Vec<String> {
+    let (from, to) = e.late;
+    let shift = delay.unwrap_or(0);
     let mut reasons: Vec<String> = e.errors.iter().map(|error| format!("a device call failed: {error}")).collect();
     let (want_from, want_to) = (from + shift - e.chunk_ticks, to + shift + e.chunk_ticks);
     if !covers(&e.blocks, e.per, want_from, want_to) {
@@ -152,11 +183,7 @@ pub fn late_chunked_verdict(e: &Evidence) -> Verdict {
     if !e.reports.iter().any(|r| r.code == TxCode::TimeError && r.tick.is_some_and(|tick| tick >= from)) {
         reasons.push("no TimeError: the burst was not late, so nothing was proved".to_owned());
     }
-    if reasons.is_empty() {
-        Verdict::Pass(format!("no 100 kHz tone window was detected in the late burst's interval, no BurstAck for it, a TimeError came; the control was heard (delay {shift} ticks)"))
-    } else {
-        Verdict::Inconclusive(reasons.join("; "))
-    }
+    reasons
 }
 
 /// The tone windows of `samples` (25 samples, each one spacing apart) as intervals: coherent over 0.9 (`tone.rs`'s monitor bar), at `tone_hz` within a fifth
@@ -181,14 +208,15 @@ pub fn tone_intervals(samples: &[(i64, Iq)], per: i64, tone_hz: f64) -> Vec<Hear
     intervals
 }
 
-/// Holds until the device's time reaches `tick`, on the device's own clock (the manual one on the fake, the real one on the USRP). `bench1115::wait_device_time`
-/// does not fit: it is private and sleeps on the thread, which would never move a manual clock this thread holds. A failed time read is retried for 50 ms
-/// (it is transient on a device that recovers) and then is an error: the caller must not send on a wait that did not happen, or a burst meant to be late goes out on time.
-fn wait_until(device: &dyn Device, tick: i64) -> Result<(), String> {
+/// Holds until the device's time reaches `tick`, on the device's own clock (the manual one on the fake, the real one on the USRP), and returns the time it read.
+/// `bench1115::wait_device_time` does not fit: it is private and sleeps on the thread, which would never move a manual clock this thread holds. A failed time
+/// read is retried for 50 ms (it is transient on a device that recovers) and then is an error: the caller must not send on a wait that did not happen, or a
+/// burst meant to be late goes out on time.
+pub fn wait_until(device: &dyn Device, tick: i64) -> Result<i64, String> {
     let mut failed = 0;
     loop {
         match device.time_now() {
-            Ok(now) if now >= tick => return Ok(()),
+            Ok(now) if now >= tick => return Ok(now),
             Ok(_) => device.host().sleep(Wall::from_micros(200)),
             Err(error) if failed >= 50 => return Err(format!("time_now: {}", error.message)),
             Err(_) => {
@@ -199,27 +227,55 @@ fn wait_until(device: &dyn Device, tick: i64) -> Result<(), String> {
     }
 }
 
-/// Sends `wave` as one device burst of timed sends of `chunk` samples (SOB on the first, EOB on the last, each with its first sample's time), each once
-/// it is inside the in-flight window, as the Module does; a short send's rest follows with its own time. Returns the last send's `(device time read once it was
-/// handed, its own first sample's time)`.
-fn send_chunked(device: &dyn Device, wave: &[Iq], first_at: i64, per: i64, chunk: usize) -> Result<(i64, i64), String> {
-    let (mut sent, mut last) = (0, (0, 0));
+/// One send of a chunked burst: its first sample's time and the device time read once it had been handed.
+#[derive(Clone, Copy, Debug)]
+pub struct Sent {
+    pub at: i64,
+    pub handed: i64,
+}
+
+/// How `send_chunked` sends one burst: from `first_at`, `per` root ticks a sample, `head` samples first and `chunk` after, `channels` buffers a send, the
+/// last send carrying the EOB when `eob`, and the device time read after every send when `each` (else after the last one only: at 100 and 200 MS/s a burst
+/// is 100 to 200 sends, and a time read is a control call; after the first one too when `first`).
+#[derive(Clone, Copy, Debug)]
+pub struct Plan {
+    pub first_at: i64,
+    pub per: i64,
+    pub chunk: usize,
+    pub head: usize,
+    pub eob: bool,
+    pub each: bool,
+    pub first: bool,
+    pub channels: usize,
+}
+
+/// Sends `wave` as one device burst of timed sends (SOB on the first, each with its first sample's time), each once it is inside the in-flight window, as the
+/// Module does; a short send's rest follows with its own time. Returns the sends with a time read (`Plan::each`, `Plan::first`), the last one at least. The wait reads the device
+/// time only when the last read is not already inside the window.
+pub fn send_chunked(device: &dyn Device, wave: &[Iq], plan: Plan) -> Result<Vec<Sent>, String> {
+    let (mut sent, mut known, mut out) = (0, i64::MIN, Vec::new());
     while sent < wave.len() {
-        let n = chunk.min(wave.len() - sent);
-        let at = first_at + sent as i64 * per;
-        wait_until(device, at - WINDOW_TICKS)?;
-        let took = device.tx_send(0, &[&wave[sent..sent + n]], Some(at), sent == 0, sent + n == wave.len(), TX_TIMEOUT).map_err(|error| error.message)?;
+        let n = if sent == 0 { plan.head } else { plan.chunk }.min(wave.len() - sent);
+        let at = plan.first_at + sent as i64 * plan.per;
+        if known < at - WINDOW_TICKS {
+            known = wait_until(device, at - WINDOW_TICKS)?;
+        }
+        let buffers = vec![&wave[sent..sent + n]; plan.channels];
+        let took = device.tx_send(0, &buffers, Some(at), sent == 0, plan.eob && sent + n == wave.len(), TX_TIMEOUT).map_err(|error| error.message)?;
         if took == 0 {
             return Err(format!("the device took none of the samples sent at sample {sent}"));
         }
-        last = (device.time_now().map_err(|error| error.message)?, at);
         sent += took;
+        if plan.each || (plan.first && at == plan.first_at) || sent == wave.len() {
+            known = device.time_now().map_err(|error| error.message)?;
+            out.push(Sent { at, handed: known });
+        }
     }
-    Ok(last)
+    Ok(out)
 }
 
 /// Every report that is there, until three quiet reads of 20 ms.
-fn read_reports(device: &dyn Device, errors: &mut Vec<String>) -> Vec<TxReport> {
+pub fn read_reports(device: &dyn Device, errors: &mut Vec<String>) -> Vec<TxReport> {
     let begun = Instant::now();
     let (mut quiet, mut out) = (0, Vec::new());
     while begun.elapsed() < Wall::from_secs(2) && quiet < 3 {
@@ -238,66 +294,118 @@ fn read_reports(device: &dyn Device, errors: &mut Vec<String>) -> Vec<TxReport> 
     out
 }
 
-/// What the receive thread read: `raw::read_with`'s blocks and samples, the stream position each other outcome came at (the end of the last block before
-/// it, `None` before the first) and the failed calls.
+/// What the receive thread read: the blocks (the same ticks for every channel) and the samples of each channel, the stream position each other outcome came at
+/// (the end of the last block before it, `None` before the first) and the failed calls.
 struct RxLog {
     blocks: Vec<(i64, usize)>,
-    samples: Vec<(i64, Iq)>,
+    samples: Vec<Vec<(i64, Iq)>>,
     other: Vec<Option<i64>>,
     errors: Vec<String>,
-}
-
-/// The positions of the outcomes that were not samples, read off the order `Read::events` keeps.
-fn rx_log(read: Read, per: i64) -> RxLog {
-    let (mut blocks, mut end, mut other, mut errors) = (read.blocks.iter(), None, Vec::new(), Vec::new());
-    for event in &read.events {
-        if event == "samples" {
-            end = blocks.next().map(|(first, len)| first + *len as i64 * per);
-        } else {
-            other.push(end);
-            if event.starts_with("Failed") {
-                errors.push(format!("rx_recv: {event}"));
-            }
-        }
-    }
-    RxLog { blocks: read.blocks, samples: read.samples, other, errors }
 }
 
 /// The receive thread is a participant of the device's clock like the sending thread (`late_chunked_cell`'s): the clock stands while it is descheduled, so
 /// a loaded host cannot make the fake report the reader as 100 ms behind (an `Overflow`, which would turn the trial INCONCLUSIVE). A real clock registers
 /// nothing. It reads until the blocks reach `end_tick`, or a call fails (a closed streamer fails at once and would be polled to the limit), or 10 s.
-fn read_rx(device: &dyn Device, per: i64, n: usize, end_tick: i64) -> RxLog {
+fn read_rx(device: &dyn Device, per: i64, n: usize, end_tick: i64, channels: usize) -> RxLog {
     let _driver = device.host().drive();
-    let read = read_with(device, 0, n, Wall::from_secs(10), Some(per), |read| read.end(per).is_some_and(|end| end >= end_tick) || read.events.last().is_some_and(|event| event.starts_with("Failed")));
-    rx_log(read, per)
+    let mut log = RxLog { blocks: Vec::new(), samples: vec![Vec::new(); channels], other: Vec::new(), errors: Vec::new() };
+    let (begun, mut end) = (Instant::now(), None);
+    while begun.elapsed() < Wall::from_secs(10) && end.is_none_or(|end| end < end_tick) {
+        match device.rx_recv(0, n, Wall::from_millis(100), false) {
+            RxRecv::Samples { first_tick, samples } => {
+                log.blocks.push((first_tick, samples[0].len()));
+                end = Some(first_tick + samples[0].len() as i64 * per);
+                for (kept, got) in log.samples.iter_mut().zip(&samples) {
+                    kept.extend(got.iter().enumerate().map(|(i, s)| (first_tick + i as i64 * per, *s)));
+                }
+            }
+            failed @ RxRecv::Failed(_) => {
+                log.other.push(end);
+                log.errors.push(format!("rx_recv: {failed:?}"));
+                break;
+            }
+            _ => log.other.push(end),
+        }
+    }
+    log
 }
 
-/// One trial of the cell at `rate`: receive from 20 ms on, the control burst at 60 ms, the late burst's first sample timed `late_ms` before the host's
+/// What one trial of a late-burst cell sends and how: the rates (C2 transmits at 100 or 200 MS/s and receives at 10), the burst's samples (control and late
+/// burst alike), the late burst's first send when it is not a chunk (C3), the late burst's first sample's time less the reference instant in ticks (C1: 1 ms
+/// before; C5's marginal cells straddle it), and the channels (C5 transmits and receives on both slots as one two-channel stream).
+#[derive(Clone, Copy, Debug)]
+pub struct Shape {
+    pub tx_rate: f64,
+    pub rx_rate: f64,
+    pub burst: usize,
+    pub head: Option<usize>,
+    pub first_offset: i64,
+    pub channels: usize,
+}
+
+/// The Module's send at `rate` (`segment::send_cap` over the in-flight window).
+pub fn chunk_at(rate: f64) -> usize {
+    usize::try_from(send_cap(WINDOW_TICKS, MCR / rate as i64, &PACKETS)).expect("a send is a positive count")
+}
+
+/// The samples of a `BURST_MS` burst at `rate`.
+pub fn burst_samples(rate: f64) -> usize {
+    (rate * BURST_MS as f64 / 1_000.0).round() as usize
+}
+
+impl Shape {
+    /// C1: `CHUNKS` chunks at `rate` both ways, the late burst's first sample timed `LATE_MS` before the reference instant.
+    pub fn c1(rate: f64) -> Shape {
+        Shape { tx_rate: rate, rx_rate: rate, burst: CHUNKS * chunk_at(rate), head: None, first_offset: -LATE_MS * TICKS_PER_MS, channels: 1 }
+    }
+
+    /// C1's trial with a `BURST_MS` burst, transmitted at `tx_rate` and received at `rx_rate`.
+    pub fn c2(tx_rate: f64, rx_rate: f64) -> Shape {
+        Shape { tx_rate, rx_rate, burst: burst_samples(tx_rate), ..Shape::c1(tx_rate) }
+    }
+
+    /// C2's shape at one rate with the late burst's first send of `C3_HEAD` samples.
+    pub fn c3(rate: f64) -> Shape {
+        Shape { head: Some(C3_HEAD), ..Shape::c2(rate, rate) }
+    }
+
+    /// Two channels at 1 MS/s, the late burst's first sample timed `first_offset` ticks from the reference instant.
+    pub fn c5(first_offset: i64) -> Shape {
+        Shape { first_offset, channels: 2, ..Shape::c2(1e6, 1e6) }
+    }
+}
+
+/// One trial of the cell: receive from 20 ms on, the control burst at 60 ms, the late burst's first sample timed `shape.first_offset` from the host's
 /// reference instant (130 ms; nothing but the control's sends comes between), and the receive read to two chunks and a ms past the late burst's end by a
-/// thread of its own, so the receiver never waits on a send. Every report is read at the end.
-fn late_chunked_trial(device: &dyn Device, rate: f64, wave: &[Iq], chunk: usize, late_ms: i64) -> Evidence {
-    let per = MCR / rate as i64;
-    let chunk_ticks = chunk as i64 * per;
+/// thread of its own, so the receiver never waits on a send. Every report is read at the end. One evidence per channel: its reports, its heard intervals.
+fn late_chunked_trial(device: &dyn Device, shape: &Shape, wave: &[Iq], chunk: usize, rate_errors: &[String]) -> Vec<Evidence> {
+    let (tx_per, rx_per) = (MCR / shape.tx_rate as i64, MCR / shape.rx_rate as i64);
+    let chunk_ticks = chunk as i64 * tx_per;
     let d0 = device.time_now().expect("the device's time");
-    let (rx_at, control_at, reference) = (align_to(d0 + 20 * TICKS_PER_MS, per), align_to(d0 + 60 * TICKS_PER_MS, per), align_to(d0 + 130 * TICKS_PER_MS, per));
-    let late_at = reference - late_ms * TICKS_PER_MS;
-    let len = wave.len() as i64 * per;
+    let (rx_at, control_at, reference) = (align_to(d0 + 20 * TICKS_PER_MS, rx_per), align_to(d0 + 60 * TICKS_PER_MS, tx_per), align_to(d0 + 130 * TICKS_PER_MS, tx_per));
+    let late_at = align_to(reference + shape.first_offset, tx_per);
+    let len = wave.len() as i64 * tx_per;
     let (control, late) = ((control_at, control_at + len), (late_at, late_at + len));
     let read_to = late.1 + 2 * chunk_ticks + TICKS_PER_MS;
-    let mut errors = Vec::new();
+    let mut errors = rate_errors.to_vec();
     if let Err(error) = device.rx_start(0, rx_at) {
         errors.push(format!("rx_start: {}", error.message));
     }
-    let n = (rate / 1_000.0) as usize;
-    let mut late_last = None;
+    let n = (shape.rx_rate / 1_000.0) as usize;
+    let control_plan = Plan { first_at: control_at, per: tx_per, chunk, head: chunk, eob: true, each: false, first: false, channels: shape.channels };
+    let late_plan = Plan { first_at: late_at, head: shape.head.unwrap_or(chunk), first: shape.channels > 1, ..control_plan };
+    let (mut late_last, mut late_first) = (None, None);
     let log = std::thread::scope(|scope| {
-        let reader = scope.spawn(|| read_rx(device, per, n.max(1_000), read_to));
-        if let Err(error) = send_chunked(device, wave, control_at, per, chunk) {
+        let reader = scope.spawn(|| read_rx(device, rx_per, n.max(1_000), read_to, shape.channels));
+        if let Err(error) = send_chunked(device, wave, control_plan) {
             errors.push(format!("control burst: {error}"));
         }
         match wait_until(device, reference) {
-            Ok(()) => match send_chunked(device, wave, late_at, per, chunk) {
-                Ok(last) => late_last = Some(last),
+            Ok(_) => match send_chunked(device, wave, late_plan) {
+                Ok(sent) => {
+                    late_last = sent.last().map(|last| (last.handed, last.at));
+                    late_first = sent.first().filter(|_| late_plan.first).map(|first| (first.handed, first.at));
+                }
                 Err(error) => errors.push(format!("late burst: {error}")),
             },
             Err(error) => errors.push(format!("the wait for the late burst: {error}")),
@@ -316,25 +424,49 @@ fn late_chunked_trial(device: &dyn Device, rate: f64, wave: &[Iq], chunk: usize,
         errors.push(format!("rx_stop: {}", error.message));
     }
     let _ = drain_without_clock(device, Wall::from_millis(10), Wall::from_millis(300));
-    errors.extend(log.errors);
-    Evidence { per, chunk_ticks, late, control, errors, blocks: log.blocks, other: log.other, heard: tone_intervals(&log.samples, per, TONE_HZ), reports, late_last }
+    errors.extend(log.errors.iter().cloned());
+    (0..shape.channels)
+        .map(|channel| Evidence {
+            per: rx_per,
+            tx_per,
+            chunk_ticks,
+            late,
+            control,
+            errors: errors.clone(),
+            blocks: log.blocks.clone(),
+            other: log.other.clone(),
+            heard: tone_intervals(&log.samples[channel], rx_per, TONE_HZ),
+            reports: reports.iter().filter(|r| r.channel == channel).copied().collect(),
+            late_last,
+            late_first,
+        })
+        .collect()
 }
 
-/// One trial of a cell: its rate, its number and what it read.
+/// One trial of a cell: its transmit rate, its number and what it read (one evidence per channel).
 pub struct Trial {
     pub rate: f64,
     pub trial: usize,
-    pub evidence: Evidence,
+    pub evidence: Vec<Evidence>,
 }
 
 impl Trial {
-    /// The trial as the bench logs it: the intervals, the receive coverage and the reports by code, so a verdict can be read back from the log.
+    /// The trial's verdict: every channel's `late_chunked_verdict`, a FAIL in any is the trial's.
+    pub fn verdict(&self) -> Verdict {
+        iii::all_of(self.evidence.iter().map(late_chunked_verdict).collect())
+    }
+
+    /// The trial as the bench logs it, one object a channel: the intervals, the receive coverage and the reports by code, so a verdict can be read back from the log.
     pub fn trace(&self) -> Json {
-        let e = &self.evidence;
+        Json::Array(self.evidence.iter().enumerate().map(|(channel, e)| self.channel_trace(channel, e)).collect())
+    }
+
+    fn channel_trace(&self, channel: usize, e: &Evidence) -> Json {
         let count = |code: TxCode| e.reports.iter().filter(|r| r.code == code).count();
         json!({
-            "rate_hz": self.rate, "trial": self.trial, "per_ticks": e.per, "chunk_ticks": e.chunk_ticks, "late": [e.late.0, e.late.1], "control": [e.control.0, e.control.1],
-            "control_delay_ticks": control_delay(e), "late_last_handed_and_own_time": e.late_last, "errors": e.errors,
+            "rate_hz": self.rate, "trial": self.trial, "channel": channel, "per_ticks": e.tx_per, "rx_per_ticks": e.per, "chunk_ticks": e.chunk_ticks, "late": [e.late.0, e.late.1],
+            "control": [e.control.0, e.control.1],
+            "control_delay_ticks": control_delay(e), "late_last_handed_and_own_time": e.late_last, "late_first_handed_and_own_time": e.late_first, "errors": e.errors,
             "blocks": e.blocks.len(), "blocks_first": e.blocks.first(), "blocks_end": e.blocks.last().map(|(first, len)| first + *len as i64 * e.per),
             "other_positions": e.other, "heard": e.heard.iter().map(|iv| [iv.first_tick, iv.last_tick, iv.samples as i64]).collect::<Vec<_>>(),
             "reports": { "BurstAck": count(TxCode::BurstAck), "TimeError": count(TxCode::TimeError), "Underflow": count(TxCode::Underflow) + count(TxCode::UnderflowInPacket) },
@@ -344,15 +476,48 @@ impl Trial {
     }
 }
 
-/// The cell at `rate` on `device`, which opens its streamers (1 GHz, 0 dB, channel 0: `raw_tx` refuses anything outside bench.md's RF envelope) and closes
-/// them again. The caller is the only driver of the device's clock while it runs.
-pub fn late_chunked_cell(device: &dyn Device, rate: f64, trials: usize, late_ms: i64) -> Vec<Trial> {
+/// The device channels a shape transmits and receives on: slot A's (`d9_channel`) alone, or both slots.
+fn shape_channels(shape: &Shape) -> Vec<usize> {
+    if shape.channels == 1 { vec![d9_channel()] } else { (0..shape.channels).collect() }
+}
+
+/// What a channel's `apply` read back, against what was asked: an error text for each rate that is not the requested one (the trial is then INCONCLUSIVE; the
+/// RF bounds `raw_tx_on` asserts are the same whatever rate the device settled on).
+pub fn rate_errors(what: &str, want: f64, applied: &[ezsdr_radio_uhd::Applied]) -> Vec<String> {
+    applied.iter().enumerate().filter(|(_, a)| a.rate != want).map(|(channel, a)| format!("the {what} rate of channel {channel} is {} S/s, not the requested {want} S/s", a.rate)).collect()
+}
+
+/// A tone burst of `n` samples at `rate` as the device takes it (`TONE_HZ` from the carrier, amplitude 0.4: `tone_wave` asserts its bound).
+pub fn tone_burst(rate: f64, n: usize) -> Vec<Iq> {
+    iq(&tone_wave(rate, n, TONE_HZ))
+}
+
+/// Opens a one-channel transmit stream at `rate` inside bench.md's RF envelope (`raw_tx_on`), prints the rate it read back, and returns the errors for a rate that is not
+/// the requested one (C4 and C6 carry them into every trial).
+pub fn open_tx_checked(device: &dyn Device, rate: f64) -> Vec<String> {
+    let applied = raw_tx_on(device, &[d9_channel()], rate, 1e9);
+    println!("MT3 rates: transmit {:?} S/s (requested {rate})", applied.iter().map(|a| a.rate).collect::<Vec<_>>());
+    rate_errors("transmit", rate, &applied)
+}
+
+/// The cell for `shape` on `device`, which opens its streamers (1 GHz, 0 dB, `raw_tx_on` refuses anything outside bench.md's RF envelope), prints the rates they
+/// read back, and closes them again. The caller is the only driver of the device's clock while it runs.
+pub fn late_chunked_cell(device: &dyn Device, shape: Shape, trials: usize) -> Vec<Trial> {
     let _driver = device.host().drive();
-    raw_rx(device, rate, 1e9);
-    raw_tx(device, rate, 1e9);
-    let chunk = usize::try_from(send_cap(WINDOW_TICKS, MCR / rate as i64, &PACKETS)).expect("a send is a positive count");
-    let wave: Vec<Iq> = tone_wave(rate, CHUNKS * chunk, TONE_HZ).into_iter().map(|(re, im)| [re, im]).collect();
-    let out = (0..trials).map(|trial| Trial { rate, trial, evidence: late_chunked_trial(device, rate, &wave, chunk, late_ms) }).collect();
+    let channels = shape_channels(&shape);
+    let rx = raw_rx_on(device, &channels, shape.rx_rate, 1e9);
+    let tx = raw_tx_on(device, &channels, shape.tx_rate, 1e9);
+    println!(
+        "MT3 rates: transmit {:?} receive {:?} S/s (requested {} and {})",
+        tx.iter().map(|a| a.rate).collect::<Vec<_>>(),
+        rx.iter().map(|a| a.rate).collect::<Vec<_>>(),
+        shape.tx_rate,
+        shape.rx_rate
+    );
+    let errors: Vec<String> = [rate_errors("transmit", shape.tx_rate, &tx), rate_errors("receive", shape.rx_rate, &rx)].concat();
+    let chunk = chunk_at(shape.tx_rate);
+    let wave = tone_burst(shape.tx_rate, shape.burst);
+    let out = (0..trials).map(|trial| Trial { rate: shape.tx_rate, trial, evidence: late_chunked_trial(device, &shape, &wave, chunk, &errors) }).collect();
     device.rx_close(0);
     device.tx_close(0);
     out
@@ -360,14 +525,81 @@ pub fn late_chunked_cell(device: &dyn Device, rate: f64, trials: usize, late_ms:
 
 /// The cell's verdict: PASS only if every trial passes, FAIL if any fails, else INCONCLUSIVE; no trial is INCONCLUSIVE.
 pub fn cell_verdict(trials: &[Trial]) -> Verdict {
-    if trials.is_empty() {
+    cell_of(trials.iter().map(Trial::verdict).collect())
+}
+
+/// A cell's verdict from its trials' (C1-C3, C6): PASS only if every trial passes, FAIL if any fails, else INCONCLUSIVE; no trial is INCONCLUSIVE.
+pub fn cell_of(verdicts: Vec<Verdict>) -> Verdict {
+    if verdicts.is_empty() {
         return Verdict::Inconclusive("no trial was run".to_owned());
     }
-    iii::all_of(trials.iter().map(|trial| late_chunked_verdict(&trial.evidence)).collect())
+    iii::all_of(verdicts)
+}
+
+/// The ticks of the TimeErrors a late burst drew, in report order (the control's, before the late burst, are left out).
+pub fn late_ticks(e: &Evidence) -> Vec<i64> {
+    e.reports.iter().filter(|r| r.code == TxCode::TimeError).filter_map(|r| r.tick).filter(|tick| *tick >= e.late.0).collect()
+}
+
+/// What the late reports' ticks show (C2's observation, C3's span): an observation, never a verdict term. The FPGA's error FIFO holds 32 entries, so it can drop reports
+/// (R7): `skipped` lists the gaps that are a whole multiple (two or more) of the modal gap, which a report that went missing would make.
+#[derive(Debug, PartialEq)]
+pub struct Gaps {
+    pub ticks: Vec<i64>,
+    pub gaps: Vec<i64>,
+    /// The commonest gap, the smaller on a tie.
+    pub modal: Option<i64>,
+    /// The indexes into `gaps` of the multiples of the modal gap.
+    pub skipped: Vec<usize>,
+    /// The first report's tick to the last's: it omits the last packet's own drain (the DUC consumes it after it is reported).
+    pub partial_span: Option<i64>,
+}
+
+pub fn gaps_of(ticks: &[i64]) -> Gaps {
+    let gaps: Vec<i64> = ticks.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    let modal = gaps.iter().map(|gap| (gaps.iter().filter(|other| *other == gap).count(), -gap)).max().map(|(_, negated)| -negated);
+    let skipped = gaps.iter().enumerate().filter(|(_, gap)| modal.is_some_and(|modal| modal > 0 && **gap >= 2 * modal && **gap % modal == 0)).map(|(index, _)| index).collect();
+    Gaps { ticks: ticks.to_vec(), gaps, modal, skipped, partial_span: ticks.first().zip(ticks.last()).map(|(first, last)| last - first) }
+}
+
+/// The log line of a late trial's report ticks: all of them in order, the consecutive gaps, the modal gap in samples (INFERRED packet length: the Device exposes no
+/// transmit packet size, and the gaps are not an independent measure of it), the multiples of it and the partial span against the burst's own length.
+pub fn gaps_line(cell: &str, rate: f64, trial: usize, g: &Gaps, tx_per: i64, burst_ticks: i64) -> String {
+    let modal = g
+        .modal
+        .map_or("none".to_owned(), |modal| format!("{modal} ticks = {} samples + {} ticks (INFERRED packet length: the Device exposes no transmit packet size)", modal / tx_per, modal % tx_per));
+    let span = g
+        .partial_span
+        .map_or("none".to_owned(), |span| format!("{span} ticks against S x per {burst_ticks} ticks, difference {} (a partial span: it omits the last packet's own drain)", span - burst_ticks));
+    format!(
+        "MT3 {cell} gaps {} MS/s trial {trial}: {} late reports, ticks {:?}, gaps {:?}, modal gap {modal}, skipped-report gaps (a multiple of the modal) at {:?}, span {span}",
+        rate / 1e6,
+        g.ticks.len(),
+        g.ticks,
+        g.gaps,
+        g.skipped
+    )
+}
+
+/// Runs the cell and prints its lines: `MT3 <name> trace`, `VERDICT mt3 <name>` a trial, and when `with_gaps` `MT3 <name> gaps` a late trial, then `MT3 <name> cell`.
+/// `Some(text)` when the cell is not PASS.
+pub fn report_cell(device: &dyn Device, name: &str, shape: Shape, trials: usize, with_gaps: bool) -> Option<String> {
+    let rate = shape.tx_rate / 1e6;
+    let trials = late_chunked_cell(device, shape, trials);
+    for trial in &trials {
+        println!("MT3 {name} trace {}", trial.trace());
+        println!("VERDICT mt3 {} {rate} MS/s trial {}: {:?}", name.to_lowercase(), trial.trial, trial.verdict());
+        for e in trial.evidence.iter().filter(|_| with_gaps) {
+            println!("{}", gaps_line(name, trial.rate, trial.trial, &gaps_of(&late_ticks(e)), e.tx_per, e.late.1 - e.late.0));
+        }
+    }
+    let verdict = cell_verdict(&trials);
+    println!("MT3 {name} cell {rate} MS/s: {verdict:?}");
+    (!matches!(verdict, Verdict::Pass(_))).then(|| format!("{rate} MS/s: {verdict:?}"))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const PER: i64 = 200;
@@ -376,17 +608,19 @@ mod tests {
     /// The delay the verdict reads off the control: its onset is 5 samples into the first tone window.
     const MEASURED: i64 = DELAY + 5 * PER;
 
-    fn report(code: TxCode, tick: Option<i64>) -> TxReport {
+    /// A report of channel 0 (the other cells' unit tests use it too).
+    pub(crate) fn report(code: TxCode, tick: Option<i64>) -> TxReport {
         TxReport { code, tick, channel: 0 }
     }
 
     /// 1 MS/s, 2 500-sample chunks, 8 per burst: a control at 10 000 000 and a late burst at 30 000 000, 4 000 000 ticks (20 000 samples) each, the loopback
     /// 44 samples late, the receive from 2 000 000 to 40 000 000 in 1 ms blocks, the control heard, nothing else heard, the control's BurstAck and two TimeErrors.
-    fn passing() -> Evidence {
+    pub(crate) fn passing() -> Evidence {
         let blocks = (0..190).map(|k| (2_000_000 + k * 200_000, 1_000)).collect();
         let control = (10_000_000, 14_000_000);
         Evidence {
             per: PER,
+            tx_per: PER,
             chunk_ticks: CHUNK,
             late: (30_000_000, 34_000_000),
             control,
@@ -396,20 +630,12 @@ mod tests {
             heard: vec![HeardInterval { first_tick: control.0 + DELAY + 5 * PER, last_tick: control.1 + DELAY - 5 * PER, samples: 19_990 }],
             reports: vec![report(TxCode::BurstAck, Some(14_000_000)), report(TxCode::TimeError, Some(30_000_000)), report(TxCode::TimeError, Some(30_500_000))],
             late_last: Some((31_000_000, 33_500_000)),
-        }
-    }
-
-    fn kind(verdict: &Verdict) -> &'static str {
-        match verdict {
-            Verdict::Pass(_) => "PASS",
-            Verdict::Inconclusive(_) => "INCONCLUSIVE",
-            Verdict::Fail(_) => "FAIL",
+            late_first: None,
         }
     }
 
     fn assert_kind(e: &Evidence, want: &str, what: &str) {
-        let verdict = late_chunked_verdict(e);
-        assert_eq!(kind(&verdict), want, "{what}: {verdict:?}");
+        late_chunked_verdict(e).assert_kind(want, what);
     }
 
     /// A heard interval of `samples` samples starting at `first`.
@@ -575,6 +801,103 @@ mod tests {
         tickless.reports.retain(|r| r.code != TxCode::TimeError);
         tickless.reports.push(report(TxCode::TimeError, None));
         assert_kind(&tickless, "INCONCLUSIVE", "a TimeError without a tick is not evidence of the late burst");
+    }
+
+    /// C2's passing case: transmitted at 100 MS/s (2 ticks a sample), received at 10 MS/s (20 ticks a sample), 20 ms (4 000 000 ticks) bursts in 20 000-sample chunks
+    /// (40 000 ticks), the loopback 44 receive samples late, the receive in blocks of 1 000 samples (20 000 ticks), everything else as `passing`.
+    fn passing_split() -> Evidence {
+        let (per, delay) = (20, 44 * 20);
+        let control = (10_000_000, 14_000_000);
+        Evidence {
+            per,
+            tx_per: 2,
+            chunk_ticks: 40_000,
+            late: (30_000_000, 34_000_000),
+            control,
+            errors: Vec::new(),
+            blocks: (0..1_900).map(|k| (2_000_000 + k * 20_000, 1_000)).collect(),
+            other: Vec::new(),
+            heard: vec![HeardInterval { first_tick: control.0 + delay + 5 * per, last_tick: control.1 + delay - 5 * per, samples: 199_990 }],
+            reports: vec![report(TxCode::BurstAck, Some(14_000_000)), report(TxCode::TimeError, Some(30_000_000)), report(TxCode::TimeError, Some(30_040_000))],
+            late_last: Some((31_000_000, 33_960_000)),
+            late_first: None,
+        }
+    }
+
+    #[test]
+    fn mt3_c2_verdict_reads_the_receive_axis_at_the_receive_spacing() {
+        // Transmit and receive spacings differ by 10: the control's 199 990 heard samples are 99.995 % of the 200 000 receive samples of its interval (at the transmit
+        // spacing the interval would hold 2 000 000), and the blocks that follow one another at 20 ticks a sample cover the late interval without a gap.
+        assert_kind(&passing_split(), "PASS", "complete evidence at 10 MS/s receive and 100 MS/s transmit");
+        let mut half = passing_split();
+        half.heard[0].samples = 100_000;
+        assert_kind(&half, "INCONCLUSIVE", "half of the control was heard");
+        let mut late_tone = passing_split();
+        late_tone.heard.push(heard_at(30_000_000 + 44 * 20, 2_500, 20));
+        assert_kind(&late_tone, "FAIL", "a tone inside the late interval, on the receive axis");
+    }
+
+    /// A heard interval of `samples` samples starting at `first`, `per` ticks apart.
+    fn heard_at(first: i64, samples: i64, per: i64) -> HeardInterval {
+        HeardInterval { first_tick: first, last_tick: first + (samples - 1) * per, samples: samples as usize }
+    }
+
+    #[test]
+    fn mt3_c2_shapes_state_the_burst_the_rates_and_the_first_send() {
+        // 20 ms at every rate: 20 000 samples at 1 MS/s (8 chunks of 2 500, C1's own), 200 000 at 10 MS/s, 2 and 4 million at 100 and 200 MS/s; the Module's send is at most 20 000.
+        assert_eq!([1e6, 10e6, 100e6, 200e6].map(burst_samples), [20_000, 200_000, 2_000_000, 4_000_000]);
+        assert_eq!([1e6, 10e6, 100e6, 200e6].map(chunk_at), [2_500, 20_000, 20_000, 20_000]);
+        // C1 stays as it was: 8 chunks, 16 ms at 10 MS/s, 1 ms late, one channel, no short head.
+        let c1 = Shape::c1(10e6);
+        assert_eq!((c1.burst, c1.first_offset, c1.channels, c1.head, c1.rx_rate), (160_000, -TICKS_PER_MS, 1, None, 10e6));
+        let c2 = Shape::c2(200e6, 10e6);
+        assert_eq!((c2.tx_rate, c2.rx_rate, c2.burst, c2.first_offset, c2.head), (200e6, 10e6, 4_000_000, -TICKS_PER_MS, None));
+        let c3 = Shape::c3(10e6);
+        assert_eq!((c3.tx_rate, c3.rx_rate, c3.burst, c3.head), (10e6, 10e6, 200_000, Some(32)));
+        let c5 = Shape::c5(-40_000);
+        assert_eq!((c5.channels, c5.first_offset, c5.tx_rate, c5.burst), (2, -40_000, 1e6, 20_000));
+    }
+
+    #[test]
+    fn mt3_c2_a_rate_that_is_not_the_requested_one_is_an_error() {
+        let applied = |rate: f64| ezsdr_radio_uhd::Applied { rate, freq: 1e9, gain: 0.0, antenna: None };
+        assert!(rate_errors("transmit", 100e6, &[applied(100e6)]).is_empty());
+        let errors = rate_errors("transmit", 100e6, &[applied(100e6), applied(50e6)]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("channel 1") && errors[0].contains("transmit"), "{errors:?}");
+        let mut trial = passing_split();
+        trial.errors = errors;
+        assert_kind(&trial, "INCONCLUSIVE", "a trial that carries a rate error");
+    }
+
+    #[test]
+    fn mt3_c2_late_ticks_are_the_time_errors_of_the_late_burst_in_order() {
+        let mut e = passing_split();
+        e.reports = vec![
+            report(TxCode::TimeError, Some(11_000_000)),
+            report(TxCode::BurstAck, Some(14_000_000)),
+            report(TxCode::TimeError, Some(30_000_000)),
+            report(TxCode::Underflow, Some(31_000_000)),
+            report(TxCode::TimeError, None),
+            report(TxCode::TimeError, Some(30_040_000)),
+        ];
+        assert_eq!(late_ticks(&e), vec![30_000_000, 30_040_000], "the control's TimeError, the ACK, the Underflow and a tickless report are not late ticks");
+    }
+
+    #[test]
+    fn mt3_c2_gaps_find_the_modal_gap_and_the_skipped_reports() {
+        // Packets of 10 ticks and 2 clocks of overhead: gaps of 12, a missing report makes one of 24.
+        let g = gaps_of(&[100, 112, 124, 148, 160, 172]);
+        assert_eq!((g.gaps.clone(), g.modal, g.skipped.clone(), g.partial_span), (vec![12, 12, 24, 12, 12], Some(12), vec![2], Some(72)));
+        // A gap that is not a whole multiple is not a skipped report; a tie takes the smaller gap; one tick has no gap and an empty span of 0; none has nothing.
+        assert!(gaps_of(&[0, 12, 24, 54, 66, 78]).skipped.is_empty(), "a gap of 30 against a modal 12 is not a whole multiple");
+        assert_eq!(gaps_of(&[0, 5, 15]).modal, Some(5));
+        assert_eq!(gaps_of(&[7]), Gaps { ticks: vec![7], gaps: vec![], modal: None, skipped: vec![], partial_span: Some(0) });
+        assert_eq!(gaps_of(&[]).partial_span, None);
+        let line = gaps_line("C2", 100e6, 3, &g, 2, 4_000_000);
+        assert!(line.starts_with("MT3 C2 gaps 100 MS/s trial 3: 6 late reports, ticks [100, 112, 124, 148, 160, 172]"), "{line}");
+        assert!(line.contains("modal gap 12 ticks = 6 samples + 0 ticks (INFERRED packet length"), "{line}");
+        assert!(line.contains("at [2]") && line.contains("span 72 ticks against S x per 4000000 ticks, difference -3999928 (a partial span"), "{line}");
     }
 
     #[test]

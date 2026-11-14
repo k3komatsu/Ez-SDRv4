@@ -7983,7 +7983,7 @@ fn mt3_c1_rehearsal_the_fake_plays_the_on_time_control_and_drops_the_late_chunke
     // control and the receive coverage, so an INCONCLUSIVE verdict fails here as it fails on the bench. The loopback is delayed by 44 samples, as the bench's is.
     for rate in common::mt3::C1_RATES {
         let device = fake(FakeConfig { loopback_delay_samples: common::n47s5::LOOPBACK_DELAY_SAMPLES, ..FakeConfig::default() });
-        let trials = common::mt3::late_chunked_cell(&*device, rate, 2, common::mt3::LATE_MS);
+        let trials = common::mt3::late_chunked_cell(&*device, common::mt3::Shape::c1(rate), 2);
         for trial in &trials {
             println!("MT3 C1 trace {}", trial.trace());
         }
@@ -7998,12 +7998,157 @@ fn mt3_c1_rehearsal_a_failed_time_read_before_the_late_burst_is_inconclusive_and
     // then fails): the trial sends no late burst, so nothing is heard or acknowledged, and its verdict is INCONCLUSIVE. A wait that is skipped on a failed read
     // would send a burst meant to be late out on time, which plays: a correct device would FAIL.
     let device = fake(FakeConfig { faults: vec![FakeFault::TimeReadFailsFor(Wall::from_millis(100), Wall::from_secs(2))], ..FakeConfig::default() });
-    let trials = common::mt3::late_chunked_cell(&*device, 1e6, 1, common::mt3::LATE_MS);
-    let evidence = &trials[0].evidence;
+    let trials = common::mt3::late_chunked_cell(&*device, common::mt3::Shape::c1(1e6), 1);
+    let evidence = &trials[0].evidence[0];
     assert!(evidence.errors.iter().any(|error| error.starts_with("the wait for the late burst: time_now")), "the failed wait is recorded as such: {:?}", evidence.errors);
     assert_eq!(evidence.late_last, None, "no late send after a wait that did not happen");
     let verdict = common::mt3::late_chunked_verdict(evidence);
     assert!(matches!(verdict, common::tone::Verdict::Inconclusive(_)), "{verdict:?}");
+}
+
+/// The samples the fake was sent, over the `tx_send` calls its log holds.
+fn mt3_sent_samples(device: &FakeDevice) -> usize {
+    device.calls().iter().filter_map(|call| call.strip_prefix("tx_send 0 n=")).map(|rest| rest.split(' ').next().unwrap().parse::<usize>().unwrap()).sum()
+}
+
+#[test]
+fn mt3_c2_rehearsal_the_fake_drops_a_20_ms_burst_whole_at_100_and_200_msps_with_the_receive_at_10() {
+    // The body of `hw_mt3_c2_chunked_late_burst_high_rates` on the FakeDevice (AGENTS section 9): a control and a late burst of 20 ms (2 and 4 million samples), transmitted at 100 and 200
+    // MS/s and received at 10. The fake's loopback forwards the transmitted signal only when the receive and transmit rates are the same, so it cannot hear the control: the
+    // trial is INCONCLUSIVE for that one reason and no other (the pure verdict's unit tests cover the split spacing), and everything else the bench's verdict needs holds: no
+    // failed call (the rates read back as requested), a TimeError for every send of the late burst, none of them an ACK, the last chunk handed well before its own time.
+    for tx in common::mt3::C2_RATES {
+        let device = fake(FakeConfig { loopback_delay_samples: common::n47s5::LOOPBACK_DELAY_SAMPLES, ..FakeConfig::default() });
+        let shape = common::mt3::Shape::c2(tx, common::mt3::C2_RX_RATE);
+        let trials = common::mt3::late_chunked_cell(&*device, shape, 1);
+        println!("MT3 C2 trace {}", trials[0].trace());
+        let e = &trials[0].evidence[0];
+        assert_eq!(common::mt3::late_chunked_reasons(e), ["the control burst was not heard"], "at {tx} S/s");
+        assert_eq!((e.per, e.tx_per), (MCR / 10_000_000, MCR / tx as i64), "the receive spacing is 10 MS/s's and the transmit spacing the cell's");
+        let chunk = common::mt3::chunk_at(tx);
+        assert_eq!(mt3_sent_samples(&device), 2 * shape.burst, "a control and a late burst of 20 ms");
+        let late = common::mt3::late_ticks(e);
+        assert_eq!(late.len(), shape.burst / chunk, "a TimeError for every send of the late burst at {tx} S/s");
+        let gaps = common::mt3::gaps_of(&late);
+        println!("{}", common::mt3::gaps_line("C2", tx, 0, &gaps, e.tx_per, e.late.1 - e.late.0));
+        assert!(gaps.skipped.is_empty() && gaps.modal == Some(e.chunk_ticks), "the fake reports a packet each chunk's time apart: {gaps:?}");
+        assert!(!e.reports.iter().any(|r| r.code == TxCode::BurstAck && r.tick.is_some_and(|tick| tick >= e.late.0)), "no BurstAck for the late burst");
+    }
+}
+
+#[test]
+fn mt3_c3_rehearsal_a_late_burst_with_a_32_sample_first_send_is_dropped_whole() {
+    // The body of `hw_mt3_c3_short_first_send` on the FakeDevice: the late burst's first send is 32 samples, then the Module's chunks to 20 ms, at 1 and 10 MS/s. The control, in
+    // chunks of the Module, is heard; the late burst draws a TimeError a send, plays nothing and has no BurstAck: PASS.
+    for rate in common::mt3::C3_RATES {
+        let device = fake(FakeConfig { loopback_delay_samples: common::n47s5::LOOPBACK_DELAY_SAMPLES, ..FakeConfig::default() });
+        let shape = common::mt3::Shape::c3(rate);
+        let trials = common::mt3::late_chunked_cell(&*device, shape, 2);
+        let verdict = common::mt3::cell_verdict(&trials);
+        assert!(matches!(verdict, common::tone::Verdict::Pass(_)), "C3 on the fake at {rate} S/s: {verdict:?}");
+        assert_eq!(mt3_sent_samples(&device), 2 * 2 * shape.burst, "two bursts of 20 ms a trial");
+        let short = device.calls().iter().filter(|call| call.starts_with("tx_send 0 n=32 at=") && call.contains("sob=true eob=false")).count();
+        assert_eq!(short, 2, "one short first send a trial (the control's first send is a chunk) at {rate} S/s");
+        let e = &trials[0].evidence[0];
+        let chunk = common::mt3::chunk_at(rate);
+        assert_eq!(common::mt3::late_ticks(e).len(), 1 + (shape.burst - 32).div_ceil(chunk), "a TimeError for the short send and each chunk after it");
+        let gaps = common::mt3::gaps_of(&common::mt3::late_ticks(e));
+        println!("{}", common::mt3::gaps_line("C3", rate, 0, &gaps, e.tx_per, e.late.1 - e.late.0));
+    }
+}
+
+#[test]
+fn mt3_c4_rehearsal_the_fake_drops_b_before_its_own_limit_and_plays_it_at_and_after() {
+    // The body of `hw_mt3_c4_cascade_boundary` on the FakeDevice (AGENTS section 9), at the bench's two rates: B, handed behind A's drain, is dropped at every delta below the fake's limit
+    // and played at the limit and after. The bench's grid ends 220 us short of the limit (its fine part, 0 to 30 us), so the rehearsal books both sides of the boundary itself: the
+    // one sample below the limit (dropped) and the limit and the limit plus the comparison's uncertainty (played; the latter is where a dropped B fails the sweep) and 20 us past it, ten trials each through the sweep's own verdict, and a coarse and a fine delta below it. A
+    // limit that is off by a sample, a send or a burst's share turns it red. (A trial costs the manual clock about 0.15 s of wall time, so this is not the bench's whole grid.)
+    for rate in common::mt3_cascade::C4_RATES {
+        let device = fake(FakeConfig::default());
+        let per = MCR / rate as i64;
+        let limit = common::mt3_cascade::planned_limit(rate);
+        let below = common::mt3_cascade::cascade_cell(&*device, rate, &[-20 * common::mt3_cascade::US, 30 * common::mt3_cascade::US, limit - per], 2);
+        for trial in &below {
+            assert_eq!(trial.outcome(), common::mt3_cascade::Outcome::Dropped, "delta {} ticks (limit {limit}) at {rate} S/s: {:?}", trial.delta, trial.evidence);
+            assert!(trial.effective_delta().is_some_and(|delta| delta < limit), "the delta aligned to the sample grid is still below the limit");
+        }
+        let unc = common::mt3_cascade::uncertainty_ticks(per);
+        // The cells carry each dropped trial's effective delta (B's time aligned up to the sample grid): the sweep judges by it, not by the nominal delta.
+        let below_cells = common::mt3_cascade::cells_of(&below);
+        for cell in &below_cells {
+            assert_eq!(cell.dropped, 2, "{cell:?}");
+            assert!(cell.dropped_at.iter().all(|at| *at >= cell.delta && *at < cell.delta + per), "an effective delta is the nominal one aligned up by less than a sample: {cell:?}");
+        }
+        assert!(below_cells.iter().any(|cell| cell.dropped_at.iter().any(|at| *at != cell.delta)), "t0 is not on the sample grid, so some trial's B was aligned up: {below_cells:?}");
+        let effective: Vec<i64> = below.iter().filter(|trial| trial.delta == below_cells[0].delta).filter_map(|trial| trial.effective_delta()).collect();
+        assert_eq!(below_cells[0].dropped_at, effective, "the cell holds the trials' effective deltas");
+        let (cells, failed) = common::mt3_cascade::report_sweep(&*device, rate, &[limit, limit + unc, limit + 20 * common::mt3_cascade::US], common::mt3_cascade::C4_TRIALS);
+        assert_eq!(failed, None, "the sweep at and past the limit on the fake at {rate} S/s");
+        let all_played = |cell: &common::mt3_cascade::Cell| cell.played == common::mt3_cascade::C4_TRIALS && cell.dropped == 0 && cell.inconclusive == 0 && cell.dropped_at.is_empty();
+        assert!(cells.len() == 3 && cells.iter().all(all_played), "B plays at the limit, at the limit plus the uncertainty and past it, every trial: {cells:?}");
+    }
+}
+
+#[test]
+fn mt3_c5_rehearsal_the_fake_drops_both_channels_together_clearly_late_and_plays_both_on_time() {
+    // The body of `hw_mt3_c5_two_channel_late_start` on the FakeDevice (AGENTS section 9), with the grid's two ends (-200 us, +200 us: a trial costs the manual clock about half a second, so not
+    // the whole grid) and two trials a cell: a burst 1 ms late (the clear cell) is dropped on both channels and passes C1's verdict; one 200 us early (it is late, as the fake's reference wait
+    // overshoots by under 200 us) is dropped on both; one 200 us after the reference is played on both; and the fake never splits a two-channel burst, since one packet carries both channels.
+    // The reading is INCONCLUSIVE here for one reason, too few trials (the pure reading's unit tests cover the rest, a SPLIT included).
+    let device = fake(FakeConfig { loopback_delay_samples: common::n47s5::LOOPBACK_DELAY_SAMPLES, ..FakeConfig::default() });
+    let (cells, reading) = common::mt3_two::report_c5(&*device, &[-200, 200], 2);
+    use common::mt3_cascade::Outcome::{Dropped, Played};
+    assert_eq!(cells[0].trials, vec![[Dropped.clone(), Dropped.clone()]; 2], "-200 us: both channels dropped");
+    assert_eq!(cells[1].trials, vec![[Played.clone(), Played.clone()]; 2], "+200 us: both channels played");
+    let text = match &reading {
+        common::tone::Verdict::Inconclusive(text) => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        text.contains("need 10 decided trials") && !text.contains("clear cell") && !text.contains("straddle"),
+        "the clear cell passed, the grid straddled, and only the trial count is short: {text}"
+    );
+}
+
+#[test]
+fn mt3_c5_rehearsal_a_two_channel_trial_records_where_its_first_send_was_handed() {
+    // The first late send's handed time is what places the host's latency against the first sample's time (the transition C5 looks for): a two-channel trial records it, a one-channel
+    // trial (C1) does not read the time after its first send.
+    let device = fake(FakeConfig { loopback_delay_samples: common::n47s5::LOOPBACK_DELAY_SAMPLES, ..FakeConfig::default() });
+    let trials = common::mt3::late_chunked_cell(&*device, common::mt3::Shape::c5(0), 1);
+    let (handed, at) = trials[0].evidence[0].late_first.expect("the first send of a two-channel late burst is recorded");
+    assert!(handed >= at, "the fake hands the burst at the reference instant, its first sample's time: handed {handed}, own {at}");
+    assert_eq!(trials[0].evidence[1].late_first, Some((handed, at)), "one send carries both channels");
+    let one = common::mt3::late_chunked_cell(&*device, common::mt3::Shape::c1(1e6), 1);
+    assert_eq!(one[0].evidence[0].late_first, None);
+}
+
+#[test]
+fn mt3_c6_rehearsal_a_held_tail_starves_the_head_then_the_close_is_dropped_with_no_ack() {
+    // The body of `hw_mt3_c6_held_tail_starves` on the FakeDevice (AGENTS section 9), at the bench's two rates: the head (S - 1 samples, the Module's chunks, no EOB) plays, the close (the
+    // held tail and a zero, EOB) is handed 1 ms past its instant, and the fake reports an Underflow where the head ended, then a TimeError for the late close, and no BurstAck: PASS.
+    // The close the bench sends is the Module's, two samples timed at the tail's instant.
+    for rate in common::mt3_tail::C6_RATES {
+        let device = fake(FakeConfig::default());
+        let trials = common::mt3_tail::held_tail_cell(&*device, rate, 2);
+        for trial in &trials {
+            println!("MT3 C6 trace {}", trial.trace());
+        }
+        let verdict = common::mt3_tail::tail_cell_verdict(&trials);
+        assert!(matches!(verdict, common::tone::Verdict::Pass(_)), "C6 on the fake at {rate} S/s: {verdict:?}");
+        let e = &trials[0].evidence;
+        let codes: Vec<TxCode> = e.reports.iter().map(|r| r.code).collect();
+        assert_eq!(codes[0], TxCode::Underflow, "the first report is the head running dry: {codes:?}");
+        assert!(codes[1..].iter().all(|code| *code == TxCode::TimeError), "then TimeErrors only: {codes:?}");
+        let per = MCR / rate as i64;
+        assert_eq!(e.reports[0].tick, Some(e.close_at), "the head ran dry where the tail was due");
+        assert_eq!(e.close_at - e.first, (common::mt3::burst_samples(rate) as i64 - 1) * per, "the close is timed at the tail's instant");
+        let calls = device.calls();
+        for trial in &trials {
+            let close = format!("tx_send 0 n=2 at={} sob=false eob=true", trial.evidence.close_at);
+            assert_eq!(calls.iter().filter(|call| **call == close).count(), 1, "one two-sample close a trial, timed at the tail's instant, EOB and no SOB (the Module's)");
+        }
+    }
 }
 
 #[test]

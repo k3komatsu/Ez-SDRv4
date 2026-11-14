@@ -1783,20 +1783,103 @@ fn hw_mt3_c1_chunked_late_burst() {
         let device = raw();
         pin_slot_a(&*device);
         assert_eq!(d9_channel(), 0, "C1 transmits on slot A only (channel 0)");
-        let mut failures = Vec::new();
-        for rate in mt3::C1_RATES {
-            let trials = mt3::late_chunked_cell(&*device, rate, mt3::C1_TRIALS, mt3::LATE_MS);
-            for trial in &trials {
-                println!("MT3 C1 trace {}", trial.trace());
-                println!("VERDICT mt3 c1 {} MS/s trial {}: {:?}", rate / 1e6, trial.trial, mt3::late_chunked_verdict(&trial.evidence));
-            }
-            let verdict = mt3::cell_verdict(&trials);
-            println!("MT3 C1 cell {} MS/s: {verdict:?}", rate / 1e6);
-            if !matches!(verdict, Verdict::Pass(_)) {
-                failures.push(format!("{} MS/s: {verdict:?}", rate / 1e6));
-            }
-        }
+        let failures: Vec<String> = mt3::C1_RATES.iter().filter_map(|&rate| mt3::report_cell(&*device, "C1", mt3::Shape::c1(rate), mt3::C1_TRIALS, false)).collect();
         assert!(failures.is_empty(), "C1: {failures:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_mt3_c2_chunked_late_burst_high_rates() {
+    // Cell C2 (maintenance table 3): C1's trial with a 20 ms burst, transmitted at 100 and 200 MS/s and received at 10 MS/s (the tone detector keeps C1's window and
+    // threshold; `apply` reads both rates back, and a rate that is not the requested one makes the trial INCONCLUSIVE). Also prints every late report's tick, the gaps and the modal
+    // gap (`MT3 C2 gaps`; an observation, never a verdict term). Slot A only, 1 GHz, 0 dB, a 100 kHz tone, into the 30 dB loopback; the owner confirms the attenuator before every
+    // run, and board #2 is the same test there. INCONCLUSIVE fails the test as FAIL does. Bounded to 15 min: a bound that passes writes `EZSDR-INFRA:` and aborts (a hang).
+    bounded(Wall::from_secs(900), "hw_mt3_c2_chunked_late_burst_high_rates", || {
+        let device = raw();
+        pin_slot_a(&*device);
+        assert_eq!(d9_channel(), 0, "C2 transmits on slot A only (channel 0)");
+        let failures: Vec<String> = mt3::C2_RATES.iter().filter_map(|&rate| mt3::report_cell(&*device, "C2", mt3::Shape::c2(rate, mt3::C2_RX_RATE), mt3::C1_TRIALS, true)).collect();
+        assert!(failures.is_empty(), "C2: {failures:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_mt3_c3_short_first_send() {
+    // Cell C3 (maintenance table 3): C1's trial with a 20 ms burst whose late copy's first send is `mt3::C3_HEAD` (32) samples, UR-22's minimum first send, at 1 and 10 MS/s: does
+    // the DUC's short first output packet change the drop? Also prints the late reports' gaps and the partial span against S x per (`MT3 C3 gaps`; the overhead the fake's
+    // `2 x packets` pad stands for; an observation, never a verdict term). Slot A only, 1 GHz, 0 dB, a 100 kHz tone, into the 30 dB loopback; the owner confirms the attenuator
+    // before every run. INCONCLUSIVE fails the test as FAIL does. Bounded to 15 min.
+    bounded(Wall::from_secs(900), "hw_mt3_c3_short_first_send", || {
+        let device = raw();
+        pin_slot_a(&*device);
+        assert_eq!(d9_channel(), 0, "C3 transmits on slot A only (channel 0)");
+        let failures: Vec<String> = mt3::C3_RATES.iter().filter_map(|&rate| mt3::report_cell(&*device, "C3", mt3::Shape::c3(rate), mt3::C1_TRIALS, true)).collect();
+        assert!(failures.is_empty(), "C3: {failures:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_mt3_c4_cascade_boundary() {
+    // Cell C4 (maintenance table 3, UR-33, Fable M3): does the X310 end a drain no later than the fake's limit? A is C1's late burst (20 ms, its first sample 1 ms late); `t0` is the tick of
+    // its first TimeError (the radio's time check of A's first packet); B, one timed burst of one chunk, is handed at once and timed at `t0 + S x per + delta`. `delta` is swept over
+    // a fixed grid (coarse -20, -10, 50, 100 us, fine 0 to 30 us in 1 us steps, the fake's own limit and 20 us past it), ten trials each, at 1 and 10 MS/s. A trial is valid only
+    // if A's sends were handed at least 1 ms before the drain reached them and B 2 ms before its end (INFERRED margin). FAIL if B is dropped at or past the fake's limit plus the
+    // comparison's uncertainty; the deltas below it are the device's own boundary (`MT3 C4 boundary`). Transmit only. Slot A only, 1 GHz, 0 dB, into the 30 dB loopback; the owner
+    // confirms the attenuator before every run. INCONCLUSIVE fails the test as FAIL does. Bounded to 15 min.
+    bounded(Wall::from_secs(900), "hw_mt3_c4_cascade_boundary", || {
+        let device = raw();
+        pin_slot_a(&*device);
+        assert_eq!(d9_channel(), 0, "C4 transmits on slot A only (channel 0)");
+        let failures: Vec<String> = common::mt3_cascade::C4_RATES
+            .iter()
+            .filter_map(|&rate| common::mt3_cascade::report_sweep(&*device, rate, &common::mt3_cascade::planned_grid(rate), common::mt3_cascade::C4_TRIALS).1)
+            .collect();
+        assert!(failures.is_empty(), "C4: {failures:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_mt3_c5_two_channel_late_start() {
+    // Cell C5 (maintenance table 3, Fable m1): can one channel of a two-channel burst play alone? One two-channel stream on slots A and B (receive on both), C1's trial: an on-time control, then a
+    // burst of 20 ms at 1 MS/s whose first sample is timed at the host's reference instant plus a delta. The clear cell (1 ms before it) must drop on both channels (C1's verdict per channel); the
+    // marginal grid (-200, -100, -50, -20, 0, 20, 50, 100, 200 us, ten trials each) must straddle the transition, which the host's control-call latency decides. A SPLIT (one channel played,
+    // the other dropped) FAILS the test: it is a device fact for the contract review (RM-11), not a tool defect. INCONCLUSIVE (no transition, too few decided trials, a clear cell that is not PASS)
+    // fails it too. TRANSMITS ON SLOT B TOO: it runs only through `two_channel_gate` (an OBX or UBX in both slots and `EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1`, set only after the owner confirmed slot B's
+    // TX/RX -> attenuator -> RX2); otherwise it prints `MT3 C5 NOT RUNNABLE` and transmits nothing. Bounded to 15 min.
+    bounded(Wall::from_secs(900), "hw_mt3_c5_two_channel_late_start", || {
+        use common::bench1115::{SLOT_B_CONFIRMED, two_channel_gate};
+        let device = raw();
+        pin_slot_a(&*device);
+        assert_eq!(d9_channel(), 0, "C5 opens both slots itself (channels 0 and 1): EZSDR_D9_CHANNEL stays unset");
+        let front_ends: Vec<Option<String>> = (0..device.channels(Dir::Tx).min(2)).map(|channel| device.front_end(Dir::Tx, channel).ok()).collect();
+        let confirmed = std::env::var(SLOT_B_CONFIRMED).is_ok_and(|value| value == "1");
+        let gate = two_channel_gate(&front_ends, confirmed).and_then(|()| if device.channels(Dir::Rx) >= 2 { Ok(()) } else { Err("the receive side has fewer than two channels".to_owned()) });
+        if let Err(reason) = gate {
+            println!("MT3 C5 NOT RUNNABLE: {reason}");
+            panic!("C5 is not runnable (INCONCLUSIVE, nothing was transmitted): {reason}");
+        }
+        let (_, reading) = common::mt3_two::report_c5(&*device, &common::mt3_two::DELTAS_US, common::mt3_two::C5_TRIALS);
+        assert!(matches!(reading, Verdict::Pass(_)), "C5: {reading:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_mt3_c6_held_tail_starves() {
+    // Cell C6 (maintenance table 3, Fable M2): a 20 ms burst whose head (its first S - 1 samples, the Module's chunks, no EOB) is on time and whose close is the Module's (the held tail and
+    // a zero, EOB, timed at the tail's instant, SOB false) handed once the device time is 1 ms past that instant, so the device runs dry first. Expected: an Underflow where the head ended,
+    // then a TimeError, no BurstAck (R3/R4: INFERRED from the FPGA source until this runs). 1 and 10 MS/s, ten trials each. Transmit only (no receive). Slot A only, 1 GHz, 0 dB, into the
+    // 30 dB loopback; the owner confirms the attenuator before every run. INCONCLUSIVE fails the test as FAIL does. Bounded to 15 min.
+    bounded(Wall::from_secs(900), "hw_mt3_c6_held_tail_starves", || {
+        let device = raw();
+        pin_slot_a(&*device);
+        assert_eq!(d9_channel(), 0, "C6 transmits on slot A only (channel 0)");
+        let failures: Vec<String> = common::mt3_tail::C6_RATES.iter().filter_map(|&rate| common::mt3_tail::report_tail_cell(&*device, rate, common::mt3_tail::C6_TRIALS)).collect();
+        assert!(failures.is_empty(), "C6: {failures:?}");
     });
 }
 

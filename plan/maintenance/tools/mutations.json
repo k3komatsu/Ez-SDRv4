@@ -24798,8 +24798,8 @@
   "id": "MT3-53",
   "name": "the late burst is sent although the wait for its reference instant failed (C1 trial)",
   "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
-  "old": "Ok(()) => match send_chunked(device, wave, late_at, per, chunk) {",
-  "new": "_ => match send_chunked(device, wave, late_at, per, chunk) {",
+  "old": "Ok(_) => match send_chunked(device, wave, late_plan) {",
+  "new": "_ => match send_chunked(device, wave, late_plan) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "mt3_c1_rehearsal_a_failed_time_read_before_the_late_burst_is_inconclusive_and_sends_nothing"
@@ -25623,5 +25623,775 @@
   "crate": "ezsdr-radio",
   "test_bin": "staging",
   "filter": "txbook_a_pause_remembers_the_first_instant_of_the_device_burst_it_closed"
+ },
+ {
+  "id": "BT1-01",
+  "name": "the control's heard samples are counted at the transmit spacing, not the receive spacing (C2 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "(to - from) / e.per * 9",
+  "new": "(to - from) / e.tx_per * 9",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c2_verdict_reads_the_receive_axis_at_the_receive_spacing"
+ },
+ {
+  "id": "BT1-02",
+  "name": "the receive blocks' coverage is read at the transmit spacing (C2 verdict)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "covers(&e.blocks, e.per, want_from, want_to)",
+  "new": "covers(&e.blocks, e.tx_per, want_from, want_to)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c2_verdict_reads_the_receive_axis_at_the_receive_spacing"
+ },
+ {
+  "id": "BT1-03",
+  "name": "a rate that is not the requested one is no error (C2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": ".filter(|(_, a)| a.rate != want)",
+  "new": ".filter(|(_, a)| false)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c2_a_rate_that_is_not_the_requested_one_is_an_error"
+ },
+ {
+  "id": "BT1-04",
+  "name": "the control's TimeErrors count as the late burst's ticks (C2 gaps)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": ".filter(|tick| *tick >= e.late.0)",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c2_late_ticks_are_the_time_errors_of_the_late_burst_in_order"
+ },
+ {
+  "id": "BT1-05",
+  "name": "the late burst is 16 ms, not 20 ms, at every rate after C1",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "pub const BURST_MS: i64 = 20;",
+  "new": "pub const BURST_MS: i64 = 16;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c2_shapes_state_the_burst_the_rates_and_the_first_send"
+ },
+ {
+  "id": "BT1-06",
+  "name": "the late burst's first send is a chunk, not C3's 32 samples",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "head: shape.head.unwrap_or(chunk)",
+  "new": "head: chunk",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c3_rehearsal_a_late_burst_with_a_32_sample_first_send_is_dropped_whole"
+ },
+ {
+  "id": "BT1-07",
+  "name": "a gap that is not a whole multiple of the modal gap is a skipped report (C2 gaps)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "**gap >= 2 * modal && **gap % modal == 0",
+  "new": "**gap >= 2 * modal",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c2_gaps_find_the_modal_gap_and_the_skipped_reports"
+ },
+ {
+  "id": "BT1-08",
+  "name": "the modal gap itself is a skipped report (C2 gaps)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "**gap >= 2 * modal && **gap % modal == 0",
+  "new": "**gap >= modal && **gap % modal == 0",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c2_gaps_find_the_modal_gap_and_the_skipped_reports"
+ },
+ {
+  "id": "BT1-09",
+  "name": "a burst's last send always carries the EOB, the head's too (C6 head)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "plan.eob && sent + n == wave.len()",
+  "new": "sent + n == wave.len()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_rehearsal_a_held_tail_starves_the_head_then_the_close_is_dropped_with_no_ack"
+ },
+ {
+  "id": "BT1-10",
+  "name": "C5's shape is one channel",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "Shape { first_offset, channels: 2, ..Shape::c2(1e6, 1e6) }",
+  "new": "Shape { first_offset, channels: 1, ..Shape::c2(1e6, 1e6) }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c2_shapes_state_the_burst_the_rates_and_the_first_send"
+ },
+ {
+  "id": "BT1-11",
+  "name": "a send of A handed late is not held to its 1 ms margin before the drain reaches it (C4 outcome, M1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "send.handed + A_MARGIN_TICKS > t0 + (send.at - e.a_first)",
+  "new": "send.handed > t0 + (send.at - e.a_first)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_a_stalled_host_or_a_late_b_is_inconclusive"
+ },
+ {
+  "id": "BT1-12",
+  "name": "B need not be handed 2 ms before the drain's end (C4 outcome, M1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "Some(handed) if handed + B_MARGIN_TICKS <= t0 + e.a_ticks => {}",
+  "new": "Some(_) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_a_stalled_host_or_a_late_b_is_inconclusive"
+ },
+ {
+  "id": "BT1-13",
+  "name": "an Underflow or sequence-error report does not make the trial inconclusive (C4 outcome)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "if e.reports.iter().any(|r| matches!(r.code, TxCode::Underflow | TxCode::UnderflowInPacket | TxCode::SeqError | TxCode::SeqErrorInBurst)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_an_underflow_a_sequence_error_or_a_tickless_report_is_inconclusive"
+ },
+ {
+  "id": "BT1-14",
+  "name": "a report without a tick does not make the trial inconclusive (C4 outcome)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "if e.reports.iter().any(|r| r.tick.is_none() && matches!(r.code, TxCode::BurstAck | TxCode::TimeError)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_an_underflow_a_sequence_error_or_a_tickless_report_is_inconclusive"
+ },
+ {
+  "id": "BT1-15",
+  "name": "A taking more sends than planned is not inconclusive (C4 outcome)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "if e.a_sends.len() != e.planned_a_sends {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_a_stalled_host_or_a_late_b_is_inconclusive"
+ },
+ {
+  "id": "BT1-16",
+  "name": "a BurstAck before B's first sample is not inconclusive: A is never acknowledged (C4 outcome)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "if e.reports.iter().any(|r| r.code == TxCode::BurstAck && r.tick.is_some_and(|tick| tick < e.b_first)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_without_a_time_error_for_a_there_is_no_drain"
+ },
+ {
+  "id": "BT1-17",
+  "name": "an ACK at B is dropped and a TimeError at B is played (C4 outcome)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "(true, false) => Outcome::Played, (false, true) => Outcome::Dropped,",
+  "new": "(true, false) => Outcome::Dropped, (false, true) => Outcome::Played,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_a_timed_error_at_b_is_dropped_and_an_ack_at_b_is_played"
+ },
+ {
+  "id": "BT1-18",
+  "name": "a BurstAck and a TimeError both at B are not inconclusive (C4 outcome)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "(true, true) => Outcome::Inconclusive(\"a BurstAck and a TimeError both at or after B's first sample\".to_owned()),",
+  "new": "(true, true) => Outcome::Played,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_a_timed_error_at_b_is_dropped_and_an_ack_at_b_is_played"
+ },
+ {
+  "id": "BT1-19",
+  "name": "t0 is any TimeError, A's leftover from the last trial too (C4 trial)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "report.code == TxCode::TimeError && *tick >= a_first",
+  "new": "report.code == TxCode::TimeError",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_t0_is_a_time_error_at_or_after_a_s_first_sample"
+ },
+ {
+  "id": "BT1-20",
+  "name": "the sweep does not fail a B dropped past the fake's limit (C4 sweep)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "if !late.is_empty() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_sweep_fails_when_b_is_dropped_past_the_fakes_limit_and_the_uncertainty"
+ },
+ {
+  "id": "BT1-21",
+  "name": "the sweep fails a drop inside the uncertainty past the limit (C4 sweep)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "cell.dropped_at.iter().any(|at| *at >= limit + uncertainty)",
+  "new": "cell.dropped_at.iter().any(|at| *at >= limit)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_sweep_fails_when_b_is_dropped_past_the_fakes_limit_and_the_uncertainty"
+ },
+ {
+  "id": "BT1-22",
+  "name": "the sweep is not inconclusive without decided trials at the limit (C4 sweep)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "if beyond.is_empty() || !thin.is_empty() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_sweep_needs_ten_decided_trials_at_and_past_the_limit"
+ },
+ {
+  "id": "BT1-23",
+  "name": "the sweep needs only nine decided trials at the limit (C4 sweep)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "pub const MIN_DECIDED: usize = 10;",
+  "new": "pub const MIN_DECIDED: usize = 9;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_sweep_needs_ten_decided_trials_at_and_past_the_limit"
+ },
+ {
+  "id": "BT1-24",
+  "name": "the test's copy of the fake's limit adds a sample (C4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "(pad + g) * ratio",
+  "new": "(pad + g + 1) * ratio",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_rehearsal_the_fake_drops_b_before_its_own_limit_and_plays_it_at_and_after"
+ },
+ {
+  "id": "BT1-25",
+  "name": "the test's copy of the fake's limit leaves out the two samples a send (C4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "2 * packets as i64",
+  "new": "packets as i64",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_the_limit_is_the_fakes_formula"
+ },
+ {
+  "id": "BT1-26",
+  "name": "the test's copy of the fake's limit leaves out the DUC's wait a burst (C4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "bursts as i64 * (g + samples_in(10_000, ratio))",
+  "new": "bursts as i64 * g",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_the_limit_is_the_fakes_formula"
+ },
+ {
+  "id": "BT1-27",
+  "name": "the bracket's upper end may lie below the last all-dropped delta (C4 boundary)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": ".is_none_or(|dropped| cell.delta > dropped)",
+  "new": ".is_none_or(|dropped| true)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_the_boundary_summary_names_the_bracket_and_the_mixed_cells"
+ },
+ {
+  "id": "BT1-28",
+  "name": "the grid's fine part stops at 20 us (C4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "(0..=30)",
+  "new": "(0..=20)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_the_grid_is_the_stated_one"
+ },
+ {
+  "id": "BT1-30",
+  "name": "a BurstAck does not fail the held-tail verdict (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "if !acks.is_empty() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_burst_ack_fails"
+ },
+ {
+  "id": "BT1-31",
+  "name": "a TimeError before the first Underflow in report order does not fail (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "if e.reports[..at].iter().any(|r| burst_time_error(r, e.first)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_time_error_before_the_underflow_fails"
+ },
+ {
+  "id": "BT1-32",
+  "name": "a TimeError whose tick is before the Underflow's does not fail (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "if e.reports.iter().any(|r| burst_time_error(r, e.first) && r.tick.is_some_and(|late| late < tick)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_time_error_before_the_underflow_fails"
+ },
+ {
+  "id": "BT1-33",
+  "name": "a missing Underflow is not inconclusive (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "None => reasons.push(\"no Underflow: the device did not report running dry\".to_owned()),",
+  "new": "None => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_needs_both_an_underflow_and_a_time_error"
+ },
+ {
+  "id": "BT1-34",
+  "name": "a head that starved early is not inconclusive (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "Some(Some(tick)) if tick < e.head_last - e.chunk_ticks =>",
+  "new": "Some(Some(tick)) if false =>",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_close_that_was_not_held_or_a_head_that_starved_early_is_inconclusive"
+ },
+ {
+  "id": "BT1-35",
+  "name": "a missing TimeError is not inconclusive (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "if !e.reports.iter().any(|r| burst_time_error(r, e.first)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_needs_both_an_underflow_and_a_time_error"
+ },
+ {
+  "id": "BT1-36",
+  "name": "a close that was not held 1 ms past its instant is not inconclusive (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "Some(read) if read >= e.close_at + HOLD_TICKS => {}",
+  "new": "Some(_) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_close_that_was_not_held_or_a_head_that_starved_early_is_inconclusive"
+ },
+ {
+  "id": "BT1-37",
+  "name": "a TimeError or BurstAck without a tick is not inconclusive (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "if e.reports.iter().any(|r| r.tick.is_none() && (r.code == TxCode::TimeError || r.code == TxCode::BurstAck)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_burst_ack_fails"
+ },
+ {
+  "id": "BT1-38",
+  "name": "the close is handed without the 1 ms hold (C6 trial)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "mt3::wait_until(device, close_at + HOLD_TICKS)",
+  "new": "mt3::wait_until(device, close_at)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_rehearsal_a_held_tail_starves_the_head_then_the_close_is_dropped_with_no_ack"
+ },
+ {
+  "id": "BT1-39",
+  "name": "the close is one sample, not the Module's two (C6 trial)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "[wave[wave.len() - 1], [0.0, 0.0]]",
+  "new": "[wave[wave.len() - 1]]",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_rehearsal_a_held_tail_starves_the_head_then_the_close_is_dropped_with_no_ack"
+ },
+ {
+  "id": "BT1-40",
+  "name": "the head carries the EOB (C6 trial)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "head: chunk, eob: false, each: false",
+  "new": "head: chunk, eob: true, each: false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_rehearsal_a_held_tail_starves_the_head_then_the_close_is_dropped_with_no_ack"
+ },
+ {
+  "id": "BT1-50",
+  "name": "a split does not fail the two-channel reading (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "if !split.is_empty() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_a_split_fails_and_says_it_is_a_device_fact"
+ },
+ {
+  "id": "BT1-51",
+  "name": "a clear cell that failed does not fail the reading (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "if let Verdict::Fail(text) = clear {",
+  "new": "if let Verdict::Pass(text) = clear {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_a_clear_cell_that_is_not_pass_is_not_a_pass"
+ },
+ {
+  "id": "BT1-52",
+  "name": "a clear cell that is inconclusive is no reason (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "if let Verdict::Inconclusive(text) = clear {",
+  "new": "if let Verdict::Fail(text) = clear {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_a_clear_cell_that_is_not_pass_is_not_a_pass"
+ },
+ {
+  "id": "BT1-53",
+  "name": "a grid that does not straddle the transition is not inconclusive (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "None => reasons.push(\"the grid did not straddle the transition: no delta with both channels dropped in every decided trial below one with both played in every decided trial\".to_owned()),",
+  "new": "None => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_a_grid_that_does_not_straddle_the_transition_is_inconclusive"
+ },
+ {
+  "id": "BT1-54",
+  "name": "the cells next to the transition need no decided trials (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "cell.decided().count() < MIN_DECIDED",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_the_cells_next_to_the_transition_need_ten_decided_trials"
+ },
+ {
+  "id": "BT1-55",
+  "name": "the lower end of the transition is searched over every cell, those above the upper end too (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "cells[..upper].iter().rposition(MarginalCell::all_dropped)",
+  "new": "cells.iter().rposition(MarginalCell::all_dropped)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_a_grid_that_does_not_straddle_the_transition_is_inconclusive"
+ },
+ {
+  "id": "BT1-57",
+  "name": "a B with no report at all is dropped (C4 outcome)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "(false, false) => Outcome::Inconclusive(\"neither a BurstAck nor a TimeError at or after B's first sample\".to_owned()),",
+  "new": "(false, false) => Outcome::Dropped,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_a_timed_error_at_b_is_dropped_and_an_ack_at_b_is_played"
+ },
+ {
+  "id": "BT1-58",
+  "name": "a failed device call does not make the trial inconclusive (C4 outcome)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "let mut reasons: Vec<String> = e.errors.iter().map(|error| format!(\"a device call failed: {error}\")).collect();",
+  "new": "let mut reasons: Vec<String> = Vec::new();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_without_a_time_error_for_a_there_is_no_drain"
+ },
+ {
+  "id": "BT1-59",
+  "name": "a failed device call does not make the held-tail trial inconclusive (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "let mut reasons: Vec<String> = e.errors.iter().map(|error| format!(\"a device call failed: {error}\")).collect();",
+  "new": "let mut reasons: Vec<String> = Vec::new();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_close_that_was_not_held_or_a_head_that_starved_early_is_inconclusive"
+ },
+ {
+  "id": "BT1-60",
+  "name": "an Underflow without a tick is not inconclusive (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "Some(None) => reasons.push(\"the Underflow has no tick\".to_owned()),",
+  "new": "Some(None) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_needs_both_an_underflow_and_a_time_error"
+ },
+ {
+  "id": "BT1-61",
+  "name": "the grid has no point at the limit plus the uncertainty (C4, M-a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": ".chain([limit, limit + uncertainty_ticks(per), limit + 20 * US])",
+  "new": ".chain([limit, limit + 20 * US])",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_the_grid_is_the_stated_one"
+ },
+ {
+  "id": "BT1-62",
+  "name": "C4's .skip(1): the first send of A is held to the margin before the drain reaches it",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "e.a_sends.iter().skip(1).filter(",
+  "new": "e.a_sends.iter().filter(",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_outcome_a_stalled_host_or_a_late_b_is_inconclusive"
+ },
+ {
+  "id": "BT1-63",
+  "name": "an ACK for the late burst with no TimeError is read as dropped (C5 channel)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "(true, false) => Outcome::Played,",
+  "new": "(true, false) => Outcome::Dropped,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_a_channel_is_read_from_its_reports_first"
+ },
+ {
+  "id": "BT1-64",
+  "name": "a TimeError, no ACK and a PASS verdict is read as played (C5 channel)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "Verdict::Pass(_) => Outcome::Dropped,",
+  "new": "Verdict::Pass(_) => Outcome::Played,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_a_channel_is_read_from_its_reports_first"
+ },
+ {
+  "id": "BT1-65",
+  "name": "a tone heard without an ACK is read as played (C5 channel: leak)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "Verdict::Fail(_) => Outcome::Inconclusive(LEAK.to_owned()),",
+  "new": "Verdict::Fail(_) => Outcome::Played,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_a_tone_heard_without_an_ack_is_a_suspected_leak_and_a_played_channel_beside_it_is_a_possible_hidden_split"
+ },
+ {
+  "id": "BT1-66",
+  "name": "an ACK and a TimeError on one channel is read as played (C5 channel)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "(true, true) => Outcome::Inconclusive(\"a BurstAck and a TimeError both for the late burst on one channel\".to_owned()),",
+  "new": "(true, true) => Outcome::Played,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_a_channel_is_read_from_its_reports_first"
+ },
+ {
+  "id": "BT1-67",
+  "name": "neither an ACK nor a TimeError on a channel is read as dropped (C5 channel)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "(false, false) => Outcome::Inconclusive(\"neither a BurstAck nor a TimeError for the late burst\".to_owned()),",
+  "new": "(false, false) => Outcome::Dropped,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_a_channel_is_read_from_its_reports_first"
+ },
+ {
+  "id": "BT1-68",
+  "name": "a report without a tick does not make a C5 channel inconclusive",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "if e.reports.iter().any(|r| r.tick.is_none() && matches!(r.code, TxCode::BurstAck | TxCode::TimeError)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_a_channel_is_read_from_its_reports_first"
+ },
+ {
+  "id": "BT1-69",
+  "name": "the PASS text counts the decided trials of every cell, not those next to the transition (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "cells[lower..=upper].iter().map(|cell| cell.decided().count()).sum();",
+  "new": "cells.iter().map(|cell| cell.decided().count()).sum();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_passes_a_straddled_transition_without_a_split"
+ },
+ {
+  "id": "BT1-70",
+  "name": "a BurstAck before the burst's first sample counts as the burst's (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": ".filter_map(|r| r.tick).filter(|tick| *tick >= e.first)",
+  "new": ".filter_map(|r| r.tick)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_passes_an_underflow_then_a_time_error_and_no_ack"
+ },
+ {
+  "id": "BT1-71",
+  "name": "a TimeError before the burst's first sample counts as the burst's (C6 filter)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "report.tick.is_some_and(|tick| tick >= first)",
+  "new": "report.tick.is_some()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_time_error_before_the_burst_is_an_earlier_trials"
+ },
+ {
+  "id": "BT1-72",
+  "name": "a leftover TimeError ahead of the Underflow fails the order (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "e.reports[..at].iter().any(|r| burst_time_error(r, e.first))",
+  "new": "e.reports[..at].iter().any(|r| r.code == TxCode::TimeError)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_time_error_before_the_burst_is_an_earlier_trials"
+ },
+ {
+  "id": "BT1-73",
+  "name": "a leftover TimeError whose tick is before the Underflow's fails (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "burst_time_error(r, e.first) && r.tick.is_some_and(|late| late < tick)",
+  "new": "r.code == TxCode::TimeError && r.tick.is_some_and(|late| late < tick)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_time_error_before_the_burst_is_an_earlier_trials"
+ },
+ {
+  "id": "BT1-74",
+  "name": "a leftover TimeError is the one TimeError that is required (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "if !e.reports.iter().any(|r| burst_time_error(r, e.first)) {",
+  "new": "if !e.reports.iter().any(|r| r.code == TxCode::TimeError) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_time_error_before_the_burst_is_an_earlier_trials"
+ },
+ {
+  "id": "BT1-75",
+  "name": "a head whose last send was handed late is not inconclusive (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "Some((handed, own)) if handed + HEAD_MARGIN_TICKS <= own => {}",
+  "new": "Some(_) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_head_that_was_handed_late_is_inconclusive"
+ },
+ {
+  "id": "BT1-76",
+  "name": "a two-channel late burst does not record its first send (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "first: shape.channels > 1,",
+  "new": "first: false,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_rehearsal_a_two_channel_trial_records_where_its_first_send_was_handed"
+ },
+ {
+  "id": "BT1-77",
+  "name": "the time is not read after the first send (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": "(plan.first && at == plan.first_at)",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_rehearsal_a_two_channel_trial_records_where_its_first_send_was_handed"
+ },
+ {
+  "id": "BT1-78",
+  "name": "a one-channel late burst records a first send too (C1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3.rs",
+  "old": ".filter(|_| late_plan.first)",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_rehearsal_a_two_channel_trial_records_where_its_first_send_was_handed"
+ },
+ {
+  "id": "BT1-79",
+  "name": "a sequence error report does not make the held-tail trial inconclusive (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "if e.reports.iter().any(|r| matches!(r.code, TxCode::SeqError | TxCode::SeqErrorInBurst)) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_sequence_error_is_inconclusive"
+ },
+ {
+  "id": "BT1-80",
+  "name": "a SeqErrorInBurst is not a sequence error (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "matches!(r.code, TxCode::SeqError | TxCode::SeqErrorInBurst)",
+  "new": "matches!(r.code, TxCode::SeqError)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_a_sequence_error_is_inconclusive"
+ },
+ {
+  "id": "BT1-81",
+  "name": "an Underflow before the burst's first sample is the burst's (C6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_tail.rs",
+  "old": "is_underflow(r.code) && r.tick.is_none_or(|tick| tick >= e.first)",
+  "new": "is_underflow(r.code)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c6_verdict_an_underflow_before_the_burst_is_an_earlier_trials"
+ },
+ {
+  "id": "BT1-82",
+  "name": "a played channel beside a leaking one does not make the reading inconclusive (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "if !hidden.is_empty() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_a_played_channel_beside_a_leaking_one_outside_the_bracket_is_not_a_pass"
+ },
+ {
+  "id": "BT1-83",
+  "name": "any undecided channel beside a played one is a possible hidden split (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "Outcome::Inconclusive(text) if text == LEAK",
+  "new": "Outcome::Inconclusive(text) if true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_a_split_fails_and_says_it_is_a_device_fact"
+ },
+ {
+  "id": "BT1-84",
+  "name": "only channel 0 played beside a leaking channel 1 is a possible hidden split (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "(leak(&pair[0]) && pair[1] == Outcome::Played)",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_a_played_channel_beside_a_leaking_one_outside_the_bracket_is_not_a_pass"
+ },
+ {
+  "id": "BT1-85",
+  "name": "the PASS headline counts every trial, undecided ones too (C5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_two.rs",
+  "old": "let decided: usize = cells.iter().map(|cell| cell.decided().count()).sum();",
+  "new": "let decided: usize = cells.iter().map(|cell| cell.trials.len()).sum();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c5_reading_the_cells_next_to_the_transition_need_ten_decided_trials"
+ },
+ {
+  "id": "BT1-86",
+  "name": "the sweep judges a dropped trial by its cell's nominal delta (C4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "cell.dropped_at.iter().any(|at| *at >= limit + uncertainty)",
+  "new": "cell.dropped_at.iter().any(|at| cell.delta >= limit + uncertainty)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_sweep_judges_a_trial_by_its_effective_delta"
+ },
+ {
+  "id": "BT1-87",
+  "name": "the cell takes the nominal delta where B was aligned (C4 cells_of)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "trial.effective_delta().unwrap_or(delta)",
+  "new": "delta",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_rehearsal_the_fake_drops_b_before_its_own_limit_and_plays_it_at_and_after"
+ },
+ {
+  "id": "BT1-88",
+  "name": "a drop below the limit is counted as inside the uncertainty (C4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "**at >= limit && **at < limit + uncertainty",
+  "new": "**at < limit + uncertainty",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_sweep_judges_a_trial_by_its_effective_delta"
  }
 ]

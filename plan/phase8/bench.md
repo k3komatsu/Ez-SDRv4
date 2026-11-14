@@ -1563,7 +1563,7 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 
 ## 11-15 の後の手順（保守表 3：遅れた device burst の cell C1〜C7．**11-15 には流さない**）
 
-出典：保守表 3 の design（`~/.cache/ezsdr-fixes/2026-11-14-mt3/`：C1〜C6 は `fable-review.md` §2.4，C7 は `addendum.md` §2.4），owner の決定 O7（2026-11-14：bench は 11-15 の後．code は source で確かめた「遅れた device burst は device ごと捨てられる」規則で先に進める）．**今あるのは C1 の道具だけ**：`hw_mt3_c1_chunked_late_burst`（body は `tests/common/mt3.rs`，判定の純関数 `late_chunked_verdict`，FakeDevice の rehearsal は default の suite の `mt3_c1_rehearsal_…`）．C2〜C7 は**道具がまだ無い**（bench-tools の step で書く）ので，下の表は何を測るかの定義で，流す command も test の名前も無い．**結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．**
+出典：保守表 3 の design（`~/.cache/ezsdr-fixes/2026-11-14-mt3/`：C1〜C6 は `fable-review.md` §2.4，C7 は `addendum.md` §2.4），owner の決定 O7（2026-11-14：bench は 11-15 の後．code は source で確かめた「遅れた device burst は device ごと捨てられる」規則で先に進める）．**道具は C1〜C6 が揃っている**（bench-tools の step `bt1`）：各 cell に `#[ignore]` の `hw_mt3_c*`（body は `tests/common/mt3.rs`・`mt3_cascade.rs`・`mt3_two.rs`・`mt3_tail.rs`），判定の純関数（手で組んだ evidence の単体 test つき），default の suite の FakeDevice の rehearsal（`mt3_c*_rehearsal_…`）．**C7 は bt2（Module 水準．production の hook が要る）で，まだ無い**：下の表の C7 は何を測るかの定義で，流す command も test の名前も無い．**結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．**
 
 ### 問い（INFERRED のもの）
 
@@ -1575,17 +1575,17 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 | cell | 形 | 測ること | 道具 | TX |
 |---|---|---|---|---|
 | C1 | raw UHD．Module の chunk の形（`segment::send_cap`：1 MS/s で 2 500，10 MS/s で 20 000 sample）の時刻つき send × 8（最初に SOB，最後に EOB，各 send に最初の sample の時刻）．**前に on-time の control の burst**（同じ形，聞く）．late burst は最初の sample の時刻を host の基準の時刻の 1 ms 前にし，host はその基準の時刻以後に最初の chunk を送る（最初の send は少なくとも 1 ms 遅れる．最後の chunk が自分の時刻の 1 ms 以上前に渡されたことを判定が確かめる）．1・10 MS/s × 10 trial | chunk の形でも device burst ごと捨てられるか | `hw_mt3_c1_chunked_late_burst`（書いてある） | あり |
-| C2 | C1 を 100・200 MS/s で，#2 でも（200 MS/s では packet + 2 の間隔が残るか） | rate と board | 未（C1 の rate を増やす） | あり |
-| C3 | C1 の最初の send を 32 sample に | DUC の出力 packet が短く始まるときの overhead（pad の `2 × P`） | 未 | あり |
-| C4 | cascade：A を遅らせ，B（時刻つき，1 burst）を A の名目の終わり + gap に置く．gap を A の遅れをまたいで掃引し，境界の近くは 1 cell ≥ 10 trial | drain の終わりの境界，fake の pad が覆うか（UR-33，M3） | 未 | あり |
-| C5 | 2 channel で，開始の遅れた burst | 片方の channel だけ鳴ることがあるか（RM-11 の「何も送られなかった」） | 未．**slot B にも送信する**：slot B の board と att を owner が確かめ，`EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1` を付けた 1 本だけ（11-15 の (4) と同じ規則．配線が無ければ走らせない） | あり（slot A と B） |
-| C6 | 負荷の下で，保持した尾の飢え（Underflow）の report の順 | channel ごとに Underflow，その後 TimeError，ACK なしか（M2） | 未 | あり |
-| C7 | Module の水準（Session）で，`start_repeat` を開始で遅らせた場合と，途中で飢えさせた場合（`tests/fake.rs` の `Descheduled` を `UhdDevice` に）．m = 10・1・0.2 ms の掃引，1 cell ≥ 10 trial，**両 board** | [from, R) の無音，R で波形が位相連続で戻る，cap に達しない．τ（Module の道での host から radio への遅れ）を測るのは C7 だけ．そのあと owner が m を決める | 未．repeat の再開の段階（段階 D）の後 | あり |
+| C2 | C1 の trial を 100・200 MS/s の送信で（**受信は 10 MS/s**，tone の窓と閾値は C1 のまま），late burst は 20 ms．#2 でも（200 MS/s では packet + 2 clock の間隔が残るか） | rate と board | `hw_mt3_c2_chunked_late_burst_high_rates` | あり |
+| C3 | C1 の late burst の最初の send を 32 sample に（UR-22 の最小の最初の send），あとは Module の chunk で 20 ms．1・10 MS/s | DUC の出力 packet が短く始まるときの overhead（pad の `2 × packets`） | `hw_mt3_c3_short_first_send` | あり |
+| C4 | cascade：A（C1 の late burst の形，20 ms，1 ms 遅れ）の最初の TimeError の tick を t0 とし，B（時刻つき，1 chunk，SOB+EOB）を `t0 + S × per + δ` に置く．δ は固定の格子（粗：−20・−10・50・100 µs，細：0〜30 µs を 1 µs 刻み，fake の limit とその +20 µs），各 δ 10 trial．1・10 MS/s | drain の終わりの境界，fake の pad が覆うか（UR-33，M3） | `hw_mt3_c4_cascade_boundary` | あり |
+| C5 | 2 channel（slot A と B の 1 つの 2 channel streamer，受信も両方）で，開始が host の基準の時刻の ±数百 µs の burst | 片方の channel だけ鳴ることがあるか（RM-11 の「何も送られなかった」） | `hw_mt3_c5_two_channel_late_start`．**slot B にも送信する**：slot B の board と att を owner が確かめ，`EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1` を付けた 1 本だけ（11-15 の (4) と同じ規則．配線が無ければ `NOT RUNNABLE` で送信しない） | あり（slot A と B） |
+| C6 | 保持した尾の close を 1 ms 遅らせる（Module の close：尾と零の 2 sample，SOB なし EOB，尾の時刻）．1・10 MS/s | Underflow，その後 TimeError，ACK なしか（M2） | `hw_mt3_c6_held_tail_starves` | あり |
+| C7 | Module の水準（Session）で，`start_repeat` を開始で遅らせた場合と，途中で飢えさせた場合（`tests/fake.rs` の `Descheduled` を `UhdDevice` に）．m = 10・1・0.2 ms の掃引，1 cell ≥ 10 trial，**両 board** | [from, R) の無音，R で波形が位相連続で戻る，cap に達しない．τ（Module の道での host から radio への遅れ）を測るのは C7 だけ．そのあと owner が m を決める | **bt2，まだ無い**（production の hook が要る．repeat の再開の段階（段階 D）の後） | あり |
 
 ### C1 の流し方
 
 - 条件：slot A（channel 0）にだけ送信する．1 GHz（`SAFE_TX_HZ`），gain 0 dB，振幅 0.4（0.5 以下．`tone_wave` が確かめる），rate は 1・10 MS/s，tone は搬送波から 100 kHz（他の tool と同じ．rate / 10 にすると 10 MS/s で 1.001 GHz になり `SAFE_TX_HZ` を出る）．**1 本の command ごとの前に，owner が「その board の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2」を確かめる**（毎回．続けて流さない）．`pin_slot_a` が CBX と `SAFE_TX_HZ` の外を拒む．`EZSDR_D9_CHANNEL` は付けない（slot B には送信しない）．
-- 板は H1 と同じ #1（OBX）を先に，次に #2（UBX）．`hw` は「2026-11-15 の手順」の「共通の準備」の定義（この test は環境変数を足さない）．device の一生全体（開く・全 trial・teardown・失敗の unwind）を **15 分**の期限（`bounded`）で囲む：過ぎると `EZSDR-INFRA:` の行を書いて abort する（hang の印．電源を入れ直して owner へ．期待は約 3 分）．約 3 分 / 台（estimate：build の後．2 rate × 10 trial，1 trial は約 0.2 s 〜 1 s）．
+- 板は H1 と同じ #1（OBX）を先に，次に #2（UBX）．`hw` は「`<DATE>` の手順（note 47 段階 5 の後）」の「共通の準備」の定義（この test は環境変数を足さない）．device の一生全体（開く・全 trial・teardown・失敗の unwind）を **15 分**の期限（`bounded`）で囲む：過ぎると `EZSDR-INFRA:` の行を書いて abort する（hang の印．電源を入れ直して owner へ．期待は約 3 分）．約 3 分 / 台（estimate：build の後．2 rate × 10 trial，1 trial は約 0.2 s 〜 1 s）．
 
   ```sh
   # --- owner が att を確かめた（#1 OBX）．次の 1 本だけ ---
@@ -1604,7 +1604,95 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 - 聞こえた区間の判定は tone の形（25 sample の窓の coherence 0.9 超，周波数が 100 kHz の ±20 %，電力が 4 LSB の床より上．`tone_intervals`）．H1 の「sample の大きさ 0.001 超」ではない：FakeDevice の受信は送信の無い所で ramp を返し，大きさでは tone と区別できないため．**閾値は bench の前に実機で確かめていない**（INFERRED：C3 の quiet check と同じ床と窓．**10 MS/s では 1 sample の位相の進みが 0.063 rad と小さく，周波数の推定と 25 sample の窓の coherence が 1 MS/s より雑音に弱い**：INFERRED，C1 の 10 MS/s の trace で確かめる）．trial の `MT3 C1 trace {json}` に区間・受信の覆い・report の数が出る．
 - **条件を超えて一般化しない**：1 GHz，この 2 rate，8 chunk，最初の send は少なくとも 1 ms 遅れ，1 cell 10 trial，この board．全 PASS でも「他の rate・board・cascade」は C2〜C7 が測る．
 
+### C2〜C6 の共通（C1 の流し方に足すもの）
+
+- 条件は C1 と同じ：slot A（channel 0）にだけ送信する（**C5 だけは slot B にも**），1 GHz（`SAFE_TX_HZ`），gain 0 dB，振幅 0.4，tone は搬送波から 100 kHz，`EZSDR_D9_CHANNEL` は付けない．**1 本の command ごとの前に，owner が「その board の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2」を確かめる（毎回．続けて流さない．C5 は slot B の同じ配線も）**．板は #1（OBX）を先に，次に #2（UBX）．**配線の条件**：#2 の項目（C2〜C4・C6）は #2 の slot A に UBX があるときだけ流す（11-15 の「盤の移動」で #2 の UBX を #1 の slot B へ移すと #2 の slot A は空になる）．C5 は slot A と B の両方が OBX／UBX の配線（移動の後の #1）．この節は 11-15 の後で，盤を戻すか・いつ戻すかは owner が決める（orchestrator の未決）．
+- 期限は device の一生全体で **15 分**（`bounded`．過ぎると `EZSDR-INFRA:` の行を書いて abort する：hang の印で，電源を入れ直して owner へ）．**INCONCLUSIVE でも test は失敗する**（`hw` の exit 0 は全 cell が PASS のとき）．
+- C1 より後の cell の late burst は **どの rate でも 20 ms**（C1 の 8 chunk は 10 MS/s で 16 ms）：100・200 MS/s の host が実時間の 1.5 倍程度でしか送れなくても，最後の chunk が自分の時刻より前に渡されるようにするため（INFERRED：10 GbE で 200 MS/s は実時間の約 1.5 倍）．判定は C1 と同じく「最後の chunk が自分の時刻の 1 ms 以上前に渡された」ことを確かめ，足りなければ INCONCLUSIVE．
+- `MT3 rates: transmit [...] receive [...] S/s (requested …)`：`apply` が返した実際の rate．要求と違えば trial は INCONCLUSIVE．
+- `hw` は **「`<DATE>` の手順（note 47 段階 5 の後）」の「共通の準備」の定義**（`-e EZSDR_SLOT_B_ATTENUATOR_CONFIRMED` と `-e EZSDR_OFS_TWO_CHANNEL_WAIVED` を container に渡す．C5 に要る）．「2026-11-15 の手順（stage 4 の値のための計測…）」の「共通の準備」の `hw` はこの変数を渡さないので，**C5 を流す shell では後者を定義し直さない**（同じ shell に両方を貼ると後から貼った方が残る）．C2〜C4・C6 はどちらの定義でも流れる．
+
+### C2 の流し方：C1 を 100・200 MS/s で（約 3 分 / 台，estimate．期限 15 分）
+
+- 送信 100・200 MS/s，**受信 10 MS/s**（`Device::apply` で別に設定する．tone の窓と閾値は C1 のまま：INFERRED．evidence は受信の間隔を送信と別に持つ）．late burst は 20 ms（100 MS/s で 2 000 000 sample = Module の chunk 20 000 × 100 send，200 MS/s で 4 000 000 sample × 200 send）．1 cell 10 trial．
+- **観測（判定の項ではない）**：late の TimeError の tick を全部，順に，隣との差，最頻の差，最頻の整数倍の差（欠けた report：FPGA の error FIFO は 32 entry で report を落としうる，R7）を出す：`MT3 C2 gaps <rate> MS/s trial <i>: …`．packet 長は UHD の streamer の値を Device が出さないので **INFERRED（最頻の差）**と明記される．late の report は burst の後にまとめて読むので，数千の report のうち古い tick が欠ける可能性がある（UHD 4.10 の送信の async queue は `boost::lockfree::queue` を 1 000 で作る：`rfnoc_tx_streamer.cpp:18,28`．容量は初期の node の数で，満杯で捨てるとは読めない：boost の仕様からの INFERRED）．判定には影響しない（新しい report だけを使う）．読むこと：200 MS/s でも差が packet + 2 clock のままか（Fable §2.1）．
+- VERDICT：C1 と同じ（`VERDICT mt3 c2 <rate> MS/s trial <i>`，`MT3 C2 cell <rate> MS/s`）：FAIL＝late burst の最初の sample 以後の BurstAck，または loopback の delay を引いた聞こえた区間が late の区間と重なる；INCONCLUSIVE＝呼び出しの失敗（rate が要求と違う場合を含む），受信の穴，control が聞こえない，tick の無い report，最後の send が 1 ms 前に渡されていない，late の TimeError が無い；PASS＝すべて揃い無音・ACK なし・TimeError あり．
+
+  ```sh
+  # --- owner が att を確かめた（#1 OBX）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_mt3_c2_chunked_late_burst_high_rates
+  # --- owner が att を確かめた（#2 UBX．盤の移動の前）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_mt3_c2_chunked_late_burst_high_rates
+  grep -h 'VERDICT\|MT3 C2\|MT3 rates\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_mt3_c2_chunked_late_burst_high_rates.$BOARD.log
+  ```
+
+### C3 の流し方：late burst の最初の send が 32 sample（約 3 分 / 台，estimate．期限 15 分）
+
+- late burst だけ最初の send が 32 sample（UR-22 の最小の最初の send），あとは Module の chunk で 20 ms（control は chunk のまま）．1・10 MS/s，送受信の rate は同じ，1 cell 10 trial．
+- **観測（判定の項ではない）**：C2 と同じ gaps に加えて，late の report の最初から最後までの tick の幅を **partial span**（最後の packet 自身の drain を含まない）と明記して `S × per` と並べる：`MT3 C3 gaps <rate> MS/s trial <i>: …`．fake の pad の `2 × packets` が表す overhead の見当．
+- VERDICT：C1 と同じ（`VERDICT mt3 c3 …`，`MT3 C3 cell …`）．
+
+  ```sh
+  # --- owner が att を確かめた（#1 OBX）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_mt3_c3_short_first_send
+  # --- owner が att を確かめた（#2 UBX．盤の移動の前）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_mt3_c3_short_first_send
+  grep -h 'VERDICT\|MT3 C3\|MT3 rates\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_mt3_c3_short_first_send.$BOARD.log
+  ```
+
+### C4 の流し方：cascade の境界（送信のみ．約 4〜6 分 / 台，estimate．期限 15 分）
+
+- 1 trial：A（C1 の late burst の形：20 ms，最初の sample の時刻は host の基準の 1 ms 前）を送り，report を A の最初の TimeError まで読む．その tick が **t0**：radio が A の最初の packet を時刻検査で遅れと見つけたときの radio の時刻（`radio_tx_core.v` の `ST_TIME_CHECK`：VERIFIED）で，**host への到着の時刻でも A の timestamp でもない**．B（時刻つき，1 chunk，SOB+EOB が 1 つの send）を `t0 + S × per + δ`（sample の格子に切り上げ）に置き，すぐ渡す．受信はしない．
+- δ は固定の格子（適応しない）：粗 −20・−10・50・100 µs，細 0〜30 µs を 1 µs 刻み，**fake の limit**（A に対する `drain_limit` − drain の終わり：1 MS/s で 256 µs，10 MS/s で 242 µs．test 側で fake と同じ式から計算し，rehearsal が fake の境界と一致することを確かめる），**limit + 不確かさ**（下の FAIL が始まる最初の δ．limit と +20 µs の間で device の drain が終わっても見落とさない），limit + 20 µs．各 δ 10 trial，δ を回す順に 1 周ずつ（host の drift が 1 つの δ に偏らない）．1・10 MS/s．
+- 有効な trial だけを数える（INCONCLUSIVE の条件）：A の各 send（最初を除く）が drain に届く 1 ms 以上前に渡されている（drain は data が無いと待つので，host の stall が drain を延ばし，pad を host のせいにしてしまう），B が `t0 + S × per` の 2 ms 以上前に渡されている（**INFERRED**：B が drain の後ろに積まれたことの目安．転送の遅れは測っていない），A の send 数が計画どおり（fake の pad は send ごとに 1 packet），Underflow・UnderflowInPacket・sequence error の report が無い，tick の無い report が無い，B の最初の sample より前の BurstAck が無い．B は **played** ＝ B の最初の sample 以後の tick の BurstAck，**dropped** ＝ それが無く TimeError がある；どちらでもなければ INCONCLUSIVE．
+- 出力：`MT3 C4 <rate> MS/s: the fake's limit …`，trial ごとに `MT3 C4 trial <rate> MS/s delta <µs> us #<i>: <Played|Dropped|Inconclusive> {trace}`（t0，b_first，格子に切り上げた後の δ，A の各 send の（自分の時刻，渡された時刻）と最小の margin），δ ごとに `MT3 C4 cell <rate> MS/s delta <µs> us: <n> played, <n> dropped, <n> inconclusive`，**`MT3 C4 boundary <rate> MS/s: last all-dropped delta …, first all-played delta …, mixed cells […]`**（device 自身の境界の bracket と，その間の混ざった cell．1 つの数ではない），`VERDICT mt3 c4 <rate> MS/s`．
+- **VERDICT**（sweep）：**FAIL**＝**実効の δ**（B の時刻を sample の格子に切り上げた後の，`t0 + S × per` からの差．cell の名目の δ ではない）が fake の limit + 不確かさ（sample の間隔 + 4 master clock：t0 と fake の drain の始まりの食い違い）以上の trial で B が dropped（device が fake より後まで drain する＝UR-33 が崩れる．fake が緩い）；**INCONCLUSIVE**＝limit 以上の δ に decided（played か dropped）が 10 trial に満たない cell がある（または limit 以上の δ が無い）；それ以外 **PASS**（limit から不確かさの内の dropped は数えて text に出す．FAIL にしない）．**limit より下の δ は device 自身の境界の測定で，判定の項ではない**．
+  - FAIL なら：その cell の trace を添えてすぐ orchestrator へ（fake の pad が device の drain を覆っていない）．
+
+  ```sh
+  # --- owner が att を確かめた（#1 OBX）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_mt3_c4_cascade_boundary
+  # --- owner が att を確かめた（#2 UBX．盤の移動の前）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_mt3_c4_cascade_boundary
+  grep -h 'VERDICT\|MT3 C4 \(cell\|boundary\|[0-9]\)\|MT3 rates\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_mt3_c4_cascade_boundary.$BOARD.log
+  ```
+
+### C5 の流し方：2 channel の開始（**slot B にも送信する**．約 3 分，estimate．期限 15 分）
+
+- **盤の移動の後の #1 だけ**（slot A に OBX，slot B に UBX）．owner が **slot B の board の TX/RX → ≥30 dB の att → 同じ board の RX2 も**確かめ，そのときだけ `EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1 hw …` の形で 1 本の呼び出しに付ける（`export` はしない）．付けない，または slot A・B の片方が OBX／UBX でない，受信が 2 channel でないときは `MT3 C5 NOT RUNNABLE: <理由>` と出て，**何も送信せず**，test は INCONCLUSIVE として失敗する．
+- 1 つの 2 channel の送信 streamer（channel 0・1）と 2 channel の受信．trial は C1 と同じ（受信を先に start，control を on time，late の burst）で，late の burst の最初の sample の時刻を host の基準の時刻 + δ にする．1 MS/s，burst 20 ms．channel ごとに evidence（report は channel で分け，tone も channel ごとに聞く）と C1 の判定を持つ．
+- 2 つの cell：**clear**（基準の 1 ms 前，10 trial：両 channel とも C1 の判定が PASS でなければならない）と **marginal**（δ ∈ −200・−100・−50・−20・0・20・50・100・200 µs，各 10 trial．host の制御呼び出しの遅れが遷移の位置を決めるので格子は広い：INFERRED）．marginal の trial は channel ごとに **その channel の report から先に**読む：played＝late burst の最初の sample 以後の tick の BurstAck があり TimeError が無い；dropped＝TimeError があり ACK が無く，C1 の判定が PASS（無音・受信の覆い・control が聞こえた）；それ以外は inconclusive（tick の無い report，ACK と TimeError の両方，どちらも無い，C1 の判定が INCONCLUSIVE，**ACK が無いのに tone が聞こえた：slot A の tone の漏れか部分的な再生の疑い**）．tone だけで played とは読まない（漏れが本物の split を隠さないため）．
+- 読み方（`MT3 C5 reading: …`，`MT3 C5 marginal <δ> us: …`，`MT3 C5 trial <δ> us #<i>: channel 0 …, channel 1 …`）：
+  - **FAIL（SPLIT observed）**：ある trial で片方の channel が played，もう片方が dropped．**これは探していたもの**で，device の事実（RM-11 の「何も送られなかった」は「少なくとも 1 channel で」に直す必要がある）であって tool の欠陥ではない：その δ と trace を添えて orchestrator へ．clear cell が FAIL（明らかに遅い burst が鳴った）も FAIL．
+  - **INCONCLUSIVE**：どの cell でも，ある trial が played の channel と「ACK が無いのに tone が聞こえた」channel の組を含む（漏れが隠した split の可能性：`possible split hidden by a leak`），clear cell が PASS でない，遷移をまたいでいない（両 channel とも dropped の δ より上に，両 channel とも played の δ が無い），遷移の隣の cell（最後の all-dropped の δ から最初の all-played の δ まで）の decided な trial が 10 に満たない．
+  - **PASS**：split が無く，遷移をまたいでいる．「no split in N decided marginal trials (M run) at these conditions」（この rate・board・条件でだけ）．
+  - **tone の漏れ**（INFERRED）：slot A の tone が slot B の受信に 4 LSB の床を超えて漏れると，その channel は「ACK が無いのに聞こえた」で inconclusive になる（played にも dropped にもしない）．漏れが続くと transition の隣の cell の decided が足りず INCONCLUSIVE になる．fake の channel は完全に分離しているので rehearsal では出ない．`MT3 C5 trace` の channel ごとの `BurstAck`・`TimeError` の数と `heard` で確かめる．
+  - trial の行に **最初の late send が渡された時刻**（device の時刻を send の後に読む）と最初の sample の時刻の差が出る（`MT3 C5 trial …` と trace の `late_first_handed_and_own_time`）：host の制御呼び出しの遅れが transition のどこに来るかを読む（遷移が格子の外なら，この差で次の格子を決める）．PASS の行は，split が無かった decided な trial の数（run した数も括弧で）と，transition の隣の cell（最後の all-dropped から最初の all-played まで）の decided な trial の数を分けて書く．
+
+  ```sh
+  # --- owner が att を確かめた（#1：slot A の OBX と slot B の UBX の両方）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1 hw hw_mt3_c5_two_channel_late_start
+  grep -h 'VERDICT\|MT3 C5\|MT3 rates\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_mt3_c5_two_channel_late_start.$BOARD.log
+  ```
+
+### C6 の流し方：保持した尾が飢える（送信のみ．約 1 分 / 台，estimate．期限 15 分）
+
+- 1 trial：20 ms の burst の head（最初の `S − 1` sample を Module の chunk で，on time，最初の send に SOB，EOB なし）を送る．close は **Module の close**（`src/provider/tx.rs`：尾と零の 2 sample，SOB なし，EOB，**尾の時刻** = 最初の sample + `(S − 1)` sample）で，device の時刻が尾の時刻 + 1 ms を過ぎてから渡す（device が先に空になる．host の負荷はこの決まった保持で替える：close が遅れる理由に device の挙動は依らない）．**待った後の時刻を渡す前に読む**（渡した後の読みは「後に渡した」ことの証拠にならない）．1・10 MS/s，各 10 trial．
+- VERDICT（`VERDICT mt3 c6 <rate> MS/s trial <i>`，`MT3 C6 cell`，`MT3 C6 trace`：全 report を順に）：**FAIL**＝burst の最初の sample 以後の tick の BurstAck，または report の順で最初の Underflow（か UnderflowInPacket）より前に TimeError，または TimeError の tick が最初の Underflow の tick より前．**INCONCLUSIVE**＝Underflow か TimeError のどちらかが無い（**両方が要る**．同じ channel で tick つき．Underflow と TimeError は burst の最初の sample 以後の tick のものだけ数える：前の trial の残りは数えない），**SeqError か SeqErrorInBurst の report が 1 つでもある（tick が無くても．UHD は転送 packet を失うと tick なしで出す．head がそれで飢えたのかもしれない）**，close が尾の時刻の 1 ms 以上後に渡されていない，head の最後の send が自分の時刻の 1 ms 以上前に渡されていない（head の host の stall は保持した尾ではない），head が早く飢えた（最初の Underflow の tick が head の最後の sample の時刻 − 1 chunk より前：host の stall であって保持した尾ではない），呼び出しの失敗，tick の無い report．**PASS**＝head の終わりに Underflow，その後に（順にも tick にも）TimeError，ACK なし．R4 が割り込まれた packet の残りを先に捨てて TimeError が複数出てもよい．
+
+  ```sh
+  # --- owner が att を確かめた（#1 OBX）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_mt3_c6_held_tail_starves
+  # --- owner が att を確かめた（#2 UBX．盤の移動の前）．次の 1 本だけ ---
+  export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_mt3_c6_held_tail_starves
+  grep -h 'VERDICT\|MT3 C6\|MT3 rates\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_mt3_c6_held_tail_starves.$BOARD.log
+  ```
+
+### C7：bt2，まだ無い
+
+Module の水準で repeat の再開に m の掃引を入れる cell．production の hook が要るので bt2 で書く．道具が揃うまで流さない．
+
 ### 流した後・記録
 
 - stop：`EZSDR-INFRA`，`Control operation timed out`，`Reference Clock PLL failed to lock`，装置が応答しない → 電源を入れ直して owner へ．
-- orchestrator に返すもの：commit，各 log の path，`MT3 C1 cell` と `VERDICT mt3 c1` の行（2 台分），`MT3 C1 trace` の dump（`head`），電源の入れ直しの有無，att の型番（owner の確認）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．C2〜C7 は道具ができてから，この節を更新して流す．
+- orchestrator に返すもの：commit，各 log の path，`MT3 C1 cell` と `VERDICT mt3 c1` の行（2 台分），`MT3 C1 trace` の dump（`head`），C2〜C6 は各項の grep の行（C2・C3 は `MT3 C* gaps` を全部，C4 は `MT3 C4 cell`・`MT3 C4 boundary`・`VERDICT mt3 c4`，C5 は `MT3 C5 reading` と marginal の行，C6 は `MT3 C6 trace`），電源の入れ直しの有無，att の型番（owner の確認）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．C2〜C6 は下の各項（C7 は bt2 の後）．

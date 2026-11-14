@@ -19,18 +19,37 @@ pub fn d9_channel() -> usize {
 }
 
 pub fn raw_rx(device: &dyn Device, rate: f64, freq: f64) {
-    let settings = Settings { rate: Some(rate), freq: Some(freq), gain: Some(0.0), antenna: Some("RX2".to_owned()) };
-    device.apply(Dir::Rx, d9_channel(), &settings).unwrap();
-    device.rx_open(0, &[d9_channel()]).unwrap();
+    raw_rx_on(device, &[d9_channel()], rate, freq);
 }
 
 /// The transmitter inside bench.md's RF conditions, or a panic before anything is sent.
 pub fn raw_tx(device: &dyn Device, rate: f64, freq: f64) {
+    raw_tx_on(device, &[d9_channel()], rate, freq);
+}
+
+/// `raw_rx` for the device channels `channels` (one stream), returning what each applied.
+pub fn raw_rx_on(device: &dyn Device, channels: &[usize], rate: f64, freq: f64) -> Vec<ezsdr_radio_uhd::Applied> {
+    let settings = Settings { rate: Some(rate), freq: Some(freq), gain: Some(0.0), antenna: Some("RX2".to_owned()) };
+    let applied = channels.iter().map(|&chan| device.apply(Dir::Rx, chan, &settings).unwrap()).collect();
+    device.rx_open(0, channels).unwrap();
+    applied
+}
+
+/// `raw_tx` for the device channels `channels` (one stream), returning what each applied: every channel is checked against bench.md's RF conditions
+/// before the stream opens.
+pub fn raw_tx_on(device: &dyn Device, channels: &[usize], rate: f64, freq: f64) -> Vec<ezsdr_radio_uhd::Applied> {
     assert!(SAFE_TX_HZ.contains(&freq) && rate <= SAFE_TX_MAX_RATE, "bench.md RF safety: {freq} Hz at {rate} S/s");
     let settings = Settings { rate: Some(rate), freq: Some(freq), gain: Some(0.0), antenna: Some("TX/RX".to_owned()) };
-    let applied = device.apply(Dir::Tx, d9_channel(), &settings).unwrap();
-    assert!(applied.gain == 0.0 && SAFE_TX_HZ.contains(&applied.freq), "{applied:?}");
-    device.tx_open(0, &[d9_channel()]).unwrap();
+    let applied: Vec<ezsdr_radio_uhd::Applied> = channels
+        .iter()
+        .map(|&chan| {
+            let applied = device.apply(Dir::Tx, chan, &settings).unwrap();
+            assert!(applied.gain == 0.0 && SAFE_TX_HZ.contains(&applied.freq), "{applied:?}");
+            applied
+        })
+        .collect();
+    device.tx_open(0, channels).unwrap();
+    applied
 }
 
 pub fn iq(samples: &[(f32, f32)]) -> Vec<ezsdr_radio_uhd::Iq> {
