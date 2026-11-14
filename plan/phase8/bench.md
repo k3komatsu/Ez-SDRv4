@@ -1606,7 +1606,10 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 
 ### C2〜C6 の共通（C1 の流し方に足すもの）
 
-- 条件は C1 と同じ：slot A（channel 0）にだけ送信する（**C5 だけは slot B にも**），1 GHz（`SAFE_TX_HZ`），gain 0 dB，振幅 0.4，tone は搬送波から 100 kHz，`EZSDR_D9_CHANNEL` は付けない．**1 本の command ごとの前に，owner が「その board の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2」を確かめる（毎回．続けて流さない．C5 は slot B の同じ配線も）**．板は #1（OBX）を先に，次に #2（UBX）．**配線の条件**：#2 の項目（C2〜C4・C6）は #2 の slot A に UBX があるときだけ流す（11-15 の「盤の移動」で #2 の UBX を #1 の slot B へ移すと #2 の slot A は空になる）．C5 は slot A と B の両方が OBX／UBX の配線（移動の後の #1）．この節は 11-15 の後で，盤を戻すか・いつ戻すかは owner が決める（orchestrator の未決）．
+- 条件は C1 と同じ：slot A（channel 0）にだけ送信する（**C5 だけは slot B にも**），1 GHz（`SAFE_TX_HZ`），gain 0 dB，振幅 0.4，tone は搬送波から 100 kHz，`EZSDR_D9_CHANNEL` は付けない．**1 本の command ごとの前に，owner が「その board の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2」を確かめる（毎回．続けて流さない．C5 は slot B の同じ配線も）**．**順と配線（owner 2026-11-14：UBX を #2 に戻してよい）**：11-15 の「盤の移動」の後の配線から始め，**#1 → 盤を戻す → #2** の順．11-15 が早く終わればその日に続けてよい．
+  1. **#1**（slot A は OBX，slot B は移した UBX）：C1〜C4・C6（slot A だけに送信），C5（2 channel．この配線でだけ流せる）．
+  2. **盤を戻す**：#1 と #2 の電源を落とし，UBX（32BC76F）を #1 の slot B から #2 の slot A へ戻す．#1 の slot B の loopback（att ごと）を外し，#2 に「slot A の TX/RX → ≥30 dB の att → 同じ UBX の RX2」を組み直す．電源を入れ，11-15 の (a) と同じ probe（送信なし）で #2 の slot A の UBX を確かめる．
+  3. **#2**（slot A は UBX）：C1〜C4・C6．C5 は流さない（slot B が空）．
 - 期限は device の一生全体で **15 分**（`bounded`．過ぎると `EZSDR-INFRA:` の行を書いて abort する：hang の印で，電源を入れ直して owner へ）．**INCONCLUSIVE でも test は失敗する**（`hw` の exit 0 は全 cell が PASS のとき）．
 - C1 より後の cell の late burst は **どの rate でも 20 ms**（C1 の 8 chunk は 10 MS/s で 16 ms）：100・200 MS/s の host が実時間の 1.5 倍程度でしか送れなくても，最後の chunk が自分の時刻より前に渡されるようにするため（INFERRED：10 GbE で 200 MS/s は実時間の約 1.5 倍）．判定は C1 と同じく「最後の chunk が自分の時刻の 1 ms 以上前に渡された」ことを確かめ，足りなければ INCONCLUSIVE．
 - `MT3 rates: transmit [...] receive [...] S/s (requested …)`：`apply` が返した実際の rate．要求と違えば trial は INCONCLUSIVE．
