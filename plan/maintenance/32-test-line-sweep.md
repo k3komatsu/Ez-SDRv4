@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Done for every accepted spec (01–11, 14, 16, 18) at base `0fa2001`; the fixes are one commit. A1's tests landed on 2026-10-16 (rows T01–T33); A2 and B go to Phase 8's plan (owner, 2026-10-16). A2 done on 2026-10-25 (rows T34–T45; [phase 8 reviews/a2-opus](../phase8/reviews/a2-opus.md)): five conditions were already tested, nine got tests. B waits for Phase 8 stage 4. A second sweep ran on 2026-10-25 (§ Second sweep): 263 checked findings applied to the Test lines, six spec/code disagreements left for the owner. |
+| Status | Done for every accepted spec (01–11, 14, 16, 18) at base `0fa2001`; the fixes are one commit. A1's tests landed on 2026-10-16 (rows T01–T33); A2 and B go to Phase 8's plan (owner, 2026-10-16). A2 done on 2026-10-25 (rows T34–T45; [phase 8 reviews/a2-opus](../phase8/reviews/a2-opus.md)): five conditions were already tested, nine got tests. B waits for Phase 8 stage 4. A second sweep ran on 2026-10-25 (§ Second sweep): 263 checked findings applied to the Test lines, six spec/code disagreements left for the owner. A third ran on 2026-11-15 (§ Third sweep): 162 checked findings applied, Sol's review fixed, three spec/code disagreements for the owner. |
 | Why | Every Sol review of DA-3 step 2 (specs 07, 09, 18) found Test lines or §6 rows that claimed more than their tests assert. No one had checked that across all specs. |
 | Tool | [`tools/sweep/`](tools/sweep/sweep.py): `sweep.py` and its two briefs. Run it again before the freeze review ("全規則の確認", handoff §2). |
 
@@ -74,3 +74,22 @@ Spec text that disagreed with the code; the owner decided each on 2026-10-25: th
 - KC-45: `prepare.reports` is a map keyed by fragment, so the Manifest cannot hold "plan order".
 - OV-21 lists four keys while the test Vocabulary declares seven.
 - UR-34: `hw_b1_probe` does not fail on a non-OBX first board, B5 has no fake rehearsal, and B4 prints nothing.
+
+## Third sweep (2026-11-15)
+
+Run at `bc48078b` (after note 51, #67, #101, #77 and maintenance table 3), every accepted spec (40 chunks, 504 rules), on a detached worktree, with the paid `opencode-go` DeepSeek V4.1 Flash (`#max`) for every pass but the spot check (owner, 2026-11-15: the Go month had quota to spare; the Sonnet check of the second sweep moved to DeepSeek).
+
+1. **Sweep.** 8 in parallel: 358 rules clean, 178 findings (112 silent gaps, 54 overclaims, 9 stale "none named", 3 wrong tests). Three chunks' JSON had a trailing comma or an invalid `\` escape; `sweep.py`'s extractor now retries a repaired copy. TM-1 got no answer.
+2. **Adversarial check.** DeepSeek, 8 in parallel: 11 refuted, 125 confirmed, 42 partly.
+3. **Check of every finding.** DeepSeek with the second sweep's Sonnet briefs (18 runs of about 10 findings, every test opened, "search for an unnamed test before none named" first): 57 none named, 49 a test the line did not name, 51 overclaims real or partly, 8 stale, 2 not real.
+4. **Spot check.** Haiku 5.5 reopened 32 decisions (2–3 per spec): 30 right; the 2 misses (RS-23, MA-14a) were again an existing test the line did not name, and their corrected fixes were applied.
+5. **Fixes.** DeepSeek, one spec at a time in the worktree, Test lines, tables and one Changes row per spec; `rules.py` after each. The orchestrator aligned three normative sentences the fixers reported (RS-27's Radio Model kinds, MA-20's `progressed` counting a pushed Action as NX-5 does, spec 18's citations of the withdrawn UR-24) and spec 10's `hd_14_schema_freeze` row, decided by the orchestrator, each with its Changes row.
+6. **Review.** Sol 6.1 in four batches (01–04, 05–08, 09–16, 18): 4 FAIL, 2 major (KC-10's graph-link end that `v58_09_a_reactor_answers_a_ping_with_a_timed_pong` does pin; an overclaim left in `ur_30_the_plan_names_every_stream_at_the_stop`'s row) and 7 minor, fixed in Sol's wording by the orchestrator; an Opus re-check of the ten places: PASS.
+
+The checked findings, each with its decision, fix, spot-check result and the four held for a decision on the rule text, are [`32-sweep3.json`](32-sweep3.json).
+
+Spec text that disagreed with the code, for the owner (rule text, no change of behaviour): SB-46 (a `reject` coercion never reaches a PrepareReport; it is a violation), KC-30 (the reason carries the call after `<stage>`, and the run loop's Authority panic reads `authority panicked during next_wakeup`), KC-35 (a child Spec Run holds its parent's Lease, `kf_03_a_child_inherits_the_lease`).
+
+Things learned:
+- DeepSeek does the per-finding check with the Sonnet briefs at a fraction of the cost; its miss rate on the spot check (2 of 32) is of the same kind as before.
+- Tell the fixers that a JSON answer must have no trailing comma and no backslash escapes but `\"` and `\\`.

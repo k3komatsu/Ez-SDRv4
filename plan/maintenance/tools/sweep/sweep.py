@@ -49,11 +49,17 @@ def extract(log):
     # (2026-10-25), and a run sometimes drops one or both.
     t = re.sub(r"\x1b\[[0-9;]*m", "", open(log, errors="replace").read()) if os.path.exists(log) else ""
     dec = json.JSONDecoder(strict=False)
+    # DeepSeek sometimes leaves a trailing comma or an invalid `\x` escape (2026-11-15): retry repaired.
+    def repaired(s):
+        return re.sub(r",(\s*[\]}])", r"\1", re.sub(r'\\([^"\\/bfnrtu])', r"\1", s))
     for m in reversed(list(re.finditer(r"^\s*\{", t, re.M))):
         try:
             d, _ = dec.raw_decode(t, m.end() - 1)
         except json.JSONDecodeError:
-            continue
+            try:
+                d, _ = dec.raw_decode(repaired(t[m.end() - 1:]))
+            except json.JSONDecodeError:
+                continue
         if isinstance(d, dict) and ("findings" in d or "verdicts" in d) and "<rule ids with no finding>" not in json.dumps(d):
             return d
     return None
