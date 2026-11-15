@@ -1,0 +1,796 @@
+[
+{
+"rule": "TM-13e",
+"where": "design/01-time-model.md:163",
+"kind": "stale_ref",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/01-time-model.md:163",
+"design/07-radio-model.md:267",
+"design/07-radio-model.md:269",
+"design/07-radio-model.md:298",
+"crates/ezsdr-mock-radio/src/lib.rs:2303",
+"crates/ezsdr-kernel/src/coordinator/admission.rs:131",
+"design/05-module-api.md:229"
+],
+"note": "The rule's last sentence says a transmit stream re-created by a cold update takes the new SampleClock origin its Vocabulary places, `for a radio stream, RM-25's`; RM-25 now names origins only for T0, the arm lattice instant, a missed start and a later receive segment, and has no re-created-clock clause. RM-27 still declares channel frequency, gain and antenna cold but leaves `radio.d.s<k>.sample_rate_hz` and `radio.{rx,tx}.c<n>.stream` classless, and both Providers register a transmit clock only at arm, so no radio cold key re-creates a transmit stream; the audit's proposed `no radio key has a cold class` is false. UC-3's own radio parenthetical has the same stale reference.",
+"fix": "Replace the sentence with: `A transmit stream re-created by a cold update (UC-3) takes as the origin of its new SampleClock, allocated when TM-13a says, the new origin its Vocabulary places; no radio cold key ends or restarts a transmit stream's clock (RM-21, RM-27), so RM-25 places no origin for a re-created radio transmit clock.` Drop the `origin of the SampleClock a cold update re-creates` clause from the Test line's none-named list."
+},
+{
+"rule": "TM-15",
+"where": "design/01-time-model.md:185",
+"kind": "missing",
+"resolution": "forward",
+"user_visible": false,
+"evidence": [
+"design/01-time-model.md:185",
+"crates/ezsdr-kernel/src/plan/islands.rs:82",
+"design/05-module-api.md:309",
+"crates/ezsdr-kernel/src/time/point.rs:262",
+"crates/ezsdr-kernel/src/stream/burst.rs:104"
+],
+"note": "The rule says admission compares budgets against block periods by TM-21 and envelope checks compare absolute deadlines in device domains; island admission only checks that a component declares a budget when its Island has an rt_policy, MA-39 defers the sum-of-budgets arithmetic to the first Processor with port rates, and `deadline_from` and `remaining` have no production caller. The envelope half exists: `LatePolicy::decide` compares the target lead with the Provider's `min_command_lead` through `compare_durations`, and both Providers call it. Only the admission comparison is missing, and no v4.0 Processor needs it yet.",
+"fix": "Replace the sentence with: `Admission compares the sum of an Island's budgets against its block period by TM-21 once the first Processor declares port rates (MA-39); envelope checks compare absolute deadlines in device domains (SC-27).`"
+},
+{
+"rule": "TM-16c",
+"where": "design/01-time-model.md:201",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/01-time-model.md:201",
+"crates/ezsdr-sim-engine/src/lib.rs:81",
+"crates/ezsdr-sim-engine/src/lib.rs:90",
+"crates/ezsdr-kernel/src/time/authority.rs:319",
+"design/08-simulation.md:41"
+],
+"note": "The rule says `wait_until` and `advance_to` take the same instant and the same refusal as `schedule`; `ManualTimeAuthority` does (its `to_root` uses `try_exact`), and `tm_16c_a_derived_instant_between_root_ticks_is_refused` pins all three. The Simulation Engine's `wait_until` calls `root_tick(point, true)`, which rounds an inexact derived instant up to the next root tick, while its `schedule` calls `root_tick(point, false)` and returns `Inexact`; SE-10 specifies the rounded wait, and no test pins it.",
+"fix": "Replace the sentence with: `In ManualTimeAuthority, wait_until and advance_to take the same instant and the same refusal as schedule; the Simulation Engine's wait_until waits for the next root tick at or after an instant between ticks (SE-10).` Add an Engine test for the rounded wait, since none pins it."
+},
+{
+"rule": "TM-18",
+"where": "design/01-time-model.md:210",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/01-time-model.md:210",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:181",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:189",
+"crates/ezsdr-kernel/src/coordinator/state.rs:343",
+"design/06-kernel-coordinator.md:428",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:295"
+],
+"note": "The rule's opening says every Run records in its Manifest a ClockRelation from its root, device or virtual, to utc, with its uncertainty; `RunHandle::relations` returns none unless `device_paced()` (HardwareInLoop or Hardware), a device-paced Run whose Authority publishes no utc relation gets a CleanupFailure (KC-45), and a RealtimeEmulation plan is refused at plan(). The rule's own later sentences and KC-45 match the code, so the opening sentence is the defect.",
+"fix": "Replace the opening sentence with: `In HardwareInLoop and Hardware the Manifest records a ClockRelation from the Run's primary root to utc, with its uncertainty; a device-paced Run whose Authority publishes none records a CleanupFailure saying so (KC-45).`"
+},
+{
+"rule": "TM-21",
+"where": "design/01-time-model.md:188",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/01-time-model.md:188",
+"crates/ezsdr-kernel/src/module_api.rs:513",
+"crates/ezsdr-mock-radio/src/lib.rs:409",
+"crates/ezsdr-kernel/src/stream/burst.rs:104",
+"design/02-stream-contract.md:254"
+],
+"note": "The rule names `min_timed_command_lead` as the value SC-27 compares in host.monotonic; the Kernel field is `ProviderInstance.min_command_lead`, a Duration built from the Vocabulary key `radio.timing.min_timed_command_lead_ns`, and SC-27's decide parameter is `min_lead`. The comparison is implemented through `compare_durations` and both Providers call it, so only the name is stale.",
+"fix": "Replace `a min_timed_command_lead declared in host.monotonic` with `a min_command_lead (from radio.timing.min_timed_command_lead_ns) declared in host.monotonic`."
+},
+{
+"rule": "SC-33",
+"where": "design/02-stream-contract.md:184",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/02-stream-contract.md:184",
+"design/02-stream-contract.md:178",
+"crates/ezsdr-kernel/src/stream/block.rs:215",
+"crates/ezsdr-kernel/src/stream/block.rs:244",
+"crates/ezsdr-mock-radio/src/lib.rs:671"
+],
+"note": "The rule says a block of a contract outside ezsdr.stream.* carries no gap flag and no burst flag; `SampleBlock::new` never reads `header.contract` and applies SC-10's flag checks to every block, so a receive control block with GAP_BEFORE or a transmit one with START_OF_BURST is accepted. No producer builds a non-stream block (both real producers publish cf32), and SC-3 makes the link check the Kernel's only contract check, so the clause is a producer/Vocabulary obligation rather than a constructor check.",
+"fix": "Replace the no-flag clause with: `a block of another contract carrying a gap flag (GAP_BEFORE and its qualifiers) or a burst flag (START_OF_BURST, END_OF_BURST) is a producer defect.`"
+},
+{
+"rule": "SC-10a",
+"where": "design/02-stream-contract.md:202",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/02-stream-contract.md:202",
+"crates/ezsdr-kernel/src/contract.rs:79",
+"crates/ezsdr-kernel/src/stream/block.rs:263",
+"crates/ezsdr-mock-radio/src/lib.rs:671",
+"crates/ezsdr-radio-uhd/src/provider/rx.rs:660"
+],
+"note": "The rule says the constructor's buffer bound uses `bytes_per_sample` passed in from the producing Port's DataContract; `DataContract::bytes_per_sample()` has no production caller, and both Producers pass the literal 8 for their cf32 port, which is the contract's value. The constructor's inequality is implemented and tested; only the provenance is unimplemented, and `PrepareContext` carries no ContractRegistry.",
+"fix": "Replace the sentence with: `The constructor also enforces buffer.len_bytes >= channels * len * bytes_per_sample, where bytes_per_sample is the value the producer takes from the producing Port's DataContract; a producer that supplies another value is a producer defect.`"
+},
+{
+"rule": "SC-20a",
+"where": "design/02-stream-contract.md:229",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/02-stream-contract.md:229",
+"crates/ezsdr-mock-radio/src/lib.rs:579",
+"crates/ezsdr-mock-radio/src/lib.rs:593",
+"crates/ezsdr-kernel/src/stream/link.rs:62",
+"design/09-mock-radio.md:153"
+],
+"note": "The rule says a producer that receives Full must not discard the block silently, then names two remedies: retry, or stop and emit LINK_BACKPRESSURE. MockRadio drops the refused block and records MR-19's device overrun, with radio.RX_OVERFLOW at the block's first sample and GAP_BEFORE|RESTARTED and lost equal to the whole jump on the next block, and no production code emits LINK_BACKPRESSURE; MR-19 says the drop is never silent (SC-20a). The audit's design/09-radio-model.md path does not exist; the rule is MR-19 at design/09-mock-radio.md:153.",
+"fix": "Replace the last sentence with: `A producer that receives Full **must not** discard the block silently: it retries on its next turn, it stops and emits the typed LINK_BACKPRESSURE event for the Run's Policy table to act on, or, where its device cannot wait for a consumer (UR-12), it records the refused block's loss as its device's own (MR-19) and continues.`"
+},
+{
+"rule": "SC-25",
+"where": "design/02-stream-contract.md:250",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/02-stream-contract.md:250",
+"crates/ezsdr-kernel/src/stream/burst.rs:151",
+"crates/ezsdr-kernel/src/stream/burst.rs:386",
+"crates/ezsdr-mock-radio/src/lib.rs:957",
+"crates/ezsdr-radio-uhd/src/provider/tx.rs:1177",
+"crates/ezsdr-radio-uhd/src/provider/tx.rs:1295",
+"crates/ezsdr-radio-uhd/src/provider/tx.rs:2202"
+],
+"note": "The rule says continuous transmission is one burst ended only by the Run's stop or an explicit END_OF_BURST; the tracker and both Providers also close it with BurstTracker::stop when a later burst takes over at its next sample (Mock open_held, UHD join_open) and when a Provider abandons a damaged burst (UHD abandon), and the UHD test asserts end is stop while the Run continues. BurstEnd::Stop's doc says `The Run stopped`, which is false for those two paths.",
+"fix": "Replace the first sentence with: `Continuous transmission is one burst, ended by the Run's stop, by an explicit END_OF_BURST, by a later burst at its next sample (RM-15, RM-37), or by the Provider's abandonment of a damaged burst (UR-22); the last two close it with BurstEnd::Stop.` Change the BurstEnd::Stop doc to: `The Run stopped, a later burst took over at its next sample, or the Provider abandoned the burst (SC-25).`"
+},
+{
+"rule": "SC-29",
+"where": "design/02-stream-contract.md:258",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/02-stream-contract.md:258",
+"design/18-uhd-radio.md:259",
+"design/02-stream-contract.md:366",
+"crates/ezsdr-radio-uhd/src/provider/tx.rs:865",
+"crates/ezsdr-radio-uhd/src/provider/tx.rs:883"
+],
+"note": "SC-29 gives the Provider the zero-length end-of-burst send that closes a burst on UHD. `close_device_burst` builds exactly two samples per channel, the held tail and a zero or two zeros when none is held, accepts only `Ok(2)`, and no transmit path sends an empty buffer; UR-22 requires at least two samples per channel and S14 forbids a zero-length block, so the rule names a send that exists nowhere.",
+"fix": "The Provider owns device input and output, including the two-sample end-of-burst send that closes a burst on UHD (the held tail and a zero, or two zeros when none is held), the `now` and `min_lead` inputs, executing the late policy, and emitting events."
+},
+{
+"rule": "SC-29a",
+"where": "design/02-stream-contract.md:260",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/02-stream-contract.md:260",
+"crates/ezsdr-kernel/src/stream/burst.rs:161",
+"crates/ezsdr-kernel/src/stream/burst.rs:173",
+"crates/ezsdr-kernel/src/stream/burst.rs:175",
+"crates/ezsdr-kernel/src/stream/burst.rs:131",
+"schemas/burst_record.v1.json"
+],
+"note": "`BurstRecord` has eight fields and the four a header cannot carry are `wraps`, `late_by`, `requested_target` and `actual_start`. `waveform_len` and `late` are the `BurstOpen` inputs the tracker derives the first two from, and `schemas/burst_record.v1.json` lists only the record's names. The mechanism is implemented exactly as described; only the rule calls two of the inputs `BurstRecord` fields.",
+"fix": "Four `BurstRecord` fields are not derivable from headers, so the Provider supplies them: `wraps`, through a `BurstOpen`'s `waveform_len`, without which it cannot be counted; `late_by`, through its `late`, which comes from `LatePolicy::decide`; and `requested_target`, what the caller asked for when the applied target differs (SC-23a), from the same `BurstOpen` on the block that opens the burst; `actual_start` arrives later as device feedback through `set_actual_start`."
+},
+{
+"rule": "SC-30",
+"where": "design/02-stream-contract.md:265",
+"kind": "contradiction",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/02-stream-contract.md:265",
+"design/02-stream-contract.md:269",
+"design/04-run-and-session.md:300",
+"crates/ezsdr-sink-capture/src/lib.rs:578",
+"crates/ezsdr-sink-capture/src/lib.rs:584",
+"crates/ezsdr-kernel/src/stream/continuity.rs:85"
+],
+"note": "SC-30 says there is one map per SampleClock, while SC-30a ends the map on a channel-count change and RS-40 says a channel-count change gives more than one map. The capture Sink finishes the old builder and starts a new one with the same domain, so two maps share one SampleClock after a 1-to-2-channel change; `ContinuityMap`'s doc comment and the generated schema descriptions repeat the false sentence.",
+"fix": "A map covers one SampleClock and one channel count: a block in another domain ends it with `DomainChanged`, a block whose channel count differs ends it with `ChannelsChanged` (SC-30a), and the Sink starts a new builder for each."
+},
+{
+"rule": "SC-31c",
+"where": "design/02-stream-contract.md:278",
+"kind": "differs",
+"resolution": "code_follows_spec",
+"user_visible": true,
+"evidence": [
+"design/02-stream-contract.md:278",
+"design/02-stream-contract.md:334",
+"crates/ezsdr-kernel/src/stream/continuity.rs:245",
+"crates/ezsdr-kernel/src/stream/continuity.rs:269",
+"crates/ezsdr-kernel/src/stream/continuity.rs:291",
+"crates/ezsdr-kernel/src/stream/continuity.rs:331",
+"crates/ezsdr-kernel/tests/stream_contract.rs:998"
+],
+"note": "For channel 2 valid in [0,100), invalid in [100,200), a stream gap 200-350 whose block still has channel 2 invalid, and a map ending at 450, `push` flushes the pending close at the gap's start and the mask loop re-arms nothing because `was_valid` is the pre-gap mask, so only `ChannelGap{2,100,100}` is emitted and [350,450) is covered by neither a valid segment nor a channel gap. `sc_31c_channel_lost_at_the_overflow` only covers a channel valid in the pre-gap block, and `sc_31d_break_across_a_stream_gap_is_split` only a channel that returns after the gap; section 6's `else: nothing` branch has the same hole.",
+"fix": "In `ContinuityBuilder::push`, after the jump branch's `flush_pending_at(expected)` and `close_open_segments()`, record a pending close at `h.first_sample_time` for every channel whose bit is clear in `h.valid` and whose `valid[i]` is not empty (it was valid somewhere in the map), so the break after the gap reaches the channel's return or `finish`. Add the matching third condition to section 6's `else` chain and a test with channel 2 invalid before and after the gap.",
+"issue": "#102"
+},
+{
+"rule": "SB-9",
+"where": "design/03-spec-and-binding.md:169",
+"kind": "differs",
+"resolution": "code_follows_spec",
+"user_visible": false,
+"evidence": [
+"design/03-spec-and-binding.md:169",
+"crates/ezsdr-kernel/src/event.rs:106",
+"crates/ezsdr-kernel/src/event.rs:125",
+"crates/ezsdr-kernel/src/event.rs:127",
+"crates/ezsdr-kernel/src/manifest.rs:330",
+"crates/ezsdr-kernel/src/manifest.rs:383",
+"schemas/event.v1.json:89",
+"crates/ezsdr-kernel/tests/spec_binding.rs:263"
+],
+"note": "`EventSource` is an internally tagged enum whose `Kernel` and `Unforeseen` variants are bare unit variants, and serde deserialises such a variant through `InternallyTaggedUnitVisitor`, which consumes every remaining entry as `IgnoredAny`. `Manifest::from_json` therefore accepts a section source of {\"kind\":\"kernel\",\"extra\":1} and silently drops `extra`, where the variant's schema says additionalProperties false; the repository already closed this exact hole for `Termination` with `Completed {}` and every other empty Kernel variant is written `{}`.",
+"fix": "Write the two variants as `Kernel {}` and `Unforeseen {}` (or give `EventSource` a manual `Deserialize` that refuses a stray field), as `Termination::Completed {}` and `RunState` do, and pin `serde_json::from_value::<EventSource>` refusing {\"kind\":\"kernel\",\"extra\":1}.",
+"issue": "#105"
+},
+{
+"rule": "SB-13",
+"where": "design/03-spec-and-binding.md:177",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/03-spec-and-binding.md:177",
+"design/03-spec-and-binding.md:169",
+"crates/ezsdr-kernel/src/spec.rs:1063",
+"crates/ezsdr-kernel/src/spec.rs:1064",
+"crates/ezsdr-kernel/src/spec.rs:1013",
+"crates/ezsdr-kernel/src/spec.rs:815",
+"crates/ezsdr-kernel/tests/spec_binding.rs:358"
+],
+"note": "`from_json` runs `check_top_level` before `check_no_placement`, and all six names are outside `SPEC_TOP_LEVEL`, so a top-level `placements` or `environment` is `UnknownField { path }`; only a nested one reaches the scan's `PlacementInSpec` or `EnvironmentInSpec`. SB-9 assigns a top-level unknown field to `UnknownField` and SB-21 repeats it for a profile, so the code follows those rules and SB-13's 'any depth' is the too-wide text.",
+"fix": "A Spec that contains a `placements`, `placement`, `environment`, `executor`, `memory_domain` or `island` field at any depth below the top level outside `extensions` and any `schema` is refused with `PlacementInSpec` or `EnvironmentInSpec`, naming the path; a top-level one is SB-9's `UnknownField`."
+},
+{
+"rule": "SB-14",
+"where": "design/03-spec-and-binding.md:179",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/03-spec-and-binding.md:179",
+"design/03-spec-and-binding.md:152",
+"crates/ezsdr-kernel/src/spec.rs:183",
+"crates/ezsdr-kernel/src/spec.rs:1066",
+"crates/ezsdr-kernel/src/binding.rs:239",
+"crates/ezsdr-kernel/tests/spec_binding.rs:349",
+"crates/ezsdr-kernel/tests/spec_binding.rs:354"
+],
+"note": "A `!COMPUTE(A - B)` value is a JSON string and `Scalar::Str` parses it, so by SB-4 it is a scalar and `from_json` accepts it with no evaluation pass, as the test's comment and outcome say. `validate()` refuses it with `KeyShape` from the key's declared-kind check, and only where the declared kind does not accept a string, so both halves of SB-14's claim that it is refused by SB-9 as an unknown field and by SB-4 as a non-scalar are wrong for the expression.",
+"fix": "v3's `CONSTANTS` is refused by SB-9 as an unknown field; a `!COMPUTE(...)` value is a JSON string, so it parses as a `Scalar::Str` and is never evaluated, and `validate()` refuses it as `KeyShape` only where the key's declared kind does not accept a string (SB-2, SB-6)."
+},
+{
+"rule": "SB-9a",
+"where": "design/03-spec-and-binding.md:181",
+"kind": "missing",
+"resolution": "code_follows_spec",
+"user_visible": true,
+"evidence": [
+"design/03-spec-and-binding.md:181",
+"crates/ezsdr-kernel/src/spec.rs:272",
+"crates/ezsdr-kernel/src/session.rs:131",
+"crates/ezsdr-kernel/src/coordinator/admission.rs:79",
+"crates/ezsdr-kernel/src/plan/prepare.rs:132",
+"crates/ezsdr-kernel/src/plan/matching.rs:150",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:88",
+"crates/ezsdr-kernel/src/hash.rs:169"
+],
+"note": "The Session, Action, control-event, section and `from_json` doors all run `Value::check_ascii_keys`, but a Provider's `PrepareReport.effective` is copied straight into `Manifest.prepare` and a `CoerceReport`'s coercions straight into `Manifest.admission`. A non-ASCII key in either survives every stage and is refused only by `Manifest::seal()` at cleanup step 7, after the Run has run - the outcome SB-9a and RS-11 exist to prevent; this is a gap at two entry points, not a missing rule.",
+"fix": "In `collect_prepare` refuse a non-ASCII map key in every `PrepareReport.effective` value and in each `Coercion.requested` and `applied`, as a `PrepareError::Violations` naming SB-9a; in `match_constraints` run `Value::check_ascii_keys` over each coercion before it enters `coercions_preview`, as the Session and Action doors already do.",
+"issue": "#104"
+},
+{
+"rule": "SB-22d",
+"where": "design/03-spec-and-binding.md:212",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/03-spec-and-binding.md:212",
+"design/03-spec-and-binding.md:121",
+"crates/ezsdr-kernel/src/spec.rs:868",
+"crates/ezsdr-kernel/src/plan/validation.rs:174",
+"crates/ezsdr-kernel/src/plan/validation.rs:193",
+"crates/ezsdr-kernel/src/plan/validation.rs:205",
+"crates/ezsdr-kernel/tests/spec_binding.rs:3898"
+],
+"note": "Only `SpecError::UnboundResource { name }` exists; an unbound output and an unbound executor are `SpecError::Structural` whose reason names `(UnboundOutput)` and `(UnboundExecutor)`, the same refusal-by-name form SB-22d already uses for the Authority slot. Every unbound slot is refused and the missing name is carried, so the behaviour is complete and only the rule's claim that these three are error values a caller can match is wrong.",
+"fix": "A slot with no binding is refused: `UnboundResource` for a resource, or, for an output, an executor or the Authority, a refusal whose reason names `UnboundOutput`, `UnboundExecutor` or `authority`."
+},
+{
+"rule": "SB-26",
+"where": "design/03-spec-and-binding.md:275",
+"kind": "missing",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/03-spec-and-binding.md:275",
+"crates/ezsdr-kernel/src/binding.rs:118",
+"crates/ezsdr-kernel/src/binding.rs:138",
+"crates/ezsdr-kernel/src/plan/compile.rs:156",
+"crates/ezsdr-kernel/src/plan/compile.rs:195",
+"crates/ezsdr-kernel/src/plan/compile.rs:214",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:59",
+"crates/ezsdr-kernel/src/manifest.rs:314",
+"design/04-run-and-session.md:306"
+],
+"note": "SB-26 says the Kernel reads four environment sections by name and that `ezsdr.capture` is read when the Manifest is written; the only reader, `BindingProfile::section`, is called for `ezsdr.arm_order`, `ezsdr.rf_path` and `ezsdr.time` and nothing calls it or the environment map for `ezsdr.capture`, which appears only in `KERNEL_SECTIONS`. The Manifest's `sections` are each Provider's `instance().sections` read after stop, which the Module writes, so there is no Manifest-time read; RS-43 confirms the capture is a section a Module writes, not one the Kernel reads.",
+"fix": "Replace the list and the closing sentence: `The Kernel reads three sections by name: `ezsdr.time` for the time class, `ezsdr.rf_path` and `ezsdr.arm_order` for explicit ordering edges. Every other section is opaque to it. ... The environment capture is no environment section the Kernel reads: it is the `ezsdr.capture` entry under the Manifest's `sections`, written by the Module that produces it (RS-43).` Code: drop `ezsdr.capture` from `KERNEL_SECTIONS` (with the doc comments that repeat it), and change SB-26's Test line and MA-5a's `SB-26's four` to three."
+},
+{
+"rule": "SB-26",
+"where": "design/03-spec-and-binding.md:275",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/03-spec-and-binding.md:275",
+"crates/ezsdr-kernel/src/binding.rs:110",
+"crates/ezsdr-kernel/src/binding.rs:341",
+"crates/ezsdr-kernel/src/binding.rs:360",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:1133",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:1135",
+"crates/ezsdr-radio/src/lib.rs:34",
+"crates/ezsdr-radio/src/lib.rs:130"
+],
+"note": "The first clause holds: `BindingProfile::section` serves only `KERNEL_SECTIONS`, and `sb_31_unregistered_section_is_informational` pins that it serves nothing else. But `a Kernel read of a Vocabulary's section is not expressible` is false: `environment` is a public field, `AdmissionCheckRegistry::run` fetches `environment.get(check.section())` by the namespace each registered check declares at all three of SB-30's points, and `child_refusal` reads a runtime check's section straight from the parent's map to compare it with the child's for RS-25a; with the radio Vocabulary that section is `radio.rf_envelope`, whose check runs at Runtime. The Kernel interprets none of it, which is what OV-21 keeps.",
+"fix": "Replace that sentence: `The Kernel's own reader serves those three names and nothing else; every other read is by a registered check's own namespace — SB-30's points hand the check its section and RS-25a compares it with the child's — and the Kernel interprets none of it (OV-21).` Apply together with n=19 so the count and the list agree."
+},
+{
+"rule": "SB-46",
+"where": "design/03-spec-and-binding.md:327",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"crates/ezsdr-kernel/src/plan/coercion.rs:17",
+"crates/ezsdr-kernel/src/plan/validation.rs:110",
+"crates/ezsdr-kernel/src/plan/validation.rs:120",
+"crates/ezsdr-kernel/src/plan/prepare.rs:118",
+"crates/ezsdr-kernel/src/session.rs:256",
+"crates/ezsdr-kernel/src/binding.rs:431",
+"crates/ezsdr-kernel/src/plan.rs:117",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:608"
+],
+"note": "`apply_coercion` is the policy's only producer of `CoercionRejected`, and every stage call site turns it into an `ezsdr.coercion` violation: `validate` reports it in `AdmissionResult.violations` and `into_result` maps the first to `SpecError::Violation`, `collect_prepare` returns `PrepareError::Violations` and runtime admission returns a `Violation`. So the stage never fails with `CoercionRejected`, though the public `plan::apply_coercion` does return it, so the finding's `no caller ever sees it` is too strong; the rule's own later clause already states the stage's surface.",
+"fix": "Replace the first sentence: `Under `reject` the policy answers `CoercionRejected`, and the stage fails with the coercion as the `ezsdr.coercion` violation of the fragment that reported it.` Also correct the stale doc at crates/ezsdr-kernel/src/plan.rs:117-119, which says the coercion appears in the PrepareReport in all three cases."
+},
+{
+"rule": "RS-5",
+"where": "design/04-run-and-session.md:116",
+"kind": "contradiction",
+"resolution": "spec_follows_code",
+"user_visible": true,
+"evidence": [
+"design/04-run-and-session.md:116",
+"design/06-kernel-coordinator.md:422",
+"crates/ezsdr-kernel/src/run.rs:635",
+"crates/ezsdr-kernel/src/run.rs:649",
+"crates/ezsdr-kernel/src/coordinator/state.rs:382",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:29"
+],
+"note": "RS-5 promises a runtime `TimePoint` for every transition, but `RunStateMachine::new` records `Created` with `at: None` and KC-43 says `Created` has no instant; the coordinator supplies `Some(now)` for every later transition and the public `move_to` accepts `None` for any of them, so the unqualified `every` matches neither KC-43 nor the coordinator. RS-5's own Test line already carries the exception, so only the normative sentence is wrong.",
+"fix": "Replace RS-5: `Every transition after `Created` is recorded with its runtime `TimePoint` and the host UTC time, and the sequence appears in the Manifest; `Created` is recorded without an instant (KC-43).`"
+},
+{
+"rule": "RS-8",
+"where": "design/04-run-and-session.md:149",
+"kind": "contradiction",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/04-run-and-session.md:149",
+"design/05-module-api.md:149",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:1278",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:1297",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:243",
+"crates/ezsdr-kernel/src/coordinator/state.rs:157"
+],
+"note": "MA-7 puts an instance's arm position at its first fragment and, in a per-fragment cleanup step, acts on it at the first of its fragments the reverse pass reaches; `build_routing` builds the reverse pass from the whole fragment list reversed and `Ops::routed` maps each fragment back to its instance. So one instance holding two Provider fragments `a1` and `a2` with another instance's `b1` between them, plan order a1, b1, a2, is armed first at `a1` and stopped first at `a2`, and RS-8's second sentence is false while its first sentence and the code agree. The finding's Provider-plus-Sink example is not reachable: a Sink is a different `Inst` and step 2 acts on Providers only.",
+"fix": "Replace the second sentence: `Each instance is acted on at the first of its fragments the reverse pass reaches, and not again (MA-7).`"
+},
+{
+"rule": "RS-8a",
+"where": "design/04-run-and-session.md:151",
+"kind": "missing",
+"resolution": "forward",
+"user_visible": false,
+"evidence": [
+"design/04-run-and-session.md:151",
+"crates/ezsdr-kernel/src/run.rs:537",
+"crates/ezsdr-kernel/src/run.rs:545",
+"crates/ezsdr-kernel/src/run.rs:584",
+"crates/ezsdr-kernel/src/module_api.rs:490",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:265",
+"crates/ezsdr-kernel/tests/support/doubles.rs:1090",
+"design/18-uhd-radio.md:223"
+],
+"note": "No `ProviderInstance` or `ModuleDescriptor` field and no Provider trait method declares a cleanup deadline, and the coordinator's `Ops` leaves `CleanupOps::deadline_millis` at its default, so every step of every Run gets `DEFAULT_CLEANUP_DEADLINE_MS` (5 000 ms); the only override in the tree is the test double. Nothing needs the declaration: spec 18 UR-16 bounds the UHD Provider's joins so its `stop` and `cleanup` finish inside the default.",
+"fix": "Replace RS-8a's first sentence: `Every cleanup step runs under the Kernel's default deadline, `DEFAULT_CLEANUP_DEADLINE_MS` (5 000 ms). A Provider-declared deadline is a Forward obligation: `CleanupOps::deadline_millis` is its hook, and the first Provider whose cleanup cannot finish in the default declares one.` If the owner prefers it now, the code route is a declared value on the instance returned by `Ops::deadline_millis`."
+},
+{
+"rule": "RS-11a",
+"where": "design/04-run-and-session.md:159",
+"kind": "contradiction",
+"resolution": "spec_follows_code",
+"user_visible": true,
+"evidence": [
+"design/04-run-and-session.md:159",
+"design/06-kernel-coordinator.md:424",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:169",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:170",
+"crates/ezsdr-kernel/src/manifest.rs:388",
+"crates/ezsdr-kernel/src/manifest.rs:412"
+],
+"note": "RS-11a says the Manifest is sealed with no failure path, while KC-44 defines one and `assemble_manifest` implements it: a failed `seal()` appends a step-7 `CleanupFailure` with `fragment: None` and returns the Manifest with `hash: None`. Every ingestion path now refuses a non-ASCII key or a non-finite number before it reaches the body, so the branch is defensive, but KC-44 states it and the code keeps it, so the two rules still disagree.",
+"fix": "Replace RS-11a: `The coordinator writes one Manifest at step 7 for every Run that reaches `CleanedUp`, including a failed Run, and seals it immutable afterwards; when `seal()` fails, a step-7 `CleanupFailure` with `fragment: None` records it and the Manifest is returned unsealed (`hash: None`, KC-44).`"
+},
+{
+"rule": "RS-35",
+"where": "design/04-run-and-session.md:222",
+"kind": "contradiction",
+"resolution": "spec_follows_code",
+"user_visible": true,
+"evidence": [
+"design/04-run-and-session.md:222",
+"design/04-run-and-session.md:218",
+"crates/ezsdr-kernel/src/event.rs:440",
+"crates/ezsdr-kernel/src/event.rs:502",
+"crates/ezsdr-kernel/src/event.rs:549",
+"crates/ezsdr-kernel/src/event.rs:563",
+"crates/ezsdr-kernel/tests/run_session.rs:535",
+"crates/ezsdr-kernel/tests/run_session.rs:610"
+],
+"note": "RS-33 gives one fallback row for pairs the plan did not foresee, and `mint` sends an unforeseen source with a planned kind to that row while keeping the kind: `counters()` reports the row as `(unforeseen, ezsdr.unforeseen)` and `drain` delivers the body under its own kind. In `rs_33_unforeseen_pair_uses_the_fallback_row` one body of kind `test.custom` from an unseen source leaves the planned `test.custom` row at 0, and in `rs_33_an_unforeseen_pair_inside_the_root_uses_the_fallback_row` one planned `test.custom` count stands against two delivered `test.custom` bodies, so the per-kind equality is false under both readings while the table-wide sum is exact.",
+"fix": "Replace the last sentence: `The counters' total equals the delivered bodies plus the sum of the `EVENTS_DROPPED` counts. The identity is over the whole table, not per kind: a pair the plan did not foresee is counted in the fallback row `(unforeseen, ezsdr.unforeseen)` (RS-33) and its body is delivered under its own kind, or under `ezsdr.unforeseen` when the kind is not registered.` The table-wide identity survives drops because a dropped body is counted before it is dropped and reported once in `EVENTS_DROPPED`."
+},
+{
+"rule": "RS-41",
+"where": "design/04-run-and-session.md:302",
+"kind": "contradiction",
+"resolution": "spec_follows_code",
+"user_visible": true,
+"evidence": [
+"design/04-run-and-session.md:302",
+"design/05-module-api.md:325",
+"design/06-kernel-coordinator.md:424",
+"design/06-kernel-coordinator.md:426",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:56",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:61",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:63",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:76",
+"crates/ezsdr-kernel/src/module_api.rs:273"
+],
+"note": "`assemble_manifest` takes only the instances whose slot it could take and whose `instance()` returned, appending a step-7 `CleanupFailure` for the others, and then takes `Fidelity::weakest` over that list, so the Manifest can record a vector stronger than the weakest bound declaration. KC-44 and KC-45 state the wedged case, but RS-41 and MA-42 promise the weakest over the bound Providers with no exception, and the `instance()` panic path is code-only, since KC-44's text names the held slot only.",
+"fix": "RS-41: `The fidelity vector is the weakest value per aspect over the declarations the coordinator can read (KC-44): an instance a wedged cleanup step still holds, or whose `instance()` panicked, contributes none, and its step-7 `CleanupFailure` names it. A Run in which no Provider declares an aspect records `none` for it.` MA-42's `the weakest over its bound Providers` becomes `the weakest over the bound Providers whose declaration the coordinator can read (RS-41, KC-44)`, and KC-44 gains `or whose `instance()` panicked` in the sentence that gives a held instance no fidelity."
+},
+{
+"rule": "MA-20",
+"where": "design/05-module-api.md:211",
+"kind": "differs",
+"resolution": "code_follows_spec",
+"user_visible": false,
+"evidence": [
+"design/05-module-api.md:211",
+"crates/ezsdr-kernel/src/module_api.rs:863",
+"crates/ezsdr-kernel/src/module_api.rs:1119",
+"crates/ezsdr-exec-native/src/lib.rs:213",
+"schemas/step_outcome.v1.json:4",
+"design/14-native-executor.md:95",
+"crates/ezsdr-exec-native/tests/native_executor.rs:335"
+],
+"note": "MA-20 requires `progressed` true exactly when a step consumed an input, produced an output or pushed an Action, and the native Executor does exactly that (`progressed |= !out.is_empty()` before the Actions are submitted), as NX-5's test asserts. The Kernel's `StepOutcome` and `Executor::step` doc comments still say 'consumed an input or produced an output', and `schemas/step_outcome.v1.json` renders that narrower description. The runtime and the rule agree; the public doc comment and the committed schema lag them and would freeze the stale wording.",
+"fix": "In `crates/ezsdr-kernel/src/module_api.rs`, the `StepOutcome` doc comment becomes 'What one `step` did. `progressed` is true exactly when the instance consumed an input, produced an output or pushed an Action (MA-20).' and `Executor::step`'s becomes '... and reports `progressed` true exactly when it consumed an input, produced an output or pushed an Action. Required, ...'; then regenerate `schemas/step_outcome.v1.json`, whose description is rendered from that comment.",
+"issue": "#105"
+},
+{
+"rule": "MA-25",
+"where": "design/05-module-api.md:241",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/05-module-api.md:241",
+"crates/ezsdr-kernel/src/module_api.rs:1142",
+"crates/ezsdr-kernel/src/module_api.rs:1102",
+"crates/ezsdr-kernel/tests/module_api.rs:1104",
+"crates/ezsdr-kernel/tests/module_api.rs:1127"
+],
+"note": "MA-25 says a Sink that leaves `step` at the default never drains and that the stepping test catches it. `Sink::step` is a required method with no body (`module_api.rs:1142`); only `Provider::step` has the default (`:1102`), so an omitted Sink step is a compile error, and the stepping test steps only its own `StepLogger` double (`tests/module_api.rs:1104`, `:1127`), never a production Sink. A hand-written no-op `step` is the real defect, and no test catches it today.",
+"fix": "Replace the MA-25 clause 'a Sink that leaves `step` at the default and therefore never drains is a defect the stepping test catches' with '`Sink::step` has no default, so every Sink implements it, and a Sink whose `step` is a no-op never drains and is a defect'."
+},
+{
+"rule": "MA-29",
+"where": "design/05-module-api.md:253",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/05-module-api.md:253",
+"crates/ezsdr-kernel/src/module_api.rs:663",
+"crates/ezsdr-sim-engine/src/lib.rs:137",
+"crates/ezsdr-sim-engine/src/lib.rs:65",
+"crates/ezsdr-sim-engine/tests/sim_engine.rs:64",
+"crates/ezsdr-radio-uhd/src/authority.rs:463",
+"design/18-uhd-radio.md:166",
+"design/08-simulation.md:33",
+"schemas/authority_descriptor.v1.json:109"
+],
+"note": "MA-29 says the descriptor's `governs` holds the primary root, that root's derived domains, `host.monotonic` and every root a simulation Authority simulates. Both Authorities put only `[root, HOST_MONOTONIC]` in `AuthorityDescriptor::governs` (sim-engine `lib.rs:137`, UHD `authority.rs:463`; asserted at `sim_engine.rs:64`); derived domains are covered by `TimeAuthority::governs` (`sim-engine lib.rs:65`), and SE-9 and UR-7 state the split. The descriptor's doc comment (`module_api.rs:663`) and `schemas/authority_descriptor.v1.json:109` repeat the false version.",
+"fix": "Replace MA-29's descriptor sentence with 'It provides a `TimeAuthority` handle (TM-16a) and declares an `AuthorityDescriptor` whose `governs` names its primary root and `host.monotonic`, and for a simulation Authority every root it simulates, while the `TimeAuthority` it provides governs that root's derived domains too (TM-16a).' Change the same claim in the `AuthorityDescriptor` doc comment to 'The domains it advances: a primary root, `host.monotonic`, and for a simulation Authority every root it simulates; the `TimeAuthority` it provides governs that root's derived domains (TM-16a, MA-29).' and regenerate `schemas/authority_descriptor.v1.json`."
+},
+{
+"rule": "MA-34",
+"where": "design/05-module-api.md:296",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/05-module-api.md:296",
+"crates/ezsdr-kernel/src/spec.rs:1090",
+"crates/ezsdr-kernel/src/spec.rs:939",
+"crates/ezsdr-kernel/src/module_api/registry.rs:194",
+"design/03-spec-and-binding.md:146",
+"crates/ezsdr-kernel/tests/spec_binding.rs:448"
+],
+"note": "MA-34 still says the Kernel refuses a key whose prefix belongs to no declared Vocabulary, naming the prefix. `check_key_prefixes` decides by owner, `registry.vocabulary_of(key)` and whether that Vocabulary is declared (`spec.rs:1090`), so `test.grid`, owned by an undeclared `test.b`, is refused while declaring only `test.b` admits it (`spec_binding.rs:448`); the diagnostic names the key (`spec.rs:939`). SB-2 (`design/03:146`) was amended to the owner rule on 2026-11-04, so MA-34's sentence is the stale copy.",
+"fix": "Replace MA-34's second sentence with 'The Kernel refuses a key whose owner, the registered Vocabulary that declares it (SB-2), the declaring document does not declare, naming the key — a declared prefix the key merely starts with is not its owner — and validates the value's shape against the `KeyDecl`, at SB-2's five key positions; an `ext.` key's owner is a registered Module.'"
+},
+{
+"rule": "MA-46",
+"where": "design/05-module-api.md:335",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/05-module-api.md:335",
+"crates/ezsdr-kernel/src/module_api.rs:1094",
+"crates/ezsdr-kernel/src/module_api.rs:1122",
+"crates/ezsdr-kernel/src/module_api.rs:1142",
+"crates/ezsdr-kernel/src/module_api.rs:1158",
+"crates/ezsdr-kernel/src/module_api.rs:1173",
+"crates/ezsdr-kernel/src/schema.rs:65",
+"crates/ezsdr-kernel/src/schema.rs:72",
+"crates/ezsdr-kernel/tests/kernel_surface.rs:904"
+],
+"note": "MA-46's fixed list omits `TimePoint`, carried by `Provider::start`, `Provider::step`, `Executor::step`, `Sink::step` and `Authority::next_wakeup`, and `DataLinkDecl`, carried by `Link::create`; both are registered documents with committed schemas (`schema.rs:65`, `:72`). The code's closed `ma6_documents!` list already holds both (`kernel_surface.rs:904`), so the clause that the fixed list includes every document a role signature carries is false, and `ClockRelation` is no longer 'the last'. Phase 7 added `ClockRelation` to that list on exactly this reading.",
+"fix": "Amend the list and its parenthetical to '... `StopMode`, `StepOutcome`, `ArtifactRef`, `ExecutionClass`, `Fidelity`, `TimePoint`, `DataLinkDecl` and `ClockRelation` — the last three since role-trait signatures carry them (`TimePoint` in `Provider::start`, `Provider::step`, `Executor::step`, `Sink::step` and `Authority::next_wakeup`; `DataLinkDecl` in `Link::create`; `ClockRelation` in `Authority::relations`, MA-29; `schemas/time_point.v1.json`, `schemas/data_link_decl.v1.json`, `schemas/clock_relation.v1.json`) — which includes every document type a role-trait signature carries (MA-6) — ...'"
+},
+{
+"rule": "KC-6",
+"where": "design/06-kernel-coordinator.md:217",
+"kind": "contradiction",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/06-kernel-coordinator.md:217",
+"design/06-kernel-coordinator.md:144",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:140",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:563",
+"crates/ezsdr-kernel/src/time/domain.rs:292",
+"crates/ezsdr-kernel/src/time/domain.rs:325",
+"crates/ezsdr-mock-radio/src/lib.rs:2143",
+"crates/ezsdr-mock-radio/src/lib.rs:1259",
+"design/01-time-model.md:159"
+],
+"note": "KC-6 says the `Assembly`'s registries are the Run's and nothing is registered after entry. The `Assembly` carries `clocks: Arc<ClockRegistry>` (`design/06:144`); the coordinator moves that Arc into `Context` and hands a clone to every `PrepareContext` (`pipeline.rs:140`, `:563`), and MockRadio declares its SampleClocks at `prepare` (`mock-radio lib.rs:2143`) and registers them at the first published block or at `arm` (`:1259`, `:2303`), which TM-13a, TM-13b and TM-13e require. Only the module, check, event-kind and contract tables are write-frozen after entry.",
+"fix": "Replace KC-6 with 'The module, check, event-kind and contract registries in the `Assembly` are the Run's; nothing is registered in them after entry. The clock registry is the Run's too: a Provider declares and registers its SampleClocks in it through `PrepareContext.clocks` (TM-13a).'"
+},
+{
+"rule": "KC-12a",
+"where": "design/06-kernel-coordinator.md:237",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/06-kernel-coordinator.md:237",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:579",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:626",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:363",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:53",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:330",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:404"
+],
+"note": "KC-12a bounds every `prepare` and `arm`, Provider, Sink and Executor alike, on a worker that keeps the slot when abandoned (`pipeline.rs:579`, `:626`). Its last sentence says step 2's `stop` waits for that slot and steps 4 and 7 record KC-39 and KC-44, but cleanup step 2 stops Providers only (`ending.rs:363`) and the Manifest's step-7 loop locks Provider slots only (`ending.rs:53`); a Sink's or Executor's held slot gets no step-2 wait and no KC-44, and steps 3 and 4 each record KC-39 (`ending.rs:404`, `:330`).",
+"fix": "Replace KC-12a's last sentence with 'Cleanup then finds that slot held: for a Provider's slot, step 2's `stop` waits for it until RS-8a's deadline abandons the step, and steps 4 and 7 record KC-39's and KC-44's failures for it; for a Sink's or an Executor's, no step-2 stop waits for it and step 7 records no KC-44, while steps 3 and 4 record KC-39's failure for it.'"
+},
+{
+"rule": "KC-24a",
+"where": "design/06-kernel-coordinator.md:329",
+"kind": "differs",
+"resolution": "code_follows_spec",
+"user_visible": true,
+"evidence": [
+"design/06-kernel-coordinator.md:329",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:320",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:329",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:335",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:338",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:808",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:1193",
+"crates/ezsdr-kernel/src/coordinator/admission.rs:26",
+"crates/ezsdr-kernel/src/coordinator/admission.rs:287"
+],
+"note": "KC-24a says a control-path call holds the admission lock from its first admission through its last dispatch, the start's batch included. `admit_schedule` admits the whole batch with no lock (`pipeline.rs:320` calls `:804`), and the lock is taken only around the dispatch at `:337-340`; the device-paced data thread starts at `:335`, after `move_to(Running)` at `:329` and before that dispatch, so an Executor component's step can call `submit` (`:1193`) and be admitted and dispatched between the batch's admissions and its dispatch. Admission clones the shared configuration (`admission.rs:26`) and only dispatch writes it (`admission.rs:287`), so that update is judged against the pre-batch configuration and is dispatched before the batch: a start batch setting `radio.tx.c0.frequency_hz` to 100e6 and a component setting the same key to 200e6 in that window leave `effective()` holding 100e6 though the component's entry was admitted later, where the rule makes the later entry the one that stands.",
+"fix": "code: in `pipeline.rs`, take `lock(&self.shared.admission)` after `start_instances()` returns and before `move_to(RunState::Running {})` (`:329`), hold it through the batch dispatch at `:337-339` (remove the inner `let _admission`), and release it before `wait_finished`; do not take it before `start_instances` (a Module submitting from its `start` would deadlock on the non-reentrant mutex) and do not re-admit at dispatch (KC-26's coerce and the checks would run twice). Add a device-paced test in which a start-batch entry and a component's first step set the same Provider key, asserting `effective()` holds the component's later-admitted value.",
+"issue": "#103"
+},
+{
+"rule": "KC-30",
+"where": "design/06-kernel-coordinator.md:374",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"design/06-kernel-coordinator.md:374",
+"crates/ezsdr-kernel/src/coordinator/admission.rs:250",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:1254",
+"crates/ezsdr-kernel/src/coordinator/stepping.rs:192",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:637",
+"crates/ezsdr-kernel/src/coordinator/pipeline.rs:843",
+"crates/ezsdr-kernel/src/coordinator/ending.rs:378",
+"crates/ezsdr-kernel/src/module_api.rs:1084"
+],
+"note": "KC-30 says a `DeviceLost` from any call after `prepare` makes the coordinator emit `DEVICE_LOST`, and admission's `coerce` (Session and schedule origins) is such a call. `coerce_provider` turns every `coerce` error, `DeviceLost` included, into one `ezsdr.coercion` violation (`admission.rs:250`); `emit_device_lost` is reached only from `step`, `arm`, `start` and the three `stop` paths (`stepping.rs:192`; `pipeline.rs:637`, `:843`; `ending.rs:378`). MA-11 makes `coerce` pure and hardware-free (`module_api.rs:1084`), so only a Provider that breaks it can return `DeviceLost`; the rule's 'any call after prepare' overpromises and cannot be met without defining behaviour for that contract violation.",
+"fix": "Replace KC-30's first sub-bullet's opening with 'an error of kind `DeviceLost` from `step`, `arm`, `start` or `stop` makes the coordinator emit `DEVICE_LOST` (severity `fatal`, source the instance's source root, time the current instant in the primary root, payload { \"message\": <the error's message> }) through `emit_control`;' and close it with 'a `DeviceLost` from `coerce` at admission emits none: KC-24 step 10 refuses it as an `ezsdr.coercion` violation (a Session entry `Rejected` and the Run keeps running; a schedule entry at `arm` `Failed { arm }`, KC-17).' The rest of the sub-bullet is unchanged."
+},
+{
+"rule": "OV-10",
+"where": "plan/phase1/00-overview.md:151",
+"kind": "missing",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"plan/phase1/00-overview.md:151",
+"plan/phase1/00-overview.md:158",
+"plan/phase1/00-overview.md:160",
+"plan/phase1/00-overview.md:532",
+"crates/ezsdr-kernel/src/schema.rs:58",
+"crates/ezsdr-kernel/src/id.rs:83",
+"crates/ezsdr-kernel/src/id.rs:95",
+"schemas/binding_profile.v1.json:190",
+"crates/ezsdr-kernel/tests/schema_freeze.rs:17"
+],
+"note": "OV-10 requires every document type to have a schema committed under `schemas/<name>.v<major>.json`, but the overview calls `MemoryDomainId` a document type at lines 160 and 532 while the four id types are committed only as `$defs` entries in the documents that carry them; `document_schemas()` registers 48 root documents, matching the 48 root files. The finding's `missing` framing is wrong, since the schemas exist and the root set is complete, but the file-per-type sentence is false for a type the same text labels a document type. The code's choice is sound.",
+"fix": "Every document type has a JSON Schema generated from its Rust definition and committed, as `schemas/<name>.v<major>.json` when it is a document of its own and as a `$defs` entry of every document that carries it otherwise."
+},
+{
+"rule": "OV-23",
+"where": "plan/phase1/00-overview.md:208",
+"kind": "differs",
+"resolution": "code_follows_spec",
+"user_visible": false,
+"evidence": [
+"plan/phase1/00-overview.md:208",
+"crates/ezsdr-kernel/tests/kernel_surface.rs:81",
+"crates/ezsdr-kernel/tests/kernel_surface.rs:99",
+"crates/ezsdr-kernel/tests/kernel_surface.rs:108",
+"design/02-stream-contract.md:275",
+"design/03-spec-and-binding.md:220",
+"design/03-spec-and-binding.md:331",
+"design/03-spec-and-binding.md:332",
+"design/06-kernel-coordinator.md:75"
+],
+"note": "OV-23 says a doc comment citing only a withdrawn rule cites no rule. `cites_a_rule` rejects only the seven ids in `WITHDRAWN`, while the specs mark twelve rules in the scanned prefixes withdrawn: SC-31a, SB-22h, SB-48, SB-49 and KA-14 are absent, so a doc comment citing one of them alone passes the gate; the negative test samples only SB-25a and MA-43.",
+"fix": "Add SC-31a, SB-22h, SB-48, SB-49 and KA-14 to `WITHDRAWN` (twelve entries) and assert at least one of them in `ov_01_citing_a_withdrawn_rule_satisfies_nothing`.",
+"issue": "#105"
+},
+{
+"rule": "OV-23b",
+"where": "plan/phase1/00-overview.md:216",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"plan/phase1/00-overview.md:216",
+"crates/ezsdr-kernel/tests/kernel_surface_allow.txt:12",
+"crates/ezsdr-kernel/tests/kernel_surface_allow.txt:39",
+"crates/ezsdr-kernel/tests/kernel_surface_allow.txt:104",
+"crates/ezsdr-kernel/src/coordinator/mod.rs:30",
+"crates/ezsdr-kernel/src/stream/link.rs:140",
+"crates/ezsdr-kernel/tests/kernel_surface.rs:368",
+"crates/ezsdr-kernel/tests/kernel_surface.rs:383"
+],
+"note": "OV-23b calls every `NEW:` entry a type, but the allow-list justifications cover any public item: 16 of the 114 `NEW:` entries are `pub const` or `pub fn` (for example `EVENT_RING_DEPTH` and `check_sink_link`), and `FEATURE:testing` is not an item at all. The test builds `new` from the `NEW:` lines including that feature line while `total` subtracts it, so it prints 114 NEW items of 295 public items when 113 items carry a `NEW:`.",
+"fix": "An allow-list entry marked `NEW:` is a public item — a type, constant, function or trait — that the Kernel has and audit §13 does not name. Also filter `FEATURE:testing` out of `new`, so the printed and asserted count is 113 of 295."
+},
+{
+"rule": "OV-19",
+"where": "plan/phase1/00-overview.md:204",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"plan/phase1/00-overview.md:204",
+"crates/ezsdr-kernel/src/time/authority.rs:375",
+"crates/ezsdr-kernel/src/time/authority.rs:393",
+"crates/ezsdr-kernel/src/time/authority.rs:123",
+"design/01-time-model.md:207",
+"crates/ezsdr-kernel/tests/time_model.rs:45",
+"crates/ezsdr-kernel/src/time/rational.rs:38"
+],
+"note": "OV-19 says inline `#[cfg(test)]` modules are for private helpers only, naming gcd and canonical number layout. `src/time/authority.rs:375` has an inline test module whose `tm_17a_every_waiter_wakes` exercises the shipped `ManualTimeAuthority` through a `cfg(test)`-only `ready` hook, and TM-17a's test line requires it there; `rational.rs` has no inline module, its gcd being covered by `tm_02_rational_normalises_by_gcd`.",
+"fix": "Inline `#[cfg(test)]` modules are for private helpers (canonical number layout) and for a type that ships behind the `testing` feature whose test needs a `cfg(test)`-only hook (TM-17a's `ManualTimeAuthority`)."
+},
+{
+"rule": "OV-20",
+"where": "plan/phase1/00-overview.md:205",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"plan/phase1/00-overview.md:205",
+"crates/ezsdr-kernel/tests/module_api.rs:1027",
+"crates/ezsdr-kernel/tests/module_api.rs:1147",
+"crates/ezsdr-kernel/tests/coordinator.rs:2609",
+"crates/ezsdr-kernel/tests/coordinator.rs:3859",
+"crates/ezsdr-kernel/tests/support/doubles.rs:229"
+],
+"note": "OV-20 says test doubles live in `tests/support/` and are never compiled into `src/`. The shared doubles are in `tests/support/doubles.rs` and nothing else is compiled into `src/` except the documented `ManualTimeAuthority` exception, but tests define local doubles beside themselves (`StepLogger` and `FailsOnce` in `module_api.rs`, `ForeverSink` and `KindWrongProvider` in `coordinator.rs`), so the absolute first sentence is false.",
+"fix": "Test doubles are never compiled into `src/`; the shared ones live in `tests/support/`, and a test may define a double beside the test that needs it."
+},
+{
+"rule": "PO-6",
+"where": "plan/phase2/00-overview.md:155",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"plan/phase2/00-overview.md:155",
+"crates/ezsdr-kernel/tests/schema_freeze.rs:17",
+"crates/ezsdr-kernel/tests/schema_freeze.rs:54",
+"schemas/SCHEMA_CHANGELOG.md:14"
+],
+"note": "PO-6 requires every Kernel schema change to regenerate the schema and add a `schemas/SCHEMA_CHANGELOG.md` line naming the KA, checked by `schema_freeze`. `schema_freeze` only regenerates and byte-compares the committed schemas; it never reads the changelog, which appears only in the assertion message, and the changelog header (line 14) records the owner's 2026-10-09 decision that no entries are written before the v4.0 freeze.",
+"fix": "Every change to a committed Kernel schema regenerates it with `EZSDR_UPDATE_SCHEMAS=1 cargo test -p ezsdr-kernel --test schema_freeze`; until the v4.0 freeze no `schemas/SCHEMA_CHANGELOG.md` entry is written (owner, 2026-10-09), and from the freeze any schema diff requires one (OV-12). *Checked by `schema_freeze`.*"
+},
+{
+"rule": "PO-8",
+"where": "plan/phase2/00-overview.md:157",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"plan/phase2/00-overview.md:157",
+"plan/phase2/00-overview.md:98",
+"crates/ezsdr-acceptance/tests/governance.rs:91",
+"design/14-native-executor.md:6",
+"design/18-uhd-radio.md:6"
+],
+"note": "PO-8 says the four Module crates are `ezsdr-sim-engine`, `ezsdr-mock-radio`, `ezsdr-link-host` and `ezsdr-sink-capture`. The code has six: `ezsdr-exec-native` (spec 14) and `ezsdr-radio-uhd` (spec 18) are Modules too, and `ma_03_no_module_crate_depends_on_another` lists all six.",
+"fix": "The six Module crates are `ezsdr-sim-engine`, `ezsdr-mock-radio`, `ezsdr-link-host`, `ezsdr-sink-capture`, `ezsdr-exec-native` and `ezsdr-radio-uhd`."
+},
+{
+"rule": "PO-8",
+"where": "plan/phase2/00-overview.md:157",
+"kind": "differs",
+"resolution": "spec_follows_code",
+"user_visible": false,
+"evidence": [
+"plan/phase2/00-overview.md:157",
+"plan/phase2/00-overview.md:144",
+"crates/ezsdr-radio-uhd/Cargo.toml:18",
+"crates/ezsdr-radio-uhd/Cargo.toml:20",
+"crates/ezsdr-acceptance/tests/governance.rs:173",
+"crates/ezsdr-acceptance/tests/governance.rs:179",
+"plan/phase7/00-overview.md:165",
+"plan/phase7/reviews/review-l.md:104"
+],
+"note": "PO-8 also forbids a Module crate from taking another Module crate as a normal or a dev-dependency. `ezsdr-radio-uhd`, a Module, takes `ezsdr-sink-capture` and `ezsdr-link-host` (and the `ezsdr-sink` Vocabulary) as dev-dependencies for `tests/fake.rs`; the governance test's dev allow-list names exactly that set and checks Module-to-Module edges only among normal dependencies, and Phase 7 Review L recorded the deviation without amending PO-8.",
+"fix": "A Module crate depends on `ezsdr-kernel`, on Vocabulary and support crates, and on nothing that is a Module crate as a normal dependency (MA-3); only `ezsdr-radio-uhd`'s tests may take `ezsdr-sink`, `ezsdr-sink-capture` and `ezsdr-link-host` as dev-dependencies (Phase 7, Review L deviation 4). Also correct §5 line 144 to name `ezsdr-radio-uhd`'s tests beside `ezsdr-acceptance`."
+}
+]

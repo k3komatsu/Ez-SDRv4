@@ -93,3 +93,15 @@ Spec text that disagreed with the code; the owner decided on 2026-11-15 ("推奨
 Things learned:
 - DeepSeek does the per-finding check with the Sonnet briefs at a fraction of the cost; its miss rate on the spot check (2 of 32) is of the same kind as before.
 - Tell the fixers that a JSON answer must have no trailing comma and no backslash escapes but `\"` and `\\`.
+
+## Kernel rule sweep (2026-11-15)
+
+The first half of the freeze checklist's per-rule check (handoff §4, [28-forward-audit.md](28-forward-audit.md) "Before the freeze review"), run early at `83e3e6ba`: every rule of specs 01–06 and the OV and PO rules (355 rules, 27 chunks) against the code, Go DeepSeek V4.1 Flash (`#max`) for every pass. The Test-line question was the third sweep's above; this one asks whether the code does what each rule says and whether two rules contradict.
+
+1. **Sweep.** 8 in parallel; two chunks lost to API timeouts were rerun. 54 findings (`differs`, `missing`, `stale_ref`, `contradiction`).
+2. **Adversarial check.** 10 refuted, 44 stand.
+3. **Check with a resolution.** DeepSeek reopened each and proposed one: 36 the rule follows the code, 2 the claim becomes a Forward obligation, 6 the code follows the rule. The orchestrator read the code of the code-side ones and filed them: #102 (a continuity hole, SC-31c), #103 (the device-paced start batch admitted outside the admission lock, KC-24a), #104 (a Provider's report not checked for non-ASCII keys, SB-9a), #105 (`EventSource`'s unit variants, the withdrawn-rule list, doc comments).
+4. **Rule text.** DeepSeek, one file at a time; the orchestrator rewrote SB-26 (four names reserved, three read) and aligned two explanatory sentences of the Phase 2 record with PO-8. Decided by the orchestrator, after the owner's "推奨で" for the same kind of change: the text follows the code with no change of behaviour, the four user-visible ones (RS-5, RS-11a, RS-35, RS-41: what the Manifest records) included.
+5. **Review.** Sol 6.1 in two batches: 2 FAIL, 4 major (TM-16c's `wait_until`, SC-25's ending `Stop`, KC-12a's step number, RS-41 against MA-42) and 5 minor, fixed by the orchestrator; an Opus re-check: PASS, and its two notes applied (KC-44 names the `instance()` panic, RS-41 any held slot).
+
+The findings with their resolutions are [`32-kernel-rules.json`](32-kernel-rules.json). Left: the Vision's §14 fidelity sentence still says every bound Provider (MA-42 and RS-41 are normative); SB-26's "a Kernel read of a Vocabulary's section is not expressible (OV-21)" overstates (RS-25a compares such a section unread), noted by the re-check outside the diff. The second half of the freeze check (the rules of specs 07–18) waits until Phase 10, when those specs stop moving.
