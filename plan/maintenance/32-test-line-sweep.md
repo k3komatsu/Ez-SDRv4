@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Done for every accepted spec (01–11, 14, 16, 18) at base `0fa2001`; the fixes are one commit. A1's tests landed on 2026-10-16 (rows T01–T33); A2 and B go to Phase 8's plan (owner, 2026-10-16). A2 done on 2026-10-25 (rows T34–T45; [phase 8 reviews/a2-opus](../phase8/reviews/a2-opus.md)): five conditions were already tested, nine got tests. B waits for Phase 8 stage 4. A second sweep ran on 2026-10-25 (§ Second sweep): 263 checked findings applied to the Test lines, six spec/code disagreements left for the owner. A third ran on 2026-11-15 (§ Third sweep): 162 checked findings applied, Sol's review fixed, three spec/code disagreements for the owner. |
+| Status | Done for every accepted spec (01–11, 14, 16, 18) at base `0fa2001`; the fixes are one commit. A1's tests landed on 2026-10-16 (rows T01–T33); A2 and B go to Phase 8's plan (owner, 2026-10-16). A2 done on 2026-10-25 (rows T34–T45; [phase 8 reviews/a2-opus](../phase8/reviews/a2-opus.md)): five conditions were already tested, nine got tests. B waits for Phase 8 stage 4. A second sweep ran on 2026-10-25 (§ Second sweep): 263 checked findings applied to the Test lines, six spec/code disagreements left for the owner. A third ran on 2026-11-15 (§ Third sweep): 162 checked findings applied, Sol's review fixed, three spec/code disagreements amended to the code (owner). |
 | Why | Every Sol review of DA-3 step 2 (specs 07, 09, 18) found Test lines or §6 rows that claimed more than their tests assert. No one had checked that across all specs. |
 | Tool | [`tools/sweep/`](tools/sweep/sweep.py): `sweep.py` and its two briefs. Run it again before the freeze review ("全規則の確認", handoff §2). |
 
@@ -88,7 +88,7 @@ Run at `bc48078b` (after note 51, #67, #101, #77 and maintenance table 3), every
 
 The checked findings, each with its decision, fix, spot-check result and the four held for a decision on the rule text, are [`32-sweep3.json`](32-sweep3.json).
 
-Spec text that disagreed with the code, for the owner (rule text, no change of behaviour): SB-46 (a `reject` coercion never reaches a PrepareReport; it is a violation), KC-30 (the reason carries the call after `<stage>`, and the run loop's Authority panic reads `authority panicked during next_wakeup`), KC-35 (a child Spec Run holds its parent's Lease, `kf_03_a_child_inherits_the_lease`).
+Spec text that disagreed with the code; the owner decided on 2026-11-15 ("推奨で") that the text follows the code, amended the same day with each rule's Test line: SB-46 (a `reject` coercion never reaches a PrepareReport; it is a violation), KC-30 (the reason carries the call after `<stage>`, and the run loop's Authority panic reads `authority panicked during next_wakeup`), KC-35 (a child Spec Run holds its parent's Lease, `kf_03_a_child_inherits_the_lease`).
 
 Things learned:
 - DeepSeek does the per-finding check with the Sonnet briefs at a fraction of the cost; its miss rate on the spot check (2 of 32) is of the same kind as before.
