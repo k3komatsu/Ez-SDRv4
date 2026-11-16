@@ -227,7 +227,7 @@ for ((n = 1; n <= RUNS; n++)); do
     [[ ! -e $log ]] || { printf 't200-bare-uhd: %s exists; not overwriting it\n' "$log" >&2; exit 2; }
     run_one "ezsdr-t200-bare-$$-$n" "$UHD_ARGS" "$SECONDS_PER_RUN" "$log"
     verdict=$(t200_verdict "$log" "$RUN_STATUS")
-    counts=$(awk '/^t200 summary / { sub(/^t200 summary /, ""); print }' "$log" | tail -n 1)
+    counts=$(grep -ao 't200 summary .*' "$log" | tail -n 1 | sed 's/^t200 summary //')
     printf 'T200 bare run %d: %s (%s) (%s)\n' "$n" "$verdict" "${counts:-no summary line}" "$log"
     verdicts+=("${verdict%%:*}")
     [[ $verdict == clean ]] || failed=1
