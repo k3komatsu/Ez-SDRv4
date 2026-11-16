@@ -9,6 +9,7 @@ IMAGE=ezsdr-v4-dev:uhd4.10
 TOOL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/uhd-repro
 RUNS=${EZSDR_T200_BARE_RUNS:-3}
 SECONDS_PER_RUN=${EZSDR_T200_BARE_SECONDS:-300}
+SPP=${EZSDR_T200_BARE_SPP:-1996}  # samples per send call; v3 handed about 1 M per call (owner, 2026-11-16)
 CPUSET=${EZSDR_BENCH_CPUSET:-}
 # One bound on a whole run (the build, opening the device, the transmit, the shutdown): the planned seconds and 3 minutes.
 BOUND=${EZSDR_T200_BARE_BOUND:-$((SECONDS_PER_RUN + 180))}
@@ -19,7 +20,7 @@ Usage: t200-bare-uhd.sh UHD-ARGS LOG-DIR [LABEL]
        t200-bare-uhd.sh --self-check
 
 Builds uhd-repro/tx_repro.cpp in the bench container and runs `tx_repro --case t200 --rate 200e6 --secs 300` 3 times
-(EZSDR_T200_BARE_RUNS and EZSDR_T200_BARE_SECONDS change the count and the length; EZSDR_BENCH_CPUSET, e.g. 4-15, is docker's --cpuset-cpus,
+(EZSDR_T200_BARE_RUNS, EZSDR_T200_BARE_SECONDS and EZSDR_T200_BARE_SPP change the count, the length and the samples per send call; EZSDR_BENCH_CPUSET, e.g. 4-15, is docker's --cpuset-cpus,
 for host setting H2; EZSDR_T200_BARE_BOUND is the bound on one run in seconds, 180 s more than the run's length by default). UHD-ARGS is e.g. addr=192.168.40.36.
 Each run's output goes to LOG-DIR/tx_repro-t200-LABEL-N.log. One line per run: its verdict and counts.
   clean         every count is 0, the samples handed to send reach 99 % of rate x seconds, tx_repro exited 0.
@@ -32,10 +33,10 @@ It transmits: the owner confirms the slot A TX/RX -> >=30 dB attenuator -> the s
 EOF
 }
 
-# The value of `key` on the last "t200 summary" line of a log, or `?` when it is not there as an integer.
+# The value of `key` on the last "t200 summary" line of a log (UHD's `U` characters can come first on that line), or `?` when it is not there as an integer.
 summary_value() { # $1 = key, $2 = log
     local value
-    value=$(awk -v key="$1" '/^t200 summary / { for (i = 3; i < NF; i += 2) if ($i == key) v = $(i + 1) } END { print v }' "$2")
+    value=$(awk -v key="$1" '(s = index($0, "t200 summary ")) { $0 = substr($0, s); for (i = 3; i < NF; i += 2) if ($i == key) v = $(i + 1) } END { print v }' "$2")
     [[ $value =~ ^[0-9]+$ ]] && printf '%s' "$value" || printf '?'
 }
 
@@ -69,7 +70,7 @@ run_one() { # $1 = name, $2 = uhd args, $3 = seconds, $4 = log
     timeout -k 10 "$BOUND" docker run --rm --init --name "$1" --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(id -u):$(id -g)" \
         ${CPUSET:+--cpuset-cpus="$CPUSET"} --tmpfs /tmp:rw,exec,size=256m -v "$TOOL_DIR:/src:ro" "$IMAGE" \
         bash -c 'g++ -O2 -std=c++17 /src/tx_repro.cpp -o /tmp/tx_repro -luhd -lpthread && exec /tmp/tx_repro "$@"' tx_repro \
-        --args "$2" --case t200 --rate 200e6 --secs "$3" --spp 1996 --wave tone >"$4" 2>&1 &
+        --args "$2" --case t200 --rate 200e6 --secs "$3" --spp "$SPP" --wave tone >"$4" 2>&1 &
     RUN_PID=$!
     wait "$RUN_PID"
     RUN_STATUS=$?
@@ -106,6 +107,8 @@ if [[ ${1:-} == --self-check ]]; then
     verdict() { t200_verdict "$log" "$1"; }
     { echo "$rf"; summary 0 0 0 0 0 0 60000000000; } >"$log"
     ok 'a clean run' "$(verdict 0)" clean
+    { echo "$rf"; printf 'UUU'; summary 2 0 0 0 0 0 60000000000; } >"$log"
+    ok 'a summary after UHD underflow characters on its line' "$(verdict 0)" 'failed: underflow 2'
     { echo "$rf"; summary 0 0 0 0 0 0 59400000000; } >"$log"
     ok 'exactly 99 % of the samples is enough' "$(verdict 0)" clean
     { echo "$rf"; summary 0 0 0 0 0 0 59399999999; } >"$log"

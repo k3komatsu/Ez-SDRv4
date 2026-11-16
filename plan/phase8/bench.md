@@ -1514,7 +1514,7 @@ grep -h 'S4 trial' ~/.cache/ezsdr-bench/$(date +%F)/hw_s4_overflow_gap.$BOARD.lo
 
 | | 何を | 流し方 | 何回 |
 |---|---|---|---|
-| ① | bare UHD | `plan/phase8/tools/t200-bare-uhd.sh "$EZSDR_UHD_ARGS" ~/.cache/ezsdr-bench/$(date +%F) <ラベル>`（container の中で `tx_repro.cpp` を build して `tx_repro --case t200 --rate 200e6 --secs 300 --spp 1996 --wave tone`．「yes」を求める．run ごとに 1 本の期限（300 s + 180 s．過ぎると container を kill し，残りの run は流さない）．Ctrl-C か TERM は container を kill して終わる（exit 130．以降の run は始まらない）．run ごとに clean / failed / INCONCLUSIVE の行） | 3 |
+| ① | bare UHD | `plan/phase8/tools/t200-bare-uhd.sh "$EZSDR_UHD_ARGS" ~/.cache/ezsdr-bench/$(date +%F) <ラベル>`（container の中で `tx_repro.cpp` を build して `tx_repro --case t200 --rate 200e6 --secs 300 --spp 1996 --wave tone`．`EZSDR_T200_BARE_SPP` で 1 回の send の sample 数を変える〈既定 1996〉．「yes」を求める．run ごとに 1 本の期限（300 s + 180 s．過ぎると container を kill し，残りの run は流さない）．Ctrl-C か TERM は container を kill して終わる（exit 130．以降の run は始まらない）．run ごとに clean / failed / INCONCLUSIVE の行） | 3 |
 | ② | Module の probe | `EZSDR_TX200_LENGTHS=20000,20000,20000 EZSDR_TX200_SECONDS=300 hw hw_tx200_hot_path_probe`（波形 20 000，`run_stage`．1 回の呼び出しで 3 run） | 3 |
 | ③ | record suite の形 | `EZSDR_MEASURE_THROUGHPUT_SECS=300 EZSDR_T200_RUNS=3 hw hw_t200_record_stage`（`measure_tx_throughput`：record の Spec，波形 1 000 sample，record の判定） | 3 |
 | ③' | 任意（5c）：③ の波形を 20 000 に | `EZSDR_TX_WAVEFORM_SAMPLES=20000 EZSDR_MEASURE_THROUGHPUT_SECS=300 EZSDR_T200_RUNS=3 hw hw_t200_record_stage` | 3 |
