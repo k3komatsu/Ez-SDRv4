@@ -475,6 +475,22 @@ fn uhd_61_03_timed_start_of_tx_and_capture() {
     assert_eq!(samples(capture), wave);
 }
 
+/// RM-14, KC-28 (stage 4a): a Session admits an untimed burst at its Provider's declared command lead, 5 ms after the Action's instant on the
+/// UHD Module, as on MockRadio (`v58.rs`).
+#[test]
+fn s4a_an_untimed_session_burst_is_admitted_at_now_plus_the_declared_lead_on_the_uhd_module() {
+    let temp = rig::TempDir::new("s4a-declared-lead-uhd");
+    let mut run = uhd_loopback_session(&temp);
+    // `uhd_loopback_session` has advanced 1 ms past T0; the transmit clock's origin is before that.
+    let (bytes, _) = experiments::waveform_of(&pn(1_000));
+    let repeat = SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: BTreeMap::new() };
+    let entry = run.submit(repeat, Some(&bytes)).unwrap();
+    let Outcome::Admitted { coercions, .. } = &entry.outcome else { panic!("{:?}", entry.outcome) };
+    let at = coercions.iter().find(|coercion| coercion.key == Key::parse("ezsdr.action.at").unwrap()).expect("the untimed burst is given an instant");
+    let now = entry.time;
+    assert_eq!(at.applied, Value::Scalar(Scalar::Int(now.ticks_in(now.domain()).unwrap() + 5 * MS)));
+}
+
 #[test]
 fn ea_16_untimed_repeat_after_stop_starts_at_the_stop_region_end() {
     // RM-15, RM-16 (sequence 1) on UHD: an untimed repeat submitted right after a transmit stream's Stop is placed past the Stop region, with

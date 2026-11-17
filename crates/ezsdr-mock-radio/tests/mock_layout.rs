@@ -1425,25 +1425,25 @@ fn mr_34_a_start_draws_one_phase_per_random_channel_whatever_the_values_and_a_ca
     harness.step(T0 + 6_000_000).unwrap();
     harness.push(start_rx("mock/rx/s0", None));
     harness.step(T0 + 7_000_000).unwrap();
-    harness.step(T0 + 80_000_000).unwrap();
+    harness.step(T0 + 40_000_000).unwrap();
     // B: a changed value.
     harness.push(stop("mock/rx/s0"));
     harness.push(set_value("radio.rx.c0.gain_db", 3.0));
+    harness.step(T0 + 50_000_000).unwrap();
+    harness.push(start_rx("mock/rx/s0", None));
+    harness.step(T0 + 51_000_000).unwrap();
     harness.step(T0 + 90_000_000).unwrap();
-    harness.push(start_rx("mock/rx/s0", None));
-    harness.step(T0 + 91_000_000).unwrap();
-    harness.step(T0 + 200_000_000).unwrap();
-    // D: a start booked ahead, cut by a `Stop` that takes effect at its origin (a start booked ahead is streaming, so nothing can be sent before
-    // then, RM-21), so D has no sample; then E.
+    // D: a start booked ahead, cut by a `Stop` before its origin (a start booked ahead is streaming, so nothing can be sent before then,
+    // RM-21), so D has no sample; then E. (The harness keeps the last 64 blocks, so each segment is short.)
     harness.push(stop("mock/rx/s0"));
-    harness.step(T0 + 210_000_000).unwrap();
-    harness.push(start_rx("mock/rx/s0", Some(T0 + 250_000_000)));
-    harness.step(T0 + 211_000_000).unwrap();
+    harness.step(T0 + 100_000_000).unwrap();
+    harness.push(start_rx("mock/rx/s0", Some(T0 + 104_000_000)));
+    harness.step(T0 + 101_000_000).unwrap();
     harness.push(stop("mock/rx/s0"));
-    harness.step(T0 + 250_000_000).unwrap();
+    harness.step(T0 + 110_000_000).unwrap();
     harness.push(start_rx("mock/rx/s0", None));
-    harness.step(T0 + 251_000_000).unwrap();
-    harness.step(T0 + 340_000_000).unwrap();
+    harness.step(T0 + 111_000_000).unwrap();
+    harness.step(T0 + 150_000_000).unwrap();
     let clocks = harness.clocks_of("mock/rx/s0");
     assert_eq!(clocks.len(), 4, "connect, A, B and E (D never began)");
     let blocks = harness.blocks("rx0");

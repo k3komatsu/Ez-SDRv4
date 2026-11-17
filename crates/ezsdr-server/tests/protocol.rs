@@ -1615,6 +1615,25 @@ fn ea_07_a_reference_that_does_not_lock_refuses_the_connect_with_its_reason() {
 }
 
 #[test]
+fn ea_10_an_unconfirmed_open_flush_ends_connect_at_arm() {
+    // UR-13, UR-22: three unconfirmed open flushes refuse Connect at `arm`: the reply is `ended` with the stage and the reason, and the Manifest is written.
+    let temp = TempDir::new("uhd-open-flush");
+    let open: ezsdr_server::OpenDevice = Arc::new(|_args: &str| {
+        Ok(Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, faults: vec![ezsdr_radio_uhd::FakeFault::DropBurstAck], ..FakeConfig::default() })) as Arc<dyn Device>)
+    });
+    let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
+    ok(handle(&mut server, Request::Hello { protocol: 2 }, Vec::new()));
+    let handled = handle(&mut server, Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None, initial: loopback() }, Vec::new());
+    assert!(handled.exit);
+    let error = err(handled);
+    assert_eq!(error.kind, ErrorKind::Ended);
+    let Some(Termination::Failed { stage: Stage::Arm, reason }) = &error.termination else { panic!("{:?}", error.termination) };
+    assert!(reason.contains("UR-13: the open flush (UR-22) was not confirmed after 3 attempts"), "{reason}");
+    let written: Manifest = serde_json::from_str(&std::fs::read_to_string(server.dir().unwrap().join("manifest.json")).unwrap()).unwrap();
+    assert!(matches!(written.termination.reason, Termination::Failed { stage: Stage::Arm, .. }));
+}
+
+#[test]
 fn ea_07_a_reference_that_locks_on_the_reopen_connects() {
     // UR-7's reopen: the first open's reference does not lock, the second's does; the
     // Session runs, and its Manifest records the reopen with the first error.

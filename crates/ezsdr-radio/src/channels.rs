@@ -350,7 +350,7 @@ impl Description {
     /// on `x3xx`; `ideal` has none.
     pub fn new(layout: &Layout, block_len: u32, terms: &ProviderTerms) -> Description {
         let timing = match layout {
-            Layout::X3xx { .. } => x3xx::timing(terms),
+            Layout::X3xx { .. } => x3xx::timing(),
             Layout::Ideal { .. } => TimingEnvelope { min_timed_command_lead_ns: 0, startup_latency_ns: 0, overflow_restart_gap_ns: 0, rx_start_lead_ns: 0, tx_in_flight_ns: 0 },
         };
         Description::build(layout, block_len, terms, timing)

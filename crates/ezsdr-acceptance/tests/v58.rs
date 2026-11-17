@@ -292,6 +292,28 @@ fn v58_07_manifest_records_every_input_and_output() {
     assert_eq!(manifest.binding.body, serde_json::to_value(profile).unwrap());
 }
 
+/// RM-14, KC-28 (stage 4a): a Session admits an untimed burst at its Provider's declared command lead, 5 ms after the Action's instant on
+/// MockRadio (2 ms before the Mock's device lead and its declared lead were told apart).
+#[test]
+fn s4a_an_untimed_session_burst_is_admitted_at_now_plus_the_declared_lead_on_the_mock() {
+    let temp = rig::TempDir::new("s4a-declared-lead-mock");
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
+    let mut run = loopback_run(&temp, &profile);
+    let clock = root(&run);
+    // Past the transmit clock's origin, so that the origin does not decide.
+    run.advance_to(TimePoint::new(clock, T0 + 10_000_000)).unwrap();
+    let (bytes, _) = experiments::waveform(1_000);
+    let entry = run
+        .submit(
+            SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() },
+            Some(&bytes),
+        )
+        .unwrap();
+    let Outcome::Admitted { coercions, .. } = &entry.outcome else { panic!("{:?}", entry.outcome) };
+    let at = coercions.iter().find(|coercion| coercion.key == Key::parse("ezsdr.action.at").unwrap()).expect("the untimed burst is given an instant");
+    assert_eq!(at.applied, Value::Scalar(Scalar::Int(entry.time.ticks_in(clock).unwrap() + 5_000_000)));
+}
+
 #[test]
 fn v58_11_short_lead_burst_is_a_time_error() {
     let temp = rig::TempDir::new("v58-11-short");
@@ -413,9 +435,9 @@ fn v58_13_session_manifest_has_log_waveform_and_capture() {
 }
 
 #[test]
-fn rs_19_an_untimed_repeat_in_a_session_starts_at_the_clock_origin() {
-    // A Session that asked for tx c0 at connect: the transmit clock begins a start lead after the Run's start
-    // (RM-25) and RS-19 admits the untimed repeat no earlier than that origin.
+fn rs_19_an_untimed_repeat_in_a_session_starts_at_the_declared_lead() {
+    // A Session that asked for tx c0 at connect: the transmit clock begins at arm, before T0, so RS-19's earliest instant for the untimed
+    // repeat is the Action's instant plus the declared 5 ms lead (KC-28), not the Mock's 2 ms device lead (RM-14) and not the origin.
     let temp = rig::TempDir::new("rs-19-enable");
     let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let mut run = loopback_run(&temp, &profile);
@@ -432,8 +454,8 @@ fn rs_19_an_untimed_repeat_in_a_session_starts_at_the_clock_origin() {
     let manifest = end_session(run, clock, T0 + 60_000_000);
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
-    // The burst starts at the clock's origin (T0 + 3 ms), on time.
-    assert_eq!((bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap(), bursts[0].late_by), (T0 / 1_000 + 3_000, None));
+    // The burst starts 5 ms after the Action (T0 + 1 ms), on time.
+    assert_eq!((bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap(), bursts[0].late_by), (T0 / 1_000 + 6_000, None));
     assert!(!manifest.events.delivered.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR));
 }
 
@@ -1066,14 +1088,17 @@ fn v58_connect_refuses_what_the_layout_cannot_carry_at_validate() {
     assert!(matches!(duplex.termination.reason, Termination::Failed { stage: Stage::Validate, .. }), "{:?}", duplex.termination.reason);
     assert!(duplex.admission.rejected.iter().any(|item| item.reason.starts_with("RM-31") && item.reason.contains("transmit channel c0")), "{:?}", duplex.admission.rejected);
     assert!(duplex.clocks.sample_clocks.is_empty(), "nothing started");
-    // RM-32: 200 + 100 Msps is over one 10 GbE link; 200 + 50 is exactly at it.
-    let streams =
-        |second: f64| [("radio.rx.c0.stream", Scalar::Int(0)), ("radio.rx.c1.stream", Scalar::Int(1)), ("radio.rx.s0.sample_rate_hz", num(200.0e6)), ("radio.rx.s1.sample_rate_hz", num(second))];
-    let over = ask(&streams(100.0e6), "v58-rm32-over");
-    assert!(matches!(over.termination.reason, Termination::Failed { stage: Stage::Validate, .. }), "{:?}", over.termination.reason);
-    assert!(over.admission.rejected.iter().any(|item| item.reason.starts_with("RM-32")), "{:?}", over.admission.rejected);
-    assert!(over.clocks.sample_clocks.is_empty());
-    let at = ask(&streams(50.0e6), "v58-rm32-at");
+    // RM-32: 200 + 100 and 200 + 50 Msps are over one 10 GbE link (800 MB/s); 100 + 100 is exactly at it.
+    let streams = |first: f64, second: f64| {
+        [("radio.rx.c0.stream", Scalar::Int(0)), ("radio.rx.c1.stream", Scalar::Int(1)), ("radio.rx.s0.sample_rate_hz", num(first)), ("radio.rx.s1.sample_rate_hz", num(second))]
+    };
+    for (second, name) in [(100.0e6, "v58-rm32-over"), (50.0e6, "v58-rm32-over-50")] {
+        let over = ask(&streams(200.0e6, second), name);
+        assert!(matches!(over.termination.reason, Termination::Failed { stage: Stage::Validate, .. }), "{:?}", over.termination.reason);
+        assert!(over.admission.rejected.iter().any(|item| item.reason.starts_with("RM-32")), "{:?}", over.admission.rejected);
+        assert!(over.clocks.sample_clocks.is_empty());
+    }
+    let at = ask(&streams(100.0e6, 100.0e6), "v58-rm32-at");
     assert!(!matches!(at.termination.reason, Termination::Failed { .. }), "{:?}", at.termination.reason);
     // A key no Vocabulary owns is refused at Validate too, and the Run exists to say so (RS-12).
     let unknown = ask(&[("zzz.x", Scalar::Int(1))], "v58-unknown-key");

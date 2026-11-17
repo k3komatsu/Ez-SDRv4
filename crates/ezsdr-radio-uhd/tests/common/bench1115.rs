@@ -50,13 +50,12 @@ fn error_text(what: &str, error: impl std::fmt::Debug) -> String {
 // Probe 1: the receive-restart zeros sweep (`hw_rxzeros_sweep`). Plan: ~/.cache/ezsdr-fixes/2026-11-13-rxzeros/options.md §4.
 // ============================================================================================================================
 
-/// The decision rule of §4 (owner's direction D, 2026-11-13), printed before the first trial and again in the summary.
-pub const RXZ_RULE: &str = "RULE (written before the data): per half-band class n_hb = min(v2(D), 3) the swept zero-count range of the gain-0 restart rate cells must stay within +-1 of the class's measured range (n_hb 3: 13-15, 2: 9-11, 1: 3-4, 0: 0); \
-all four classes hold -> D: the table 0/4/11/15 stands; a class wider than +-1 -> B: a table over the swept rates, unmeasured elsewhere. \
-A fresh open (rx_close, rx_open, rx_start) outside +-1 of the same D's restart range -> the fill applies to the case measured only (restarts), else to every start. \
-A gain whose range moves a limit by more than 2 -> KNOWN_LIMITATIONS: the zero count is exact for the stated level only; the Mock value stays a bound. \
+/// The decision rule (owner, 2026-11-17: the settling length, not the exact-zero count), printed before the first trial and again in the summary.
+pub const RXZ_RULE: &str = "RULE: a complete trial's settling length zeros + ramp90 (the samples until the magnitude first reaches 90 % of steady) must be at most ezsdr_radio::x3xx::rx_fill_samples(D) \
+(2, 13, 18, 24 for n_hb = min(v2(D), 3) = 0, 1, 2, 3): the head MockRadio and FakeDevice deliver at every receive start; a trial above it FAILs its cell (the Mock's head is looser than the board's). \
+A fresh open (rx_close, rx_open, rx_start) outside +-1 of the same D's restart exact-zero range (an observation of the zero count, which is no bound) -> the head applies to the case measured only (restarts), else to every start. \
 A precursor (non-zero samples before the 10 % point) whose peak reaches 5 % of the steady magnitude -> signal-like: the recommendation is revisited before any code. \
-The candidate bound of a class is the max zero count over every counted cell of the class (every gain, every start kind), apart from the structure comparison; a level effect adds the KNOWN_LIMITATIONS line and never lowers the bound. \
+The exact-zero count itself falls with the received level and is no bound. \
 A cell counts only when every planned trial (10, 15 where planned) is complete; a decision needs every planned cell counted and is otherwise INCONCLUSIVE, naming the missing cells. The warm-up trial of each cell is dumped and not counted.";
 
 /// The largest transmit gain of the sweep's tone source, with the attenuator in the loopback (owner, 2026-10-27, bench.md T5: gain up to the
@@ -136,6 +135,11 @@ impl ZCell {
     /// Trials a cell needs complete to count: every planned one.
     pub fn needed(&self) -> usize {
         self.trials
+    }
+
+    /// The most samples a trial of this cell may take to settle: the head both Providers deliver (MR-35, UR-33).
+    pub fn bound(&self) -> usize {
+        ezsdr_radio::x3xx::rx_fill_samples(self.decim) as usize
     }
 }
 
@@ -238,6 +242,8 @@ pub struct CellStats {
     pub zeros: Option<(usize, usize, usize)>,
     pub ramp10: Option<(usize, usize, usize)>,
     pub ramp90: Option<(usize, usize, usize)>,
+    /// The largest settling length, zeros + ramp90, over the complete trials.
+    pub settled: Option<usize>,
     pub precursor_peak: Option<f64>,
 }
 
@@ -253,12 +259,13 @@ pub fn cell_stats(trials: &[ZTrial]) -> CellStats {
         zeros: spread(fills().map(|fill| fill.zeros).collect()),
         ramp10: spread(fills().map(|fill| fill.ramp10).collect()),
         ramp90: spread(fills().map(|fill| fill.ramp90).collect()),
+        settled: fills().map(|fill| fill.zeros + fill.ramp90).max(),
         precursor_peak: complete.iter().filter_map(|trial| trial.precursor_peak).max_by(f64::total_cmp),
     }
 }
 
-/// FAIL when a call failed or a first block is not at its planned tick in a read with no overflow; INCONCLUSIVE below the cell's planned trials complete; else PASS, with the
-/// measured spread. (The cell's meaning is in the decision, `decide`.)
+/// FAIL when a call failed, a first block is not at its planned tick in a read with no overflow, or a complete trial settled after more samples than
+/// `rx_fill_samples(D)`; INCONCLUSIVE below the cell's planned trials complete; else PASS, with the measured spread. (The cell's meaning is in the decision, `decide`.)
 pub fn cell_verdict(cell: &ZCell, stats: &CellStats) -> Verdict {
     if stats.errors > 0 {
         return Verdict::Fail(format!("{} of {} trials had a failed device call", stats.errors, stats.trials));
@@ -266,10 +273,26 @@ pub fn cell_verdict(cell: &ZCell, stats: &CellStats) -> Verdict {
     if stats.misplaced > 0 {
         return Verdict::Fail(format!("{} of {} trials have the first block off the planned tick", stats.misplaced, stats.trials));
     }
+    if let Some(settled) = over_bound(cell, stats) {
+        return Verdict::Fail(format!(
+            "a trial settled after {settled} samples, over the {} of rx_fill_samples({}): the Mock's and the Fake's head is looser than the board's",
+            cell.bound(),
+            cell.decim
+        ));
+    }
     if stats.complete < cell.needed() {
         return Verdict::Inconclusive(format!("{} of {} trials complete ({} needed)", stats.complete, stats.trials, cell.needed()));
     }
-    Verdict::Pass(format!("{} of {} complete; zeros {:?}; ramp10 {:?}; ramp90 {:?}", stats.complete, stats.trials, stats.zeros, stats.ramp10, stats.ramp90))
+    Verdict::Pass(format!(
+        "{} of {} complete; zeros {:?}; ramp10 {:?}; ramp90 {:?}; settled {:?} of {}",
+        stats.complete,
+        stats.trials,
+        stats.zeros,
+        stats.ramp10,
+        stats.ramp90,
+        stats.settled,
+        cell.bound()
+    ))
 }
 
 /// The summary line of one cell.
@@ -287,39 +310,22 @@ pub fn cell_line(cell: &ZCell, stats: &CellStats) -> String {
     )
 }
 
-/// The classes' measured zero ranges before the sweep (options.md §2.1, 5 trials a rate, two boards): (n_hb, min, max).
-pub const CURRENT_ZEROS: [(u32, usize, usize); 4] = [(0, 0, 0), (1, 3, 4), (2, 9, 11), (3, 13, 15)];
-
-/// One half-band class after the sweep.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClassResult {
-    pub half_bands: u32,
-    /// The structure comparison: min and max zeros over the counted gain-0 restart rate cells of the class, None without data.
-    pub observed: Option<(usize, usize)>,
-    pub cells: Vec<String>,
-    /// `observed` within +-1 of the class's measured range.
-    pub holds: Option<bool>,
-    /// The candidate bound: the max zeros over every counted cell of the class (every gain, every start kind), and how many cells that is.
-    pub bound: Option<usize>,
-    pub bound_cells: usize,
-    /// Planned cells of the class (every gain, every start kind): `bound` is a bound only when `bound_cells` reaches this.
-    pub planned_cells: usize,
-}
-
 /// The sweep's verdicts on the plan's questions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
     /// Planned cells that are not counted (absent, a failed call, a misplaced block or fewer complete trials than planned); any makes every decision INCONCLUSIVE.
     pub missing: Vec<String>,
-    pub classes: Vec<ClassResult>,
-    /// D holds: every planned cell counted and all four classes hold. None while a planned cell is missing.
-    pub d_holds: Option<bool>,
+    /// Cells with a complete trial that settled after more samples than `rx_fill_samples(D)`: (cell, settling length, bound).
+    pub over_bound: Vec<(String, usize, usize)>,
     /// (decimation, start kind, outside +-1 of the same decimation's restart range).
     pub start_differs: Vec<(u64, Start, bool)>,
-    /// (decimation, gain, the largest shift of the min or max against the gain-0 restart cell).
-    pub amplitude_shift: Vec<(u64, f64, usize)>,
     /// The largest precursor peak over every counted trial, as a fraction of the steady magnitude.
     pub precursor_peak: Option<f64>,
+}
+
+/// The slowest complete trial's settling length when it is over the cell's bound.
+fn over_bound(cell: &ZCell, stats: &CellStats) -> Option<usize> {
+    stats.settled.filter(|settled| *settled > cell.bound())
 }
 
 /// The zero range of `planned`'s cell among `runs`, when it counts: no failed call, no misplaced block, and every planned trial complete.
@@ -332,32 +338,14 @@ fn outside_by_one(range: (usize, usize), base: (usize, usize)) -> bool {
     range.0 + 1 < base.0 || range.1 > base.1 + 1
 }
 
-/// §4's decision rule (`RXZ_RULE`) over every cell run on one board, against the planned cell set (`zeros_cells`).
+/// The decision rule (`RXZ_RULE`) over every cell run on one board, against the planned cell set (`zeros_cells`).
 pub fn decide(runs: &[(ZCell, CellStats)]) -> Decision {
     let planned = zeros_cells();
     let counted: Vec<(&ZCell, (usize, usize))> = planned.iter().filter_map(|cell| counted_range(cell, runs).map(|range| (cell, range))).collect();
     let missing: Vec<String> = planned.iter().filter(|cell| !counted.iter().any(|(c, _)| c == cell)).map(ZCell::name).collect();
-    let classes: Vec<ClassResult> = CURRENT_ZEROS
-        .iter()
-        .map(|&(class, lo, hi)| {
-            let of_class: Vec<&(&ZCell, (usize, usize))> = counted.iter().filter(|(cell, _)| cell.half_bands() == class).collect();
-            let structure: Vec<&&(&ZCell, (usize, usize))> = of_class.iter().filter(|(cell, _)| cell.start == Start::Restart && cell.gain_db == 0.0).collect();
-            let observed = structure.iter().map(|(_, range)| *range).reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
-            ClassResult {
-                half_bands: class,
-                observed,
-                cells: structure.iter().map(|(cell, _)| cell.name()).collect(),
-                holds: observed.map(|range| !outside_by_one(range, (lo, hi))),
-                bound: of_class.iter().map(|(_, range)| range.1).max(),
-                bound_cells: of_class.len(),
-                planned_cells: planned.iter().filter(|cell| cell.half_bands() == class).count(),
-            }
-        })
-        .collect();
-    let d_holds = missing.is_empty().then(|| classes.iter().all(|class| class.holds == Some(true)));
+    let over_bound = runs.iter().filter_map(|(cell, stats)| over_bound(cell, stats).map(|settled| (cell.name(), settled, cell.bound()))).collect();
     let range_of = |decim: u64, start: Start, gain_db: f64| counted.iter().find(|(cell, _)| cell.decim == decim && cell.start == start && cell.gain_db == gain_db).map(|(_, range)| *range);
     let mut start_differs = Vec::new();
-    let mut amplitude_shift = Vec::new();
     for decim in LEVEL_DECIMATIONS {
         let Some(base) = range_of(decim, Start::Restart, 0.0) else { continue };
         for start in [Start::Fresh, Start::Retune, Start::AfterRate] {
@@ -365,65 +353,31 @@ pub fn decide(runs: &[(ZCell, CellStats)]) -> Decision {
                 start_differs.push((decim, start, outside_by_one(range, base)));
             }
         }
-        for gain in LEVEL_GAINS_DB {
-            if let Some(range) = range_of(decim, Start::Restart, gain) {
-                amplitude_shift.push((decim, gain, base.0.abs_diff(range.0).max(base.1.abs_diff(range.1))));
-            }
-        }
     }
     let precursor_peak = runs.iter().filter_map(|(_, stats)| stats.precursor_peak).max_by(f64::total_cmp);
-    Decision { missing, classes, d_holds, start_differs, amplitude_shift, precursor_peak }
+    Decision { missing, over_bound, start_differs, precursor_peak }
 }
 
-/// The summary lines of a decision: the observations (one line per class, the start kinds, the levels and the precursor), then the four decisions of the
-/// rule, each INCONCLUSIVE while a planned cell is missing.
+/// The summary lines of a decision: the observations (the start kinds and the precursor), then the decisions of the rule, each INCONCLUSIVE while a planned
+/// cell is missing.
 pub fn decision_lines(decision: &Decision) -> Vec<String> {
-    let mut lines: Vec<String> = decision
-        .classes
-        .iter()
-        .map(|class| {
-            let current = CURRENT_ZEROS.iter().find(|(n, _, _)| *n == class.half_bands).map(|(_, lo, hi)| (*lo, *hi));
-            let incomplete = if class.bound_cells < class.planned_cells { " (INCOMPLETE: a planned cell of the class is not counted, so this is no bound)" } else { "" };
-            format!(
-                "RXZ class n_hb {}: structure (gain-0 restart rate cells, {} counted) zeros {:?} (measured before {:?}, +-1): holds {:?}; this board's candidate bound {:?}{incomplete} = max over {} of {} planned cell(s) of the class counted (every gain, every start kind)",
-                class.half_bands,
-                class.cells.len(),
-                class.observed,
-                current,
-                class.holds,
-                class.bound,
-                class.bound_cells,
-                class.planned_cells
-            )
-        })
-        .collect();
-    lines.push(format!(
-        "RXZ observed: start kinds against restart (decimation, kind, outside +-1) {:?}; level shifts (decimation, gain, shift) {:?}; largest precursor peak {:?}",
-        decision.start_differs, decision.amplitude_shift, decision.precursor_peak
-    ));
+    let mut lines =
+        vec![format!("RXZ observed: start kinds against restart (decimation, kind, exact-zero range outside +-1) {:?}; largest precursor peak {:?}", decision.start_differs, decision.precursor_peak)];
     let inconclusive = |number: &str| {
         format!("RXZ decision {number}: INCONCLUSIVE: {} planned cell(s) not counted (every planned trial complete, no failed call): {}", decision.missing.len(), decision.missing.join("; "))
     };
-    lines.push(match decision.d_holds {
-        _ if !decision.missing.is_empty() => inconclusive("1"),
-        Some(true) => "RXZ decision 1: D holds on this board: the table by half-band count stands; the class value is the max over cells and boards".to_owned(),
-        _ => "RXZ decision 1: D does NOT hold on this board (a class is wider than +-1): B, a table over the swept rates, unmeasured elsewhere".to_owned(),
+    lines.push(match &decision.over_bound[..] {
+        [] if !decision.missing.is_empty() => inconclusive("1 (bound)"),
+        [] => "RXZ decision 1: every trial settles within rx_fill_samples(D): the head MockRadio and FakeDevice deliver is no looser than the board's".to_owned(),
+        over => format!("RXZ decision 1: the head is looser than the board's: (cell, settled, bound) {over:?}"),
     });
     let fresh: Vec<&(u64, Start, bool)> = decision.start_differs.iter().filter(|(_, start, _)| *start == Start::Fresh).collect();
     lines.push(if !decision.missing.is_empty() {
         inconclusive("2 (every start or restarts only)")
     } else if fresh.iter().any(|(_, _, differs)| *differs) {
-        format!("RXZ decision 2: a fresh open differs from a restart ({fresh:?}): the fill applies to the case measured (restarts) only")
+        format!("RXZ decision 2: a fresh open differs from a restart ({fresh:?}): the head applies to the case measured (restarts) only")
     } else {
-        "RXZ decision 2: a fresh open is within +-1 of a restart at every level rate: the fill applies to every start".to_owned()
-    });
-    let moved: Vec<&(u64, f64, usize)> = decision.amplitude_shift.iter().filter(|(_, _, shift)| *shift > 2).collect();
-    lines.push(if !decision.missing.is_empty() {
-        inconclusive("3 (amplitude)")
-    } else if moved.is_empty() {
-        format!("RXZ decision 3: the gain moves a limit by at most 2 samples ({:?}): no KNOWN_LIMITATIONS entry for the level", decision.amplitude_shift)
-    } else {
-        format!("RXZ decision 3: the gain moves a limit by more than 2 ({moved:?}): KNOWN_LIMITATIONS says the zero count is exact for the stated level only; the candidate bounds above already include every level")
+        "RXZ decision 2: a fresh open is within +-1 of a restart at every level rate: the head applies to every start".to_owned()
     });
     lines.push(match decision.precursor_peak {
         _ if !decision.missing.is_empty() => inconclusive("4 (shape)"),
@@ -438,7 +392,7 @@ pub fn decision_lines(decision: &Decision) -> Vec<String> {
 
 /// The last line of the sweep: the rule, repeated, and the verdict of the whole run.
 pub fn summary_line(decision: &Decision) -> String {
-    format!("RXZ summary: d_holds {:?}; {RXZ_RULE}", decision.d_holds)
+    format!("RXZ summary: over_bound {:?}; {RXZ_RULE}", decision.over_bound)
 }
 
 /// Opens the tone source: the transmit settings and streamer, at `gain_db` within `MAX_TONE_GAIN_DB` and the bench's frequency and rate bounds.
@@ -1373,7 +1327,7 @@ pub fn routing_decision(verdicts: &[(String, Verdict)], rates: &[f64], trials: u
 }
 
 // ============================================================================================================================
-// Probe 3: the open-flush sweep (`hw_open_flush_sweep`): the T3 at `arm` (`core.rs` `open_tx_device_locked`), 1, 2, 10 MS/s x one and two channels.
+// Probe 3: the open-flush sweep (`hw_open_flush_sweep`): the T3 at `arm` (`core.rs` `open_tx_confirmed`), 1, 2, 10 MS/s x one and two channels.
 // ============================================================================================================================
 
 pub const FLUSH_RATES: [f64; 3] = [1e6, 2e6, 10e6];
@@ -2107,7 +2061,7 @@ mod tests {
             first_tick: Some(100),
             covered: true,
             tone_hz: Some(100e3),
-            fill: Some(iii::Fill { zeros, ramp10: 6, ramp90: 7, steady: 0.01 }),
+            fill: Some(iii::Fill { zeros, ramp10: 0, ramp90: 0, steady: 0.01 }),
         };
         ZTrial { warmup, trial, expected_tone_hz: 100e3, precursor_peak: Some(0.02), error: None, rx_other: Vec::new() }
     }
@@ -2120,7 +2074,7 @@ mod tests {
         cell_stats(&zeros.iter().map(|zeros| fill_trial(*zeros, false)).collect::<Vec<_>>())
     }
 
-    /// Every class at its measured range, every level and start cell like its restart cell.
+    /// Every class within its bound (settling = zeros), every level and start cell like its restart cell.
     fn plain_runs() -> Vec<(ZCell, CellStats)> {
         zeros_cells()
             .into_iter()
@@ -2197,6 +2151,7 @@ mod tests {
         let stats = cell_stats(&trials);
         assert_eq!((stats.trials, stats.complete, stats.misplaced, stats.errors), (4, 3, 0, 0));
         assert_eq!(stats.zeros, Some((13, 14, 15)));
+        assert_eq!(stats.settled, Some(15), "zeros + ramp90 of the slowest complete trial");
         assert_eq!(stats.precursor_peak, Some(0.02));
     }
 
@@ -2291,70 +2246,58 @@ mod tests {
     }
 
     #[test]
-    fn the_measured_classes_hold_and_the_plan_says_d() {
+    fn a_sweep_within_the_bound_passes_every_decision() {
         let decision = decide(&plain_runs());
-        assert_eq!(decision.d_holds, Some(true));
-        assert!(decision.missing.is_empty());
-        assert_eq!(decision.classes.iter().map(|c| c.observed).collect::<Vec<_>>(), vec![Some((0, 0)), Some((4, 4)), Some((11, 11)), Some((14, 14))]);
-        assert_eq!(decision.classes.iter().map(|c| (c.bound, c.bound_cells)).collect::<Vec<_>>(), vec![(Some(0), 5), (Some(4), 10), (Some(11), 10), (Some(14), 10)]);
+        assert!(decision.missing.is_empty() && decision.over_bound.is_empty());
         let lines = decision_lines(&decision);
-        assert!(lines.iter().any(|l| l.contains("decision 1: D holds")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("decision 1: every trial settles within rx_fill_samples(D)")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("decision 2") && l.contains("every start")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("decision 3") && l.contains("no KNOWN_LIMITATIONS")), "{lines:?}");
+        assert!(lines.iter().all(|l| !l.contains("decision 3")), "the level decision is gone: the exact-zero count is no bound: {lines:?}");
         assert!(lines.iter().any(|l| l.contains("decision 4") && l.contains("near zero")), "{lines:?}");
     }
 
-    #[test]
-    fn a_class_line_marks_an_incomplete_bound() {
-        let line_of = |runs: &[(ZCell, CellStats)], class: u32| decision_lines(&decide(runs)).into_iter().find(|l| l.starts_with(&format!("RXZ class n_hb {class}"))).unwrap();
-        let line = line_of(&plain_runs(), 3);
-        assert!(!line.contains("INCOMPLETE") && line.contains("candidate bound Some(14)") && line.contains("max over 10 of 10 planned"), "{line}");
-        let mut runs = plain_runs();
-        runs.retain(|(c, _)| !(c.decim == 100 && c.start == Start::Fresh));
-        let line = line_of(&runs, 2);
-        assert!(line.contains("candidate bound Some(11) (INCOMPLETE") && line.contains("max over 9 of 10 planned"), "{line}");
-        assert!(!line_of(&runs, 3).contains("INCOMPLETE"), "the other classes stay complete");
-        let decision = decide(&runs);
-        assert_eq!((decision.classes[2].bound_cells, decision.classes[2].planned_cells), (9, 10));
+    /// A cell whose trials settle after `zeros + ramp90` samples.
+    fn settling_stats(zeros: usize, ramp90: usize) -> CellStats {
+        let mut trial = fill_trial(zeros, false);
+        trial.trial.fill = Some(iii::Fill { zeros, ramp10: 0, ramp90, steady: 0.01 });
+        cell_stats(&vec![trial; 10])
     }
 
     #[test]
-    fn a_class_wider_than_one_either_way_is_b_and_one_inside_is_d() {
-        let mut runs = plain_runs();
-        *with(&mut runs, 6, Start::Restart, 0.0) = stats_of(&[6; 15]);
-        assert_eq!(decide(&runs).d_holds, Some(false), "n_hb 1 reaching 6 against 3-4");
-        let mut runs = plain_runs();
-        *with(&mut runs, 6, Start::Restart, 0.0) = stats_of(&[5; 15]);
-        assert_eq!(decide(&runs).d_holds, Some(true), "5 is 4 + 1");
-        *with(&mut runs, 6, Start::Restart, 0.0) = stats_of(&[1; 15]);
-        assert_eq!(decide(&runs).d_holds, Some(false), "1 is 3 - 2");
-        *with(&mut runs, 6, Start::Restart, 0.0) = stats_of(&[2; 15]);
-        assert_eq!(decide(&runs).d_holds, Some(true), "2 is 3 - 1");
-        let mut runs = plain_runs();
-        *with(&mut runs, 255, Start::Restart, 0.0) = stats_of(&[2; 15]);
-        assert_eq!(decide(&runs).d_holds, Some(false), "n_hb 0 reaching 2 against 0");
-        let lines = decision_lines(&decide(&runs));
-        assert!(lines.iter().any(|l| l.contains("decision 1") && l.contains("B, a table over the swept rates")), "{lines:?}");
+    fn rxz_a_trial_is_within_the_bound_at_n_and_fails_at_n_plus_one() {
+        // rx_fill_samples: D = 200 -> 24, 100 -> 18, 2 -> 13, 1 -> 2. The settling length is zeros + ramp90, not the zeros alone.
+        for (decim, bound) in [(200u64, 24usize), (100, 18), (2, 13), (1, 2)] {
+            let c = cell(decim, Start::Restart, 0.0, 10);
+            assert_eq!(c.bound(), bound, "D {decim}");
+            for (zeros, ramp90) in [(bound, 0), (bound - 1, 1), (0, bound)] {
+                assert!(matches!(cell_verdict(&c, &settling_stats(zeros, ramp90)), Verdict::Pass(_)), "D {decim}: {zeros} + {ramp90}");
+            }
+            for (zeros, ramp90) in [(bound + 1, 0), (bound, 1), (0, bound + 1)] {
+                let verdict = cell_verdict(&c, &settling_stats(zeros, ramp90));
+                assert!(matches!(&verdict, Verdict::Fail(text) if text.contains("rx_fill_samples") && text.contains(&format!("{}", zeros + ramp90))), "D {decim}: {zeros} + {ramp90}: {verdict:?}");
+            }
+        }
+        // One slow trial among nine fast ones fails the cell; an incomplete trial's fill is not counted.
+        let c = cell(200, Start::Restart, 0.0, 10);
+        let mut trials: Vec<ZTrial> = (0..10).map(|_| fill_trial(24, false)).collect();
+        assert!(matches!(cell_verdict(&c, &cell_stats(&trials)), Verdict::Pass(_)));
+        trials[4] = fill_trial(25, false);
+        assert!(matches!(cell_verdict(&c, &cell_stats(&trials)), Verdict::Fail(_)));
+        trials[4].trial.covered = false;
+        assert!(matches!(cell_verdict(&c, &cell_stats(&trials)), Verdict::Inconclusive(_)), "an incomplete trial says nothing about the settling");
     }
 
     #[test]
-    fn the_structure_reads_the_gain_zero_restart_cells_and_the_bound_every_counted_cell() {
+    fn a_cell_over_the_bound_is_named_in_the_decision() {
         let mut runs = plain_runs();
-        *with(&mut runs, 200, Start::Restart, 20.0) = stats_of(&[20; 10]);
+        *with(&mut runs, 6, Start::Restart, 0.0) = stats_of(&[14; 15]);
         let decision = decide(&runs);
-        assert_eq!(decision.d_holds, Some(true), "a level cell is the amplitude rule's, not the structure's");
-        assert_eq!(decision.classes[3].observed, Some((14, 14)));
-        assert_eq!(decision.classes[3].bound, Some(20), "the candidate bound is the maximum over every measured level");
+        assert_eq!(decision.over_bound, vec![("D6 n_hb1 restart gain +0 dB (33.333 MS/s)".to_owned(), 14, 13)]);
         let lines = decision_lines(&decision);
-        assert!(lines.iter().any(|l| l.contains("class n_hb 3") && l.contains("candidate bound Some(20)")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("decision 1: D holds")) && lines.iter().any(|l| l.contains("decision 3") && l.contains("exact for the stated level only")), "{lines:?}");
-        *with(&mut runs, 200, Start::Restart, 20.0) = stats_of(&[3; 10]);
-        assert_eq!(decide(&runs).classes[3].bound, Some(14), "a level that lowers the count never lowers the bound");
-        *with(&mut runs, 100, Start::Fresh, 0.0) = stats_of(&[13; 10]);
-        let decision = decide(&runs);
-        assert_eq!((decision.classes[2].observed, decision.classes[2].bound), (Some((11, 11)), Some(13)), "a start kind with more zeros raises the bound, not the structure");
-        assert_eq!(decision.d_holds, Some(true));
-        assert!(decision.start_differs.contains(&(100, Start::Fresh, true)));
+        assert!(lines.iter().any(|l| l.contains("decision 1: the head is looser than the board's") && l.contains("D6 n_hb1")), "{lines:?}");
+        assert!(summary_line(&decision).contains("D6 n_hb1"));
+        *with(&mut runs, 6, Start::Restart, 0.0) = stats_of(&[13; 15]);
+        assert!(decide(&runs).over_bound.is_empty(), "13 is the bound");
     }
 
     #[test]
@@ -2362,19 +2305,18 @@ mod tests {
         let mut runs = plain_runs();
         runs.retain(|(c, _)| !(c.decim == 3 && c.start == Start::Restart && c.gain_db == 0.0));
         let decision = decide(&runs);
-        assert_eq!(decision.d_holds, None, "an odd-decimation cell is missing");
         assert_eq!(decision.missing.len(), 1);
         let lines = decision_lines(&decision);
         let inconclusive: Vec<&String> = lines.iter().filter(|l| l.starts_with("RXZ decision") && l.contains("INCONCLUSIVE") && l.contains("D3 n_hb0")).collect();
-        assert_eq!(inconclusive.len(), 4, "{lines:?}");
-        assert!(lines.iter().all(|l| !l.contains("D holds") && !l.contains("applies to every start") && !l.contains("no KNOWN_LIMITATIONS")), "{lines:?}");
+        assert_eq!(inconclusive.len(), 3, "{lines:?}");
+        assert!(lines.iter().all(|l| !l.contains("settles within") && !l.contains("applies to every start")), "{lines:?}");
         let mut runs = plain_runs();
         *with(&mut runs, 8, Start::Restart, 0.0) = short_stats(14, 9, 10);
-        assert_eq!(decide(&runs).d_holds, None, "nine of ten valid observations do not count");
+        assert_eq!(decide(&runs).missing.len(), 1, "nine of ten valid observations do not count");
         *with(&mut runs, 8, Start::Restart, 0.0) = short_stats(14, 10, 10);
-        assert_eq!(decide(&runs).d_holds, Some(true));
+        assert!(decide(&runs).missing.is_empty());
         *with(&mut runs, 255, Start::Restart, 0.0) = short_stats(0, 14, 15);
-        assert_eq!(decide(&runs).d_holds, None, "fourteen of the fifteen planned");
+        assert_eq!(decide(&runs).missing.len(), 1, "fourteen of the fifteen planned");
         let mut runs = plain_runs();
         with(&mut runs, 200, Start::Fresh, 0.0).errors = 1;
         assert_eq!(decide(&runs).missing.len(), 1, "a cell with a failed call is not counted");
@@ -2383,8 +2325,7 @@ mod tests {
         assert_eq!(decide(&runs).missing.len(), 1, "a cell with a misplaced first block is not counted");
         let mut runs = plain_runs();
         *with(&mut runs, 100, Start::Restart, 20.0) = short_stats(11, 7, 10);
-        let lines = decision_lines(&decide(&runs));
-        assert!(lines.iter().any(|l| l.contains("decision 3") && l.contains("INCONCLUSIVE") && l.contains("D100 n_hb2 restart gain +20 dB")), "{lines:?}");
+        assert_eq!(decide(&runs).missing, vec!["D100 n_hb2 restart gain +20 dB (2.000 MS/s)".to_owned()]);
         assert_eq!(decide(&[]).missing.len(), zeros_cells().len());
     }
 
@@ -2402,22 +2343,10 @@ mod tests {
         assert!(!decide(&runs).start_differs.contains(&(200, Start::Fresh, true)), "15 is 14 + 1");
         *with(&mut runs, 200, Start::Fresh, 0.0) = stats_of(&[16; 10]);
         assert!(decide(&runs).start_differs.contains(&(200, Start::Fresh, true)));
-    }
-
-    #[test]
-    fn a_gain_that_moves_a_limit_by_more_than_two_gets_a_known_limitation() {
-        let mut runs = plain_runs();
-        *with(&mut runs, 100, Start::Restart, 10.0) = stats_of(&[9; 10]);
-        let decision = decide(&runs);
-        assert!(decision.amplitude_shift.contains(&(100, 10.0, 2)));
-        assert!(decision_lines(&decision).iter().any(|l| l.contains("decision 3") && l.contains("no KNOWN_LIMITATIONS")), "a shift of 2 is within the rule");
-        *with(&mut runs, 100, Start::Restart, 10.0) = stats_of(&[8; 10]);
-        let decision = decide(&runs);
-        assert!(decision.amplitude_shift.contains(&(100, 10.0, 3)));
-        assert!(decision_lines(&decision).iter().any(|l| l.contains("decision 3") && l.contains("exact for the stated level only")));
-        *with(&mut runs, 100, Start::Restart, 10.0) = stats_of(&[11; 10]);
-        *with(&mut runs, 100, Start::Restart, 20.0) = stats_of(&[14; 10]);
-        assert!(decision_lines(&decide(&runs)).iter().any(|l| l.contains("exact for the stated level only")), "a gain that raises the bound moves it too");
+        *with(&mut runs, 200, Start::Fresh, 0.0) = stats_of(&[13; 10]);
+        assert!(!decide(&runs).start_differs.contains(&(200, Start::Fresh, true)), "13 is 14 - 1");
+        *with(&mut runs, 200, Start::Fresh, 0.0) = stats_of(&[12; 10]);
+        assert!(decide(&runs).start_differs.contains(&(200, Start::Fresh, true)), "12 is 14 - 2");
     }
 
     #[test]
@@ -2431,8 +2360,8 @@ mod tests {
 
     #[test]
     fn the_rule_is_in_the_summary_before_any_data() {
-        assert!(summary_line(&decide(&[])).contains("RULE (written before the data)"));
-        assert!(RXZ_RULE.contains("13-15") && RXZ_RULE.contains("every planned trial") && RXZ_RULE.contains("never lowers the bound"));
+        assert!(summary_line(&decide(&[])).contains("RULE:"));
+        assert!(RXZ_RULE.contains("rx_fill_samples(D)") && RXZ_RULE.contains("every planned trial") && RXZ_RULE.contains("is no bound"));
     }
 
     fn synthetic_capture(per: i64, planned: i64, zeros: usize) -> Vec<(i64, Iq)> {

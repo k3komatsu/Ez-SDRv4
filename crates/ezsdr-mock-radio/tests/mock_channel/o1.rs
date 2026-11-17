@@ -44,7 +44,7 @@ fn x3xx(waves: &[(u8, usize)]) -> M {
     step(&world, &mut [&mut radio], T0);
     let Phases { rx, tx, .. } = phases(SEED, "mock");
     let (sin, cos) = (tx[0] - rx[0]).sin_cos();
-    // The Mock's profile in the oracle's terms: window 10 ms, device lead 2 ms (`min_timed_command_lead_ns`), and the emulated UHD allowance
+    // The Mock's profile in the oracle's terms: window 10 ms, device lead 2 ms (the declared `min_timed_command_lead_ns` less the allowance), and the emulated UHD allowance
     // (3 ms, MR-3) that RM-15's join deadline uses.
     let p = o::Params { clock: o::Clock { origin: 0, n: 1_000 }, root_hz: 1_000_000_000, window: 10_000_000, lead: 2_000_000, allowance: 3_000_000 };
     let mut m = build(world, radio, p, X, 45, (sin, cos), waves);

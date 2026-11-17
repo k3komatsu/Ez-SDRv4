@@ -332,11 +332,13 @@ pub struct CountingDevice {
     counts: Mutex<Counts>,
     fault: InjectedFault,
     swallowed: AtomicUsize,
+    /// A timed send went out: the open flushes (untimed, at `arm`) are over, and the faults reach experiment traffic only.
+    timed: std::sync::atomic::AtomicBool,
 }
 
 impl CountingDevice {
     pub fn new(inner: Arc<dyn Device>) -> CountingDevice {
-        CountingDevice { inner, counts: Mutex::new(Counts::default()), fault: FAULT.with(std::cell::Cell::get), swallowed: AtomicUsize::new(0) }
+        CountingDevice { inner, counts: Mutex::new(Counts::default()), fault: FAULT.with(std::cell::Cell::get), swallowed: AtomicUsize::new(0), timed: Default::default() }
     }
 
     pub fn rx_samples(&self, stream: usize) -> u64 {
@@ -442,7 +444,10 @@ impl Device for CountingDevice {
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, DeviceError> {
         let given = samples.first().map_or(0, |channel| channel.len());
         let mut accepted = self.inner.tx_send(stream, samples, at, sob, eob, timeout)?;
-        if self.fault.short_tx == Some(stream) && accepted > 1 {
+        if at.is_some() {
+            self.timed.store(true, AtomicOrdering::Release);
+        }
+        if self.fault.short_tx == Some(stream) && at.is_some() && accepted > 1 {
             accepted -= 1;
         }
         let mut counts = self.counts.lock().unwrap();
@@ -455,7 +460,7 @@ impl Device for CountingDevice {
     fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> {
         let report = self.inner.tx_async(stream, timeout)?;
         let swallow = |report: &TxReport| self.fault.swallow_ack == Some(stream) || self.fault.swallow_ack_channel == Some(report.channel);
-        if report.as_ref().is_some_and(|report| report.code == TxCode::BurstAck && swallow(report)) {
+        if self.timed.load(AtomicOrdering::Acquire) && report.as_ref().is_some_and(|report| report.code == TxCode::BurstAck && swallow(report)) {
             self.swallowed.fetch_add(1, AtomicOrdering::AcqRel);
             return Ok(None);
         }

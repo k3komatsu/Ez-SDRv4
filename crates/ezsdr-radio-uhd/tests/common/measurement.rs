@@ -1936,7 +1936,7 @@ pub struct TrialPlan {
 }
 
 fn default_timing() -> ezsdr_radio::TimingEnvelope {
-    ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms())
+    ezsdr_radio::x3xx::timing()
 }
 
 fn candidate_timing(field: &str, value: u64) -> Result<ezsdr_radio::TimingEnvelope, String> {
@@ -2236,6 +2236,8 @@ fn restart_trial(run: &mut Run, probe: &super::probe_device::ProbeDevice, lead_n
         }
     }
     let clocks_before = run.sample_clocks().len();
+    // The probe keeps a bounded record (PROBE_ROW_LIMIT); a receive at 100 MS/s fills it in a few trials, so each trial reads its own.
+    probe.clear_rows();
     let start_index = probe.count("rx_start");
     let start = run.submit(super::verb("start_rx", super::resource("radio/rx/s0"), None, &[]), None).map_err(|error| error.to_string())?;
     if !super::admitted(&start) {
@@ -2257,6 +2259,7 @@ fn restart_trial(run: &mut Run, probe: &super::probe_device::ProbeDevice, lead_n
         let clocks = run.sample_clocks();
         expected = clocks.iter().rev().find(|clock| clock.stream.to_string().ends_with("usrp/rx/s0") && clock.ended_at.is_none()).and_then(|clock| clock.origin.ticks_in(clock.root).ok());
     }
+    probe.rows_complete()?;
     Ok(RxStartTrial { expected, origin, first_tick, started: origin.is_some(), late: false, short: false, lead_left_ns: None })
 }
 
@@ -4421,6 +4424,20 @@ mod tests {
                 "the row reports the trial: {row:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_restart_trial_on_a_probe_that_dropped_rows_is_an_error_not_a_trial() {
+        // The probe already holds more rows than its limit: whatever the trial finds is an incomplete record, so the trial is refused rather than classified.
+        let device: Arc<dyn Device> = super::super::fake(ezsdr_radio_uhd::FakeConfig::default());
+        let probe = Arc::new(super::super::probe_device::ProbeDevice::new(device));
+        let timing = candidate_timing("rx_start_lead_ns", 10_000_000).unwrap();
+        let (mut run, _dir) = candidate_session_asking(probe.clone(), timing, |profile| rx_start_asking(profile, 1_000_000, 1)).unwrap();
+        super::super::past_t0(&mut run, super::super::ms(100));
+        assert!(restart_trial(&mut run, &probe, 10_000_000, None, 1).is_ok(), "a probe that dropped nothing gives a trial");
+        probe.overfill();
+        let error = restart_trial(&mut run, &probe, 10_000_000, None, 1).unwrap_err();
+        assert!(error.contains("dropped") && error.contains("rows"), "{error}");
     }
 
     #[test]

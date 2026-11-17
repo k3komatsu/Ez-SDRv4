@@ -116,6 +116,14 @@ pub fn clip_decimation(master_clock_hz: u64, rate: f64) -> u64 {
     best
 }
 
+/// The exact-zero samples a receive start of decimation `decimation` begins with (MR-35, UR-33): the length of the DDC's settling at the 90 % point,
+/// 2, 13, 18 or 24 for a decimation with 0, 1, 2 or 3 or more factors of two (the half-band filters `min(v2(D), 3)`). A bound the 2026-11-16 bench
+/// measured on both boards, every start kind (KL-47), not the hardware's exact-zero count.
+pub fn rx_fill_samples(decimation: u64) -> u64 {
+    const HEAD: [u64; 4] = [2, 13, 18, 24];
+    HEAD[(decimation.trailing_zeros() as usize).min(3)]
+}
+
 /// A daughterboard kind this stage describes (design 33 D5).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Board {
@@ -401,30 +409,22 @@ impl Image {
     }
 }
 
-/// The TimingEnvelope every `x3xx` description declares (RM-6, RM-20).
-pub fn timing(terms: &ProviderTerms) -> TimingEnvelope {
-    TimingEnvelope {
-        min_timed_command_lead_ns: terms.min_timed_command_lead_ns,
-        startup_latency_ns: 2_000_000_000,
-        overflow_restart_gap_ns: 50_000_000,
-        rx_start_lead_ns: 50_000_000,
-        tx_in_flight_ns: 10_000_000,
-    }
+/// The TimingEnvelope every `x3xx` description declares (RM-6, RM-20): one set of values for both Providers.
+pub fn timing() -> TimingEnvelope {
+    TimingEnvelope { min_timed_command_lead_ns: 5_000_000, startup_latency_ns: 2_000_000_000, overflow_restart_gap_ns: 50_000_000, rx_start_lead_ns: 10_000_000, tx_in_flight_ns: 10_000_000 }
 }
 
-/// The PerformanceEnvelope of an `x3xx` with one `link_gbps` GbE link (RM-7, RM-20).
+/// The PerformanceEnvelope of an `x3xx` with one `link_gbps` GbE link (RM-7, RM-20): 100 MB/s on 1 GbE
+/// and 800 MB/s (200 MS/s of 4-byte samples) on 10 GbE, the same in both directions.
 pub fn performance(link_gbps: u8) -> PerformanceEnvelope {
-    let bytes_per_s = i64::from(link_gbps) * 100_000_000;
+    let bytes_per_s = if link_gbps >= 10 { 800_000_000 } else { 100_000_000 };
     PerformanceEnvelope { rx_bytes_per_s: bytes_per_s, tx_bytes_per_s: bytes_per_s, wire_bytes_per_sample: 4 }
 }
 
 /// The values a Provider's own Module contributes to a `x3xx` description (design 33 D5):
-/// the two that differ between the Providers at this stage, so that a description says
-/// whose value each is (the values are levelled in stage 4).
+/// the two that differ between the Providers, so that a description says whose value each is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ProviderTerms {
-    /// `radio.timing.min_timed_command_lead_ns`.
-    pub min_timed_command_lead_ns: i64,
     /// `radio.tx.repeat_max_samples`.
     pub repeat_max_samples: u64,
     /// `radio.tx.repeat_align_samples`.

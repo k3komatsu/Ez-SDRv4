@@ -59,7 +59,7 @@ fn terms(direction: Direction) -> Terms {
     let ticks = |ns: i64| ns / 5;
     let origin = if direction == Direction::Rx { T0 } else { 0 };
     let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
-    let stream = Stream { direction, origin, config, lead: 50 * MS, call: 2_000, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
+    let stream = Stream { direction, origin, config, lead: ticks(ezsdr_radio::x3xx::timing().rx_start_lead_ns), call: 2_000, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
     Terms { t0: T0, root_hz: 200_000_000, stream }
 }
 

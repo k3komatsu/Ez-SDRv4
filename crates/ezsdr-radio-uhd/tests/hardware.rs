@@ -374,7 +374,7 @@ fn hw_b8_raw_device_lead() {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_b8_raw_restart_lead() {
-    // The restart lead (UR-25, 50 ms INFERRED): a stop, optionally a rate change (`cold`),
+    // The restart lead (UR-25; the profile's 10 ms is measured at 1 and 10 MS/s): this raw probe books 50 ms ahead. A stop, optionally a rate change (`cold`),
     // then a timed start `lead` ahead; is the start honoured at its tick, or late?
     let device = raw();
     raw_rx(&*device, 1e6, 1e9);
@@ -650,7 +650,7 @@ fn hw_b8_stop_end() {
     // the loop delay measured in the trial (S5) and the edge found only with signal, then quiet windows (`n47s5::heard_until`). INCONCLUSIVE
     // when no edge or no delay is shown; a FAIL is reported and the test asserts (bench.md: a FAIL is the owner's, not a closed issue). The
     // submit-to-silence time and the in-flight window (UR-23) are printed, not judged.
-    let in_flight = ns_ticks(ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms()).tx_in_flight_ns);
+    let in_flight = ns_ticks(ezsdr_radio::x3xx::timing().tx_in_flight_ns);
     let mut observations = Vec::new();
     let mut failures = Vec::new();
     for trial in 0..3 {
@@ -1265,7 +1265,7 @@ fn hw_b8_raw_burst_gap() {
 
 /// The transmit streamer at `rate` on the raw device, with the reports of earlier bursts drained, then the Module's open-time flush: four
 /// untimed zeros with start and end of burst, acknowledged before any timed send (`core.rs` `tx_flush_locked`, reached from the streamer's
-/// open, `open_tx_device_locked`; UR-22). The flush's acknowledgement is printed and counted in no pair.
+/// open, `open_tx_confirmed`; UR-22). The flush's acknowledgement is printed and counted in no pair.
 fn raw_tx_ready(device: &dyn Device, rate: f64) {
     raw_tx(device, rate, 1e9);
     while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
@@ -4190,6 +4190,27 @@ fn hw_s5_lead_rungs() {
         drop(device);
         drop(guard);
         assert!(stopped.is_none() && latched.is_none(), "S5 stopped early: {stopped:?}, latch {latched:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_s5_rx_start_lead() {
+    // The receive start-lead pass of `hw_s5_lead_rungs` alone, at one channel: both conditions at each of `EZSDR_MEASURE_RX_START_RATES_HZ` (10 and 100 MS/s), rungs 3/4/5/7.5/10 ms,
+    // 100 trials a rung, every value the plan's (`s4bench::s5_plan`). Receive only: it transmits nothing, so no attenuator is needed. The decision line reads every trial `Success`
+    // at the 10 ms rung; a dropped probe row is an error (the probe's record is cleared per trial; a trial that did not start without a drop is `Incomplete` and shows in the decision line), and `lead_left_ns` should show no downward trend over a rung's trials.
+    let env = env_values(&measurement::MeasurementPlan::ENV_NAMES);
+    let plan = common::s4bench::s5_plan(&env).expect("the S5 plan's values are valid before opening the USRP");
+    let limit = common::s4bench::s5_planned_seconds(&plan) + 900;
+    println!("S5 rx start lead: start leads {:?} ns at RX {:?} Hz; {} trials a rung; bound {limit} s", plan.rx_start_leads_ns, plan.rx_start_rates_hz, plan.step_trials);
+    bounded(Wall::from_secs(limit), "hw_s5_rx_start_lead", move || {
+        let (guard, device) = slot_a_guarded();
+        let (lines, error) = common::s4bench::s5_rx_start_lead(&device, &measurement::MeasurementPlan { rx_start_channels: 1, ..plan });
+        lines.iter().for_each(|line| println!("{line}"));
+        let latched = guard.latched();
+        drop(device);
+        drop(guard);
+        assert!(error.is_none() && latched.is_none(), "S5 rx start lead stopped early: {error:?}, latch {latched:?}");
     });
 }
 

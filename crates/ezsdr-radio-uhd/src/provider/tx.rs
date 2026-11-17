@@ -4414,6 +4414,16 @@ mod tests {
         burst
     }
 
+    /// UR-33, MR-35: a receive start at 200 MS/s begins with `rx_fill_samples(1)` exact zeros. A loopback test starts its receive that many ticks before the transmit
+    /// start, so the zeros replace the samples before it and every transmitted sample is read; `head()` is the number of ticks and `with_head` puts the zeros in front.
+    fn head() -> usize {
+        ezsdr_radio::x3xx::rx_fill_samples(1) as usize
+    }
+
+    fn with_head(samples: Vec<Vec<[f32; 2]>>) -> Vec<Vec<[f32; 2]>> {
+        samples.into_iter().map(|channel| std::iter::repeat_n([0.0, 0.0], head()).chain(channel).collect()).collect()
+    }
+
     /// Each `tx_send` the fake saw: `n`, start-of-burst, end-of-burst.
     fn sends(device: &FakeDevice) -> Vec<(usize, bool, bool)> {
         device
@@ -5438,7 +5448,7 @@ mod tests {
             device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
         }
         device.rx_open(1, &[0, 1]).unwrap();
-        device.rx_start(1, clock.instant(start)).unwrap();
+        device.rx_start(1, clock.instant(start) - head() as i64).unwrap();
         let waves: Vec<Vec<Iq>> = (0..2).map(|channel| (0..997).map(|i| [((channel * 997 + i + 1) as f32) / 2_000.0, -((channel * 997 + i) as f32) / 3_000.0]).collect()).collect();
         let mut burst = txp_burst(&clock, start, 997, true, LatePolicy::DropAndFlag);
         burst.samples = Arc::new(waves.clone());
@@ -5447,12 +5457,12 @@ mod tests {
         assert!(tx.step());
         assert_eq!(sends(&device), [(20_000, true, false), (20_000, false, false)]);
         device_at(&core, &time, &device, clock.instant(start + 40_000));
-        let crate::device::RxRecv::Samples { samples, first_tick } = device.rx_recv(1, 40_000, Wall::from_millis(10), false) else { panic!("both channels loop back") };
-        assert_eq!(first_tick, clock.instant(start));
+        let crate::device::RxRecv::Samples { samples, first_tick } = device.rx_recv(1, 40_000 + head(), Wall::from_millis(10), false) else { panic!("both channels loop back") };
+        assert_eq!(first_tick, clock.instant(start) - head() as i64);
         assert_eq!(samples.len(), 2);
         for channel in 0..2 {
             let expected: Vec<_> = (0..40_000).map(|i| waves[channel][i % 997]).collect();
-            assert_eq!(samples[channel], expected, "channel {channel} keeps its own tiled phase and shared cursor");
+            assert_eq!(samples[channel], with_head(vec![expected]).remove(0), "channel {channel} keeps its own tiled phase and shared cursor");
         }
         halt(&mut tx);
     }
@@ -5921,7 +5931,7 @@ mod tests {
             device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
         }
         device.rx_open(0, &[0, 1]).unwrap();
-        device.rx_start(0, clock.instant(start)).unwrap();
+        device.rx_start(0, clock.instant(start) - head() as i64).unwrap();
         device_at(&core, &time, &device, clock.instant(start - 400_000));
         let mut burst = txp_burst(&clock, start, 1, false, LatePolicy::DropAndFlag);
         burst.samples = Arc::new(vec![vec![[0.1, 0.0]], vec![[0.2, 0.0]]]);
@@ -5930,8 +5940,12 @@ mod tests {
         assert_eq!(sends(&device), [(4, true, true)], "{:?}", device.calls());
         assert_eq!(tx.chain().front(), Some((clock.domain, start + 4 + GAP_200MSPS)), "the padded end + the gap");
         device_at(&core, &time, &device, clock.instant(start + 4));
-        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 4, Wall::from_millis(10), false) else { panic!("the loopback contains both channels") };
-        assert_eq!(samples, [vec![[0.1, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], vec![[0.2, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]], "both channels are padded with zeros after their sample");
+        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 4 + head(), Wall::from_millis(10), false) else { panic!("the loopback contains both channels") };
+        assert_eq!(
+            samples,
+            with_head(vec![vec![[0.1, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], vec![[0.2, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]]),
+            "both channels are padded with zeros after their sample"
+        );
     }
 
     #[test]
@@ -6300,7 +6314,7 @@ mod tests {
             device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
         }
         device.rx_open(0, &[0, 1]).unwrap();
-        device.rx_start(0, clock.instant(start)).unwrap();
+        device.rx_start(0, clock.instant(start) - head() as i64).unwrap();
         device_at(&core, &time, &device, clock.instant(start - 400_000));
 
         let a: Vec<Vec<[f32; 2]>> = (0..2).map(|c| (0..33).map(|i| [(i + 1) as f32 / 64.0, (c + 1) as f32 / 16.0]).collect()).collect();
@@ -6321,9 +6335,9 @@ mod tests {
         assert_eq!(*sends(&device).last().unwrap(), (2, false, true), "Stop ends on the next burst's held tail and one zero");
 
         device_at(&core, &time, &device, clock.instant(start + 36));
-        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 36, Wall::from_millis(10), false) else { panic!("the loopback contains both channel tails") };
+        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 36 + head(), Wall::from_millis(10), false) else { panic!("the loopback contains both channel tails") };
         let expected: Vec<Vec<[f32; 2]>> = (0..2).map(|c| a[c].iter().chain(b[c].iter()).copied().chain([[0.0, 0.0]]).collect()).collect();
-        assert_eq!(samples, expected, "continuation and EOB preserve each channel's held sample");
+        assert_eq!(samples, with_head(expected), "continuation and EOB preserve each channel's held sample");
     }
 
     #[test]

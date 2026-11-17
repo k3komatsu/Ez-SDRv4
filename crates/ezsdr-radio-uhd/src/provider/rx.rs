@@ -1871,6 +1871,33 @@ mod tests {
     }
 
     #[test]
+    fn ur_26_the_stop_s_device_lead_guard_is_exact() {
+        // #108: after a stop the next stream drops what arrives before the stop's time plus the device lead (`last_stop`, `Stream::not_before`); a packet stamped
+        // exactly at the guard is kept, one a tick before it is dropped, and the guard is the stop's `now` plus exactly `DEVICE_LEAD_NS`.
+        let link = link();
+        let (core, _, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(samples(clock.instant(0), 300));
+        time.advance_to(core.at(core.ticks(8_000_000))).unwrap();
+        crate::provider::test_support::end_streams(&core, core.ticks(5_000_000), false, false);
+        rx.poll();
+        rx.receive(samples(clock.instant(300), 10_000));
+        assert_eq!(rx.last_stop, Some(core.now() + core.ticks(DEVICE_LEAD_NS)), "the guard is the stop's time plus the device lead");
+    }
+
+    #[test]
+    fn ur_26_a_packet_at_the_guard_is_kept_and_one_before_it_is_dropped() {
+        let link = link();
+        let (core, _, _, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.stream.as_mut().expect("a stream").not_before = clock.instant(1_000);
+        rx.receive(samples(clock.instant(1_000) - 1, 100));
+        assert!(received(&link).is_empty(), "a packet a tick before the guard is dropped");
+        rx.receive(samples(clock.instant(1_000), 100));
+        assert_eq!(received(&link).iter().map(|(_, first, len)| (*first, *len)).collect::<Vec<_>>(), [(1_000, 100)], "a packet exactly at the guard is kept");
+    }
+
+    #[test]
     fn ur_29_a_loss_ends_the_stream_at_its_instant() {
         // RM-16, UR-29: the thread that finds the device lost books the loss with the first
         // sample uhd-rx has not delivered, and uhd-rx ends the stream at the loss's sample —
@@ -2234,14 +2261,17 @@ mod tests {
         // RM-25: when the device refuses a segment's configuration, uhd-rx books the `start_rx` as
         // refused itself, which halts the stream, and reads the plan made so at once. The `start_rx`
         // after the owner's Stop at 10 ms begins after the call in progress there (2 ms at 1 MS/s),
-        // the allowance (3 ms) and lead (50 ms): 65 ms.
+        // the allowance (3 ms) and the start lead (10 ms): 25 ms.
         let refuse = crate::device::FakeFault::WrongRate { claimed: 1e6, applied: 1e6 - 1_000.0, nth: 0 };
         let (core, device, _, _) = super::super::test_support::rig_with(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }, vec![link()]);
         let (mut rx, _) = rx(&core, 1);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book(&core, ms(10), 1, Kind::Stop);
         book(&core, ms(15), 2, Kind::Start);
-        assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.by)).collect::<Vec<_>>(), [(0, None), (ms(65), Some(2))]);
+        assert_eq!(
+            lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.by)).collect::<Vec<_>>(),
+            [(0, None), (ms(15) + core.ticks(ezsdr_radio::x3xx::timing().rx_start_lead_ns), Some(2))]
+        );
         rx.poll();
         rx.receive(samples(0, 10_000));
         assert!(rx.stream.is_none());
@@ -2254,14 +2284,15 @@ mod tests {
         // The owner learns of the refusal, stops the halted stream and starts it again.
         book(&core, ms(90), 3, Kind::Stop);
         book(&core, ms(95), 4, Kind::Start);
+        let resumed = ms(95) + core.ticks(ezsdr_radio::x3xx::timing().rx_start_lead_ns);
         assert!(rx.begin());
         let starts: Vec<_> = device.calls().into_iter().filter(|c| c.starts_with("rx_start ")).collect();
-        assert_eq!(starts, ["rx_start 0 0".to_owned(), format!("rx_start 0 {}", ms(145))]);
+        assert_eq!(starts, ["rx_start 0 0".to_owned(), format!("rx_start 0 {}", resumed)]);
         let stream = rx.stream.as_ref().expect("the resumed segment");
-        assert_eq!(stream.clock.origin, ms(145), "the resumed segment begins from the refused one's cut");
+        assert_eq!(stream.clock.origin, resumed, "the resumed segment begins from the refused one's cut");
         assert_eq!(stream.config.ratio.num(), 200);
         let streams = lock(&core.streams);
-        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((ms(145), stream.config, 0)));
+        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((resumed, stream.config, 0)));
         assert_eq!(streams.planned(stream_key(Dir::Rx, 0)).last().map(|planned| planned.segment.by), Some(Some(4)), "the command that began the resumed segment is the second Start's");
     }
 

@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use ezsdr_kernel::spec::Key;
 use ezsdr_mock_radio::BLOCK_LEN;
 use ezsdr_radio::channels::{self, Description};
-use ezsdr_radio::measurement::{self, Record, ValueRecord, Worst};
+use ezsdr_radio::measurement::{self, Record};
 use ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN;
 const FIXTURE: &str = include_str!("../../ezsdr-radio/tests/fixtures/measurement/records/valid.json");
 
@@ -71,11 +70,14 @@ fn measurement_fixture_files_enforce_provider_specific_rejections() {
     assert_eq!(comparisons.len(), 3);
 
     let find = |name: &str| comparisons.iter().find(|item| item.file.file_name().is_some_and(|file| file == name)).unwrap();
-    let mock_only = find("mock-only-rejects.json");
-    assert!(mock_only.mock_violations.iter().any(|violation| violation.key == "radio.timing.min_timed_command_lead_ns"), "MockRadio must reject the 3 ms lead: {:?}", mock_only.mock_violations);
-    assert!(mock_only.uhd_violations.is_empty(), "UHD must accept the 3 ms lead: {:?}", mock_only.uhd_violations);
-    let mock_gate = check_comparison(mock_only);
-    assert!(matches!(mock_gate.as_ref(), Err(error) if error.contains("MockRadio")), "the shared gate must reject MockRadio's fixture: {mock_gate:?}");
+    let both = find("both-reject.json");
+    for (provider, violations) in [("MockRadio", &both.mock_violations), ("UHD", &both.uhd_violations)] {
+        for (key, reason) in [("radio.timing.min_timed_command_lead_ns", "below measured"), ("radio.perf.rx_bytes_per_s", "exceeds measured")] {
+            assert!(violations.iter().any(|violation| violation.key == key && violation.reason.contains(reason)), "{provider} must reject {key}: {violations:?}");
+        }
+    }
+    let both_gate = check_comparison(both);
+    assert!(matches!(both_gate.as_ref(), Err(error) if error.contains("MockRadio")), "the shared gate must report MockRadio first: {both_gate:?}");
 
     let uhd_only = find("uhd-only-rejects.json");
     assert!(uhd_only.mock_violations.is_empty(), "MockRadio must accept the 300 MSample repeat maximum: {:?}", uhd_only.mock_violations);
@@ -88,26 +90,6 @@ fn measurement_fixture_files_enforce_provider_specific_rejections() {
     assert!(valid.uhd_violations.is_empty(), "UHD rejects the passing fixture: {:?}", valid.uhd_violations);
     let valid_gate = check_comparison(valid);
     assert!(valid_gate.is_ok(), "the shared gate must accept the passing fixture: {valid_gate:?}");
-}
-
-#[test]
-fn measurement_between_the_provider_leads_passes_only_uhd() {
-    let mut record: Record = serde_json::from_str(FIXTURE).unwrap();
-    let key = Key::parse("radio.timing.min_timed_command_lead_ns").unwrap();
-    let Some(ValueRecord::Measured { worst, .. }) = record.values.iter_mut().find(|value| match value {
-        ValueRecord::Measured { key: value, .. } | ValueRecord::Unmeasured { key: value, .. } => *value == key,
-    }) else {
-        panic!("fixture has the timed-command lead value");
-    };
-    *worst = Worst::Number(3_000_000.0);
-    let (mock, uhd) = descriptions(&record);
-    let mock_violations = measurement::compare(&record, &mock);
-    assert!(
-        mock_violations.iter().any(|violation| { violation.key == key.as_str() && violation.reason.contains("below measured") }),
-        "MockRadio's 2 ms lead must fail specifically against the 3 ms measurement: {mock_violations:?}"
-    );
-    let uhd_violations = measurement::compare(&record, &uhd);
-    assert!(uhd_violations.is_empty(), "UHD's 5 ms lead covers the 3 ms measurement: {uhd_violations:?}");
 }
 
 #[test]

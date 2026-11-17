@@ -1338,6 +1338,7 @@ mod rehearsal_tests {
     fn the_test_side_literals_equal_the_profile() {
         assert_eq!(iii::WINDOW_LEAD_NS, ezsdr_radio_uhd::profile::DEVICE_LEAD_NS);
         assert_eq!(iii::JOIN_LEAD_NS, ezsdr_radio_uhd::profile::DEVICE_LEAD_NS + ezsdr_radio_uhd::profile::DELIVERY_ALLOWANCE_NS);
-        assert_eq!(iii::IN_FLIGHT_NS, ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms()).tx_in_flight_ns);
+        assert_eq!(iii::JOIN_LEAD_NS, ezsdr_radio::x3xx::timing().min_timed_command_lead_ns);
+        assert_eq!(iii::IN_FLIGHT_NS, ezsdr_radio::x3xx::timing().tx_in_flight_ns);
     }
 }

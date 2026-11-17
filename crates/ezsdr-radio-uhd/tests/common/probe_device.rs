@@ -74,10 +74,11 @@ pub fn receive_sample_follows_start(start: &Json, sample: &Json) -> bool {
 
 /// The `start_index`th (0-based) `rx_start` and the first sample after it, if the probe has both now.
 pub fn rx_start_and_sample(probe: &ProbeDevice, start_index: usize) -> Option<Json> {
-    let rows = probe.rows();
-    let start = rows.iter().filter(|row| row["call"] == "rx_start").nth(start_index).cloned()?;
-    let sample = rows.iter().find(|row| receive_sample_follows_start(&start, row)).cloned()?;
-    Some(json!({ "rx_start": start, "rx_sample": sample }))
+    probe.with_rows(|rows| {
+        let start = rows.iter().filter(|row| row["call"] == "rx_start").nth(start_index)?;
+        let sample = rows.iter().find(|row| receive_sample_follows_start(start, row))?;
+        Some(json!({ "rx_start": start, "rx_sample": sample }))
+    })
 }
 
 /// Waits for the `start_index`th (0-based) `rx_start` and the first sample after it; `None` at `timeout`.
@@ -130,6 +131,31 @@ impl ProbeDevice {
 
     pub fn rows(&self) -> Vec<Json> {
         self.rows.lock().unwrap().clone()
+    }
+
+    /// Reads the rows under the lock, without cloning them: the receive thread's `record` waits for the read, so keep `read` short.
+    pub fn with_rows<R>(&self, read: impl FnOnce(&[Json]) -> R) -> R {
+        read(&self.rows.lock().unwrap())
+    }
+
+    /// Records `PROBE_ROW_LIMIT + 1` rows, so that the last is dropped (the state a long receive leaves).
+    pub fn overfill(&self) {
+        for index in 0..=PROBE_ROW_LIMIT {
+            self.record(json!({ "index": index }));
+        }
+    }
+
+    /// Forgets the rows so far; the drop counter keeps its count.
+    pub fn clear_rows(&self) {
+        self.rows.lock().unwrap().clear();
+    }
+
+    /// An error naming the count when rows were dropped at the limit: a search of an incomplete record would report a start that never came.
+    pub fn rows_complete(&self) -> Result<(), String> {
+        match self.dropped_rows() {
+            0 => Ok(()),
+            dropped => Err(format!("the probe dropped {dropped} rows at its limit of {PROBE_ROW_LIMIT}; its record is incomplete")),
+        }
     }
 
     /// From now on `rx_recv` also keeps the samples it returns, before any publication truncation.
@@ -507,11 +533,43 @@ mod tests {
     fn probe_rows_stop_at_the_limit_and_count_dropped_rows() {
         let inner = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() }));
         let probe = ProbeDevice::new(inner);
-        for index in 0..=PROBE_ROW_LIMIT {
-            probe.record(json!({ "index": index }));
-        }
+        probe.overfill();
         assert_eq!(probe.rows().len(), PROBE_ROW_LIMIT);
         assert_eq!(probe.dropped_rows(), 1);
+        assert_eq!(PROBE_ROW_LIMIT, 65_536, "the cap is an independent budget of the bench's trials");
+        assert!(probe.rows_complete().unwrap_err().contains("dropped 1 rows"));
+        probe.clear_rows();
+        probe.record(json!({"call":"rx_start"}));
+        assert_eq!((probe.rows().len(), probe.count("rx_start"), probe.dropped_rows()), (1, 1, 1));
+    }
+
+    #[test]
+    fn an_unfilled_probe_has_complete_rows() {
+        let inner = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() }));
+        let probe = ProbeDevice::new(inner);
+        for index in 0..PROBE_ROW_LIMIT {
+            probe.record(json!({ "index": index }));
+        }
+        assert_eq!(probe.rows_complete(), Ok(()));
+    }
+
+    #[test]
+    fn rx_start_and_sample_finds_the_nth_start_and_its_own_sample() {
+        let inner = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..ezsdr_radio_uhd::FakeConfig::default() }));
+        let probe = ProbeDevice::new(inner);
+        let start = |at: i64, after: u64| json!({"call":"rx_start","at":at,"host_after_ns":after,"result":null});
+        let sample = |before: u64, first: i64| json!({"call":"rx_recv","host_before_ns":before,"outcome":{"kind":"samples","first_tick":first}});
+        probe.record(start(100, 10));
+        probe.record(sample(10, 100));
+        probe.record(start(500, 50));
+        assert!(rx_start_and_sample(&probe, 1).is_none(), "the second start has no sample yet");
+        probe.record(sample(40, 500)); // before the second start finished
+        assert!(rx_start_and_sample(&probe, 1).is_none(), "a sample from before the start's host time is not its own");
+        probe.record(sample(60, 500));
+        assert_eq!(rx_start_and_sample(&probe, 0).unwrap()["rx_sample"]["host_before_ns"], 10);
+        let second = rx_start_and_sample(&probe, 1).unwrap();
+        assert_eq!((second["rx_start"]["at"].as_i64(), second["rx_sample"]["host_before_ns"].as_u64()), (Some(500), Some(60)));
+        assert!(rx_start_and_sample(&probe, 2).is_none());
     }
 
     #[test]

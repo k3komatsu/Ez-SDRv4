@@ -30,6 +30,31 @@ fn x3xx_the_decimation_set_is_the_ddc_s() {
 }
 
 #[test]
+fn rx_fill_samples_is_the_table_by_half_band_count() {
+    // MR-35, UR-33: 2 / 13 / 18 / 24 for 0 / 1 / 2 / 3-or-more factors of two in D.
+    let cases: [(u64, u64); 17] =
+        [(1, 2), (2, 13), (3, 2), (4, 18), (6, 13), (8, 24), (12, 18), (16, 24), (24, 24), (25, 2), (32, 24), (248, 24), (250, 13), (255, 2), (1020, 18), (1024, 24), (2040, 24)];
+    for (decimation, head) in cases {
+        assert_eq!(x3xx::rx_fill_samples(decimation), head, "D {decimation}");
+    }
+    // Every decimation of the DDC against a class derived here by halving, the table spelled out apart from the function.
+    for &decimation in x3xx::decimations() {
+        let (mut odd, mut twos) = (decimation, 0usize);
+        while odd % 2 == 0 {
+            odd /= 2;
+            twos += 1;
+        }
+        let expected = match twos {
+            0 => 2,
+            1 => 13,
+            2 => 18,
+            _ => 24,
+        };
+        assert_eq!(x3xx::rx_fill_samples(decimation), expected, "D {decimation}");
+    }
+}
+
+#[test]
 fn ur_13_the_rate_set_comparison_expands_ranges_and_ignores_order() {
     // UR-13, design 33 D5: the device's `(start, stop, step)` ranges are expanded and
     // compared as a set, in any order; a range is the values UHD would enumerate, and an

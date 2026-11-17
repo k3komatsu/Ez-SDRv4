@@ -1,11 +1,11 @@
 //! The recovery flush (T3) as a confirmed, bounded retry (UR-22, #75): the strict attempt, the loop that runs it on fresh streamers, and the
-//! single attempt the open at `arm` keeps while `OPEN_FLUSH_CONFIRMED` is off. The device's clock is the fake's manual one, held by the test
+//! open's flush at `arm` and in the owner's open, which refuses after the last unconfirmed attempt. The device's clock is the fake's manual one, held by the test
 //! thread as a participant (`clock_guard`): it stands still while the test reads it and runs while the Core waits on it, so every instant is exact.
 
 use super::*;
 use crate::ClockMode;
 use crate::device::{FakeConfig, FakeDevice, FakeFault, TxCode, TxReport};
-use crate::provider::test_support::{LockSpy, ReportFeed, clock_guard, flush_attempt_rows, probe, rig_on, rig_with, t3_calls};
+use crate::provider::test_support::{LockSpy, ReportFeed, clock_guard, flush_attempt_rows, probe, rig_on, t3_calls};
 use ezsdr_kernel::event::EventCollector;
 use std::sync::atomic::AtomicUsize;
 
@@ -84,8 +84,8 @@ fn strict(faults: Vec<FakeFault>, nch: usize, script: &[(usize, Option<i64>)], n
     for (channel, tick) in script {
         feed.give(TxReport { code: TxCode::BurstAck, tick: tick.map(|delta| p + delta), channel: *channel });
     }
-    let attempt = Attempt { number: 1, not_before: not_before.map_or(i64::MIN, |delta| p + delta) };
-    let result = core.tx_flush_attempt(0, &channels, Some(attempt));
+    let attempt = Attempt { number: 1, not_before: not_before.map_or(i64::MIN, |delta| p + delta), what: OPEN_FLUSH };
+    let result = core.tx_flush_attempt(0, &channels, attempt);
     let elapsed = inner.time_now().unwrap() - p;
     Strict { result, core, p, elapsed }
 }
@@ -193,7 +193,7 @@ fn ur_75_a_stray_ack_never_confirms_an_attempt_whose_send_put_nothing_out() {
         let (core, _time, _events) = rig_on(feed.clone(), Vec::new(), 2_000);
         feed.tx_open(0, &[0]).unwrap();
         feed.give(stray());
-        let result = core.tx_flush_attempt(0, &[0], Some(Attempt { number: 1, not_before: i64::MIN }));
+        let result = core.tx_flush_attempt(0, &[0], Attempt { number: 1, not_before: i64::MIN, what: OPEN_FLUSH });
         assert!(!result.acknowledged, "{fault:?}");
         assert_eq!(feed.reads(0), 0, "{fault:?}: no read after a send that put nothing out");
         assert!(feed.tx_async(0, Wall::ZERO).unwrap().is_some(), "{fault:?}: the stray ack is still queued");
@@ -365,12 +365,18 @@ fn ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss
     let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
     let error = result.expect_err("the reads never succeed");
     assert!(!error.lost && error.message.contains("flush time read failed: ") && !error.message.contains("Provider::stop"), "{}", error.message);
+    assert!(error.message.starts_with("UR-13: the open flush (UR-22) could not read the device time for 2s: "), "{}", error.message);
     assert_eq!(t3_calls(&device), ["open", "send", "close", "open", "close"]);
     let rows = flush_attempt_rows(&core);
     assert!(rows[0]["error"].as_str().unwrap().contains("BurstAck missing"));
     assert!(rows.len() == 2 && rows[1]["error"].as_str().unwrap().starts_with("flush time read failed") && rows[1]["attempt"] == 2, "{rows:?}");
     let elapsed = device.host().now() - start;
     assert!(elapsed >= Wall::from_millis(2_100) && elapsed < Wall::from_millis(2_100 + SLACK_MS as u64), "{elapsed:?}");
+    // The recovery keeps its own text (KL-44).
+    let (core, device, _guard, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_secs(10))]);
+    device.tx_open(0, &[0]).unwrap();
+    let error = core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ()).expect_err("the reads never succeed");
+    assert!(error.message.starts_with("UR-22: the recovery flush could not read the device time for 2s: "), "{}", error.message);
     // (c2) a read that fails for 1.9 s and then succeeds is within the cap: the recovery goes on.
     let (core, device, _guard, _events) = run(vec![FakeFault::DropAckOfSend(0), FakeFault::TimeReadFailsFor(origin(100), Wall::from_millis(1_900))]);
     let result = core.open_tx_confirmed(0, Channels::first(1), i64::MIN).map(|_| ());
@@ -657,33 +663,43 @@ fn ur_75_after_three_failed_attempts_every_stash_stays_the_runs() {
     assert!(core.take_stashed_tx_report(0).is_none());
 }
 
+/// The streamer's record after the open at `arm` or the owner's: open on `set`, or unknown.
+fn open_record(core: &Core) -> DeviceSet {
+    lock(&core.streams).stream(stream_key(Dir::Tx, 0)).set
+}
+
 #[test]
-fn ur_75_with_the_switch_off_the_open_flush_is_todays() {
-    let off = std::hint::black_box(OPEN_FLUSH_CONFIRMED);
-    assert!(!off, "this test pins the switch-off path: at the flip it is rewritten for the loop");
-    for fault in [FakeFault::DropBurstAck, FakeFault::StalledSend(0), FakeFault::ShortSend(0), FakeFault::FailSend(0)] {
-        let spy = Arc::new(LockSpy::new(config(vec![fault.clone()])));
-        let (core, _time, events) = rig_on(spy.clone(), Vec::new(), 2_000);
-        spy.watch(&core);
-        let _guard = clock_guard(&spy.host());
-        let start = spy.time_now().unwrap();
-        let result = core.open_streamer(Dir::Tx, 0, Channels::first(1));
-        assert!(result.is_ok(), "{fault:?}: the open flush never refuses: {result:?}");
-        let order = spy.order();
-        let send = order.iter().position(|call| *call == "tx_send").unwrap();
-        assert!(order[send..].contains(&"tx_async"), "{fault:?}: today's 100 ms read runs even after a send that put nothing out: {order:?}");
-        assert!(!order.contains(&"tx_close"), "{fault:?}: the streamer stays open");
-        assert!(spy.time_now().unwrap() - start >= ms(&core, 100), "{fault:?}");
-        let rows: Vec<_> = lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").cloned().collect();
-        assert_eq!(rows.len(), 1, "{fault:?}: {rows:?}");
-        assert!(rows[0].get("attempt").is_none(), "{fault:?}: the single attempt writes no attempt number");
-        let kinds = rejected_kinds(&core, &events);
-        assert_eq!(kinds, if matches!(fault, FakeFault::FailSend(_)) { vec!["tx_flush".to_owned()] } else { Vec::new() }, "{fault:?}: only a failed send keeps its event");
-        assert_eq!(lock(&core.streams).stream(stream_key(Dir::Tx, 0)).set, DeviceSet::Open(Channels::first(1)), "{fault:?}");
-        assert!(spy.tx_send(0, &[&zeros()[..]], None, true, true, Wall::from_millis(1)).is_ok(), "{fault:?}: a usable send follows");
+fn ur_75_an_open_flush_that_is_confirmed_takes_one_attempt() {
+    for channels in [1_u32, 2] {
+        let (core, device, _guard, events) = held_rig(Vec::new());
+        core.open_streamer(Dir::Tx, 0, Channels::first(channels)).unwrap();
+        assert_eq!(t3_calls(&device), ["open", "send"], "{channels} channel(s): one attempt, nothing closed");
+        assert!(lock(&core.rec).rejected.iter().all(|row| row["call"] != "tx_flush"), "{channels}");
+        assert_eq!(flush_acks(&core).len(), channels as usize, "{channels}: one acknowledgement per channel position");
+        assert!(rejected_kinds(&core, &events).is_empty());
+        assert_eq!(open_record(&core), DeviceSet::Open(Channels::first(channels)));
     }
-    // (d) the same faults, failing every attempt, end the strict recovery in an error: the flush the open at `arm` leaves unconfirmed is
-    // a refusal there.
+}
+
+#[test]
+fn ur_75_an_open_flush_recovered_on_the_second_attempt_leaves_one_row_and_no_event() {
+    // F2: a recovered attempt is a row, never a `COMMAND_REJECTED`, whichever way the first attempt failed (a failed send included).
+    for fault in [FakeFault::DropAckOfSend(0), FakeFault::StalledSend(0), FakeFault::ShortSend(0), FakeFault::FailSend(0)] {
+        let (core, device, _guard, events) = held_rig(vec![fault.clone()]);
+        core.open_streamer(Dir::Tx, 0, Channels::first(1)).unwrap_or_else(|error| panic!("{fault:?}: {error:?}"));
+        assert_eq!(t3_calls(&device), shape(&[], 2, false), "{fault:?}");
+        let rows = flush_attempt_rows(&core);
+        assert!(rows.len() == 1 && rows[0]["attempt"] == 1, "{fault:?}: {rows:?}");
+        assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").count(), 1, "{fault:?}");
+        assert!(rejected_kinds(&core, &events).is_empty(), "{fault:?}: a recovered attempt emits nothing");
+        assert_eq!(open_record(&core), DeviceSet::Open(Channels::first(1)), "{fault:?}");
+        assert_eq!(device.tx_send(0, &[&zeros()[..]], None, true, true, Wall::from_millis(1)).unwrap(), 4, "{fault:?}: the streamer is usable");
+    }
+}
+
+#[test]
+fn ur_75_the_open_flush_refusal_text_names_the_open() {
+    // Three unconfirmed attempts refuse the open: `UR-13:` once, the open flush named, three rows, the last streamer closed, the record unknown.
     for faults in [
         vec![FakeFault::DropBurstAck],
         vec![FakeFault::StalledSend(0), FakeFault::StalledSend(1), FakeFault::StalledSend(2)],
@@ -691,50 +707,67 @@ fn ur_75_with_the_switch_off_the_open_flush_is_todays() {
         vec![FakeFault::FailSend(0), FakeFault::FailSend(1), FakeFault::FailSend(2)],
     ] {
         let (core, device, _guard, _events) = held_rig(faults.clone());
-        device.tx_open(0, &[0]).unwrap();
-        let result = core.reopen_tx_streamer(0, Channels::first(1), i64::MIN).map(|_| ());
-        assert!(result.is_err(), "{faults:?}");
+        let error = core.open_streamer(Dir::Tx, 0, Channels::first(1)).expect_err("refused");
+        let text = &error.message;
+        assert!(!error.lost && text.starts_with("UR-13: the open flush (UR-22) was not confirmed after 3 attempts: ") && !text.contains("UR-13: UR-22"), "{faults:?}: {text}");
+        assert_eq!(t3_calls(&device), shape(&[], 3, true), "{faults:?}");
+        let attempts: Vec<_> = flush_attempt_rows(&core).iter().map(|row| row["attempt"].as_u64().unwrap()).collect();
+        assert_eq!(attempts, [1, 2, 3], "{faults:?}");
+        assert_eq!(open_record(&core), DeviceSet::Unknown, "{faults:?}");
+    }
+    // Two channels, one acknowledgement each attempt: still unconfirmed.
+    let (core, device, _guard, _events) = held_rig(vec![FakeFault::DropAckOfSend(0), FakeFault::DropAckOfSend(1), FakeFault::DropAckOfSend(2)]);
+    let error = core.open_streamer(Dir::Tx, 0, Channels::first(2)).expect_err("refused");
+    assert!(error.message.starts_with("UR-13: the open flush (UR-22)"), "{}", error.message);
+    assert_eq!(t3_calls(&device), shape(&[], 3, true));
+}
+
+#[test]
+fn ur_75_stop_and_loss_during_the_open_flush_are_not_a_refusal_of_the_flush() {
+    for stop in [true, false] {
+        let (core, device, _guard, _events) = held_rig(vec![FakeFault::DropAckOfSend(0)]);
+        let owner = core.clone();
+        probe(&core, "t3_between", move |_| publish(&owner, stop));
+        let error = core.open_streamer(Dir::Tx, 0, Channels::first(1)).expect_err("interrupted");
+        assert_eq!(error.lost, !stop, "{}", error.message);
+        assert_eq!(error.message.contains("Provider::stop"), stop, "{}", error.message);
+        assert!(!error.message.contains("after 3 attempts"), "{}", error.message);
+        assert_eq!(t3_calls(&device), ["open", "send"], "stop {stop}: nothing after the publication");
+        assert_eq!(open_record(&core), DeviceSet::Unknown);
     }
 }
 
 #[test]
-fn ur_75_the_open_flush_at_arm_keeps_todays_ack_rule() {
-    // A stale and a tickless ack are accepted at the open with the switch off, and refused by the strict function.
-    for tick in [Some(-1), None] {
-        let inner = Arc::new(FakeDevice::new(config(vec![FakeFault::DropAckOfSend(0)])));
-        let feed = Arc::new(ReportFeed::new(inner));
-        let (core, _time, _events) = rig_on(feed.clone(), Vec::new(), 2_000);
-        feed.give(TxReport { code: TxCode::BurstAck, tick, channel: 0 });
-        core.open_streamer(Dir::Tx, 0, Channels::first(1)).unwrap();
-        assert_eq!(flush_acks(&core), [(Some(0), tick)], "{tick:?}: the legacy flush counts any ack of an expected position");
-        assert!(lock(&core.rec).rejected.iter().all(|row| row["call"] != "tx_flush"), "{tick:?}");
-        let offset = tick.map(|_| -1);
-        let strict = strict(vec![FakeFault::DropAckOfSend(0)], 1, &[(0, offset)], None);
-        assert!(!strict.result.acknowledged, "{tick:?}: the same report is refused by the strict flush");
-    }
-}
-
-#[test]
-fn ur_75_the_owner_s_mid_run_open_keeps_todays_flush_while_the_switch_is_off() {
+fn ur_75_the_owner_s_mid_run_open_confirms_its_flush_or_refuses() {
     // The owner's open of a transmit stream has no production caller today (`owner_configure` has only receive callers): a unit plan stands in.
     use super::super::control::ColdConfig;
     use ezsdr_kernel::time::Rational;
     use ezsdr_radio::timeline::Segment;
-    let (core, device, _time, events) = rig_with(config(vec![FakeFault::DropBurstAck]), Vec::new());
-    let key = stream_key(Dir::Tx, 0);
-    let planned = {
-        let mut streams = lock(&core.streams);
-        streams.stream_mut(key).configs.insert(1, Arc::new(ColdConfig::new(BTreeMap::new())));
-        let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
-        let mut line = Line::new(timeline::Stream { direction: Direction::Tx, origin: 0, config, lead: 0, call: 2_000, allowance: 0 });
-        line.plan = vec![Segment { origin: 0, cut: None, config, by: Some(1) }];
-        streams.lines.insert((Direction::Tx, 0), line);
-        streams.planned(key)
-    };
-    assert!(core.owner_configure(Dir::Tx, 0, &planned[0]).unwrap(), "an unconfirmed open flush does not refuse the owner's open");
-    assert_eq!(flush_attempt_rows(&core).len(), 0);
-    assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").count(), 1, "the single attempt's row");
-    assert_eq!(t3_calls(&device), ["open", "send"], "no retry, no close");
-    assert!(rejected_kinds(&core, &events).is_empty());
-    assert_eq!(device.tx_send(0, &[&zeros()[..]], None, true, true, Wall::from_millis(1)).unwrap(), 4, "the streamer is usable");
+    for (faults, refused) in [(vec![FakeFault::DropBurstAck], true), (vec![FakeFault::DropAckOfSend(0)], false)] {
+        let (core, device, _guard, events) = held_rig(faults.clone());
+        let key = stream_key(Dir::Tx, 0);
+        let planned = {
+            let mut streams = lock(&core.streams);
+            streams.stream_mut(key).configs.insert(1, Arc::new(ColdConfig::new(BTreeMap::new())));
+            let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
+            let mut line = Line::new(timeline::Stream { direction: Direction::Tx, origin: 0, config, lead: 0, call: 2_000, allowance: 0 });
+            line.plan = vec![Segment { origin: 0, cut: None, config, by: Some(1) }];
+            streams.lines.insert((Direction::Tx, 0), line);
+            streams.planned(key)
+        };
+        let result = core.owner_configure(Dir::Tx, 0, &planned[0]);
+        if refused {
+            let (error, claim) = result.expect_err("three unconfirmed open flushes refuse the owner's open");
+            assert!(error.message.starts_with("UR-13: the open flush (UR-22)"), "{}", error.message);
+            lock(&core.streams).give_back(claim);
+            assert_eq!(open_record(&core), DeviceSet::Unknown);
+            assert_eq!(t3_calls(&device), shape(&[], 3, true));
+        } else {
+            assert!(result.unwrap(), "{faults:?}");
+            assert_eq!(flush_attempt_rows(&core).len(), 1, "{faults:?}");
+            assert_eq!(t3_calls(&device), shape(&[], 2, false));
+            assert_eq!(device.tx_send(0, &[&zeros()[..]], None, true, true, Wall::from_millis(1)).unwrap(), 4, "the streamer is usable");
+        }
+        assert!(rejected_kinds(&core, &events).is_empty());
+    }
 }

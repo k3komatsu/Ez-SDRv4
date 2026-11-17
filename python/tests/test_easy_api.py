@@ -68,9 +68,9 @@ class EasyApi(unittest.TestCase):
             return copy.deepcopy(sdr.profile)
 
     def wait_for_tx_signal(self, sdr: ezsdr.Session) -> None:
-        # An untimed repeat starts 2 ms after it is admitted (RS-19's earliest instant) and x3xx's
-        # TX path is 45 samples (46 µs at 1 Msps): after 3 ms of Run time the waveform is out.
-        sdr.sleep(0.003)
+        # An untimed repeat is admitted at the declared command lead, 5 ms after its Action (KC-28; RS-19's
+        # earliest instant), and x3xx's TX path is 45 samples (46 µs at 1 Msps): after 6 ms of Run time the waveform is out.
+        sdr.sleep(0.006)
 
     def add_recorder(self, profile: dict, stream: int) -> str:
         name = f"rec{stream}"
@@ -90,8 +90,8 @@ class EasyApi(unittest.TestCase):
         x = ramp()
         with self.connect(tx={0: [0]}) as sdr:
             sdr.tx.repeat(x)
-            # The transmit clock starts with the Session and the untimed repeat 2 ms after it is
-            # admitted (RS-19, RM-25); 60 ms of Run time puts the waveform on the air.
+            # The transmit clock starts with the Session and the untimed repeat is admitted 5 ms after its
+            # Action (the declared command lead, KC-28; RS-19, RM-25); 60 ms of Run time puts the waveform on the air.
             sdr.sleep(0.06)
             y = sdr.rx.capture(3000)
         self.assertEqual((y.shape, y.dtype), ((3000,), np.complex64))
@@ -742,7 +742,8 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(len(sdr.rx.capture(1000)), 1000)
             sdr.rx.stop()
             sdr.sleep(0.01)
-            at = sdr.after(0.02)
+            # Booked nearer than the start lead (10 ms on the Mock), so that the lead decides the origin and `at` does not.
+            at = sdr.after(0.005)
             sdr.rx.start(at=at)
             self.assertEqual(len(sdr.rx.capture(1000)), 1000)
             # RM-21: the stream is streaming, so a start is refused with the Provider's reason and changes nothing.
@@ -763,10 +764,13 @@ class EasyApi(unittest.TestCase):
         self.assertEqual(len(clocks), 3, clocks)
         self.assertTrue(all(c.get("ended_at") is not None for c in clocks), clocks)
         self.assertEqual([c["root_ticks_per_tick"]["num"] for c in clocks], [1000, 1000, 1000], clocks)
-        # The start, received 20 ms before its `at`, is ready then: its clock begins the start
-        # lead after its receipt, the later of that and `at` (RM-25).
-        lead, received = 50_000_000, at["ticks"] - 20_000_000
-        self.assertLessEqual(abs(clocks[1]["origin"]["ticks"] - max(at["ticks"], received + lead)), 1000, (clocks, at))
+        # The start, received 5 ms before its `at`, is ready then: its clock begins the start
+        # lead (the Mock's envelope declares it) after its receipt, the later of that and `at` (RM-25).
+        (envelope,) = [s["content"] for s in sdr.manifest["sections"] if s["name"] == "ezsdr.radio.mock.envelope"]
+        lead, received = envelope["timing"]["rx_start_lead_ns"], at["ticks"] - 5_000_000
+        self.assertLess(lead + 5_000_000, 62_000_000, "the wait after the first stop is longer than the start lead, one receive call and the allowance")
+        self.assertGreater(received + lead, at["ticks"], "the lead, not `at`, decides this origin")
+        self.assertLessEqual(abs(clocks[1]["origin"]["ticks"] - (received + lead)), 1000, (clocks, at))
 
     def test_ea_16_repeat_uses_stream_membership_without_setting_it(self) -> None:
         with self.connect(tx={0: [0]}) as sdr:
@@ -992,7 +996,9 @@ class EasyApi(unittest.TestCase):
             sdr.rx.start(frequency={0: 2.45e9})
             y = sdr.rx.capture(1000)
             self.assertEqual(sdr.rx_channels[0].frequency, 2.45e9)
-        rotation(y, x)
+        # MR-35: a receive start begins with the head of its rate (1 MS/s: 24 exact zeros); the repeat is heard after it, on its own samples.
+        np.testing.assert_array_equal(y[:24], 0)
+        rotation(y[24:], x)
         kinds = [(entry["action"]["kind"], entry["action"].get("key") or entry["action"].get("verb")) for entry in sdr.manifest["action_log"] if entry["action"].get("verb") != "capture"]
         self.assertEqual(kinds[-3:], [("stop", None), ("set_parameter", "radio.rx.c0.frequency_hz"), ("vocabulary", "start_rx")])
 

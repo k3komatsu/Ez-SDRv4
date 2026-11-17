@@ -171,9 +171,9 @@ pub(super) fn t3_calls(device: &FakeDevice) -> Vec<&'static str> {
         .collect()
 }
 
-/// The rows an unconfirmed recovery flush attempt writes: `tx_flush` rows that carry an `attempt` (the open at `arm` writes none).
+/// The rows an unconfirmed recovery flush attempt writes: `tx_flush` rows, each carrying its `attempt` number (each unconfirmed attempt of the open at `arm` and of the recovery writes one).
 pub(super) fn flush_attempt_rows(core: &Core) -> Vec<serde_json::Value> {
-    super::core::lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush" && row.get("attempt").is_some()).cloned().collect()
+    super::core::lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").cloned().collect()
 }
 
 /// A recovery whose first attempt is meant to be confirmed wrote no attempt row: a silent second attempt would otherwise only change a

@@ -185,7 +185,7 @@ fn ur_09_the_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz() {
     assert_eq!(timing["min_timed_command_lead_ns"], 5_000_000);
     assert_eq!(timing["startup_latency_ns"], 2_000_000_000i64);
     assert_eq!(timing["overflow_restart_gap_ns"], 50_000_000);
-    assert_eq!(timing["rx_start_lead_ns"], 50_000_000);
+    assert_eq!(timing["rx_start_lead_ns"], 10_000_000);
     assert_eq!(timing["tx_in_flight_ns"], 10_000_000);
 }
 
@@ -531,7 +531,7 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(capability("radio.timing.min_timed_command_lead_ns"), one(Scalar::from(5_000_000)));
     assert_eq!(capability("radio.timing.startup_latency_ns"), one(Scalar::from(2_000_000_000)));
     assert_eq!(capability("radio.timing.overflow_restart_gap_ns"), one(Scalar::from(50_000_000)));
-    assert_eq!(capability("radio.timing.rx_start_lead_ns"), one(Scalar::from(50_000_000)));
+    assert_eq!(capability("radio.timing.rx_start_lead_ns"), one(Scalar::from(10_000_000)));
     assert_eq!(capability("radio.timing.tx_in_flight_ns"), one(Scalar::from(10_000_000)));
     assert_eq!(capability("radio.tx.repeat_max_samples"), one(Scalar::from(4_294_967_295)));
     assert_eq!(capability("radio.tx.repeat_align_samples"), one(Scalar::from(1)));
@@ -543,7 +543,7 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], 5_000_000);
     assert_eq!(envelope["timing"]["startup_latency_ns"], 2_000_000_000i64);
     assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], 50_000_000);
-    assert_eq!(envelope["timing"]["rx_start_lead_ns"], 50_000_000);
+    assert_eq!(envelope["timing"]["rx_start_lead_ns"], 10_000_000);
     assert_eq!(envelope["timing"]["tx_in_flight_ns"], 10_000_000);
     assert_eq!(envelope["performance"]["rx_bytes_per_s"], 100_000_000);
     assert_eq!(section_of(instance, "device")["fake"], true);
@@ -1854,9 +1854,12 @@ fn ur_17_blocks_carry_the_device_timestamps() {
     let origin = manifest.clocks.sample_clocks[0].origin.ticks_in(manifest.clocks.sample_clocks[0].root).unwrap();
     let samples = read_capture(&capture, 1).remove(0);
     assert_eq!(samples.len(), 10_000);
+    // UR-33, MR-35: the segment begins with the head of its rate (1 MS/s: 24 exact zeros); the ramp's own values follow.
+    let head = ezsdr_radio::x3xx::rx_fill_samples(200) as usize;
     for (k, (re, _)) in samples.iter().enumerate() {
         let tick = origin + k as i64 * 200;
-        assert_eq!(*re, ((tick / 200).rem_euclid(65_536)) as f32 / 65_536.0, "sample {k}");
+        let want = if k < head { 0.0 } else { ((tick / 200).rem_euclid(65_536)) as f32 / 65_536.0 };
+        assert_eq!(*re, want, "sample {k}");
     }
 }
 
@@ -1868,7 +1871,7 @@ fn ur_17_a_missed_start_restarts_with_a_gap() {
     let payload: ezsdr_radio::payloads::LateCommandPayload = serde_json::from_value(late[0].payload.clone()).unwrap();
     let t0 = manifest.clocks.sample_clocks[0].origin.ticks_in(manifest.clocks.sample_clocks[0].root).unwrap();
     assert_eq!(payload.requested.ticks_in(payload.requested.domain()).unwrap(), t0);
-    assert!(payload.applied.ticks_in(payload.applied.domain()).unwrap() - t0 >= ms(50) && payload.applied.ticks_in(payload.applied.domain()).unwrap() % 200 == 0, "{payload:?}");
+    assert!(payload.applied.ticks_in(payload.applied.domain()).unwrap() - t0 >= ms(start_lead_ms()) && payload.applied.ticks_in(payload.applied.domain()).unwrap() % 200 == 0, "{payload:?}");
     // TM-13b as KG-14 amends it: the origin stays T0, so the first sample the capture
     // holds is at the restart's index, after the first block's GAP_BEFORE.
     let map = &capture_of(&manifest, "rec").continuity[0];
@@ -2630,8 +2633,9 @@ fn ur_22_a_repeat_the_device_reports_late_resumes_on_its_lattice() {
     // sends the repeat's next device burst at `resumes_at`, a lattice point 100 samples apart from the start: the event names the span, the record splits, and
     // one `timing` row says why.
     let device = Arc::new(Descheduled::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })));
-    device.hold_reports(true);
     let (mut run, _dir) = tx_session_on(device.clone());
+    // After `arm`: the open flush needs its acknowledgement (UR-22).
+    device.hold_reports(true);
     let start = tx_at(&run, ms(30));
     assert!(admitted(&send_at(&mut run, "start_repeat", Some(start), &tone(100))));
     wait(&mut run, ms(40));
@@ -2722,8 +2726,9 @@ fn ur_28_two_joined_bursts_a_late_report_reaches_are_both_told() {
     // TimeError at the device burst's first instant is let through (the fake cannot be late here: with `SlowSend` the host's own clock expires A's timeline
     // before B can join, which is `ur_28_a_finite_burst_the_device_receives_late_is_dropped_whole`'s case): the one device burst names both Kernel bursts.
     let device = Arc::new(Descheduled::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() })));
-    device.hold_reports(true);
     let (mut run, _dir) = tx_session_on(device.clone());
+    // After `arm`: the open flush needs its acknowledgement (UR-22).
+    device.hold_reports(true);
     let a = tx_at(&run, ms(30));
     let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + 3_000);
     assert!(admitted(&send_at(&mut run, "send", Some(a), &tone(3_000))));
@@ -4053,7 +4058,8 @@ fn ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock() {
 /// failed read waiting its timeout the window closes and uhd-tx joins (no "did not join").
 #[test]
 fn ur_33_a_shutdown_with_a_report_read_that_fails_at_once_still_joins_uhd_tx() {
-    let (mut run, _device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::TxAsyncFails(Wall::ZERO, false)], ..FakeConfig::default() });
+    // The reads fail from 10 ms of device time: after `arm`, whose open flush needs its acknowledgement (UR-22).
+    let (mut run, _device, _dir) = tx_session(FakeConfig { clock: ClockMode::Manual, faults: vec![FakeFault::TxAsyncFails(Wall::from_millis(10), false)], ..FakeConfig::default() });
     let at = tx_at(&run, ms(20));
     // `send_asap_and_flag`: a delayed booking is moved, not dropped (rule (3)); the shutdown
     // path under test does not depend on the burst, only on not losing it to the delay.
@@ -6115,6 +6121,11 @@ fn ur_25_a_successful_start_clears_a_later_stream_s_halt() {
     assert_eq!(plan_stream(&plan, "rx", 1).len(), 2, "{plan}");
 }
 
+/// The profile's receive start lead in whole milliseconds (`radio.timing.rx_start_lead_ns`): the lead the receive restarts below are judged against.
+fn start_lead_ms() -> i64 {
+    ezsdr_radio::x3xx::timing().rx_start_lead_ns / 1_000_000
+}
+
 fn bench_link(latency_ms: u64) -> FakeConfig {
     FakeConfig { rx_latency: Wall::from_millis(latency_ms), rx_packet: Some(1_996), ..FakeConfig::default() }
 }
@@ -6140,7 +6151,7 @@ fn ur_25_a_start_booked_anywhere_in_a_long_receive_call_is_on_time() {
         let switch = timing.as_array().unwrap().iter().rfind(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
         // UR-25's ready instant (spec 22, VH-4): the new origin is at least the booking plus the longer of a block and a
         // packet at the old rate, 3 ms and the start lead (Review Q, TG-Q3).
-        let floor = ms(50) + block_len.max(packet) as i64 * 512 + ms(3);
+        let floor = ms(start_lead_ms()) + block_len.max(packet) as i64 * 512 + ms(3);
         let origin = switch["origin"].as_i64().unwrap();
         assert!(origin - booked >= floor, "block {block_len} packet {packet} phase {phase}: booked {booked} {switch}");
         assert!(switch["at"].as_i64().unwrap() < origin, "block {block_len} packet {packet} phase {phase}: switched after e₂: {switch}");
@@ -6806,7 +6817,8 @@ fn ur_25_a_receive_cut_counts_its_own_stream_s_packet_size() {
     let rx = plan["rx"].as_array().unwrap();
     assert_eq!(rx.len(), 2, "{plan}");
     let gap = rx[1]["origin"].as_i64().unwrap() - rx[0]["end"].as_i64().unwrap();
-    assert!((11_400_000..11_400_400).contains(&gap), "4000 samples at 200 ticks + 3 ms allowance + 50 ms lead, rounded to the lattice: {gap} in {plan}");
+    let expected = 4_000 * 200 + ms(3) + ms(start_lead_ms());
+    assert!((expected..expected + 400).contains(&gap), "4000 samples at 200 ticks + 3 ms allowance + the start lead, rounded to the lattice: {gap} in {plan}");
 }
 
 #[test]
@@ -8601,7 +8613,8 @@ fn iii_restart_fill_probe_rehearses_on_the_fake() {
     // T2's probe (`common::iii::restart_fill_probe`) on FakeDevice, on the host clock because the probe waits in real time. The fake
     // returns the transmitted tone only when the transmit and receive rates are equal (device.rs `sample_at`); at any other rate it
     // returns a ramp. So the tone and the verdict are checked at 1 MS/s alone. At every rate the rehearsal checks the calls, each first
-    // block at its planned tick and the rate read-back. The fake models no DDC fill, so the zeros and ramps are not checked.
+    // block at its planned tick and the rate read-back. The fake models the start's head of exact zeros (MR-35, UR-33) and no ramp: at 1 MS/s the first trial's zeros are
+    // `rx_fill_samples(200)`, and the tone after them is on time.
     let device = fake_real(one_obx());
     device.set_time_zero(false).unwrap();
     for fill in common::iii::restart_fill_probe(device, &common::iii::RESTART_RATES, 3) {
@@ -8612,6 +8625,9 @@ fn iii_restart_fill_probe_rehearses_on_the_fake() {
         if fill.rate == 1e6 {
             let outcome = common::iii::restart_rate_verdict(fill.rate, &fill.trials, common::iii::RESTART_TONE_HZ, common::n47::TONE_TOLERANCE_HZ);
             assert!(matches!(outcome, common::tone::Verdict::Pass(_)), "{outcome:?}");
+            for trial in &fill.trials {
+                assert_eq!(trial.fill.map(|fill| fill.zeros), Some(ezsdr_radio::x3xx::rx_fill_samples(200) as usize), "the head at 1 MS/s");
+            }
         }
     }
 }
@@ -9016,8 +9032,8 @@ fn p72_timed_tx_chunks_rehearsal_on_the_fake() {
 }
 
 /// `hw_p72_…`'s verdict on a Session whose first flush (the open flush at `arm`, the first send that carries samples) is not acknowledged: a flush
-/// without its `BurstAck` is a refused flush (UR-22), so T3 fails by name, whatever the retry rule does above it (#75: the open flush at `arm` is one
-/// attempt while `OPEN_FLUSH_CONFIRMED` is off, and a recovery's retried flush rows would still count as refused).
+/// without its `BurstAck` is a refused flush (UR-22), so T3 fails by name, whatever the retry rule does above it (#75: the open flush at `arm`
+/// recovers on its second attempt, and the first attempt's row still counts as refused).
 #[test]
 fn p72_a_lost_flush_ack_fails_the_verdict_on_the_fake() {
     let dir = TempDir::new();
@@ -9837,7 +9853,7 @@ fn run_any_a_perf_trial_still_fails_on_a_bound() {
 #[test]
 fn bench1115_zeros_sweep_rehearses_on_the_fake() {
     // On the host clock because the probe waits in real time. The fake returns the transmitted tone only at equal rates and frequencies, so the
-    // 1 MS/s restart cell is judged PASS (it models no fill); a retune moves the receive frequency, so its tone is a ramp there: INCONCLUSIVE.
+    // 1 MS/s restart cell is judged PASS (its head is on the bound, below); a retune moves the receive frequency, so its tone is a ramp there: INCONCLUSIVE.
     use common::bench1115::{Start, ZCell, cell_stats, cell_verdict, zeros_cells, zeros_report, zeros_sweep};
     use common::tone::Verdict;
     let device = fake_real(one_obx());
@@ -9857,6 +9873,14 @@ fn bench1115_zeros_sweep_rehearses_on_the_fake() {
     assert!(matches!(verdict(200, Start::Restart, 0.0), Verdict::Pass(_)), "{:?}", verdict(200, Start::Restart, 0.0));
     assert!(matches!(verdict(200, Start::Fresh, 0.0), Verdict::Pass(_)), "{:?}", verdict(200, Start::Fresh, 0.0));
     assert!(matches!(verdict(200, Start::Restart, 10.0), Verdict::Pass(_)));
+    // The fake's settling is exactly its head (24 zeros at 1 MS/s, no ramp), so it sits on the bound the verdict judges; one more sample over it fails the same verdict.
+    for start in [Start::Restart, Start::Fresh] {
+        let (cell, trials) = runs.iter().find(|(c, _)| c.decim == 200 && c.start == start && c.gain_db == 0.0).unwrap();
+        assert_eq!(cell_stats(trials).settled, Some(cell.bound()), "{}", cell.name());
+        let mut longer = trials.clone();
+        longer.iter_mut().filter_map(|trial| trial.trial.fill.as_mut()).for_each(|fill| fill.zeros += 1);
+        assert!(matches!(cell_verdict(cell, &cell_stats(&longer)), Verdict::Fail(text) if text.contains("rx_fill_samples(200)")), "{}", cell.name());
+    }
     let verdicts = zeros_report(&runs);
     assert!(verdicts.iter().all(|(_, v)| !matches!(v, Verdict::Fail(_))), "{verdicts:?}");
     assert!(zeros_cells().len() > cells.len());
@@ -9878,8 +9902,8 @@ fn bench1115_zeros_sweep_refuses_a_gain_above_the_bench_maximum_and_restores_0_d
 
 #[test]
 fn bench1115_pn_sweep_rehearses_on_the_fake() {
-    // On the host clock because the probe waits in real time. The fake models a loopback delay and no DDC fill: the PN is found at the delay in a
-    // continuous capture and in a restart, with no zeros, so the trial is INSEPARABLE and the cell passes.
+    // On the host clock because the probe waits in real time. The fake models a loopback delay and the start's head of exact zeros (24 at 1 MS/s, the signal after it
+    // on time): the PN is found at the delay in a continuous capture and in a restart, with no shift, so the trial is GROUP DELAY and the cell passes.
     use common::bench1115::{PnCell, PnOutcome, pn_cell_verdict, pn_report, pn_stats, pn_sweep};
     use common::tone::Verdict;
     let device = fake_real(FakeConfig { loopback_delay_samples: 44, ..one_obx() });
@@ -9893,8 +9917,8 @@ fn bench1115_pn_sweep_rehearses_on_the_fake() {
     for trial in trials {
         assert!(trial.error.is_none() && trial.incomplete.is_none() && !trial.misplaced, "{trial:?}");
         let measure = trial.measure.expect("measured");
-        assert_eq!((measure.z, measure.cont.d, measure.restart.d), (0, Some(44), Some(44)), "{measure:?}");
-        assert_eq!(trial.outcome(), Some(PnOutcome::Inseparable));
+        assert_eq!((measure.z, measure.cont.d, measure.restart.d), (ezsdr_radio::x3xx::rx_fill_samples(200) as usize, Some(44), Some(44)), "{measure:?}");
+        assert_eq!(trial.outcome(), Some(PnOutcome::GroupDelay));
     }
     assert!(matches!(pn_cell_verdict(&cell, &pn_stats(trials)), Verdict::Pass(_)));
     let sends: Vec<String> = device.calls().into_iter().filter(|call| call.starts_with("tx_send 0")).collect();
@@ -10278,6 +10302,33 @@ fn s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels() {
     let (lines, error) = with_selector(two_channel_selector(), || s5_rx_start_lead(&cbx, &two));
     assert_eq!((error, lines.len()), (None, 1));
     assert!(lines[0].contains("INCONCLUSIVE: not runnable") && lines[0].contains("0:B:cbx:0"), "{lines:?}");
+}
+
+#[test]
+fn s4bench_s5_rx_start_lead_at_100_msps_starts_every_trial_past_the_probes_row_limit() {
+    // The bench's receive pass at 100 MS/s, 30 trials a rung (`hw_s5_rx_start_lead`'s plan narrowed to the 10 ms rung and to a count past the fill point; 100 trials take two minutes): a 100 MS/s receive records thousands of `rx_recv` rows
+    // a trial, so the probe's 65 536-row record filled after about a dozen trials and the rest read `started: false`. Every trial must start and the decision line must read
+    // 30/30 Success in both conditions, the verdict the bench computes.
+    use common::s4bench::*;
+    let (fake_device, _, _) = raw_group_fixture(one_obx());
+    let device: Arc<dyn Device> = fake_device;
+    let env = std::collections::BTreeMap::from([
+        ("EZSDR_MEASURE_RX_START_RATES_HZ".to_owned(), "100000000".to_owned()),
+        ("EZSDR_MEASURE_RX_START_LEADS_NS".to_owned(), D4_LEAD_NS.to_string()),
+        ("EZSDR_MEASURE_STEP_TRIALS".to_owned(), "30".to_owned()),
+    ]);
+    let plan = measurement::MeasurementPlan { rx_start_channels: 1, ..s5_plan(&env).unwrap() };
+    assert_eq!((plan.rx_start_rates_hz.clone(), plan.step_trials), (vec![100_000_000], 30));
+    // The margin past the fill point, by arithmetic: a trial waits the lead plus 60 ms, and a receive at 100 MS/s returns one block of `DEFAULT_BLOCK_LEN` samples a row.
+    let rows_a_trial = 100_000_000 / 1_000 * (D4_LEAD_NS / 1_000_000 + 60) / u64::from(ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN);
+    assert!((plan.step_trials as u64 - 1) * rows_a_trial > common::probe_device::PROBE_ROW_LIMIT as u64, "{rows_a_trial} rows a trial would not fill the probe in {} trials", plan.step_trials);
+    let (lines, error) = s5_rx_start_lead(&device, &plan);
+    assert_eq!(error, None, "{lines:?}");
+    let decision = lines.last().unwrap();
+    assert!(decision.contains("10.000 ms: every trial Success in 2 of 2 conditions") && !decision.contains("INCONCLUSIVE"), "{decision}");
+    let trials: Vec<&String> = lines.iter().filter(|line| line.starts_with("S5 rx-start-lead-1ch trial ")).collect();
+    assert_eq!(trials.len(), 2 * 30);
+    assert!(trials.iter().all(|line| line.contains("\"started\":true") && !line.contains("\"lead_left_ns\":null")), "every trial started and read its lead");
 }
 
 #[test]

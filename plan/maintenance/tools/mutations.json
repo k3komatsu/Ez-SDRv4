@@ -4858,8 +4858,8 @@
    "id": "P215",
    "name": "a receive start recorded on stream 0 whatever stream it names (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "let streamer = st.rx.get_mut(&stream).expect(\"checked\");\n                streamer.next = Some(at);",
-   "new": "let streamer = st.rx.get_mut(&0).expect(\"checked\");\n                streamer.next = Some(at);",
+   "old": "None => st.rx.get_mut(&stream).expect(\"checked\").begin(at, ratio),",
+   "new": "None => st.rx.get_mut(&0).expect(\"checked\").begin(at, ratio),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_33_two_receive_streamers_keep_their_own_channels"
@@ -6815,8 +6815,8 @@
   "id": "P625",
   "name": "the x3xx profile publishes a 10 ms TX in-flight window (MR-03, UR-09)",
   "file": "crates/ezsdr-radio/src/x3xx.rs",
-  "old": "        tx_in_flight_ns: 10_000_000,",
-  "new": "        tx_in_flight_ns: 0,",
+  "old": "tx_in_flight_ns: 10_000_000",
+  "new": "tx_in_flight_ns: 0",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_03_profile_values_reach_the_capabilities_and_the_envelope_section"
@@ -7231,7 +7231,7 @@
     "scope": "fn descriptions",
     "crate": "ezsdr-acceptance",
     "test_bin": "measurements",
-    "filter": "measurement_between_the_provider_leads_passes_only_uhd"
+    "filter": "measurement_fixture_files_enforce_provider_specific_rejections"
    },
    {
     "id": "P689",
@@ -12862,8 +12862,8 @@
       "id": "N48S1-09",
       "name": "a flush's BurstAck does not acknowledge its channel (UR-22 T3)",
       "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-      "old": "if report.code == TxCode::BurstAck && expected.contains(&report.channel) && floor.is_none_or(|floor| report.tick.is_some_and(|tick| tick >= floor)) && acknowledged.insert(report.channel) {",
-      "new": "if report.code == TxCode::BurstAck && expected.contains(&report.channel) && floor.is_none_or(|floor| report.tick.is_some_and(|tick| tick >= floor)) && acknowledged.insert(report.channel) && false {",
+      "old": "if report.code == TxCode::BurstAck && expected.contains(&report.channel) && report.tick.is_some_and(|tick| tick >= floor) && acknowledged.insert(report.channel) {",
+      "new": "if report.code == TxCode::BurstAck && expected.contains(&report.channel) && report.tick.is_some_and(|tick| tick >= floor) && acknowledged.insert(report.channel) && false {",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_22_t3_flush_requires_each_channel_ack_and_device_loss_stays_distinct"
@@ -12962,8 +12962,8 @@
     "id": "N-09",
     "name": "the open-time flush takes no report gate, so shutdown can take its acknowledgement (UR-22, S2a-ii)",
     "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-    "old": "let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
-    "new": "let _reports = ();\n        self.open_tx_device_locked(k, set, &channels)",
+    "old": "let _reports = self.lock_tx_reports(k);\n        self.open_tx_confirmed_locked(k, set, &channels, not_before, OPEN_FLUSH)",
+    "new": "let _reports = ();\n        self.open_tx_confirmed_locked(k, set, &channels, not_before, OPEN_FLUSH)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_22_t3_flush_ack_is_not_taken_by_shutdown"
@@ -20637,7 +20637,7 @@
   "scope": "fn outside_by_one",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "a_class_wider_than_one_either_way_is_b_and_one_inside_is_d"
+  "filter": "a_fresh_open_outside_one_of_the_restart_range_limits_the_fill_to_restarts"
  },
  {
   "id": "B1115-05",
@@ -20648,18 +20648,7 @@
   "scope": "fn outside_by_one",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "a_class_wider_than_one_either_way_is_b_and_one_inside_is_d"
- },
- {
-  "id": "B1115-06",
-  "name": "bench 2026-11-15 probes: a start kind's zero counts enter the structure comparison (decide)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
-  "old": "cell.start == Start::Restart && cell.gain_db == 0.0",
-  "new": "cell.gain_db == 0.0",
-  "scope": "pub fn decide",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "the_structure_reads_the_gain_zero_restart_cells_and_the_bound_every_counted_cell"
+  "filter": "a_fresh_open_outside_one_of_the_restart_range_limits_the_fill_to_restarts"
  },
  {
   "id": "B1115-07",
@@ -20671,17 +20660,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "a_missing_or_short_cell_makes_every_decision_inconclusive_and_names_it"
- },
- {
-  "id": "B1115-08",
-  "name": "bench 2026-11-15 probes: a gain that moves a limit by 3 is not reported (decision_lines)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
-  "old": "*shift > 2",
-  "new": "*shift > 3",
-  "scope": "pub fn decision_lines",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "a_gain_that_moves_a_limit_by_more_than_two_gets_a_known_limitation"
  },
  {
   "id": "B1115-09",
@@ -20972,39 +20950,6 @@
   "filter": "a_missing_or_short_cell_makes_every_decision_inconclusive_and_names_it"
  },
  {
-  "id": "B1115-35",
-  "name": "bench 2026-11-15 probes: a level cell's zero counts enter the structure comparison (decide)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
-  "old": "cell.start == Start::Restart && cell.gain_db == 0.0",
-  "new": "cell.start == Start::Restart",
-  "scope": "pub fn decide",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "the_structure_reads_the_gain_zero_restart_cells_and_the_bound_every_counted_cell"
- },
- {
-  "id": "B1115-36",
-  "name": "bench 2026-11-15 probes: the candidate bound reads only the structure cells (decide)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
-  "old": "of_class.iter().map(|(_, range)| range.1).max()",
-  "new": "structure.iter().map(|(_, range)| range.1).max()",
-  "scope": "pub fn decide",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "the_structure_reads_the_gain_zero_restart_cells_and_the_bound_every_counted_cell"
- },
- {
-  "id": "B1115-37",
-  "name": "bench 2026-11-15 probes: the candidate bound is the smallest count, not the largest (decide)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
-  "old": "of_class.iter().map(|(_, range)| range.1).max()",
-  "new": "of_class.iter().map(|(_, range)| range.1).min()",
-  "scope": "pub fn decide",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "the_structure_reads_the_gain_zero_restart_cells_and_the_bound_every_counted_cell"
- },
- {
   "id": "B1115-38",
   "name": "bench 2026-11-15 probes: a missing planned cell is not listed (decide)",
   "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
@@ -21016,22 +20961,11 @@
   "filter": "a_missing_or_short_cell_makes_every_decision_inconclusive_and_names_it"
  },
  {
-  "id": "B1115-39",
-  "name": "bench 2026-11-15 probes: D is decided while a planned cell is missing (decide)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
-  "old": "missing.is_empty().then",
-  "new": "true.then",
-  "scope": "pub fn decide",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "a_missing_or_short_cell_makes_every_decision_inconclusive_and_names_it"
- },
- {
   "id": "B1115-40",
   "name": "bench 2026-11-15 probes: decision 1 is not inconclusive while a cell is missing (decision_lines)",
   "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
-  "old": "_ if !decision.missing.is_empty() => inconclusive(\"1\"),",
-  "new": "_ if false => inconclusive(\"1\"),",
+  "old": "[] if !decision.missing.is_empty() => inconclusive(\"1 (bound)\"),",
+  "new": "[] if false => inconclusive(\"1 (bound)\"),",
   "scope": "pub fn decision_lines",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -21042,17 +20976,6 @@
   "name": "bench 2026-11-15 probes: decision 2 is not inconclusive while a cell is missing (decision_lines)",
   "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
   "old": "inconclusive(\"2 (every start or restarts only)\")",
-  "new": "String::new()",
-  "scope": "pub fn decision_lines",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "a_missing_or_short_cell_makes_every_decision_inconclusive_and_names_it"
- },
- {
-  "id": "B1115-42",
-  "name": "bench 2026-11-15 probes: decision 3 is not inconclusive while a cell is missing (decision_lines)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
-  "old": "inconclusive(\"3 (amplitude)\")",
   "new": "String::new()",
   "scope": "pub fn decision_lines",
   "crate": "ezsdr-radio-uhd",
@@ -21410,28 +21333,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "the_capture_is_contiguous_when_every_sample_is_one_spacing_from_the_next"
- },
- {
-  "id": "B1115-75",
-  "name": "bench 2026-11-15 probes: a class with a missing planned cell prints no INCOMPLETE mark (decision_lines)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
-  "old": "class.bound_cells < class.planned_cells",
-  "new": "false",
-  "scope": "pub fn decision_lines",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "a_class_line_marks_an_incomplete_bound"
- },
- {
-  "id": "B1115-76",
-  "name": "bench 2026-11-15 probes: a class's planned cells are the counted ones (decide)",
-  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
-  "old": "planned.iter().filter(|cell| cell.half_bands() == class).count()",
-  "new": "of_class.len()",
-  "scope": "pub fn decide",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "a_class_line_marks_an_incomplete_bound"
  },
  {
   "id": "B1115-77",
@@ -22057,7 +21958,7 @@
   "id": "N75-03",
   "name": "three unconfirmed attempts end the loop in success (#75)",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "Err(DeviceError::failed(format!(\"UR-22: the recovery flush was not confirmed after {T3_ATTEMPTS} attempts: {last}\")))",
+  "old": "Err(DeviceError::failed(format!(\"{what} was not confirmed after {T3_ATTEMPTS} attempts: {last}\")))",
   "new": "Ok(Confirmed { ack_tick: 0 })",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -22137,8 +22038,8 @@
   "id": "N75-08b",
   "name": "an ack older than the floor is the attempt's (#75)",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "floor.is_none_or(|floor| report.tick.is_some_and(|tick| tick >= floor))",
-  "new": "floor.is_none_or(|_| report.tick.is_some())",
+  "old": "report.tick.is_some_and(|tick| tick >= floor)",
+  "new": "report.tick.is_some()",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_75_an_ack_older_than_the_floor_is_not_this_attempts"
@@ -22157,18 +22058,18 @@
   "id": "N75-09",
   "name": "a send that put nothing out still waits for an ack (#75)",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "(Some(_), Some(text)) = (attempt, &problem)",
-  "new": "(Some(_), Some(text)) = (None::<Attempt>, &problem)",
+  "old": "if let Some(text) = &problem {",
+  "new": "if let Some(text) = &None::<String> {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_75_a_send_that_is_not_whole_ends_its_attempt_at_once"
  },
  {
   "id": "N75-10",
-  "name": "a strict attempt's failed send is rejected as an event again (#75)",
+  "name": "a flush attempt's failed send is rejected as an event again (#75, F2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "if attempt.is_none() || error.lost {",
-  "new": "if true || error.lost {",
+  "old": "if error.lost { self.device_failed(None, \"tx_flush\", &error); }",
+  "new": "if true { self.device_failed(None, \"tx_flush\", &error); }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_75_a_send_that_is_not_whole_ends_its_attempt_at_once"
@@ -22182,26 +22083,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_75_a_report_an_unconfirmed_attempt_stashed_makes_its_event_after_the_recovery"
- },
- {
-  "id": "N75-13",
-  "name": "the open at arm takes the confirmed loop while the switch is off (#75)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "Dir::Tx => self.open_tx_device(k, set).map(|_| ()),",
-  "new": "Dir::Tx => self.open_tx_confirmed(k, set, i64::MIN).map(|_| ()),",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_75_with_the_switch_off_the_open_flush_is_todays"
- },
- {
-  "id": "N75-14",
-  "name": "the open flush switch is read the wrong way round (#75)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "Dir::Tx if OPEN_FLUSH_CONFIRMED =>",
-  "new": "Dir::Tx if !OPEN_FLUSH_CONFIRMED =>",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_75_with_the_switch_off_the_open_flush_is_todays"
  },
  {
   "id": "N75-15",
@@ -22242,16 +22123,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_75_an_ack_older_than_the_floor_is_not_this_attempts"
- },
- {
-  "id": "N75-19",
-  "name": "the open at arm takes the strict ack rule (#75)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "let flush = self.tx_flush_locked(k, channels, None, None);",
-  "new": "let flush = self.tx_flush_locked(k, channels, None, Some(0));",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_75_the_open_flush_at_arm_keeps_todays_ack_rule"
  },
  {
   "id": "N75-20",
@@ -22305,10 +22176,10 @@
  },
  {
   "id": "N75-25",
-  "name": "the open flush at arm writes its missing-ACK row under another call (#75: the p72 verdict counts it as refused)",
+  "name": "a flush attempt's missing-ACK row is written under another call (#75: the p72 verdict counts it as refused)",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "None => json!({ \"call\": \"tx_flush\", \"stream\": stream, \"error\": error }),",
-  "new": "None => json!({ \"call\": \"tx_flushed\", \"stream\": stream, \"error\": error }),",
+  "old": "self.reject_note(json!({ \"call\": \"tx_flush\", \"stream\": stream, \"error\": error, \"attempt\": attempt.number }));",
+  "new": "self.reject_note(json!({ \"call\": \"tx_flushed\", \"stream\": stream, \"error\": error, \"attempt\": attempt.number }));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "p72_a_lost_flush_ack_fails_the_verdict_on_the_fake"
@@ -22388,7 +22259,7 @@
   "name": "an attempt's window after a successful pre-send time read is not its whole 100 ms (#75)",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
   "old": "let until = host.now() + Wall::from_millis(100);",
-  "new": "let until = host.now() + Wall::from_millis(if floor.is_some() { 50 } else { 100 });",
+  "new": "let until = host.now() + Wall::from_millis(if true { 50 } else { 100 });",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_75_a_failing_pre_send_time_read_is_retried_until_it_succeeds_a_stop_a_loss_or_the_cap"
@@ -26693,5 +26564,665 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "mt3d_a_switch_that_joins_a_resumed_part_is_named_with_it"
+ },
+ {
+  "id": "S4A-01",
+  "name": "the x3xx command lead is 2 ms again (stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "min_timed_command_lead_ns: 5_000_000,",
+  "new": "min_timed_command_lead_ns: 2_000_000,",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "s4a_x3xx_values_are_the_measured_ones"
+ },
+ {
+  "id": "S4A-02",
+  "name": "the declared command lead moves alone, so it is no longer the UHD device lead plus its delivery allowance (UR-9, stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "min_timed_command_lead_ns: 5_000_000,",
+  "new": "min_timed_command_lead_ns: 6_000_000,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_09_the_declared_lead_is_the_device_lead_plus_the_delivery_allowance"
+ },
+ {
+  "id": "S4A-03",
+  "name": "the x3xx receive start lead is 50 ms again (stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "rx_start_lead_ns: 10_000_000,",
+  "new": "rx_start_lead_ns: 50_000_000,",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "s4a_x3xx_values_are_the_measured_ones"
+ },
+ {
+  "id": "S4A-04",
+  "name": "a 10 GbE link carries 1 GB/s again (RM-32, stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "800_000_000",
+  "new": "1_000_000_000",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "s4a_x3xx_values_are_the_measured_ones"
+ },
+ {
+  "id": "S4A-05",
+  "name": "a 1 GbE link carries 125 MB/s (RM-32, stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "else { 100_000_000 }",
+  "new": "else { 125_000_000 }",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "s4a_x3xx_values_are_the_measured_ones"
+ },
+ {
+  "id": "S4A-06",
+  "name": "the transmit byte rate is half the receive one (RM-7, stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "tx_bytes_per_s: bytes_per_s,",
+  "new": "tx_bytes_per_s: bytes_per_s / 2,",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "s4a_x3xx_values_are_the_measured_ones"
+ },
+ {
+  "id": "S4A-07",
+  "name": "MockRadio takes the UHD Module's repeat length limit (stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/profile.rs",
+  "old": "repeat_max_samples: 268_435_456,",
+  "new": "repeat_max_samples: u64::from(u32::MAX),",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "x3xx",
+  "filter": "d3_the_two_providers_share_every_comparable_value_but_the_repeat_pair"
+ },
+ {
+  "id": "S4A-08",
+  "name": "the UHD Module takes Replay's repeat alignment (stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/src/profile.rs",
+  "old": "repeat_align_samples: 1 }",
+  "new": "repeat_align_samples: 2 }",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "x3xx",
+  "filter": "d3_the_two_providers_share_every_comparable_value_but_the_repeat_pair"
+ },
+ {
+  "id": "S4A-09",
+  "name": "a throughput exactly at the link limit is refused (RM-32)",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "if need <= cap {",
+  "new": "if need < cap {",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_32_throughput_cases"
+ },
+ {
+  "id": "S4A-10",
+  "name": "MockRadio judges lateness with the declared lead as its device lead (RM-14, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.device_lead_ns())",
+  "new": "Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.timing().min_timed_command_lead_ns)",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "s4a_the_mock_places_at_the_device_lead_and_admits_at_the_declared_lead"
+ },
+ {
+  "id": "S4A-11",
+  "name": "MockRadio's instance declares a 2 ms command lead (MR-4, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "Duration::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, timing.min_timed_command_lead_ns)",
+  "new": "Duration::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 2_000_000)",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_04_instance"
+ },
+ {
+  "id": "S4A-12",
+  "name": "the receive byte rate is compared with the transmit one (RM-35, stage 4a)",
+  "file": "crates/ezsdr-radio/src/measurement.rs",
+  "old": "keys::RX_BYTES_PER_S => Worst::Number(description.performance.rx_bytes_per_s as f64),",
+  "new": "keys::RX_BYTES_PER_S => Worst::Number(description.performance.tx_bytes_per_s as f64),",
+  "crate": "ezsdr-radio",
+  "test_bin": "measurement",
+  "filter": "rm_35_the_receive_and_transmit_byte_rates_are_each_compared_with_their_own_value"
+ },
+ {
+  "id": "S4A-13",
+  "name": "MockRadio's device lead adds its delivery allowance instead of taking it from the declared lead (RM-14, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/profile.rs",
+  "old": "self.description.timing.min_timed_command_lead_ns - self.delivery_allowance_ns()",
+  "new": "self.description.timing.min_timed_command_lead_ns + self.delivery_allowance_ns()",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "s4a_the_mock_places_at_the_device_lead_and_admits_at_the_declared_lead"
+ },
+ {
+  "id": "S4A-14",
+  "name": "MockRadio places a late SendAsap start with the declared lead as its device lead (RM-14, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "time::ns_to_v(clocks, root, self.profile.device_lead_ns())",
+  "new": "time::ns_to_v(clocks, root, self.profile.timing().min_timed_command_lead_ns)",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "s4a_the_mock_places_at_the_device_lead_and_admits_at_the_declared_lead"
+ },
+ {
+  "id": "S4A-20",
+  "name": "the receive head of a decimation with no factor of two is 3 samples (MR-35, stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "[u64; 4] = [2, 13, 18, 24]",
+  "new": "[u64; 4] = [3, 13, 18, 24]",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rx_fill_samples_is_the_table_by_half_band_count"
+ },
+ {
+  "id": "S4A-21",
+  "name": "the receive head of a decimation with one factor of two is 12 samples (MR-35, stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "[u64; 4] = [2, 13, 18, 24]",
+  "new": "[u64; 4] = [2, 12, 18, 24]",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rx_fill_samples_is_the_table_by_half_band_count"
+ },
+ {
+  "id": "S4A-22",
+  "name": "the receive head of a decimation with two factors of two is 17 samples (MR-35, stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "[u64; 4] = [2, 13, 18, 24]",
+  "new": "[u64; 4] = [2, 13, 17, 24]",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rx_fill_samples_is_the_table_by_half_band_count"
+ },
+ {
+  "id": "S4A-23",
+  "name": "the receive head of a decimation with three factors of two is 25 samples (MR-35, stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "[u64; 4] = [2, 13, 18, 24]",
+  "new": "[u64; 4] = [2, 13, 18, 25]",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rx_fill_samples_is_the_table_by_half_band_count"
+ },
+ {
+  "id": "S4A-24",
+  "name": "the receive head's half-band count is not capped at three (MR-35, stage 4a)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "as usize).min(3)",
+  "new": "as usize).min(4)",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rx_fill_samples_is_the_table_by_half_band_count"
+ },
+ {
+  "id": "S4A-25",
+  "name": "MockRadio's receive start has no head (MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "Ok(self.profile.rx_head_samples(decimation as u64))",
+  "new": "Ok(0)",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_"
+ },
+ {
+  "id": "S4A-26",
+  "name": "MockRadio reads the head's class from the ratio's own factors of two instead of the decimation (MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "Ok(self.profile.rx_head_samples(decimation as u64))",
+  "new": "Ok(self.profile.rx_head_samples(ratio.num()))",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_a_head_is_counted_in_samples_whatever_the_root"
+ },
+ {
+  "id": "S4A-27",
+  "name": "MockRadio's head is one sample too long (MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if sample < head_until {",
+  "new": "if sample <= head_until {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_"
+ },
+ {
+  "id": "S4A-28",
+  "name": "MockRadio gives only a Run's first segment a head (MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let head = self.rx_head(segment.config.ratio)?;",
+  "new": "let head = if self.rx[k].from == 0 { self.rx_head(segment.config.ratio)? } else { 0 };",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_every_receive_restart_begins_with_the_head_of_its_rate"
+ },
+ {
+  "id": "S4A-29",
+  "name": "MockRadio's signal is late by the head, zeros inserted instead of replacing samples (MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "sample.saturating_sub(model.path_delay_samples));",
+  "new": "sample.saturating_sub(model.path_delay_samples + if sample >= head_until { head_until } else { 0 }));",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_every_receive_restart_begins_with_the_head_of_its_rate"
+ },
+ {
+  "id": "S4A-30",
+  "name": "MockRadio's receive test pattern `ramp` has a head (MR-13, MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let sample = (first as u64 + index as u64) % 65_536;",
+  "new": "let sample = if first + (index as i64) < head_until { 0 } else { (first as u64 + index as u64) % 65_536 };",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_the_head_is_only_on_the_x3xx_signal_path"
+ },
+ {
+  "id": "S4A-31",
+  "name": "MockRadio's `ideal` profile has a head (MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/profile.rs",
+  "old": "ProfileKind::X3xx => x3xx::rx_fill_samples(decimation) as i64, ProfileKind::Ideal => 0,",
+  "new": "ProfileKind::X3xx => x3xx::rx_fill_samples(decimation) as i64, ProfileKind::Ideal => x3xx::rx_fill_samples(decimation) as i64,",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_the_head_is_only_on_the_x3xx_signal_path"
+ },
+ {
+  "id": "S4A-34",
+  "name": "the sweep's bound allows one sample over rx_fill_samples, in the verdict and the decision (hw_rxzeros_sweep, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
+  "old": "stats.settled.filter(|settled| *settled > cell.bound())",
+  "new": "stats.settled.filter(|settled| *settled >= cell.bound())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "rxz_a_trial_is_within_the_bound_at_n_and_fails_at_n_plus_one"
+ },
+ {
+  "id": "S4A-36",
+  "name": "FakeDevice's receive start has no head (UR-33, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "at + ezsdr_radio::x3xx::rx_fill_samples(ratio as u64) as i64 * ratio",
+  "new": "at",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_receive_start_begins_with_the_head_of_its_rate"
+ },
+ {
+  "id": "S4A-37",
+  "name": "FakeDevice's streamer keeps the previous start's head at a new start (UR-33, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "self.head_until = rx_head_until(at, ratio);",
+  "new": "let _ = rx_head_until(at, ratio);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_receive_start_begins_with_the_head_of_its_rate"
+ },
+ {
+  "id": "S4A-38",
+  "name": "FakeDevice has a head only where a matched loopback supplies the samples (UR-33, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "if next + i * ratio < head_until {",
+  "new": "if next + i * ratio < head_until && st.settings[1].get(*chan).is_some_and(|tx| self.ratio(tx.rate) == ratio) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_receive_start_begins_with_the_head_of_its_rate"
+ },
+ {
+  "id": "S4A-39",
+  "name": "FakeDevice's fresh start (no stopped tail) has no head (UR-33, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "None => st.rx.get_mut(&stream).expect(\"checked\").begin(at, ratio),",
+  "new": "None => {\n                let streamer = st.rx.get_mut(&stream).expect(\"checked\");\n                streamer.next = Some(at);\n                streamer.origin = at;\n                streamer.ratio = ratio;\n            }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_receive_start_begins_with_the_head_of_its_rate"
+ },
+ {
+  "id": "S4A-40",
+  "name": "MockRadio's injected overrun restart has no head (MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "rx.head_until = kg + rx.head;",
+  "new": "let _ = kg + rx.head;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_an_injected_overflow_restart_begins_with_the_head"
+ },
+ {
+  "id": "S4A-41",
+  "name": "MockRadio's back-pressure restart has no head (MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "rx.head_until = next_sample + rx.head;",
+  "new": "let _ = next_sample + rx.head;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_a_back_pressure_restart_begins_with_the_head"
+ },
+ {
+  "id": "S4A-42",
+  "name": "FakeDevice's scripted overflow restart has no head (UR-33, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.head_until = rx_head_until(next + skip, ratio);",
+  "new": "let _ = rx_head_until(next + skip, ratio);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fakes_overflow_restart_begins_with_the_head"
+ },
+ {
+  "id": "S4A-43",
+  "name": "FakeDevice's late-reader overrun restart has no head (UR-33, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.head_until = rx_head_until(restart, ratio);",
+  "new": "let _ = rx_head_until(restart, ratio);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fakes_overflow_restart_begins_with_the_head"
+ },
+ {
+  "id": "S4A-44",
+  "name": "FakeDevice's start behind a stopped stream's tail has no head (UR-33, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.begin(at, ratio0);",
+  "new": "streamer.next = Some(at);\n                        streamer.origin = at;\n                        streamer.ratio = ratio0;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_receive_start_begins_with_the_head_of_its_rate"
+ },
+ {
+  "id": "S4A-45",
+  "name": "FakeDevice's start a reopened streamer adopts has no head (UR-33, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.begin(at, ratio);\n        }",
+  "new": "streamer.next = Some(at);\n            streamer.origin = at;\n            streamer.ratio = ratio;\n        }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_start_a_reopened_streamer_adopts_begins_with_the_head"
+ },
+ {
+  "id": "S4A-46",
+  "name": "the sweep's settling length counts the zeros only (hw_rxzeros_sweep, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/bench1115.rs",
+  "old": "fill.zeros + fill.ramp90",
+  "new": "fill.zeros",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "rxz_a_trial_is_within_the_bound_at_n_and_fails_at_n_plus_one"
+ },
+ {
+  "id": "S4A-48",
+  "name": "layer 3 excuses a late start whose gap is any earlier overrun's, not the previous segment's (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "hits[index - 1].iter().any(|(f, fault)| *fault == Fault::Overrun",
+  "new": "hits.iter().flatten().any(|(f, fault)| *fault == Fault::Overrun",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_a_late_start_is_excused_only_by_an_overrun_the_previous_segment_ran_through"
+ },
+ {
+  "id": "S4A-49",
+  "name": "layer 3 excuses a late start after a sequence error's gap too (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "*fault == Fault::Overrun && (*f..*f + GAP).contains(&cut)",
+  "new": "(*f..*f + GAP).contains(&cut)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_a_late_start_is_excused_only_by_an_overrun_the_previous_segment_ran_through"
+ },
+ {
+  "id": "S4A-51",
+  "name": "an excused segment's first block may lose another count than its first sample (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "|| lost != Some(first as u64)",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_an_excused_segment_is_checked_on_its_own"
+ },
+ {
+  "id": "S4A-52",
+  "name": "an excused segment's later blocks may differ from the plan's: a hole or a flag (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "got[1..] != rest[..n]",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_an_excused_segment_is_checked_on_its_own"
+ },
+ {
+  "id": "S4A-53",
+  "name": "an excused segment may end before the plan's end without a loss or an abort (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "|| (!cutoff && n != rest.len())",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_an_excused_segment_is_checked_on_its_own"
+ },
+ {
+  "id": "S4A-54",
+  "name": "an excused segment's first block may be another than the guard's (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "if (first, len) != (full[kept].0, full[kept].1) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_an_excused_segment_is_checked_on_its_own"
+ },
+ {
+  "id": "S4A-55",
+  "name": "an excused segment's first block is expected `RESTARTED`, as an overrun's (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "flags != BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY",
+  "new": "flags != BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "S4A-56",
+  "name": "MockRadio counts the head in each block, not from the start of the segment (MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if sample < head_until {",
+  "new": "if sample - first < head_until {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_every_receive_restart_begins_with_the_head_of_its_rate"
+ },
+ {
+  "id": "S4A-57",
+  "name": "MockRadio gives a sequence error's skip a head (MR-22, MR-35, stage 4a)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if matches!(cause, ezsdr_radio::payloads::RxOverflowCause::Overrun) {",
+  "new": "if true {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_a_sequence_error_skips_samples_and_has_no_head"
+ },
+ {
+  "id": "S4A-58",
+  "name": "FakeDevice gives a sequence error's skip a head (UR-33, stage 4a)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "st.rx.get_mut(&stream).expect(\"checked\").next = Some(next + block); return RxRecv::Overflow { out_of_sequence: true };",
+  "new": "{ let streamer = st.rx.get_mut(&stream).expect(\"checked\"); streamer.next = Some(next + block); streamer.head_until = rx_head_until(next + block, ratio); } return RxRecv::Overflow { out_of_sequence: true };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fakes_sequence_error_skips_samples_and_has_no_head"
+ },
+ {
+  "id": "S4A-60",
+  "name": "three unconfirmed open flushes are swallowed at arm (#75 (3), UR-13)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "Dir::Tx => self.open_tx_confirmed(k, set, i64::MIN).map(|_| ()),",
+  "new": "Dir::Tx => self.open_tx_confirmed(k, set, i64::MIN).map(|_| ()).or(Ok(())),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_three_unconfirmed_open_flushes_refuse_arm"
+ },
+ {
+  "id": "S4A-61",
+  "name": "the open flush at arm needs an acknowledgement from the future (#75 (3))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "Dir::Tx => self.open_tx_confirmed(k, set, i64::MIN)",
+  "new": "Dir::Tx => self.open_tx_confirmed(k, set, i64::MAX)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_13_arm_radiates_nothing"
+ },
+ {
+  "id": "S4A-62",
+  "name": "the open flush's refusal text loses its UR-13 label (#75 (3))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "const OPEN_FLUSH: &str = \"UR-13: the open flush (UR-22)\";",
+  "new": "const OPEN_FLUSH: &str = \"the open flush (UR-22)\";",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_the_open_flush_refusal_text_names_the_open"
+ },
+ {
+  "id": "S4A-63",
+  "name": "the owner's mid-run open swallows an unconfirmed open flush (#75 (3))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "if let Err(error) = opened {",
+  "new": "if let (Err(error), false) = (opened, true) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_75_the_owner_s_mid_run_open_confirms_its_flush_or_refuses"
+ },
+ {
+  "id": "S4A-64",
+  "name": "uhd-rx drops the packets before the stop's device lead 3 ms later (#108: the excused start is pinned to the guard)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.last_stop = Some(self.core.now() + self.core.ticks(DEVICE_LEAD_NS)).or(self.last_stop);",
+  "new": "self.last_stop = Some(self.core.now() + self.core.ticks(DEVICE_LEAD_NS + 3_000_000)).or(self.last_stop);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "S4A-65",
+  "name": "the excused segment's blocks are read from another clock (#108 comparison)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": ".position(|(o, _)| *o == origin).map(|clock| observed.blocks.iter().filter(|(c, _)| *c == clock)",
+  "new": ".position(|(o, _)| *o == origin).map(|clock| observed.blocks.iter().filter(|(c, _)| *c != clock)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "S4A-66",
+  "name": "the excused segment's blocks are never compared (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "excused_blocks(&got, &full, guard, cutoff)",
+  "new": "None::<String>",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_compare_judges_the_excused_segment_it_finds"
+ },
+ {
+  "id": "S4A-67",
+  "name": "the guard of the excused segment ignores the device lead (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "sample_at_or_after(at + (DEVICE_LEAD_NS + 4) / 5)",
+  "new": "sample_at_or_after(at)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "S4A-70",
+  "name": "ProbeDevice::clear_rows keeps the rows",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "self.rows.lock().unwrap().clear();",
+  "new": "self.rows.lock().unwrap().truncate(usize::MAX);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_rows_stop_at_the_limit_and_count_dropped_rows"
+ },
+ {
+  "id": "S4A-71",
+  "name": "rx_start_and_sample reads the start after the asked one",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": ".nth(start_index)?;",
+  "new": ".nth(start_index + 1)?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "rx_start_and_sample_finds_the_nth_start_and_its_own_sample"
+ },
+ {
+  "id": "S4A-72",
+  "name": "a probe that dropped one row counts as complete",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "0 => Ok(()),",
+  "new": "1 => Ok(()),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_rows_stop_at_the_limit_and_count_dropped_rows"
+ },
+ {
+  "id": "S4A-73",
+  "name": "a restart trial does not clear the probe's rows",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "probe.clear_rows();",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4bench_s5_rx_start_lead_at_100_msps_starts_every_trial_past_the_probes_row_limit"
+ },
+ {
+  "id": "S4A-74",
+  "name": "the probe's row limit is larger than the bench budget",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "pub const PROBE_ROW_LIMIT: usize = 65_536;",
+  "new": "pub const PROBE_ROW_LIMIT: usize = 1_000_000;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_rows_stop_at_the_limit_and_count_dropped_rows"
+ },
+ {
+  "id": "S4A-75",
+  "name": "uhd-rx drops a packet stamped exactly at the stop's guard (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "first_tick < stream.not_before",
+  "new": "first_tick <= stream.not_before",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_packet_at_the_guard_is_kept_and_one_before_it_is_dropped"
+ },
+ {
+  "id": "S4A-76",
+  "name": "uhd-rx keeps a packet one tick before the stop's guard (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "first_tick < stream.not_before",
+  "new": "first_tick < stream.not_before - 1",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_packet_at_the_guard_is_kept_and_one_before_it_is_dropped"
+ },
+ {
+  "id": "S4A-77",
+  "name": "the stop's guard is 1 ms later than the device lead",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.last_stop = Some(self.core.now() + self.core.ticks(DEVICE_LEAD_NS)).or(self.last_stop);",
+  "new": "self.last_stop = Some(self.core.now() + self.core.ticks(DEVICE_LEAD_NS + 1_000_000)).or(self.last_stop);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_the_stop_s_device_lead_guard_is_exact"
+ },
+ {
+  "id": "S4A-78",
+  "name": "the excused-segment check accepts a guard at sample 0",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "if guard <= 0 {",
+  "new": "if guard < 0 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_an_excused_segment_is_checked_on_its_own"
+ },
+ {
+  "id": "S4A-79",
+  "name": "a restart trial does not check that the probe kept every row",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "probe.rows_complete()?;",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_restart_trial_on_a_probe_that_dropped_rows_is_an_error_not_a_trial"
  }
 ]

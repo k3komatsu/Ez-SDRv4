@@ -7,7 +7,7 @@
 //! transmit sample 10 000 is radiated 45 samples late (MR-3) and crosses a 1 µs path, so its
 //! first sample reaches the responder at receive sample 10 046; a 5 ms turnaround targets
 //! 15 046, which reaches the pinger at 15 092. The block holding 10 046 is published at
-//! 12 000 µs (MR-14), and with MR-3's 2 ms lead a target before 14 000 is late.
+//! 12 000 µs (MR-14), and with MR-3's 2 ms device lead a target before 14 000 is late.
 
 mod support;
 
@@ -33,7 +33,7 @@ const TURNAROUND_NS: i64 = 5_000_000;
 /// With block-length jitter a block holds up to 4 000 samples (MR-12), so the responder may
 /// learn of a PING up to 4 ms after it began, and a 5 ms turnaround can then be late (the
 /// radio's verdict, as on hardware; the decision itself does not move). The carriers that
-/// jitter use 7 ms, which no block length makes late: 4 ms + MR-3's 2 ms lead < 7 ms.
+/// jitter use 7 ms, which no block length makes late: 4 ms + MR-3's 2 ms device lead < 7 ms.
 const JITTER_TURNAROUND_NS: i64 = 7_000_000;
 
 fn constant(len: usize, value: (f32, f32)) -> Vec<(f32, f32)> {

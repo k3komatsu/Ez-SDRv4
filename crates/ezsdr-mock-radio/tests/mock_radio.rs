@@ -537,9 +537,9 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(capabilities[&key("radio.tx.repeat_align_samples")], one(Scalar::from(if x3xx { 2 } else { 1 })));
         assert_eq!(capabilities[&key("radio.rx.block_len")], one(Scalar::from(2_000)));
         let envelope = &radio.instance().sections[&Namespace::parse("ezsdr.radio.mock.envelope").unwrap()];
-        let (lead, startup, gap, bytes_per_s, wire, in_flight) = if x3xx { (2_000_000, 2_000_000_000, 50_000_000, 100_000_000, 4, 10_000_000) } else { (0, 0, 0, 1_i64 << 62, 8, 0) };
+        let (lead, startup, gap, bytes_per_s, wire, in_flight) = if x3xx { (5_000_000, 2_000_000_000, 50_000_000, 100_000_000, 4, 10_000_000) } else { (0, 0, 0, 1_i64 << 62, 8, 0) };
         // Each direction's own start lead (RM-25; design 33 D5).
-        let start_lead = if x3xx { 50_000_000 } else { 0 };
+        let start_lead = if x3xx { 10_000_000 } else { 0 };
         assert_eq!(capabilities[&key("radio.timing.min_timed_command_lead_ns")], one(Scalar::from(lead)));
         assert_eq!(capabilities[&key("radio.timing.startup_latency_ns")], one(Scalar::from(startup)));
         assert_eq!(capabilities[&key("radio.timing.overflow_restart_gap_ns")], one(Scalar::from(gap)));
@@ -600,7 +600,7 @@ fn mr_03_a_cbx_layer_starts_at_its_board_s_default_frequency() {
 fn mr_04_instance() {
     let radio = MockRadio::from_binding(&binding("x3xx")).unwrap();
     assert!(radio.instance().driving.stepped);
-    assert_eq!(radio.instance().min_command_lead.unwrap().ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap(), 2_000_000);
+    assert_eq!(radio.instance().min_command_lead.unwrap().ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap(), 5_000_000);
     assert_eq!(radio.instance().arm_after, Vec::<ResourceId>::new());
     let ideal = MockRadio::from_binding(&binding("ideal")).unwrap();
     assert!(ideal.instance().min_command_lead.is_none());
@@ -1083,6 +1083,50 @@ fn mr_16_s1_a_booking_meeting_an_accepted_repeat_is_refused_at_receipt() {
         let refused: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).map(|event| event.payload["action"].clone()).collect();
         assert_eq!(refused, [serde_json::json!(2)], "{case}: the second receipt is refused by id");
         assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{case}: a refusal moves nothing: {events:?}");
+    }
+}
+
+/// RM-14 (stage 4a): the Mock declares the 5 ms lead a Session admits with, and places and judges lateness with its device lead, the declared
+/// lead less the 3 ms delivery allowance (2 ms), as the UHD Module does. A burst received at T0 + 1 ms (transmit sample 2 001 000 at 1 MS/s) is on
+/// time from sample 2 003 000, 3 ms ahead: the declared lead as a device lead would make 2 003 000 and 2 004 000 late, and a lead of 0 would not
+/// make 2 002 999 late.
+#[test]
+fn s4a_the_mock_places_at_the_device_lead_and_admits_at_the_declared_lead() {
+    let radio = MockRadio::from_binding(&binding("x3xx")).unwrap();
+    assert_eq!(radio.instance().min_command_lead.unwrap().ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap(), 5_000_000);
+    for policy in [LatePolicy::SendAsapAndFlag, LatePolicy::DropAndFlag] {
+        for (target, late) in [(2_004_000, false), (2_003_000, false), (2_002_999, true), (2_002_000, true)] {
+            let mut harness = tx_harness("x3xx");
+            harness.arm_start(2_000_000_000).unwrap();
+            let domain = tx_domain(&harness);
+            harness.actions.push(tx_action(domain, target, 2, false, policy));
+            harness.step(2_001_000_000).unwrap();
+            harness.step(2_010_000_000).unwrap();
+            let records: Vec<ezsdr_kernel::stream::BurstRecord> = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()]
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned()
+                .map(serde_json::from_value)
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let events = harness.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+            let errors: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+            let case = format!("{policy:?} at {target}");
+            assert_eq!(errors.len(), usize::from(late), "{case}: {events:?}");
+            match (late, policy) {
+                (false, _) => assert_eq!(records.iter().map(|record| record.target).collect::<Vec<_>>(), [TimePoint::new(domain, target)], "{case}"),
+                (true, LatePolicy::SendAsapAndFlag) => {
+                    assert_eq!(errors[0].payload["outcome"], "send_asap", "{case}");
+                    assert_eq!(errors[0].payload["late_by_ns"], (2_003_000 - target) * 1_000, "{case}");
+                    assert_eq!(records.iter().map(|record| record.target).collect::<Vec<_>>(), [TimePoint::new(domain, 2_003_000)], "{case}: the first free sample at the device lead");
+                }
+                (true, _) => {
+                    assert_eq!(errors[0].payload["outcome"], "drop", "{case}");
+                    assert!(records.is_empty(), "{case}");
+                }
+            }
+        }
     }
 }
 

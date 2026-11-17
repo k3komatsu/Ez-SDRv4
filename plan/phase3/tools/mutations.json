@@ -493,8 +493,8 @@
  {
   "name": "MR-34/35 rx LO rotation sign flipped",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "let re = amplitude * (fr * cos + fi * sin);\n                    let im = amplitude * (fi * cos - fr * sin);",
-    "new": "let re = amplitude * (fr * cos - fi * sin);\n                    let im = amplitude * (fi * cos + fr * sin);",
+    "old": "amplitude * (fr * cos + fi * sin), amplitude * (fi * cos - fr * sin)",
+    "new": "amplitude * (fr * cos - fi * sin), amplitude * (fi * cos + fr * sin)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
     "filter": "mr_32_the_transmit_path_delay_shifts_a_loopback",

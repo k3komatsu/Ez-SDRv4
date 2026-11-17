@@ -44,7 +44,7 @@ fn layout_selector(rx: &[&str], tx: &[&str]) -> BTreeMap<Ident, Value> {
 }
 
 fn terms() -> ProviderTerms {
-    ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 }
+    ProviderTerms { repeat_max_samples: 268_435_456, repeat_align_samples: 2 }
 }
 
 fn description_of(rx: &[&str], tx: &[&str]) -> Description {
@@ -329,7 +329,7 @@ fn rm_28_the_layout_analysis_cases() {
     let mut xg = minimal.clone();
     xg.insert(ident("image"), strings(&["xg"]));
     let description = Description::new(&channels::from_selector(&xg).unwrap(), 2_000, &terms());
-    assert_eq!(description.performance.rx_bytes_per_s, 1_000_000_000);
+    assert_eq!(description.performance.rx_bytes_per_s, 800_000_000);
 
     // The `ideal` layout: channel counts, 1 receive and 0 transmit by default.
     let ideal = channels::ideal_from_selector(&selector(&[("rx", Value::from(3_i64)), ("tx", Value::from(1_i64))]));
@@ -646,6 +646,29 @@ fn rm_31_full_duplex_cases() {
     assert!(description.violations(&held).is_empty());
 }
 
+/// RM-6, RM-7, RM-20 (stage 4a): the values the bench decided, for both Providers (D1, D2, D3, D4).
+#[test]
+fn s4a_x3xx_values_are_the_measured_ones() {
+    let timing = x3xx::timing();
+    assert_eq!(
+        (timing.min_timed_command_lead_ns, timing.startup_latency_ns, timing.overflow_restart_gap_ns, timing.rx_start_lead_ns, timing.tx_in_flight_ns),
+        (5_000_000, 2_000_000_000, 50_000_000, 10_000_000, 10_000_000)
+    );
+    let (one, ten) = (x3xx::performance(1), x3xx::performance(10));
+    assert_eq!((one.rx_bytes_per_s, one.tx_bytes_per_s, one.wire_bytes_per_sample), (100_000_000, 100_000_000, 4));
+    assert_eq!((ten.rx_bytes_per_s, ten.tx_bytes_per_s, ten.wire_bytes_per_sample), (800_000_000, 800_000_000, 4));
+    // The description carries them: the capability tree and the envelope read the same struct.
+    let description = description_of(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    assert_eq!(description.timing, timing);
+    assert_eq!(description.envelope().performance, ten);
+    let tree = description.tree(&ResourceId::parse("dev").unwrap(), MemoryDomainId::local(7));
+    let capability = |name: &str| tree.capabilities[&key(name)].clone();
+    assert_eq!(capability("radio.timing.min_timed_command_lead_ns"), CapabilityValue::One { value: Scalar::Int(5_000_000) });
+    assert_eq!(capability("radio.timing.rx_start_lead_ns"), CapabilityValue::One { value: Scalar::Int(10_000_000) });
+    assert_eq!(capability("radio.perf.rx_bytes_per_s"), CapabilityValue::One { value: Scalar::Int(800_000_000) });
+    assert_eq!(capability("radio.perf.tx_bytes_per_s"), CapabilityValue::One { value: Scalar::Int(800_000_000) });
+}
+
 #[test]
 fn rm_32_throughput_cases() {
     // Two 10 GbE links do not raise the limit: one link's bytes per second is the cap.
@@ -653,7 +676,7 @@ fn rm_32_throughput_cases() {
     let id = ResourceId::parse("dev").unwrap();
     let coerce = |pairs: &[(&str, Constraint)]| description.coerce(&id, &request(pairs)).unwrap();
 
-    // One channel at 200 Msps is 800 MB/s on a 1 GB/s link.
+    // One channel at 200 Msps is 800 MB/s: exactly the cap of a 10 GbE link.
     let report = coerce(&[("radio.rx.c0.stream", eq_int(0)), ("radio.rx.s0.sample_rate_hz", eq_num(200_000_000.0))]);
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
     // Two channels on the same stream are 1.6 GB/s: refused on the rate key, even
@@ -694,13 +717,18 @@ fn rm_32_throughput_cases() {
         coerce(&[("radio.rx.c0.stream", eq_int(0)), ("radio.rx.s0.sample_rate_hz", eq_num(200_000_000.0)), ("radio.rx.c1.stream", eq_int(1)), ("radio.rx.s1.sample_rate_hz", eq_num(200_000_000.0))]);
     let refusal = rejection(&report, "radio.rx.s0.sample_rate_hz");
     assert!(refusal.reason.starts_with("RM-32: rx needs"), "{}", refusal.reason);
-    // Rates of two different streams add up too: 200 + 100 Msps is over the 250 Msps
-    // that 1 GB/s at 4 wire bytes a sample carries, while 200 + 50 is exactly at it.
+    // Rates of two different streams add up too: the 200 Msps that 800 MB/s at 4 wire bytes a
+    // sample carries is taken by 200 alone or by 100 + 100; 200 + 100 and 200 + 50 are over it.
+    for second in [100_000_000.0, 50_000_000.0] {
+        let report =
+            coerce(&[("radio.rx.c0.stream", eq_int(0)), ("radio.rx.s0.sample_rate_hz", eq_num(200_000_000.0)), ("radio.rx.c1.stream", eq_int(1)), ("radio.rx.s1.sample_rate_hz", eq_num(second))]);
+        assert!(rejection(&report, "radio.rx.s0.sample_rate_hz").reason.contains("one link carries 800000000"), "{:?}", report.rejected);
+    }
     let report =
-        coerce(&[("radio.rx.c0.stream", eq_int(0)), ("radio.rx.s0.sample_rate_hz", eq_num(200_000_000.0)), ("radio.rx.c1.stream", eq_int(1)), ("radio.rx.s1.sample_rate_hz", eq_num(100_000_000.0))]);
-    assert!(rejection(&report, "radio.rx.s0.sample_rate_hz").reason.starts_with("RM-32: "));
-    let report =
-        coerce(&[("radio.rx.c0.stream", eq_int(0)), ("radio.rx.s0.sample_rate_hz", eq_num(200_000_000.0)), ("radio.rx.c1.stream", eq_int(1)), ("radio.rx.s1.sample_rate_hz", eq_num(50_000_000.0))]);
+        coerce(&[("radio.rx.c0.stream", eq_int(0)), ("radio.rx.s0.sample_rate_hz", eq_num(100_000_000.0)), ("radio.rx.c1.stream", eq_int(1)), ("radio.rx.s1.sample_rate_hz", eq_num(100_000_000.0))]);
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    // Two channels of one stream at 100 Msps are the same 800 MB/s.
+    let report = coerce(&[("radio.rx.c0.stream", eq_int(0)), ("radio.rx.c1.stream", eq_int(0)), ("radio.rx.s0.sample_rate_hz", eq_num(100_000_000.0))]);
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
     // The transmit direction is judged the same way.
     let transmitting = description_of(&[], &["0:A:ubx:0", "0:B:ubx:0"]);
@@ -738,12 +766,27 @@ fn rm_32_throughput_cases() {
                 &description,
                 &[
                     ("radio.rx.c0.stream", Value::from(0_i64)),
+                    ("radio.rx.s0.sample_rate_hz", Value::from(num(100_000_000.0))),
+                    ("radio.rx.c1.stream", Value::from(1_i64)),
+                    ("radio.rx.s1.sample_rate_hz", Value::from(num(100_000_000.0))),
+                ],
+            ))
+            .is_empty()
+    );
+    // 100 + 100 is exactly the cap; 200 + 50 is 1 GB/s: over it.
+    assert_eq!(
+        description
+            .violations(&configuration(
+                &description,
+                &[
+                    ("radio.rx.c0.stream", Value::from(0_i64)),
                     ("radio.rx.s0.sample_rate_hz", Value::from(num(200_000_000.0))),
                     ("radio.rx.c1.stream", Value::from(1_i64)),
                     ("radio.rx.s1.sample_rate_hz", Value::from(num(50_000_000.0))),
                 ],
             ))
-            .is_empty()
+            .len(),
+        1
     );
 
     // A change that names only a channel's membership is refused when the configuration
@@ -757,6 +800,28 @@ fn rm_32_throughput_cases() {
     let report = pinched.coerce(&id, &request(&[("radio.rx.c1.stream", eq_int(0)), ("radio.rx.s1.sample_rate_hz", eq_num(1_000_000.0))])).unwrap();
     assert!(rejection(&report, "radio.rx.s1.sample_rate_hz").reason.starts_with("RM-32: "));
     assert!(!report.applied.contains_key(&key("radio.rx.s1.sample_rate_hz")));
+}
+
+/// RM-32 (stage 4a): four receive channels of 50 MS/s on one stream, and three of 66.67 MS/s (decimation 3), are exactly the 800 MB/s of one
+/// 10 GbE link; two transmit channels (the most a board layout has) of 100 MS/s are the same (the Providers share this description; the
+/// acceptance test runs two channels on both).
+#[test]
+fn s4a_many_channels_on_one_stream_fill_one_10gbe_link_and_no_more() {
+    let rx = ["0:A:basic_rx:0", "0:A:basic_rx:1", "0:B:basic_rx:0", "0:B:basic_rx:1"];
+    let tx = ["0:A:basic_tx:0", "0:B:basic_tx:0"];
+    let description = Description::new(&channels::from_selector(&layout_selector(&rx, &tx)).unwrap(), 2_000, &terms());
+    let id = ResourceId::parse("dev").unwrap();
+    let ask = |direction: &str, count: usize, rate: f64| {
+        let mut pairs: Vec<(String, Constraint)> = (0..count).map(|c| (format!("radio.{direction}.c{c}.stream"), eq_int(0))).collect();
+        pairs.push((format!("radio.{direction}.s0.sample_rate_hz"), eq_num(rate)));
+        let pairs: Vec<(&str, Constraint)> = pairs.iter().map(|(name, constraint)| (name.as_str(), constraint.clone())).collect();
+        description.coerce(&id, &request(&pairs)).unwrap().rejected
+    };
+    assert!(ask("rx", 4, 50_000_000.0).is_empty(), "4 x 50 MS/s");
+    assert!(ask("rx", 3, 200e6 / 3.0).is_empty(), "3 x 66.67 MS/s");
+    assert!(!ask("rx", 4, 200e6 / 3.0).is_empty(), "4 x 66.67 MS/s is over");
+    assert!(ask("tx", 2, 100_000_000.0).is_empty(), "2 x 100 MS/s");
+    assert!(!ask("tx", 2, 200_000_000.0).is_empty(), "2 x 200 MS/s is over");
 }
 
 /// RM-33's check over one fragment's configuration.

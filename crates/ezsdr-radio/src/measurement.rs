@@ -677,7 +677,7 @@ mod tests {
     fn rm_35_every_profile_capability_has_one_rule_and_one_value() {
         let selector = BTreeMap::from([(Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])), (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")]))]);
         let layout = channels::from_selector(&selector).unwrap();
-        let terms = ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 };
+        let terms = ProviderTerms { repeat_max_samples: 268_435_456, repeat_align_samples: 2 };
         let description = Description::new(&layout, 2_000, &terms);
         let capabilities = description.capabilities();
         profile_values(&description);
@@ -697,7 +697,7 @@ mod tests {
             (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:obx:0")])),
         ]);
         let layout = channels::from_selector(&selector).unwrap();
-        let description = Description::new(&layout, 2_000, &ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 });
+        let description = Description::new(&layout, 2_000, &ProviderTerms { repeat_max_samples: 268_435_456, repeat_align_samples: 2 });
         let values = profile_values(&description);
         let frequency = values.get(&Key::parse("radio.rx.c1.frequency_hz").unwrap()).unwrap();
         assert!(matches!(frequency, Worst::Grid(GridValue::Step { hi, .. }) if *hi == 8_400_000_000.0));

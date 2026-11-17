@@ -1699,3 +1699,33 @@ Module の水準で repeat の再開に m の掃引を入れる cell．productio
 
 - stop：`EZSDR-INFRA`，`Control operation timed out`，`Reference Clock PLL failed to lock`，装置が応答しない → 電源を入れ直して owner へ．
 - orchestrator に返すもの：commit，各 log の path，`MT3 C1 cell` と `VERDICT mt3 c1` の行（2 台分），`MT3 C1 trace` の dump（`head`），C2〜C6 は各項の grep の行（C2・C3 は `MT3 C* gaps` を全部，C4 は `MT3 C4 cell`・`MT3 C4 boundary`・`VERDICT mt3 c4`，C5 は `MT3 C5 reading` と marginal の行，C6 は `MT3 C6 trace`），電源の入れ直しの有無，att の型番（owner の確認）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．C2〜C6 は下の各項（C7 は bt2 の後）．
+
+## 受信 start lead だけの再測定（stage 4a の D：`hw_s5_rx_start_lead`．**送信なし・att 不要**．約 10〜15 分 / 台，estimate）
+
+2026-11-16 の S5 で 100 MS/s の trial の約 88 % が `started:false` だったのは，ProbeDevice の行の上限（65 536）で行が黙って捨てられたため（test tool の不具合）．直した道具（trial ごとに `clear_rows`，lock の下で探索，行が捨てられたら trial を error に）で，10 ms の根拠になる 100 MS/s の rung を測り直す．
+
+前提：上の「共通の準備（送信しない）」の `cd`・`mkdir`・`hw()` の定義（`BOARD` と `EZSDR_UHD_ARGS` と `EZSDR_BENCH_NIC` は board ごとに export する）．
+
+```sh
+# 送信しない．ホストの負荷を確かめてから（bench-host-load の規則）．board ごとに 1 本
+export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_s5_rx_start_lead   # #2
+export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_s5_rx_start_lead   # #1
+# 読む行．再実行すると log は .2.log，.3.log になる（`hw` は上書きしない）ので * で全部
+grep -h 'S5 decision\|S5 .* stage \|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_s5_rx_start_lead.$BOARD*.log
+# lead_left_ns の最初の 10 trial と最後の 10 trial の中央値（condition・rung ごと）
+python3 - ~/.cache/ezsdr-bench/$(date +%F)/hw_s5_rx_start_lead.$BOARD.log <<'PY'
+import json, re, statistics, sys, collections
+by = collections.defaultdict(list)
+for line in open(sys.argv[1]):
+    m = re.match(r'S5 rx-start-lead-1ch trial (\{.*\})', line)
+    if m:
+        row = json.loads(m.group(1)); by[(row['condition'], row['rung_ns'])].append(row['lead_left_ns'])
+for key, v in sorted(by.items()):
+    v = [x for x in v if x is not None]
+    if len(v) >= 20: print(key, 'first10', statistics.median(v[:10]), 'last10', statistics.median(v[-10:]))
+PY
+```
+
+- 流すもの：`hw_s5_lead_rungs` の (2) だけ（1 channel，`restart-same`・`restart-retune` × rate 10・100 MS/s × rung 3/4/5/7.5/10 ms × 100 trial）．値と env の名前（`EZSDR_MEASURE_RX_START_*`，`EZSDR_MEASURE_STEP_TRIALS`）は S5 と同じ．2 channel の pass は流さない．
+- 読み方：決定の行 `S5 decision rx-start-lead-1ch`（10 ms が全 condition で 100 %）．trial の行は全部 `started:true`（probe が行を捨てると test が error で止まる．捨てずに始まらなかった trial は `Incomplete` で，決定の行と stage の行に出る）．`lead_left_ns` が 1 rung の 100 trial で下がり続けない（最初の 10 trial と最後の 10 trial の中央値を比べる）．下がり続けるなら probe の lock ではなく Module 側の原因（別の欠陥として起票）．
+- 条件を超えて一般化しない：1 GHz，slot A，board ごと，この rate と rung．

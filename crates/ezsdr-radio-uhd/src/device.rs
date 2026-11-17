@@ -485,14 +485,29 @@ struct RxStreamer {
     /// Where the running stream's packets begin: its start (UHD's packets are the
     /// stream's, not a request's; Review O, N-2).
     origin: i64,
+    /// The tick the latest start's exact-zero head runs to (UR-33, MR-35): its start, or an overrun's restart, plus `rx_fill_samples` samples.
+    head_until: i64,
     late: Option<i64>,
     last: Option<i64>,
 }
 
 impl RxStreamer {
     fn new(channels: Vec<usize>) -> RxStreamer {
-        RxStreamer { channels, next: None, ratio: 1, end: None, then: None, origin: 0, late: None, last: None }
+        RxStreamer { channels, next: None, ratio: 1, end: None, then: None, origin: 0, head_until: 0, late: None, last: None }
     }
+
+    /// A start at tick `at` with `ratio` ticks a sample: the packets begin there and so does the head.
+    fn begin(&mut self, at: i64, ratio: i64) {
+        self.next = Some(at);
+        self.origin = at;
+        self.ratio = ratio;
+        self.head_until = rx_head_until(at, ratio);
+    }
+}
+
+/// UR-33, MR-35: the tick the head of a receive start (or an overrun restart) at `at` runs to. The decimation is the master-clock ticks a sample.
+fn rx_head_until(at: i64, ratio: i64) -> i64 {
+    at + ezsdr_radio::x3xx::rx_fill_samples(ratio as u64) as i64 * ratio
 }
 
 /// One chain's DDC (receive) or DUC (transmit) frequency state in the fake (UR-33): every change
@@ -1314,12 +1329,7 @@ impl FakeDevice {
             None if at < now => st.rx.get_mut(&stream).expect("checked").late = Some(at),
             // Behind the stopped stream's tail, which is delivered first.
             None if st.rx[&stream].end.is_some() => st.rx.get_mut(&stream).expect("checked").then = Some((at, ratio)),
-            None => {
-                let streamer = st.rx.get_mut(&stream).expect("checked");
-                streamer.next = Some(at);
-                streamer.origin = at;
-                streamer.ratio = ratio;
-            }
+            None => st.rx.get_mut(&stream).expect("checked").begin(at, ratio),
         }
         Ok(())
     }
@@ -1611,9 +1621,7 @@ impl Device for FakeDevice {
         // order (INFERRED: the bench reopened one channel); the earliest sets the streamer's.
         let adopted: Vec<(i64, i64)> = channels.iter().filter_map(|chan| st.orphans.remove(chan)).filter(|(at, _)| *at >= now).collect();
         if let Some(&(at, ratio)) = adopted.iter().min() {
-            streamer.next = Some(at);
-            streamer.origin = at;
-            streamer.ratio = ratio;
+            streamer.begin(at, ratio);
         }
         st.rx.insert(stream, streamer);
         st.opened[Dir::Rx as usize].extend(channels.iter().copied());
@@ -1690,9 +1698,7 @@ impl Device for FakeDevice {
                     if at < now {
                         streamer.late = Some(at);
                     } else {
-                        streamer.next = Some(at);
-                        streamer.origin = at;
-                        streamer.ratio = ratio0;
+                        streamer.begin(at, ratio0);
                     }
                 }
             }
@@ -1728,7 +1734,9 @@ impl Device for FakeDevice {
             match fault {
                 FakeFault::Overflow(_) => {
                     let skip = (self.ticks_of(Duration::from_millis(50)) + ratio - 1) / ratio * ratio;
-                    st.rx.get_mut(&stream).expect("checked").next = Some(next + skip);
+                    let streamer = st.rx.get_mut(&stream).expect("checked");
+                    streamer.next = Some(next + skip);
+                    streamer.head_until = rx_head_until(next + skip, ratio);
                     return RxRecv::Overflow { out_of_sequence: false };
                 }
                 FakeFault::SequenceError(_) => {
@@ -1764,7 +1772,10 @@ impl Device for FakeDevice {
         }
         let end = next + n * ratio;
         if now - end > behind {
-            st.rx.get_mut(&stream).expect("checked").next = Some(next + ((now - next) / ratio + 1) * ratio);
+            let restart = next + ((now - next) / ratio + 1) * ratio;
+            let streamer = st.rx.get_mut(&stream).expect("checked");
+            streamer.next = Some(restart);
+            streamer.head_until = rx_head_until(restart, ratio);
             return RxRecv::Overflow { out_of_sequence: false };
         }
         drop(st);
@@ -1835,13 +1846,14 @@ impl Device for FakeDevice {
             return RxRecv::Timeout;
         }
         let channels = st.rx[&stream].channels.clone();
+        let head_until = st.rx[&stream].head_until;
         let delay = self.config.loopback_delay_samples * ratio;
         let samples = channels
             .iter()
             .map(|chan| {
                 let end = next + got * ratio;
                 let constant = (freq_constant(&st, Dir::Rx, *chan, next, end), freq_constant(&st, Dir::Tx, *chan, next - delay, end - delay));
-                (0..got).map(|i| self.sample_at(&st, *chan, next + i * ratio, ratio, constant)).collect()
+                (0..got).map(|i| if next + i * ratio < head_until { [0.0, 0.0] } else { self.sample_at(&st, *chan, next + i * ratio, ratio, constant) }).collect()
             })
             .collect();
         let _ = jumped;
@@ -2436,7 +2448,10 @@ mod tests {
                     got.extend(samples[0].clone());
                 }
             }
-            assert_eq!(got, wave);
+            // MR-35, UR-33: the start's head is zero, the samples after it are the transmitted ones for their own ticks.
+            let head = ezsdr_radio::x3xx::rx_fill_samples(200) as usize;
+            assert_eq!(got[..head], vec![[0.0, 0.0]; head]);
+            assert_eq!(got[head..], wave[head..]);
         });
     }
 
@@ -2498,8 +2513,12 @@ mod tests {
                 }
                 got
             };
-            assert_eq!(read(0, 300), a[..300], "stream 0 returns its own channel's signal");
-            assert_eq!(read(1, 300), b[..300], "stream 1 returns its own channel's signal");
+            // Each stream's start begins with the head of zeros (MR-35, UR-33); the signal is its own channel's after it.
+            let head = ezsdr_radio::x3xx::rx_fill_samples(200) as usize;
+            let (first_a, first_b) = (read(0, 300), read(1, 300));
+            assert_eq!((&first_a[..head], &first_b[..head]), (&vec![[0.0, 0.0]; head][..], &vec![[0.0, 0.0]; head][..]));
+            assert_eq!(first_a[head..], a[head..300], "stream 0 returns its own channel's signal");
+            assert_eq!(first_b[head..], b[head..300], "stream 1 returns its own channel's signal");
             // Each streamer carries its own stop: stopping stream 1 leaves stream 0 running.
             device.rx_stop(1).unwrap();
             // The instant is read after the stop, so it is at or past the stop the device took: a
@@ -2537,6 +2556,224 @@ mod tests {
                 }
             }
             assert!(timed_out, "a stopped stream's calls time out once its tail is delivered");
+        });
+    }
+
+    // UR-33, MR-35: every receive start begins with `rx_fill_samples(D)` exact zeros, whichever source supplies the later samples; the samples after it are the ones the
+    // device produces for their ticks. Each case reads in pieces of 7, 7 and 11 samples, so the head is counted from the start, not per read.
+
+    /// Where a receive start's later samples come from: a loopback of equal rate and frequency, a ramp when nothing was transmitted, a ramp when the transmit rate differs.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Source {
+        Loopback,
+        ReceiveOnly,
+        Mismatched,
+    }
+
+    /// How the start at the end of the case is made.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Begin {
+        /// A freshly opened streamer.
+        Fresh,
+        /// A stop with an unread tail, then a start with the same values.
+        Restart,
+        /// The same, with a new receive frequency.
+        Retune,
+        /// The same, with a new rate.
+        Rate,
+    }
+
+    fn ramp_at(t: i64, ratio: i64) -> Iq {
+        [((t / ratio).rem_euclid(65_536)) as f32 / 65_536.0, 0.0]
+    }
+
+    /// Reads in pieces of 7, 7, 11 samples until a sample at or after `last` is in, as `(tick, sample)`; `ratio_at` gives the ticks a sample of a block starting at a tick.
+    fn read_pieces(device: &FakeDevice, last: i64, ratio_at: impl Fn(i64) -> i64) -> Vec<(i64, Iq)> {
+        let mut got: Vec<(i64, Iq)> = Vec::new();
+        let mut sizes = [7usize, 7, 11].into_iter().cycle();
+        for _ in 0..20_000 {
+            if got.last().is_some_and(|(t, _)| *t >= last) {
+                break;
+            }
+            match device.rx_recv(0, sizes.next().unwrap(), Duration::from_millis(100), false) {
+                RxRecv::Samples { first_tick, samples } => {
+                    let ratio = ratio_at(first_tick);
+                    got.extend(samples[0].iter().enumerate().map(|(i, sample)| (first_tick + i as i64 * ratio, *sample)));
+                }
+                RxRecv::Timeout => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        got
+    }
+
+    /// The segment that starts at `start` at decimation `d`, as read: `head` exact zeros, then `expect` at each tick.
+    fn assert_segment(got: &[(i64, Iq)], start: i64, d: u64, expect: &dyn Fn(i64) -> Iq, what: &str) {
+        let head = ezsdr_radio::x3xx::rx_fill_samples(d) as usize;
+        assert!(got.len() >= head + 16 && got[0].0 == start, "{what}: {} samples from {:?}", got.len(), got.first().map(|g| g.0));
+        for (k, (t, sample)) in got.iter().enumerate() {
+            let want = if k < head { [0.0, 0.0] } else { expect(*t) };
+            assert!(*sample == want && (k >= head || (sample[0].to_bits() == 0 && sample[1].to_bits() == 0)), "{what}: sample {k} at {t}: {sample:?}, expected {want:?}");
+        }
+    }
+
+    fn head_case(source: Source, begin: Begin, d0: u64, d1: u64) {
+        let device = manual(FakeConfig::default());
+        participant(&device, move |device| {
+            let rate = |d: u64| 200e6 / d as f64;
+            let what = format!("{source:?} {begin:?} D {d0} -> {d1}");
+            device.set_time_zero(false).unwrap();
+            device.apply(Dir::Rx, 0, &Settings { rate: Some(rate(d0)), ..Settings::default() }).unwrap();
+            // At most 50 ms ahead of the device's time (the fake's flow control): a 20 ms wave starting 5 ms ahead is sent without a wait.
+            let wave: Vec<Iq> = (0..20_000).map(|i| [(i + 1) as f32 / 100_000.0, 0.5]).collect();
+            let t_tx = (device.time_now().unwrap() + ms(5)) / 200 * 200;
+            if source != Source::ReceiveOnly {
+                let tx_rate = if source == Source::Loopback {
+                    rate(d0)
+                } else if d0 == 200 {
+                    2e6
+                } else {
+                    1e6
+                };
+                device.apply(Dir::Tx, 0, &Settings { rate: Some(tx_rate), ..Settings::default() }).unwrap();
+                device.tx_open(0, &[0]).unwrap();
+                device.tx_send(0, &[&wave], Some(t_tx), true, true, Duration::from_secs(1)).unwrap();
+            }
+            let (d0, d1) = (d0 as i64, d1 as i64);
+            let old = |t: i64| if source == Source::Loopback { wave[((t - t_tx) / d0) as usize] } else { ramp_at(t, d0) };
+            let new_matches = source == Source::Loopback && matches!(begin, Begin::Fresh | Begin::Restart);
+            let new = |t: i64| if new_matches { wave[((t - t_tx) / d1) as usize] } else { ramp_at(t, d1) };
+            let at = t_tx + 3_000 * d0;
+            device.rx_open(0, &[0]).unwrap();
+            if begin != Begin::Fresh {
+                let at0 = t_tx + 1_000 * d0;
+                device.rx_start(0, at0).unwrap();
+                let first = read_pieces(&device, at0 + 199 * d0, |_| d0);
+                assert_segment(&first[..200], at0, d0 as u64, &old, &what);
+                // An unread tail: the device runs on for 500 samples after the reader stops.
+                device.host().sleep(Duration::from_nanos(2_500 * d0 as u64));
+                device.rx_stop(0).unwrap();
+                match begin {
+                    Begin::Retune => drop(device.apply(Dir::Rx, 0, &Settings { freq: Some(2.4e9), ..Settings::default() }).unwrap()),
+                    Begin::Rate => drop(device.apply(Dir::Rx, 0, &Settings { rate: Some(rate(d1 as u64)), ..Settings::default() }).unwrap()),
+                    _ => {}
+                }
+            }
+            device.rx_start(0, at).unwrap();
+            let got = read_pieces(&device, at + (ezsdr_radio::x3xx::rx_fill_samples(d1 as u64) as i64 + 24) * d1, |first| if first < at { d0 } else { d1 });
+            let split = got.iter().position(|(t, _)| *t >= at).expect("the new segment is delivered");
+            if begin != Begin::Fresh {
+                // The old tail comes first and is unchanged: no head in it, every sample as the old stream produced it.
+                assert!(split > 0, "{what}: an unread tail was left");
+                assert!(got[..split].iter().all(|(t, sample)| *sample == old(*t)), "{what}: the old tail is as it was");
+            }
+            assert_segment(&got[split..], at, d1 as u64, &new, &what);
+        });
+    }
+
+    #[test]
+    fn ur_33_a_receive_start_begins_with_the_head_of_its_rate() {
+        let sources = [Source::Loopback, Source::ReceiveOnly, Source::Mismatched];
+        for source in sources {
+            for begin in [Begin::Fresh, Begin::Restart, Begin::Retune] {
+                head_case(source, begin, 200, 200);
+            }
+            head_case(source, Begin::Rate, 200, 2);
+        }
+        // The four classes at every start the loopback sees as matching: D = 25, 10, 4, 2, 1 (2, 13, 18, 13, 2 zeros).
+        for d in [25, 10, 4, 2, 1] {
+            head_case(Source::Loopback, Begin::Fresh, d, d);
+            head_case(Source::Loopback, Begin::Restart, d, d);
+        }
+        // A new rate's head is the new rate's, not the old one's.
+        for d1 in [25, 10, 4, 1] {
+            head_case(Source::Loopback, Begin::Rate, 200, d1);
+        }
+        head_case(Source::Loopback, Begin::Rate, 4, 200);
+        head_case(Source::ReceiveOnly, Begin::Rate, 2, 200);
+    }
+
+    /// A receive-only segment at 1 MS/s (the ramp supplies the samples) that an overrun restarts: after the restart the first `rx_fill_samples(200)` samples are zero and
+    /// the ramp follows on its ticks.
+    fn overrun_case(late_reader: bool) {
+        let faults = if late_reader { Vec::new() } else { vec![FakeFault::Overflow(Duration::from_millis(8))] };
+        let device = manual(FakeConfig { faults, ..FakeConfig::default() });
+        participant(&device, move |device| {
+            device.set_time_zero(false).unwrap();
+            device.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
+            device.rx_open(0, &[0]).unwrap();
+            let at = ms(5);
+            device.rx_start(0, at).unwrap();
+            let mut seen = 0;
+            let mut got: Vec<(i64, Iq)> = Vec::new();
+            for call in 0..20_000 {
+                if late_reader && call == 20 {
+                    device.host().sleep(Duration::from_millis(150));
+                }
+                match device.rx_recv(0, 100, Duration::from_millis(100), false) {
+                    RxRecv::Samples { first_tick, samples } if seen > 0 => got.extend(samples[0].iter().enumerate().map(|(i, sample)| (first_tick + i as i64 * 200, *sample))),
+                    RxRecv::Samples { .. } | RxRecv::Timeout => {}
+                    RxRecv::Overflow { out_of_sequence: false } => seen += 1,
+                    other => panic!("{other:?}"),
+                }
+                if got.len() >= 100 {
+                    break;
+                }
+            }
+            assert_eq!(seen, 1, "one overrun");
+            let restart = got[0].0;
+            assert!(restart > at + 100 * 200, "the restart is after the gap: {restart}");
+            assert_segment(&got, restart, 200, &|t| ramp_at(t, 200), if late_reader { "a reader behind" } else { "the scripted overflow" });
+        });
+    }
+
+    #[test]
+    fn ur_33_the_fakes_overflow_restart_begins_with_the_head() {
+        overrun_case(false);
+        overrun_case(true);
+    }
+
+    #[test]
+    fn ur_33_the_fakes_sequence_error_skips_samples_and_has_no_head() {
+        // A sequence error skips a block (`Overflow { out_of_sequence: true }`) and is not a start: the samples after it are the ramp on its ticks, no zeros.
+        let device = manual(FakeConfig { faults: vec![FakeFault::SequenceError(Duration::from_millis(8))], ..FakeConfig::default() });
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
+            device.rx_open(0, &[0]).unwrap();
+            device.rx_start(0, ms(5)).unwrap();
+            let (mut seen, mut got) = (0, Vec::new());
+            for _ in 0..20_000 {
+                match device.rx_recv(0, 100, Duration::from_millis(100), false) {
+                    RxRecv::Samples { first_tick, samples } if seen > 0 => got.extend(samples[0].iter().enumerate().map(|(i, sample)| (first_tick + i as i64 * 200, *sample))),
+                    RxRecv::Samples { .. } | RxRecv::Timeout => {}
+                    RxRecv::Overflow { out_of_sequence: true } => seen += 1,
+                    other => panic!("{other:?}"),
+                }
+                if got.len() >= 100 {
+                    break;
+                }
+            }
+            assert_eq!(seen, 1, "one sequence error");
+            assert!(got[0].0 > ms(8), "the samples after the skip");
+            assert!(got.iter().all(|(t, sample)| *sample == ramp_at(*t, 200) && sample[0] > 0.0), "no head after a sequence error");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_start_a_reopened_streamer_adopts_begins_with_the_head() {
+        // A timed start a closed streamer left queued is delivered at its origin by the streamer opened next (#67); it is a receive start, so it begins with the head too.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
+            device.rx_open(0, &[0]).unwrap();
+            let at = ms(5);
+            device.rx_start(0, at).unwrap();
+            device.rx_close(0);
+            device.rx_open(0, &[0]).unwrap();
+            let got = read_pieces(&device, at + 40 * 200, |_| 200);
+            assert_segment(&got, at, 200, &|t| ramp_at(t, 200), "an adopted start");
         });
     }
 

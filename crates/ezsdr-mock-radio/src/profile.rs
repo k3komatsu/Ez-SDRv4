@@ -42,9 +42,9 @@ impl Profile {
     }
 
     /// The values only the Mock contributes to the `x3xx` description (design 33 D5): its
-    /// 2 ms lead (INFERRED, measured by Phase 8) and its Replay-like repeat constraints.
+    /// Replay-like repeat constraints (INFERRED, Replay's size and alignment).
     pub fn terms() -> ProviderTerms {
-        ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 }
+        ProviderTerms { repeat_max_samples: 268_435_456, repeat_align_samples: 2 }
     }
 
     pub(crate) fn channels(&self) -> &channels::Description {
@@ -116,6 +116,14 @@ impl Profile {
         }
     }
 
+    /// MR-35: the exact-zero samples a receive start at decimation `decimation` begins with on `x3xx` (`x3xx::rx_fill_samples`); none on `ideal`.
+    pub(crate) fn rx_head_samples(&self, decimation: u64) -> i64 {
+        match self.kind {
+            ProfileKind::X3xx => x3xx::rx_fill_samples(decimation) as i64,
+            ProfileKind::Ideal => 0,
+        }
+    }
+
     pub(crate) fn repeat_max_samples(&self) -> u64 {
         self.description.repeat_max_samples
     }
@@ -145,6 +153,12 @@ impl Profile {
             ProfileKind::X3xx => 3_000_000,
             ProfileKind::Ideal => 0,
         }
+    }
+
+    /// RM-14: the device lead, the declared command lead less the delivery allowance, that a booking's decision instant, its late
+    /// verdict and its `SendAsap` placement read (the UHD Module's `DEVICE_LEAD_NS`).
+    pub(crate) fn device_lead_ns(&self) -> i64 {
+        self.description.timing.min_timed_command_lead_ns - self.delivery_allowance_ns()
     }
 
     pub(crate) fn timing(&self) -> TimingEnvelope {

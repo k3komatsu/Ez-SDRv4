@@ -18,10 +18,10 @@ pub const DELIVERY_ALLOWANCE_NS: i64 = 3_000_000;
 pub const DEFAULT_BLOCK_LEN: u32 = 2_000;
 
 /// The values only the UHD Module contributes to the `x3xx` description (UR-9, design 33
-/// D5): its 5 ms command lead (the device lead plus the delivery allowance) and its
-/// streamed-from-host repeat, to which neither Replay's size nor its alignment applies.
+/// D5): its streamed-from-host repeat, to which neither Replay's size nor its alignment applies.
+/// The declared command lead is the Vocabulary's (`x3xx::timing`), the device lead plus the delivery allowance.
 pub fn terms() -> ProviderTerms {
-    ProviderTerms { min_timed_command_lead_ns: DEVICE_LEAD_NS + DELIVERY_ALLOWANCE_NS, repeat_max_samples: u64::from(u32::MAX), repeat_align_samples: 1 }
+    ProviderTerms { repeat_max_samples: u64::from(u32::MAX), repeat_align_samples: 1 }
 }
 
 /// The profile this Module's binding must name (UR-9, design 33 D5).
@@ -31,10 +31,18 @@ pub fn profile_ref() -> ProfileRef {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEVICE_LEAD_NS, terms};
+    use super::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
 
     #[test]
     fn tx_in_flight_window_covers_device_lead() {
-        assert!(ezsdr_radio::x3xx::timing(&terms()).tx_in_flight_ns >= DEVICE_LEAD_NS);
+        assert!(ezsdr_radio::x3xx::timing().tx_in_flight_ns >= DEVICE_LEAD_NS);
+    }
+
+    /// UR-9, RM-14: the declared command lead is the Module's device lead plus its delivery allowance, so a Session admits with the sum
+    /// and the Module places at the device lead.
+    #[test]
+    fn ur_09_the_declared_lead_is_the_device_lead_plus_the_delivery_allowance() {
+        assert_eq!(DEVICE_LEAD_NS + DELIVERY_ALLOWANCE_NS, ezsdr_radio::x3xx::timing().min_timed_command_lead_ns);
+        assert_eq!((DEVICE_LEAD_NS, DELIVERY_ALLOWANCE_NS), (2_000_000, 3_000_000));
     }
 }

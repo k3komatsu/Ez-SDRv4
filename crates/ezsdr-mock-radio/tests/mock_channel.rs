@@ -33,6 +33,9 @@ mod oracle;
 #[path = "mock_channel/o1.rs"]
 mod o1;
 
+#[path = "mock_channel/s4a.rs"]
+mod s4a;
+
 const ROOT: ClockDomainId = ClockDomainId::local(7);
 
 fn rid(name: &str) -> ResourceId {
@@ -89,10 +92,16 @@ impl ActionSubmitter for Accepting {
 struct Sink {
     queue: Mutex<VecDeque<BlockRef>>,
     drops: AtomicU64,
+    /// Some(n): a link that applies back-pressure, `Full` (keeping nothing) once n blocks are queued.
+    limit: Mutex<Option<usize>>,
 }
 impl DataLink for Sink {
     fn publish(&self, block: BlockRef) -> PublishOutcome {
-        self.queue.lock().unwrap().push_back(block);
+        let mut queue = self.queue.lock().unwrap();
+        if self.limit.lock().unwrap().is_some_and(|limit| queue.len() >= limit) {
+            return PublishOutcome::Full;
+        }
+        queue.push_back(block);
         PublishOutcome::Accepted
     }
     fn receive(&self) -> Option<(BlockRef, DropCarry)> {
@@ -120,8 +129,12 @@ struct World {
 
 impl World {
     fn new(environment: serde_json::Value) -> World {
+        World::with_root(environment, 1_000_000_000)
+    }
+
+    fn with_root(environment: serde_json::Value, root_hz: u64) -> World {
         let clocks = Arc::new(ClockRegistry::new());
-        clocks.register(ClockDomain::root(ROOT, Rational::new(1_000_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
+        clocks.register(ClockDomain::root(ROOT, Rational::new(root_hz, 1).unwrap(), EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
         let auth = Arc::new(ManualTimeAuthority::new(clocks.clone(), ROOT, &[], Pacing::FreeRunning).unwrap());
         let environment = environment.as_object().unwrap().iter().map(|(name, value)| (Namespace::parse(name).unwrap(), value.clone())).collect();
         World { clocks, auth, medium: Medium::new(), inputs: Arc::new(Mutex::new(BTreeMap::new())), environment: Arc::new(environment) }

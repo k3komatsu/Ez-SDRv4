@@ -921,17 +921,15 @@ mod tests {
         assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "the transmit streamer's open: {calls:?}");
     }
 
-    #[test]
-    fn ur_75_arm_does_not_refuse_an_unacknowledged_open_flush_while_the_switch_is_off() {
-        // UR-22, KL-12: the open at `arm` keeps its single flush attempt; a flush nobody acknowledges is a row, and the streamer stays open.
+    /// `arm` of one transmit stream on a fake with `faults`: the Core, the device and `arm`'s result.
+    fn arm_with(faults: Vec<crate::device::FakeFault>) -> (Arc<Core>, Arc<FakeDevice>, Result<(), ModuleError>) {
         let binding: Binding = serde_json::from_value(json!({
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
             "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
         }))
         .unwrap();
-        let config = FakeConfig { faults: vec![crate::device::FakeFault::DropBurstAck], ..FakeConfig::default() };
-        let (core, device, _time, _events) = test_support::rig_with(config, Vec::new());
+        let (core, device, _time, _events) = test_support::rig_with(FakeConfig { faults, ..FakeConfig::default() }, Vec::new());
         let mut radio = UhdRadio::from_binding(&binding, device.clone()).unwrap();
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Tx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
         radio.prepared = Some(Prepared {
@@ -941,10 +939,30 @@ mod tests {
             rx: Vec::new(),
             tx: vec![PreparedStream { k: 0, handle: Some(handle), channels: Channels::first(1), clock: None }],
         });
-        radio.arm().expect("arm");
-        assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush" && row.get("attempt").is_none()).count(), 1);
-        assert_eq!(device.calls().iter().filter(|call| call.starts_with("tx_open")).count(), 1, "one open, no retry: {:?}", device.calls());
-        assert!(device.calls().iter().all(|call| !call.starts_with("tx_close")), "the streamer stays open: {:?}", device.calls());
+        let armed = radio.arm();
+        (core, device, armed)
+    }
+
+    #[test]
+    fn ur_75_arm_recovers_a_lost_open_flush_ack() {
+        // UR-22: the open at `arm` retries an unconfirmed flush on a fresh streamer; a recovered attempt is a row, and `arm` passes.
+        let (core, device, armed) = arm_with(vec![crate::device::FakeFault::DropAckOfSend(0)]);
+        armed.expect("arm");
+        assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush" && row["attempt"] == 1).count(), 1);
+        assert_eq!(device.calls().iter().filter(|call| call.starts_with("tx_open")).count(), 2, "{:?}", device.calls());
+        assert_eq!(device.calls().iter().filter(|call| call.starts_with("tx_close")).count(), 1, "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_75_three_unconfirmed_open_flushes_refuse_arm() {
+        // UR-13: three unconfirmed attempts refuse `arm`, with the open flush named once, and the last streamer is closed.
+        let (core, device, armed) = arm_with(vec![crate::device::FakeFault::DropBurstAck]);
+        let error = armed.expect_err("arm refuses");
+        assert!(error.message.starts_with("UR-13: the open flush (UR-22) was not confirmed after 3 attempts") && !error.message.contains("UR-13: UR-22"), "{}", error.message);
+        let calls = device.calls();
+        assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 3, "{calls:?}");
+        assert_eq!(calls.iter().filter(|call| call.starts_with("tx_close")).count(), 3, "{calls:?}");
+        assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").count(), 3);
     }
 
     #[test]
@@ -967,7 +985,7 @@ mod tests {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         {
             let ordinary = UhdRadio::from_binding(&binding, device.clone()).unwrap();
-            assert_eq!(ordinary.description.timing, x3xx::timing(&profile::terms()));
+            assert_eq!(ordinary.description.timing, x3xx::timing());
         }
         let mut radio = UhdRadio::from_binding(&binding, device.clone()).unwrap().with_measurement_timing(candidate);
         assert_eq!(radio.description.timing, candidate);

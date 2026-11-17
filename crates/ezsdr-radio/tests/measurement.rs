@@ -20,11 +20,11 @@ fn description(record: &Record, terms: ProviderTerms) -> Description {
 }
 
 fn mock_terms() -> ProviderTerms {
-    ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 }
+    ProviderTerms { repeat_max_samples: 268_435_456, repeat_align_samples: 2 }
 }
 
 fn uhd_terms() -> ProviderTerms {
-    ProviderTerms { min_timed_command_lead_ns: 5_000_000, repeat_max_samples: u64::from(u32::MAX), repeat_align_samples: 1 }
+    ProviderTerms { repeat_max_samples: u64::from(u32::MAX), repeat_align_samples: 1 }
 }
 
 fn key_of(value: &ValueRecord) -> &str {
@@ -497,12 +497,29 @@ fn rm_35_a_channel_cannot_belong_to_two_streams_in_one_direction() {
 #[test]
 fn rm_35_each_provider_is_compared_with_its_own_description() {
     let mut record = fixture_record();
-    set_worst(&mut record, "radio.timing.min_timed_command_lead_ns", Worst::Number(3_000_000.0));
+    // The repeat limit is the one comparable value the Providers still differ in (Replay's 2^28 against the host stream's 2^32 - 1).
+    set_worst(&mut record, "radio.tx.repeat_max_samples", Worst::Number(300_000_000.0));
     let mock = description(&record, mock_terms());
     let uhd = description(&record, uhd_terms());
 
-    assert_rejected(&record, &mock, "radio.timing.min_timed_command_lead_ns", "below measured");
-    assert_clear(&record, &uhd);
+    assert_clear(&record, &mock);
+    assert_rejected(&record, &uhd, "radio.tx.repeat_max_samples", "exceeds measured");
+}
+
+#[test]
+fn rm_35_the_receive_and_transmit_byte_rates_are_each_compared_with_their_own_value() {
+    // An asymmetric Description: with rx = tx a swap of the two keys changes no verdict.
+    let mut record = fixture_record();
+    let mut desc = description(&record, mock_terms());
+    desc.performance.rx_bytes_per_s = 80_000_000;
+    desc.performance.tx_bytes_per_s = 40_000_000;
+    set_worst(&mut record, "radio.perf.rx_bytes_per_s", Worst::Number(60_000_000.0));
+    set_worst(&mut record, "radio.perf.tx_bytes_per_s", Worst::Number(60_000_000.0));
+    assert_rejected(&record, &desc, "radio.perf.rx_bytes_per_s", "exceeds measured");
+    set_worst(&mut record, "radio.perf.rx_bytes_per_s", Worst::Number(80_000_000.0));
+    assert_clear(&record, &desc);
+    set_worst(&mut record, "radio.perf.tx_bytes_per_s", Worst::Number(30_000_000.0));
+    assert_rejected(&record, &desc, "radio.perf.tx_bytes_per_s", "exceeds measured");
 }
 
 #[test]

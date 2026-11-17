@@ -134,6 +134,9 @@ struct Rx {
     channels: timeline::Channels,
     by: Option<u64>,
     next: i64,
+    /// MR-35: the exact-zero samples each start of the segment begins with, and the sample index (exclusive) its latest start's head runs to.
+    head: i64,
+    head_until: i64,
     planned: Option<i64>,
     flags: BlockFlags,
     lost: Option<u64>,
@@ -586,6 +589,7 @@ impl MockRadio {
                 let domain = self.rx_register(k)?;
                 if let Some(rx) = self.rx[k].running.as_mut() {
                     rx.next = next_sample;
+                    rx.head_until = next_sample + rx.head;
                     rx.planned = None;
                     rx.flags = rx.flags | BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
                     rx.lost = Some(lost_total);
@@ -613,7 +617,7 @@ impl MockRadio {
         if self.rx[k].pool.is_none() {
             return Err(self.reject("MR-13: receive pool is absent"));
         }
-        let (origin, ratio) = self.rx[k].running.as_ref().map(|rx| (rx.origin, rx.ratio)).expect("a receive stream publishes");
+        let (origin, ratio, head_until) = self.rx[k].running.as_ref().map(|rx| (rx.origin, rx.ratio, rx.head_until)).expect("a receive stream publishes");
         let mut clipped = 0u64;
         let received: Option<Vec<(f32, f32)>> = if self.channel.is_some() {
             let Some((mode, models, channel_set)) = self.channel.as_ref().and_then(|mode| Some((mode, &mode.rx_channels, self.rx[k].running.as_ref()?.channels))) else {
@@ -629,8 +633,8 @@ impl MockRadio {
                     let (fr, fi) = mode.medium.field(&mode.fragment, logical as u16, model.frequency_hz.at(stamp), antenna);
                     let amplitude = 10f64.powf(model.gain_db.at(stamp) / 20.0);
                     let (sin, cos) = model.phase.at(stamp).sin_cos();
-                    let re = amplitude * (fr * cos + fi * sin);
-                    let im = amplitude * (fi * cos - fr * sin);
+                    // MR-35: the start's head is exact zero; the field was still drawn, so the noise after it is the same as without a head.
+                    let (re, im) = if sample < head_until { (0.0, 0.0) } else { (amplitude * (fr * cos + fi * sin), amplitude * (fi * cos - fr * sin)) };
                     let (cre, cim) = (re.clamp(-1.0, 1.0), im.clamp(-1.0, 1.0));
                     if cre != re || cim != im {
                         clipped += 1;
@@ -745,6 +749,9 @@ impl MockRadio {
             rx.next = kg;
             rx.planned = None;
             if lost > 0 {
+                if matches!(cause, ezsdr_radio::payloads::RxOverflowCause::Overrun) {
+                    rx.head_until = kg + rx.head;
+                }
                 rx.flags = rx.flags
                     | BlockFlags::GAP_BEFORE
                     | match cause {
@@ -1301,6 +1308,14 @@ impl MockRadio {
         Ok(())
     }
 
+    /// MR-35: the exact-zero samples a receive start at `ratio` root ticks a sample begins with. The decimation is read back from the ratio
+    /// (`ratio = root rate · D / master clock`), never from the root's own ratio to the sample clock.
+    fn rx_head(&self, ratio: Rational) -> Result<i64, ModuleError> {
+        let root_rate = self.clocks.as_ref().expect("prepared clocks").nominal_rate(self.root.expect("prepared root")).map_err(|error| self.reject(format!("MR-35: {error}")))?;
+        let decimation = u128::from(ratio.num()) * u128::from(x3xx::MASTER_CLOCK_HZ) / (u128::from(ratio.den()) * u128::from(root_rate.num()));
+        Ok(self.profile.rx_head_samples(decimation as u64))
+    }
+
     /// The next receive segment of stream `k`'s plan, after the last one begun (RM-25).
     fn rx_next_segment(&self, k: usize) -> Option<Segment> {
         if self.rx[k].links.is_empty() {
@@ -1327,6 +1342,7 @@ impl MockRadio {
             }
         };
         let channels = segment.config.channels;
+        let head = self.rx_head(segment.config.ratio)?;
         self.rx[k].running = Some(Rx {
             handle,
             domain: None,
@@ -1335,6 +1351,8 @@ impl MockRadio {
             channels,
             by: segment.by,
             next: 0,
+            head,
+            head_until: head,
             planned: None,
             flags: BlockFlags::NONE,
             lost: None,
@@ -1627,7 +1645,7 @@ impl MockRadio {
         let clocks = self.clocks.as_ref().expect("prepared clocks");
         // RM-22: a time that does not fit a clock is a refusal of the Action with its id, never a failed Run.
         let instants = || -> Result<_, String> {
-            let lead = time::ns_to_v(clocks, root, self.profile.timing().min_timed_command_lead_ns).map_err(|error| format!("MR-17: {error}"))?;
+            let lead = time::ns_to_v(clocks, root, self.profile.device_lead_ns()).map_err(|error| format!("MR-17: {error}"))?;
             let join_lead = lead + time::ns_to_v(clocks, root, self.profile.delivery_allowance_ns()).map_err(|error| format!("MR-17: {error}"))?;
             let window = time::ns_to_v(clocks, root, self.profile.timing().tx_in_flight_ns).map_err(|error| format!("MR-25: {error}"))?;
             // RM-15: decided at the clock's origin less the lead if that is later.
@@ -1654,7 +1672,7 @@ impl MockRadio {
         let decision = if switch || untimed {
             Ok(LateOutcome::OnTime {})
         } else {
-            late_policy.decide(clocks, at.time_point, decided_tx, Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.timing().min_timed_command_lead_ns))
+            late_policy.decide(clocks, at.time_point, decided_tx, Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.device_lead_ns()))
         };
         let mut policy = match decision {
             Ok(policy) => policy,

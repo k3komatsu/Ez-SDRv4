@@ -1,7 +1,7 @@
 //! The documentation audit's D3: from one selector, MockRadio and the UHD Module describe
 //! one device alike, because both build their description with `ezsdr_radio::channels`
-//! (design 33 D5). Board-derived values only: the two Providers differ by design in their
-//! command lead and repeat constraints at this stage, and those are not the board's.
+//! (design 33 D5). Board-derived values, and every comparable value but the repeat pair: the
+//! two Providers differ by design in their repeat constraints only, which are not the board's.
 
 use std::collections::BTreeMap;
 
@@ -10,6 +10,8 @@ use ezsdr_kernel::id::{ModuleId, ResourceId};
 use ezsdr_kernel::module_api::{ModuleRef, ProfileRef, Provider, Requested, Version};
 use ezsdr_kernel::spec::{CapabilityValue, Constraint, Ident, Key, Scalar, Value};
 use ezsdr_mock_radio::MockRadio;
+use ezsdr_radio::channels::{self, Description};
+use ezsdr_radio::measurement::{self, Rule};
 use std::sync::Arc;
 
 use ezsdr_radio_uhd::{ClockMode, FakeConfig, FakeDevice, UhdRadio};
@@ -235,5 +237,72 @@ fn d3_the_layout_is_a_node_id_of_neither_provider() {
         assert_eq!(tree.id, ResourceId::parse(id).unwrap());
         let children: Vec<_> = tree.children.iter().map(|child| child.id.path()).collect();
         assert_eq!(children, [format!("{id}/rx/s0"), format!("{id}/tx/s0")]);
+    }
+}
+
+/// Stage 4a (proposal §6.3): the Vocabulary's one set of values reaches both Providers. For every selector and every key whose measurement rule
+/// compares it, the two Providers' profile values are equal except the repeat pair (Replay's size and alignment against the host stream's).
+#[test]
+fn d3_the_two_providers_share_every_comparable_value_but_the_repeat_pair() {
+    let elements = |board: &str| vec![format!("0:A:{board}:0"), format!("0:B:{board}:0")];
+    let with = |mut selector: BTreeMap<Ident, Value>, extra: &[(&str, Value)]| {
+        for (key, value) in extra {
+            selector.insert(Ident::parse(key).unwrap(), value.clone());
+        }
+        selector
+    };
+    let ubx = elements("ubx");
+    let selectors = [
+        ezsdr_acceptance::layout::x3xx_selector(&ubx, &ubx),
+        with(ezsdr_acceptance::layout::x3xx_selector(&ubx, &ubx), &[("link_gbps", Value::List(vec![Scalar::Int(10)]))]),
+        with(ezsdr_acceptance::layout::x3xx_selector(&ubx, &ubx), &[("image", Value::List(vec![Scalar::from("xg")]))]),
+        ezsdr_acceptance::layout::x3xx_selector(&elements("cbx")[..1], &elements("cbx")[..1]),
+    ];
+    for selector in selectors {
+        let layout = channels::from_selector(&selector).unwrap();
+        let mock = Description::new(&layout, ezsdr_mock_radio::BLOCK_LEN, &ezsdr_mock_radio::Profile::terms());
+        let uhd = Description::new(&layout, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms());
+        let (mock, uhd) = (measurement::profile_values(&mock), measurement::profile_values(&uhd));
+        assert_eq!(mock.keys().collect::<Vec<_>>(), uhd.keys().collect::<Vec<_>>());
+        let differing: Vec<_> = mock.iter().filter(|(key, value)| measurement::rule(key.as_str()) != Some(Rule::NotCompared) && uhd[*key] != **value).map(|(key, _)| key.as_str().to_owned()).collect();
+        assert_eq!(differing, ["radio.tx.repeat_align_samples", "radio.tx.repeat_max_samples"], "{selector:?}");
+    }
+}
+
+/// Stage 4a: one 10 GbE link carries 800 MB/s a direction on both Providers: one channel at 200 MS/s and two of 100 MS/s are admitted, and
+/// 200 + 100 and 200 + 50 MS/s are refused alike, in both directions (RM-32), with the limit in the reason; a 1 GbE link (the default selector) carries 25 MS/s.
+#[test]
+fn s4a_both_providers_admit_what_one_10gbe_link_carries_and_refuse_the_rest_alike() {
+    let elements = vec!["0:A:ubx:0".to_owned(), "0:B:ubx:0".to_owned()];
+    let mut ten = ezsdr_acceptance::layout::x3xx_selector(&elements, &elements);
+    ten.insert(Ident::parse("link_gbps").unwrap(), Value::List(vec![Scalar::Int(10)]));
+    let one = ezsdr_acceptance::layout::x3xx_selector(&elements, &elements);
+    let device = || Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, front_ends: vec!["UBX", "UBX"], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
+    for (selector, cases) in
+        [(ten, vec![(200e6, None, true), (100e6, Some(100e6), true), (200e6, Some(100e6), false), (200e6, Some(50e6), false)]), (one, vec![(25e6, None, true), (30e6, None, false)])]
+    {
+        let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
+        let uhd = UhdRadio::from_binding(&uhd_binding(selector), device()).unwrap();
+        for (direction, (first, second, admitted)) in ["rx", "tx"].into_iter().flat_map(|direction| cases.iter().map(move |case| (direction, *case))) {
+            let mut reports = Vec::new();
+            for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
+                let key = |name: String| Key::parse(&format!("radio.{direction}.{name}")).unwrap();
+                let mut constraints = BTreeMap::from([
+                    (key("c0.stream".into()), Constraint::Eq { value: Scalar::Int(0) }),
+                    (key("s0.sample_rate_hz".into()), Constraint::Eq { value: Scalar::try_from(first).unwrap() }),
+                ]);
+                if let Some(second) = second {
+                    constraints.insert(key("c1.stream".into()), Constraint::Eq { value: Scalar::Int(1) });
+                    constraints.insert(key("s1.sample_rate_hz".into()), Constraint::Eq { value: Scalar::try_from(second).unwrap() });
+                }
+                let report = provider.coerce(&Requested { resource: provider.instance().id.clone(), constraints }).unwrap();
+                assert_eq!(report.rejected.is_empty(), admitted, "{direction} {first} + {second:?}: {:?}", report.rejected);
+                if !admitted {
+                    assert!(report.rejected.iter().any(|refusal| refusal.reason.starts_with(&format!("RM-32: {direction} needs"))), "{:?}", report.rejected);
+                }
+                reports.push(report.rejected.iter().map(|refusal| (refusal.key.clone(), refusal.reason.clone())).collect::<Vec<_>>());
+            }
+            assert_eq!(reports[0], reports[1], "{direction} {first} + {second:?}: the Providers refuse alike");
+        }
     }
 }
