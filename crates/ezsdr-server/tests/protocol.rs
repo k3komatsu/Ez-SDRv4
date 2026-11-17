@@ -1666,6 +1666,22 @@ fn ea_07_the_reopen_can_be_switched_off() {
 }
 
 #[test]
+fn ea_07_a_bad_record_rows_per_kind_is_refused_with_the_ur_5_text_before_the_device_opens() {
+    // UR-5, UR-30: the binding's `record_rows_per_kind` is an Int in 1..=100000; the refusal is the UR-5 selector's, through the catalogue's `EA-7: <name>: ` prefix
+    // like any other selector refusal (no new Python error class: it arrives as `connect`'s refusal), and it comes before the device opens.
+    for value in [json!(0), json!(100_001), json!("1000"), json!(1.5)] {
+        let temp = TempDir::new("uhd-record-rows");
+        let (mut server, opened) = fake_server(&temp.0);
+        let mut profile = uhd_profile(&temp.0);
+        profile["bindings"]["radio"]["selector"]["record_rows_per_kind"] = value.clone();
+        let error = err(handle(&mut server, Request::Connect { profile: Some(profile), lease: None, initial: None }, Vec::new()));
+        assert_eq!(error.kind, ErrorKind::Refused, "{value}");
+        assert_eq!(error.message, "EA-7: radio: Rejected: UR-5: selector `record_rows_per_kind` must be an Int in 1..=100000", "{value}");
+        assert_eq!(opened.load(Ordering::SeqCst), 0, "{value}: refused before the device opens");
+    }
+}
+
+#[test]
 fn ea_07_a_lost_device_ends_the_session_with_its_manifest() {
     // Review S, TG-S3 (F4): a device lost during a Session stops the Run by Policy; Finish
     // still returns the Manifest and writes it, and the device was marked lost first.

@@ -26,6 +26,9 @@ use crate::device::{Iq, TxCode, TxReport};
 use crate::host::{ClockGuard, ClockMutex};
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
 
+mod records;
+pub(crate) use records::{DEFAULT_RECORD_ROWS, Records, async_key, burst_key, rejected_key, timing_key};
+
 /// A guard of the instance's state (UR-25): a `MutexGuard`, except that the test build counts
 /// how many `core::lock` guards this thread holds — `streams`, `rec` and `rates` all
 /// count — so that [`assert_line_free`] sees a lock order a `try_lock` cannot: another
@@ -782,27 +785,6 @@ impl Streams {
     }
 }
 
-/// Everything the threads record; written to the sections at `cleanup` (UR-30).
-pub(crate) struct Records {
-    pub applied: Vec<Json>,
-    pub bursts: Vec<Json>,
-    pub device_async: Vec<Json>,
-    pub rejected: Vec<Json>,
-    pub switches: Vec<Json>,
-    pub timing: Vec<Json>,
-    pub stats: BTreeMap<&'static str, i64>,
-}
-
-impl Default for Records {
-    fn default() -> Self {
-        let stats = ["rx_blocks", "rx_samples", "rx_overflows", "rx_errors", "rx_off_lattice", "rx_overlapping", "rx_before_origin", "link_drops_seen", "tx_bursts", "tx_samples", "tx_errors"]
-            .into_iter()
-            .map(|name| (name, 0))
-            .collect();
-        Records { applied: Vec::new(), bursts: Vec::new(), device_async: Vec::new(), rejected: Vec::new(), switches: Vec::new(), timing: Vec::new(), stats }
-    }
-}
-
 /// The context `prepare` gathered, shared by uhd-control, uhd-rx and uhd-tx.
 pub(crate) struct Core {
     pub device: Arc<dyn Device>,
@@ -888,6 +870,7 @@ impl Core {
         inputs: Arc<dyn InputStore>,
         mut links: Vec<Vec<Arc<dyn DataLink>>>,
         description: ezsdr_radio::channels::Description,
+        record_rows: usize,
     ) -> Result<Core, ModuleError> {
         #[cfg(test)]
         let rx_id = description.stream_node(&id, Dir::Rx, 0);
@@ -930,7 +913,7 @@ impl Core {
             inputs,
             links,
             description,
-            rec: Mutex::new(Records::default()),
+            rec: Mutex::new(Records::with_limit(record_rows)),
             streams: Mutex::new(Streams::with_streams(rx_count, tx_count)),
             rates: Mutex::new([None, None]),
             start_up: AtomicI64::new(i64::MIN),
@@ -1035,11 +1018,16 @@ impl Core {
     }
 
     pub fn timing(&self, row: Json) {
-        lock(&self.rec).timing.push(row);
+        lock(&self.rec).timing.push(timing_key(&row), row);
     }
 
     pub fn reject_note(&self, row: Json) {
-        lock(&self.rec).rejected.push(row);
+        lock(&self.rec).rejected.push(rejected_key(&row), row);
+    }
+
+    /// An asynchronous report's row (UR-28); `booked_ack`: it acknowledges the end of a booked burst, which the bound never leaves out (UR-30).
+    pub fn async_row(&self, row: Json, booked_ack: bool) {
+        lock(&self.rec).device_async.push(async_key(&row, booked_ack), row);
     }
 
     /// A control-path event from `source` at `time` (RM-11, UR-20), never under the line lock (UR-25): [`Core::emit`] comes here too.
@@ -1236,9 +1224,7 @@ impl Core {
     }
 
     fn record_tx_async(&self, stream: usize, report: TxReport) {
-        lock(&self.rec).device_async.push(json!({
-            "code": format!("{:?}", report.code), "tick": report.tick, "channel": report.channel, "stream": stream, "tx_flush": true,
-        }));
+        self.async_row(json!({ "code": format!("{:?}", report.code), "tick": report.tick, "channel": report.channel, "stream": stream, "tx_flush": true }), false);
     }
 
     /// The open-time four-zero burst (UR-22) clears stale TX header state. One device-clock deadline

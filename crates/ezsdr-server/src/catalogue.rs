@@ -135,6 +135,8 @@ pub fn assemble(profile_doc: &serde_json::Value, inputs: BTreeMap<ContentHash, V
                 // reference PLL did not lock is built again once on a new open of the device,
                 // unless the binding's `reopen_on_unlock` is false; a second refusal stands.
                 let reopen = !matches!(binding.selector.get(&Ident::parse("reopen_on_unlock").expect("a selector key")), Some(Value::Scalar(Scalar::Bool(false))));
+                // UR-5, UR-30: a bad `record_rows_per_kind` is refused before the device opens (an open takes seconds).
+                ezsdr_radio_uhd::record_rows_per_kind(binding).map_err(|e| built(&e))?;
                 let mut first_error: Option<String> = None;
                 loop {
                     let device = match open_device {

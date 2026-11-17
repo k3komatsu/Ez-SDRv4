@@ -20,7 +20,7 @@ use ezsdr_radio::staging::{CLOSE_GAP, DeviceChain, DeviceEnd, DeviceSend, OpId, 
 use serde_json::json;
 
 use super::control::ColdConfig;
-use super::core::{Clock, Core, Locked, Streams, lock, stream_key};
+use super::core::{Clock, Core, Locked, Streams, burst_key, lock, rejected_key, stream_key};
 use crate::device::{Dir, Iq, TxCode, TxReport};
 use crate::host::HostClock;
 use crate::profile::{DEVICE_LEAD_NS, RESUME_MARGIN_NS};
@@ -99,8 +99,9 @@ struct PendingReport {
     /// The repeat resumes at this sample after this device burst was dropped, planned by the expired-timeline check before any report was read: the
     /// first report that reaches the burst takes it for its event (UR-22, UR-28).
     resumes_at: Option<i64>,
-    /// This device burst is a part that resumed a repeat: the stall part of the gap before it, in root ticks (UR-22).
-    resumed: Option<i64>,
+    /// The device burst is a part that resumed a repeat, and no booked burst joined it: its acknowledgement is a resume's, which the record bound may leave out
+    /// (UR-30). Any other device burst carries a booked burst's end.
+    part: bool,
 }
 
 /// What a report retires (UR-28): `Ack` the bursts starting before its tick, `Underflow` and `Late` those starting at or before it and marking them told (a `Late` one also telling them).
@@ -111,14 +112,13 @@ enum Reach {
     Late,
 }
 
-/// A device burst a report retired (UR-28): its Kernel bursts, its first instant in the root domain, whether this report is the first to tell it late,
-/// the resume point it carried and, for a part that resumed a repeat, the stall part of the gap before it.
+/// A device burst a report retired (UR-28): its Kernel bursts, its first instant in the root domain, whether this report is the first to tell it late
+/// and the resume point it carried.
 struct Reached {
     targets: Vec<TimePoint>,
     start: i64,
     tell: bool,
     resumes_at: Option<i64>,
-    resumed: Option<i64>,
 }
 
 /// What a report that reached the device burst did to its burst (UR-22).
@@ -160,6 +160,9 @@ pub(crate) struct Tx {
     /// since is told from this one's.
     streamer: u64,
     tracker: Option<BurstTracker>,
+    /// The tracker's open burst record was opened by a part that resumed a repeat (UR-30): the record a later start of burst closes is then an intermediate
+    /// part, which the record bound may leave out. Assigned after the step that opened the record.
+    open_part: bool,
     /// The root tick of the current clock's cut, from the stream's one segment as the last pass
     /// read it (UR-25): the origin when a loss or `Provider::stop` ended the clock at or before it.
     cut: Option<i64>,
@@ -185,6 +188,12 @@ enum Values {
     Start,
     Configure(u64),
     Wait,
+}
+
+/// Whether a device burst that starts a send is a part that resumes a repeat (UR-22, UR-30): the booking is paused and this is not its first send. A
+/// switch that replaced a paused repeat is `first`: it is a booked burst.
+fn is_resume_part(first: bool, paused: bool) -> bool {
+    paused && !first
 }
 
 /// UR-22: the resume point `R` of a repeat on the lattice `origin + j * period`: the first lattice point at or after the latest of `unaligned` (the
@@ -213,6 +222,7 @@ impl Tx {
             cmds,
             host,
             tracker: clock.map(|c| BurstTracker::new(c.domain)),
+            open_part: false,
             clock,
             channels,
             streamer,
@@ -348,29 +358,32 @@ impl Tx {
 
     #[cfg(test)]
     fn remember_burst(&mut self, target: TimePoint) {
-        self.remember_part(target, None);
+        self.remember_part(target, false);
     }
 
-    /// [`Tx::remember_burst`] for a device burst that is the part resuming a repeat when `stall` is given (UR-22).
-    fn remember_part(&mut self, target: TimePoint, stall: Option<i64>) {
+    /// Correlates a device burst starting at `target` with the reports of its channel positions; `part`: it is a part that resumed a repeat (UR-22, UR-30).
+    fn remember_part(&mut self, target: TimePoint, part: bool) {
         // UR-28: a pending report's channels are the positions in the streamer — the
         // numbers UHD's asynchronous reports carry (4.10's `rfnoc_tx_streamer.cpp:152-159,
         // 312-319`; `FakeDevice`, `device.rs:1515-1516,1555-1556`) —, not the device
         // channels the stream runs: a stream opened for `{1}` reports channel 0. The set is
         // never empty: a burst is booked only on a stream this Module opened, and a stream
         // with no channel is refused (UR-21).
-        self.unacked.push_back(PendingReport { target, joined: Vec::new(), channels: (0..self.channels.count() as usize).collect(), told: false, resumes_at: None, resumed: stall });
+        self.unacked.push_back(PendingReport { target, joined: Vec::new(), channels: (0..self.channels.count() as usize).collect(), told: false, resumes_at: None, part });
     }
 
     /// A Kernel burst whose first send continues the open device burst: the last correlation is that device burst's (UR-28).
     fn join_burst(&mut self, target: TimePoint) {
         if let Some(pending) = self.unacked.back_mut() {
             pending.joined.push(target);
+            // A Kernel burst that joins is booked: the device burst's end is its end too (UR-30).
+            pending.part = false;
         }
     }
 
-    /// Each channel's reports are ordered independently in UHD's shared queue. A tickless report retires only an `Ack`'s first pending burst.
-    fn retire(&mut self, channel: usize, tick: Option<i64>, reach: Reach) -> Vec<Reached> {
+    /// Each channel's reports are ordered independently in UHD's shared queue. A tickless report retires only an `Ack`'s first pending burst. Also tells
+    /// whether a device burst it retired carries a booked burst's end (UR-30): an `Ack` of that is never left out of the record.
+    fn retire(&mut self, channel: usize, tick: Option<i64>, reach: Reach) -> (Vec<Reached>, bool) {
         let root = self.core.root;
         let start = |pending: &PendingReport| self.core.clocks.convert(pending.target, root).and_then(|converted| converted.floor().ticks_in(root)).ok();
         let matching: Vec<usize> = match tick {
@@ -385,9 +398,11 @@ impl Tx {
             None => Vec::new(),
         };
         let mut reached = Vec::new();
+        let mut booked = false;
         for index in matching.into_iter().rev() {
             let starts = start(&self.unacked[index]);
             let pending = &mut self.unacked[index];
+            booked |= !pending.part;
             pending.channels.remove(&channel);
             if reach != Reach::Ack {
                 let tell = !std::mem::replace(&mut pending.told, true) && reach == Reach::Late;
@@ -396,7 +411,6 @@ impl Tx {
                     start: starts.expect("a reached burst has a start"),
                     tell,
                     resumes_at: pending.resumes_at.take(),
-                    resumed: pending.resumed,
                 });
             }
             if pending.channels.is_empty() {
@@ -404,7 +418,7 @@ impl Tx {
             }
         }
         reached.reverse();
-        reached
+        (reached, booked)
     }
 
     /// One unit of work; false when there was nothing to do.
@@ -616,6 +630,7 @@ impl Tx {
         );
         let next = open.next;
         let paused = open.paused;
+        let resume_part = is_resume_part(first, paused.is_some());
         let len = open.booking.waveform_len as i64;
         let tiled = open.booking.repeat && open.booking.samples[0].len() > len as usize;
         let waveform = Waveform { start, len, repeat: open.booking.repeat, tiled };
@@ -727,7 +742,7 @@ impl Tx {
                 Ok(accepted) => {
                     self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: a send did not complete within 1 s" }));
                     if device_sob && accepted > 0 {
-                        self.remember_part(TimePoint::new(clock.domain, next), paused.map(|paused| paused.stall));
+                        self.remember_part(TimePoint::new(clock.domain, next), resume_part);
                     } else if continuing && accepted > 0 {
                         self.join_burst(TimePoint::new(clock.domain, start));
                     }
@@ -743,7 +758,7 @@ impl Tx {
                     // gone is counted for its report, then closed by the two-sample EOB below.
                     self.core.device_failed(None, "tx_burst", &error);
                     if device_sob {
-                        self.remember_part(TimePoint::new(clock.domain, next), paused.map(|paused| paused.stall));
+                        self.remember_part(TimePoint::new(clock.domain, next), resume_part);
                     } else if continuing {
                         self.join_burst(TimePoint::new(clock.domain, start));
                     }
@@ -784,7 +799,7 @@ impl Tx {
             paused.map(|_| BurstOpen { waveform_len: burst_open.waveform_len, late: started_late, requested_target: started_late.map(|_| target) })
         };
         if device_sob {
-            self.remember_part(TimePoint::new(clock.domain, next), paused.map(|paused| paused.stall));
+            self.remember_part(TimePoint::new(clock.domain, next), resume_part);
         } else if continuing {
             self.join_burst(TimePoint::new(clock.domain, start));
         }
@@ -795,6 +810,9 @@ impl Tx {
         if let Some(tracker) = self.tracker.as_mut() {
             let step = tracker.on_block(&header, open_record);
             self.record(step);
+            if part {
+                self.open_part = resume_part;
+            }
         }
         self.contract = Some(header.contract);
         true
@@ -816,15 +834,19 @@ impl Tx {
     fn record(&self, step: Result<BurstStep, ezsdr_kernel::stream::StreamError>) {
         let mut rec = lock(&self.core.rec);
         match step {
-            Ok(BurstStep::Ended { record }) => rec.bursts.push(serde_json::to_value(record).expect("a record")),
+            Ok(BurstStep::Ended { record }) => rec.bursts.push(burst_key(false), serde_json::to_value(record).expect("a record")),
             Ok(BurstStep::Discontinuity { closed, then_ended, .. }) => {
-                rec.bursts.push(serde_json::to_value(closed).expect("a record"));
+                // The record a start of burst closes is an intermediate part when a resume opened it (UR-30).
+                rec.bursts.push(burst_key(self.open_part), serde_json::to_value(closed).expect("a record"));
                 if let Some(ended) = then_ended {
-                    rec.bursts.push(serde_json::to_value(ended).expect("a record"));
+                    rec.bursts.push(burst_key(false), serde_json::to_value(ended).expect("a record"));
                 }
             }
             Ok(_) => {}
-            Err(error) => rec.rejected.push(json!({ "burst_tracker": error.to_string() })),
+            Err(error) => {
+                let row = json!({ "burst_tracker": error.to_string() });
+                rec.rejected.push(rejected_key(&row), row);
+            }
         }
     }
 
@@ -857,7 +879,7 @@ impl Tx {
         });
         // A switch that replaced a paused repeat is cancelled by a halt with nothing of it sent (UR-22): the repeat's record is the tracker's open one.
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
-            lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
+            lock(&self.core.rec).bursts.push(burst_key(false), serde_json::to_value(record).expect("a record"));
         }
         front
     }
@@ -971,7 +993,7 @@ impl Tx {
     /// which the caller reports once the lock is released (UR-25).
     fn halt_failed_reopen(&mut self, streams: &mut Streams, key: StreamKey) {
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
-            lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
+            lock(&self.core.rec).bursts.push(burst_key(false), serde_json::to_value(record).expect("a record"));
         }
         streams.finished(key);
         self.clock = None;
@@ -1100,8 +1122,7 @@ impl Tx {
             let front = book.device.front().filter(|(domain, _)| *domain == clock.domain).map(|(_, front)| clock.instant(front));
             let unaligned = book.busy.saturating_add(margin);
             let at = resume_boundary(clock, origin, period, unaligned, now.saturating_add(lead), front)?;
-            // The stall part of the gap: from the drop point to the unaligned resume candidate; the wait to the period boundary is not counted.
-            book.resume_at(at, unaligned.saturating_sub(clock.instant(handed)));
+            book.resume_at(at);
             if unsent {
                 let open = book.open.as_mut().expect("a booking is open");
                 open.booking.k = at;
@@ -1113,26 +1134,19 @@ impl Tx {
             Some(at)
         })?;
         self.core.timing(json!({ "what": "tx_resume", "stream": self.k, "cause": cause, "from": handed, "resumes_at": planned, "at": now }));
+        self.core.stat("tx_resumes", 1);
+        self.core.stat("tx_gap_samples", planned - handed);
         Some(planned)
     }
 
-    /// UR-22: what a report that retired `newest` (the newest device burst it reached, if any) does to the burst. `tick` is the report's instant, none
-    /// for a lost sequence; `resumes` whether the report's kind lets a repeat resume (an underflow or a late drop, not a lost sequence); `late` whether
-    /// it is a late drop, which no sample of a part survives. A part that resumed a repeat and plays less than the stall part before it ends the repeat.
-    fn dropped(&mut self, newest: Option<&Reached>, tick: Option<i64>, resumes: bool, late: bool) -> Dropped {
+    /// UR-22: what a report does to the open device burst. `tick` is the report's instant, none for a lost sequence; `resumes` whether the report's
+    /// kind lets a repeat resume (an underflow or a late drop, not a lost sequence); `late` whether it is a late drop, which names the cause. A part that
+    /// resumed a repeat is dropped as any device burst is: the repeat resumes again.
+    fn dropped(&mut self, tick: Option<i64>, resumes: bool, late: bool) -> Dropped {
         let (hit, paused) = self.with_book(|book| (book.device.underflowed(tick), book.open.as_ref().and_then(|open| open.paused)));
         // A lost sequence ends a repeat that waits to resume as it ends one that runs: no device burst is open then, so nothing else would reach it.
         if !resumes && paused.is_some() {
             return Dropped::Ended;
-        }
-        if let Some((stall, reached)) = newest.and_then(|reached| reached.resumed.map(|stall| (stall, reached))) {
-            let played = if late { 0 } else { tick.map_or(0, |tick| tick - reached.start) };
-            // The part is the open device burst's, or the one whose drop made the pause the booking is in now (its burst was closed by that pause, so none is open): a
-            // report of another repeat's part, read while this one waits, is none of this pause's business.
-            let ours = hit || paused.is_some_and(|paused| paused.source == Some(reached.start));
-            if ours && played < stall {
-                return Dropped::Ended;
-            }
         }
         if !hit {
             return Dropped::Nothing;
@@ -1175,7 +1189,7 @@ impl Tx {
             }
         }
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
-            lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
+            lock(&self.core.rec).bursts.push(burst_key(false), serde_json::to_value(record).expect("a record"));
         }
         self.with_book(|book| book.end_open(end));
         true
@@ -1398,14 +1412,18 @@ impl Tx {
         let raw = json!({
             "code": format!("{:?}", report.code), "tick": report.tick, "channel": report.channel, "stream": self.k,
         });
-        lock(&self.core.rec).device_async.push(raw);
+        // An `Ack`'s row waits for what it retires: a booked burst's acknowledgement is never left out of the record (UR-30).
+        if report.code != TxCode::BurstAck {
+            self.core.async_row(raw.clone(), false);
+        }
         let time = match (self.clock, report.tick) {
             (Some(clock), Some(tick)) => TimePoint::new(clock.domain, (tick - clock.origin).div_euclid(clock.n)),
             _ => self.core.at(self.core.now()),
         };
         match report.code {
             TxCode::BurstAck => {
-                self.retire(report.channel, report.tick, Reach::Ack);
+                let (_, booked) = self.retire(report.channel, report.tick, Reach::Ack);
+                self.core.async_row(raw, booked);
             }
             TxCode::Underflow | TxCode::UnderflowInPacket | TxCode::SeqError | TxCode::SeqErrorInBurst => {
                 let cause = if matches!(report.code, TxCode::Underflow | TxCode::UnderflowInPacket) { TxUnderflowCause::Starved } else { TxUnderflowCause::Lost };
@@ -1416,9 +1434,9 @@ impl Tx {
                 // abandon. A sequence error's tick is not compared: its meaning is unmeasured, and it may be ahead of its packet's play time.
                 let tick = if cause == TxUnderflowCause::Starved { report.tick } else { None };
                 // UR-28: the report retires the bursts it reaches, silently: a burst that underflowed is not late.
-                let reached = self.retire(report.channel, tick, Reach::Underflow);
+                let (reached, _) = self.retire(report.channel, tick, Reach::Underflow);
                 // The resume point is decided before the event that carries it is made.
-                let dropped = self.dropped(reached.last(), tick, cause == TxUnderflowCause::Starved, false);
+                let dropped = self.dropped(tick, cause == TxUnderflowCause::Starved, false);
                 let resumes_at = match dropped {
                     Dropped::Resumed(at) => Some(at),
                     Dropped::Ended => None,
@@ -1434,9 +1452,9 @@ impl Tx {
             TxCode::TimeError => {
                 // The report tick is radio-current-time, not the rejected packet's timestamp. A tickless report is only the raw row.
                 let Some(tick) = report.tick else { return };
-                let reached = self.retire(report.channel, Some(tick), Reach::Late);
+                let (reached, _) = self.retire(report.channel, Some(tick), Reach::Late);
                 // UR-22: a late report that reaches the open device burst abandons it as an underflow does, but a repeat resumes.
-                let dropped = self.dropped(reached.last(), Some(tick), true, true);
+                let dropped = self.dropped(Some(tick), true, true);
                 let count = reached.len();
                 for (index, reached) in reached.into_iter().enumerate() {
                     if !reached.tell {
@@ -1595,7 +1613,7 @@ mod tests {
     use super::super::test_support::{ReportFeed, TxSpy};
     use super::{Held, TX_CHANNELS_MAX, Tail, Tx, TxCmd};
     use crate::device::{Device, Dir, FakeConfig, FakeDevice, FakeFault, Iq, Settings, TxCode, TxReport};
-    use crate::provider::core::{Clock, Core, Holder, lock, stream_key};
+    use crate::provider::core::{Clock, Core, Holder, Records, burst_key, lock, stream_key};
     use crate::provider::test_support::{clock_guard, device_at};
     use ezsdr_kernel::id::ClockDomainId;
     use ezsdr_radio::staging::{DeviceChain, Recovery};

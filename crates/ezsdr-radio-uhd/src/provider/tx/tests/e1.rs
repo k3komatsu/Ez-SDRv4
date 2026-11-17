@@ -58,7 +58,7 @@ pub(super) fn last_send_eob(rig: &SwitchRig) -> bool {
 }
 
 pub(super) fn rows(rig: &SwitchRig) -> Vec<serde_json::Value> {
-    lock(&rig.core.rec).bursts.clone()
+    lock(&rig.core.rec).bursts.to_vec()
 }
 
 /// A rig on a clock whose origin is `origin` ticks after the start: `booking_control_at` registers it.

@@ -819,6 +819,22 @@ mod tests {
     }
 
     #[test]
+    fn ur_30_a_stop_per_action_is_never_bounded_past_n() {
+        // UR-30: the `tx_stop_applied` row is the only place a Stop's applied instant and bound exist, so the record bound never leaves one out: N = 2 and five Stops keep
+        // five rows, and `record_bound` counts nothing.
+        let (core, mut control, time, _events) = tx_rig();
+        *lock(&core.rec) = crate::provider::core::Records::with_limit(2);
+        for i in 0..5i64 {
+            book_tx_burst(&mut control, &core, 10 + i as u64 * 2, 10_000 + i * 100_000, true, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
+            time.advance_to(core.at(core.ticks((5 + i * 100) * 1_000_000))).unwrap();
+            control.book(Dispatched::new(ActionId(11 + i as u64 * 2), Action::Stop { target: Some(crate::provider::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
+        }
+        let rec = lock(&core.rec);
+        assert_eq!(rec.timing.iter().filter(|row| row["what"] == "tx_stop_applied").count(), 5);
+        assert!(rec.written().iter().any(|(name, value)| *name == "record_bound" && value["omitted"] == serde_json::json!({})));
+    }
+
+    #[test]
     fn ur_21_an_untimed_repeat_after_a_stop_starts_at_the_bound_or_its_ordinary_start() {
         // RM-15, RM-16 (#83), on the controlled clock: a Stop at 5 ms bounds the stream at 10 ms of samples past it, plus five (the bound,
         // 15 ms here). An untimed repeat received inside that region (7 ms) starts at the bound; one received after it (20 ms) starts at

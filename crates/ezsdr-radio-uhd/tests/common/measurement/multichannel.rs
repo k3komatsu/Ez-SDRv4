@@ -693,7 +693,8 @@ fn nic_delta(before: &BTreeMap<String, [Option<u64>; 7]>, after: &BTreeMap<Strin
 /// The bench profile of a stage: `bench_profile` with one capture sink and one placement for each receive stream's port.
 fn stage_profile(device: &dyn Device, dir: &common::TempDir, stage: &Stage) -> Json {
     let environment = if stage.tx.is_empty() { json!({}) } else { common::bench_envelope(device) };
-    let mut doc = common::bench_profile(device, dir, json!({}), environment, false);
+    // UR-30: this stage's reader counts rows, so it asks for the most rows of each kind the selector allows.
+    let mut doc = common::bench_profile(device, dir, common::throughput_selector(), environment, false);
     for k in 1..stage.rx.len() {
         let sink = doc["bindings"]["rec"].clone();
         doc["bindings"][format!("rec{k}")] = sink;
@@ -870,6 +871,10 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
             "sample_clock_interval_ticks": interval.map(|(ticks, _)| ticks), "sample_clock_origin_tick": span.map(|(origin, _)| origin), "sample_clock_end_tick": span.map(|(_, end)| end), "actual_samples": actual, "packet_samples": packets[k], "tolerance_samples": slack,
             "rx_overflow": overflow, "class": trial_class_name(class),
         }) });
+    }
+    let left_out = common::omitted_rows(&manifest);
+    if !left_out.is_empty() {
+        return Err(format!("throughput Run: the Provider left rows out of the Manifest ({left_out:?}); raise `record_rows_per_kind`"));
     }
     let async_all = manifest.section(&common::usrp(), "ezsdr.radio.uhd.async").ok_or("throughput Run has no async section")?;
     let bursts_all = manifest.section(&common::usrp(), "ezsdr.radio.uhd.bursts").ok_or("throughput Run has no burst section")?;

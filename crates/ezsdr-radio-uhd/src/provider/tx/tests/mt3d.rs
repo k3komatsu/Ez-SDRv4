@@ -38,6 +38,14 @@ fn resumes(core: &Core) -> Vec<serde_json::Value> {
     lock(&core.rec).timing.iter().filter(|row| row["what"] == "tx_resume").cloned().collect()
 }
 
+/// C1 (UR-30): `tx_resumes` is the number of `tx_resume` rows and `tx_gap_samples` the sum of their planned spans `resumes_at - from`, in a Run below the record bound.
+fn assert_counters(core: &Core) {
+    let rows = resumes(core);
+    let stats = lock(&core.rec).stats.clone();
+    assert_eq!(stats["tx_resumes"], rows.len() as i64, "{rows:?}");
+    assert_eq!(stats["tx_gap_samples"], rows.iter().map(|row| row["resumes_at"].as_i64().unwrap() - row["from"].as_i64().unwrap()).sum::<i64>(), "{rows:?}");
+}
+
 /// The fake's transmit calls as `(samples, first sample's tick, start of burst, end of burst)`.
 fn tx_sends(device: &FakeDevice) -> Vec<(i64, Option<i64>, bool, bool)> {
     let field = |call: &str, name: &str| call.split_whitespace().find_map(|word| word.strip_prefix(name)).map(str::to_owned);
@@ -84,7 +92,12 @@ fn late_repeat_with(faults: Vec<FakeFault>) -> SwitchRig {
 
 /// `late_repeat`, its report read (the repeat resumes at 32 000) and its part at 32 000 handed, the owner and the device at 24 ms.
 fn resumed_part() -> SwitchRig {
-    let mut rig = late_repeat();
+    resumed_part_with(Vec::new())
+}
+
+/// [`resumed_part`] on a fake with `faults`.
+fn resumed_part_with(faults: Vec<FakeFault>) -> SwitchRig {
+    let mut rig = late_repeat_with(faults);
     rig.tx.reports(Wall::ZERO);
     assert_eq!(rig.tx.open_next(), Some(32_000), "paused until its resume point");
     for ms in [23, 24] {
@@ -180,10 +193,13 @@ fn mt3d_the_expired_timeline_resumes_and_the_report_that_comes_later_carries_the
     let row = resumes(&rig.core);
     assert_eq!((row.len(), row[0]["cause"].as_str(), row[0]["resumes_at"].as_i64()), (1, Some("expired"), Some(33_000)), "{row:?}");
     assert_eq!(ended_notes(&rig.core), 0, "{:?}", lock(&rig.core.rec).rejected);
+    assert_eq!(lock(&rig.core.rec).stats["tx_resumes"], 1, "counted once, by the expired check (C2)");
     rig.tx.reports(Wall::ZERO);
     assert_eq!(emitted(&rig.events), [("late", Some(33_000))], "the event carries the plan the expired check made");
     assert_eq!(resumes(&rig.core).len(), 1, "the report that comes later resumes nothing again: {:?}", lock(&rig.core.rec).timing);
     assert_eq!(rig.tx.open_next(), Some(33_000));
+    assert_eq!(lock(&rig.core.rec).stats["tx_resumes"], 1, "counted once, by the expired check (C2)");
+    assert_counters(&rig.core);
 }
 
 #[test]
@@ -223,20 +239,57 @@ fn mt3d_a_second_stall_inside_the_send_moves_busy_and_so_the_resume_point() {
 }
 
 #[test]
-fn mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat() {
-    // V11 (UR-22): the first gap's stall part is P = (busy + m) - H = (21 002 + 10 000) - 21 000 = 10 002 samples. The part started at 32 000: an Underflow after
-    // played = P - 1 ends the repeat, after P (equality) or P + 1 resumes it again; a late drop that reaches the part (nothing of it played) ends it.
-    for (code, played, ends) in [(TxCode::Underflow, 10_001, true), (TxCode::Underflow, 10_002, false), (TxCode::Underflow, 10_003, false), (TxCode::TimeError, 1, true)] {
+fn mt3d_an_underflow_on_a_part_resumes_the_repeat_again_whatever_it_played() {
+    // V11 (UR-22, #106): a part is dropped as any device burst is, whatever it played: the first gap's part started at 32 000 and the Underflow reads 0, 1, 10 001
+    // (the old stall part less one), 10 002 and 10 003 samples after it. Each resumes the repeat again: one event with the plan, one `tx_resume` row from the part's
+    // handed cursor, one close, and a resume point on the lattice at least m + 32 samples (10 032) after the one before (`R2 >= busy + m` and the part's first send moved
+    // `busy` by at least 32 samples).
+    for played in [0, 1, 10_001, 10_002, 10_003] {
         let mut rig = resumed_part();
-        let resumes_before = resumes(&rig.core).len();
-        report(&mut rig.tx, code, &rig.clock, 32_000 + played, 0);
-        let events = emitted(&rig.events);
-        assert_eq!(ended_notes(&rig.core), usize::from(ends), "{code:?} after {played}: {:?}", lock(&rig.core.rec).rejected);
-        assert_eq!(rig.tx.open_next().is_none(), ends, "{code:?} after {played}");
-        assert_eq!(resumes(&rig.core).len(), resumes_before + usize::from(!ends), "{code:?} after {played}");
-        assert_eq!(events.len(), 1, "{events:?}");
-        assert_eq!(events[0].1.is_some(), !ends, "{code:?} after {played}: an ended repeat has no `resumes_at`: {events:?}");
+        let (h2, before) = (rig.tx.open_next().expect("the part's cursor"), resumes(&rig.core).len());
+        report(&mut rig.tx, TxCode::Underflow, &rig.clock, 32_000 + played, 0);
+        let r2 = rig.tx.open_next().expect("paused until R2");
+        assert_eq!(emitted(&rig.events), [("underflow", Some(r2))], "after {played}: {:?}", lock(&rig.core.rec).rejected);
+        assert_eq!(ended_notes(&rig.core), 0, "after {played}: {:?}", lock(&rig.core.rec).rejected);
+        let rows = resumes(&rig.core);
+        assert_eq!(rows.len(), before + 1, "after {played}");
+        assert_eq!((rows[before]["cause"].as_str(), rows[before]["from"].as_i64(), rows[before]["resumes_at"].as_i64()), (Some("underflow"), Some(h2), Some(r2)), "after {played}: {rows:?}");
+        assert!(r2 % 1_000 == 0 && r2 - 32_000 >= 10_032, "R2 {r2} is on W0's lattice and a margin past R1 after {played}");
+        assert_eq!(closing_sends(&rig.device).len(), 2, "one close per resume, none for the report: {:?}", rig.device.calls());
+        assert!(rig.tx.unacked.is_empty(), "after {played}");
+        assert_counters(&rig.core);
     }
+}
+
+#[test]
+fn mt3d_a_late_report_that_reaches_a_part_resumes_it_again() {
+    // V11 (UR-22, UR-28, #106): the part at R1 = 32 000 is dropped late (nothing of it played): the repeat resumes again, the event names the part's own start and
+    // carries the new plan, and the part's record ends in a discontinuity once the next part is handed.
+    let mut rig = resumed_part();
+    report(&mut rig.tx, TxCode::TimeError, &rig.clock, 33_000, 0);
+    let r2 = rig.tx.open_next().expect("paused until R2");
+    let late: Vec<_> = drained(&rig.events)
+        .iter()
+        .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR && event.payload["outcome"] == "late_at_device")
+        .map(|event| (event.payload["target"]["ticks"].as_i64(), event.payload["resumes_at"]["ticks"].as_i64()))
+        .collect();
+    assert_eq!(late, [(Some(32_000), Some(r2))], "{:?}", lock(&rig.core.rec).rejected);
+    assert_eq!(ended_notes(&rig.core), 0, "{:?}", lock(&rig.core.rec).rejected);
+    let rows_now = resumes(&rig.core);
+    assert_eq!((rows_now.len(), rows_now[1]["cause"].as_str(), rows_now[1]["resumes_at"].as_i64()), (2, Some("late_at_device"), Some(r2)), "{rows_now:?}");
+    assert_counters(&rig.core);
+    // The part at R2 is handed in its own send window; the part at 32 000 closed its record then.
+    for ms in [r2 / 1_000 - 9, r2 / 1_000 + 1] {
+        at(&rig, ms * MS);
+        go(&mut rig);
+    }
+    assert_eq!(part_start(&rig), Some(r2), "{:?}", rig.device.calls());
+    let records = rows(&rig);
+    assert_eq!(
+        records.iter().map(|row| (row["end"].as_str(), row["target"]["ticks"].as_i64())).collect::<Vec<_>>(),
+        [(Some("discontinuity"), Some(20_000)), (Some("discontinuity"), Some(32_000))],
+        "{records:?}"
+    );
 }
 
 #[test]
@@ -255,24 +308,25 @@ fn mt3d_a_stale_report_of_the_dropped_burst_does_not_drop_the_resumed_part() {
 }
 
 #[test]
-fn mt3d_a_second_drop_found_in_the_gap_abandons_at_the_handed_cursor() {
-    // V13 (UR-22, M3): the part at R1 = 32 000 is dropped. The owner's expired check finds it before the report is read and resumes again (H2, R2; nothing is
-    // open). Then the part's TimeError reaches its correlation: nothing of it played, so the repeat ends by the abandon, at H2, not at R2: a booking 5 000
-    // samples past H2 is on time and accepted (a footprint at R2 + 5 would refuse it), and no send follows at R2.
+fn mt3d_a_part_the_expired_check_resumed_is_told_by_its_report_and_resumes_nothing_more() {
+    // V13 (UR-22, UR-28, #106): the part at R1 = 32 000 is dropped. The owner's expired check finds it before the report is read and resumes again (H2, R2; nothing is
+    // open). The part's TimeError then reaches its correlation: it carries the plan the expired check made, once, and resumes nothing again (no device burst is open),
+    // ends nothing, sends nothing; the part at R2 starts there. (The abandon at H with no send at R is pinned where it still happens: the lost sequence in the gap.)
     let mut rig = resumed_part();
     let h2 = rig.tx.open_next().expect("the part's cursor");
     at(&rig, h2 / 1_000 * MS + MS);
     assert!(rig.tx.step());
-    let paused_at = rig.tx.open_next().expect("paused again");
-    assert!(paused_at > h2 + 5_000, "R2 {paused_at} is past H2 {h2}");
+    let r2 = rig.tx.open_next().expect("paused again");
+    assert!(r2 > h2 + 5_000, "R2 {r2} is past H2 {h2}");
     assert_eq!(resumes(&rig.core).len(), 2);
     let sends = tx_sends(&rig.device).len();
     report(&mut rig.tx, TxCode::TimeError, &rig.clock, 33_000, 0);
-    assert_eq!(ended_notes(&rig.core), 1, "{:?}", lock(&rig.core.rec).rejected);
-    assert_eq!(rig.tx.open_next(), None);
-    assert_eq!(tx_sends(&rig.device).len(), sends, "no close and no start at R2: {:?}", rig.device.calls());
-    book(&mut rig, 7, 1, h2 + 5_000);
-    assert!(super::e2a::refused_ids(&rig.events).is_empty(), "{:?}", lock(&rig.core.rec).rejected);
+    assert_eq!(emitted(&rig.events), [("late", Some(r2))], "{:?}", lock(&rig.core.rec).rejected);
+    assert_eq!((ended_notes(&rig.core), rig.tx.open_next(), resumes(&rig.core).len()), (0, Some(r2), 2), "{:?}", lock(&rig.core.rec).rejected);
+    assert_eq!(tx_sends(&rig.device).len(), sends, "the report sends nothing: {:?}", rig.device.calls());
+    assert_counters(&rig.core);
+    sweep(&mut rig, h2 / 1_000 + 2, r2 / 1_000 + 1);
+    assert_eq!(part_start(&rig), Some(r2), "{:?}", rig.device.calls());
 }
 
 #[test]
@@ -326,20 +380,24 @@ fn mt3d_busy_survives_a_new_owner() {
 #[test]
 fn mt3d_a_switch_that_joins_a_resumed_part_is_named_with_it() {
     // V21 (UR-28, carry (b)): a late drop that reaches a resumed part names the part's start and the Kernel burst that joined it. After the part is the
-    // open device burst, its correlation is the last, so the join lands on it.
+    // open device burst, its correlation is the last, so the join lands on it. Both events carry the plan of the one resume the drop caused (UR-28): the Kernel
+    // bursts of one dropped device burst share it; the resume is counted once.
     let mut rig = resumed_part();
+    let resumed_before = lock(&rig.core.rec).stats["tx_resumes"];
     let (domain, part) = (rig.clock.domain, rig.tx.unacked.back().map(|pending| pending.target.ticks_in(rig.clock.domain).unwrap()));
     assert_eq!(part, Some(32_000), "the part's correlation starts at R");
     rig.tx.join_burst(TimePoint::new(domain, 40_000));
     report(&mut rig.tx, TxCode::TimeError, &rig.clock, 33_000, 0);
-    let named: Vec<i64> = rig
+    let r2 = rig.tx.open_next().expect("paused until the one resume point the drop planned");
+    let named: Vec<(i64, Option<i64>)> = rig
         .events
         .drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0))
         .iter()
         .filter(|event| event.payload["outcome"] == "late_at_device")
-        .map(|event| event.payload["target"]["ticks"].as_i64().unwrap())
+        .map(|event| (event.payload["target"]["ticks"].as_i64().unwrap(), event.payload["resumes_at"]["ticks"].as_i64()))
         .collect();
-    assert_eq!(named, [32_000, 40_000]);
+    assert_eq!(named, [(32_000, Some(r2)), (40_000, Some(r2))], "each Kernel burst of the dropped device burst carries the same plan");
+    assert_eq!(lock(&rig.core.rec).stats["tx_resumes"], resumed_before + 1, "one resume");
     // V21b: with no correlation (a reopen cleared them) a join makes none and touches none.
     let (mut tx, _clock, _events, _to_tx, _core) = unit(1);
     tx.join_burst(TimePoint::new(domain, 5));
@@ -363,14 +421,15 @@ fn mt3d_two_channels_resume_once_and_tell_each_underflow() {
     }
     assert_eq!(emitted(&rig.events), [("underflow", Some(36_000)), ("underflow", None)]);
     assert_eq!(resumes(&rig.core).len(), 1);
+    assert_counters(&rig.core);
     assert!(rig.tx.unacked.is_empty(), "each channel's Underflow retired its own position");
 }
 
 #[test]
-fn mt3d_two_channels_late_resume_once_in_either_order_and_the_part_ends_on_one_channel() {
+fn mt3d_two_channels_late_resume_once_in_either_order_and_the_part_resumes_on_one_channel() {
     // V23 (UR-22, UR-28, RT22): a late drop on two channels. The report that comes first, from either channel, names the Kernel burst once with `resumes_at`
     // and makes the one resume and the one `timing` row; the other channel's report, which reaches the burst's remaining position, adds no event and no resume.
-    // The part's first report to reach it decides the stutter rule from either channel.
+    // The part is dropped as any device burst is, from either channel.
     for first_channel in [0, 1] {
         let mut rig = late_repeat();
         // The fake's report (channel 0) waits in its queue; a scripted report of `first_channel` is read first.
@@ -381,12 +440,22 @@ fn mt3d_two_channels_late_resume_once_in_either_order_and_the_part_ends_on_one_c
         rig.tx.reports(Wall::ZERO);
         assert!(emitted(&rig.events).is_empty(), "the other channel and the fake's own reports add no event: channel {first_channel} first");
         assert_eq!((resumes(&rig.core).len(), rig.tx.open_next()), (1, Some(32_000)));
+        assert_counters(&rig.core);
     }
-    // The part's correlation holds both channels: a late report from channel 1 alone reaches it, nothing of it played, and the repeat ends.
-    let mut rig = resumed_part();
-    rig.tx.unacked.back_mut().expect("the part's correlation").channels = [0, 1].into();
-    report(&mut rig.tx, TxCode::TimeError, &rig.clock, 33_000, 1);
-    assert_eq!((ended_notes(&rig.core), rig.tx.open_next()), (1, None), "{:?}", lock(&rig.core.rec).rejected);
+    // The part's correlation holds both channels: a late report from either channel reaches it, nothing of it played, and the repeat resumes again once (the
+    // device burst is closed by the resume, so the other channel's report finds none to drop).
+    for first_channel in [0, 1] {
+        let mut rig = resumed_part();
+        rig.tx.unacked.back_mut().expect("the part's correlation").channels = [0, 1].into();
+        report(&mut rig.tx, TxCode::TimeError, &rig.clock, 33_000, first_channel);
+        let r2 = rig.tx.open_next().expect("paused until R2");
+        assert_eq!(emitted(&rig.events), [("late", Some(r2))], "channel {first_channel} first");
+        assert_eq!(resumes(&rig.core).len(), 2, "channel {first_channel} first");
+        report(&mut rig.tx, TxCode::TimeError, &rig.clock, 33_000, 1 - first_channel);
+        assert!(emitted(&rig.events).is_empty(), "the other channel adds no event: channel {first_channel} first");
+        assert_eq!((ended_notes(&rig.core), resumes(&rig.core).len(), rig.tx.open_next()), (0, 2, Some(r2)), "channel {first_channel} first: {:?}", lock(&rig.core.rec).rejected);
+        assert_counters(&rig.core);
+    }
 }
 
 #[test]
@@ -465,57 +534,49 @@ fn mt3d_a_resume_whose_event_never_comes_still_splits_the_record() {
     assert_eq!(rows(&rig).iter().map(|row| row["end"].as_str()).collect::<Vec<_>>(), [Some("discontinuity")]);
 }
 
-#[test]
-fn mt3d_a_delayed_underflow_that_retires_two_entries_applies_the_stutter_rule() {
-    // V3b (UR-22): the part at R1 = 33 000 (after an expired resume) is itself found expired and resumed again, before any report is read. One delayed
-    // Underflow then reaches the dropped burst and the part together: one TX_UNDERFLOW, and the newest entry decides by the stall part before it,
-    // P1 = (busy1 + m) - H1 = (22 002 + 10 000) - 21 000 = 11 002 samples: played = P1 - 1 ends (abandon at H2, no start at R2, no stray close), P1 and P1 + 1 keep
-    // the second resume.
-    // Two geometries for the second gap: the owner wakes `wake` samples past H2, so its stall part is P2 = busy2 + m - H2 = 10 002 + wake: g1 wake 1 500, P2 =
-    // P1 + 500; g2 wake 500, P2 = P1 - 500. A rule that compared with P2 ends the P1 cases in g1 and resumes the P1 - 1 case in g2.
-    for (wake, delta) in [(1_500, 500), (500, -500)] {
-        for (played, ends) in [(11_001, true), (11_002, false), (11_003, false)] {
-            let mut rig = late_repeat();
-            at(&rig, 22 * MS);
-            assert!(rig.tx.step());
-            for ms in [24, 25] {
-                at(&rig, ms * MS);
-                go(&mut rig);
-            }
-            let h2 = rig.tx.open_next().expect("the part's cursor");
-            at(&rig, (h2 + wake) * 200);
-            assert!(rig.tx.step());
-            assert_eq!(resumes(&rig.core).len(), 2);
-            let r2 = rig.tx.open_next().expect("paused again");
-            let stall = rig.tx.with_book(|book| book.open.as_ref().and_then(|open| open.paused).map(|paused| paused.stall));
-            assert_eq!(stall, Some((11_002 + delta) * 200), "P2 of wake {wake}");
-            while let Ok(Some(_)) = rig.device.tx_async(0, Wall::ZERO) {}
-            let sends = tx_sends(&rig.device).len();
-            report(&mut rig.tx, TxCode::Underflow, &rig.clock, 33_000 + played, 0);
-            assert_eq!(emitted(&rig.events), [("underflow", (!ends).then_some(r2))], "wake {wake}, played {played}");
-            assert!(rig.tx.unacked.is_empty());
-            assert_eq!(ended_notes(&rig.core), usize::from(ends), "wake {wake}, played {played}");
-            assert_eq!(resumes(&rig.core).len(), 2, "no third resume");
-            assert_eq!(rig.tx.open_next(), (!ends).then_some(r2), "wake {wake}, played {played}");
-            assert_eq!(tx_sends(&rig.device).len(), sends, "no close and no start at R2: {:?}", rig.device.calls());
-        }
-        // A late drop that reaches both entries: nothing of the part played, so the repeat ends whatever the gap; each Kernel burst is told, the dropped
-        // burst with the plan it was given, the part with none.
-        let mut rig = late_repeat();
-        at(&rig, 22 * MS);
-        assert!(rig.tx.step());
-        for ms in [24, 25] {
-            at(&rig, ms * MS);
-            go(&mut rig);
-        }
-        let h2 = rig.tx.open_next().expect("the part's cursor");
-        at(&rig, (h2 + wake) * 200);
-        assert!(rig.tx.step());
-        while let Ok(Some(_)) = rig.device.tx_async(0, Wall::ZERO) {}
-        report(&mut rig.tx, TxCode::TimeError, &rig.clock, 33_001, 0);
-        assert_eq!(emitted(&rig.events), [("late", Some(33_000)), ("late", None)], "wake {wake}");
-        assert_eq!((ended_notes(&rig.core), resumes(&rig.core).len(), rig.tx.open_next()), (1, 2, None), "wake {wake}");
+/// `late_repeat`'s dropped burst resumed by the expired check at 22 ms (R1), the part at R1 handed and itself found expired `wake` samples past its cursor `H2`
+/// (R2), the fake's own reports drained: two entries are pending, the dropped burst's and the part's, and the repeat waits to resume at R2.
+fn two_pending_entries(wake: i64) -> (SwitchRig, i64) {
+    let mut rig = late_repeat();
+    at(&rig, 22 * MS);
+    assert!(rig.tx.step());
+    for ms in [24, 25] {
+        at(&rig, ms * MS);
+        go(&mut rig);
     }
+    let h2 = rig.tx.open_next().expect("the part's cursor");
+    at(&rig, (h2 + wake) * 200);
+    assert!(rig.tx.step());
+    assert_eq!(resumes(&rig.core).len(), 2);
+    let r2 = rig.tx.open_next().expect("paused again");
+    while let Ok(Some(_)) = rig.device.tx_async(0, Wall::ZERO) {}
+    emitted(&rig.events);
+    (rig, r2)
+}
+
+#[test]
+fn mt3d_a_delayed_report_that_retires_two_entries_keeps_both_resumes() {
+    // V3b (UR-22, UR-28, #106): the part at R1 = 33 000 (after an expired resume) is itself found expired and resumed again, before any report is read. One delayed
+    // report then reaches the dropped burst and the part together. Nothing ends the repeat, whatever the part played: both resumes stay, no third is made by the
+    // report (no device burst is open), nothing is sent. An Underflow makes one TX_UNDERFLOW with the newest entry's plan (R2); the older entry's plan is taken and
+    // not carried. A late drop tells each Kernel burst with the plan it was given: the dropped burst R1, the part R2.
+    for (wake, played) in [(1_500, 1), (1_500, 11_001), (500, 1)] {
+        let (mut rig, r2) = two_pending_entries(wake);
+        let sends = tx_sends(&rig.device).len();
+        report(&mut rig.tx, TxCode::Underflow, &rig.clock, 33_000 + played, 0);
+        assert_eq!(emitted(&rig.events), [("underflow", Some(r2))], "wake {wake}, played {played}");
+        assert!(rig.tx.unacked.is_empty());
+        assert_eq!(ended_notes(&rig.core), 0, "wake {wake}, played {played}: {:?}", lock(&rig.core.rec).rejected);
+        assert_eq!(resumes(&rig.core).len(), 2, "no third resume");
+        assert_eq!(rig.tx.open_next(), Some(r2), "wake {wake}, played {played}");
+        assert_eq!(tx_sends(&rig.device).len(), sends, "no close and no start at R2: {:?}", rig.device.calls());
+        assert_counters(&rig.core);
+    }
+    let (mut rig, r2) = two_pending_entries(1_500);
+    report(&mut rig.tx, TxCode::TimeError, &rig.clock, 33_001, 0);
+    assert_eq!(emitted(&rig.events), [("late", Some(33_000)), ("late", Some(r2))]);
+    assert_eq!((ended_notes(&rig.core), resumes(&rig.core).len(), rig.tx.open_next()), (0, 2, Some(r2)), "{:?}", lock(&rig.core.rec).rejected);
+    assert_counters(&rig.core);
 }
 
 #[test]
@@ -540,8 +601,7 @@ fn mt3d_the_margin_is_ten_milliseconds_and_the_lattice_rounds_up() {
     // samples (2 500 from 21 000, plus the fake's pad) ends near 23 560. busy1 = max(0, 17 000, k0) + 2 500 = k0 + 2 500; the close (H = k0 + 2 500, r = 21 000,
     // n = 2): busy = k0 + 2 502, so busy + m = k0 + 12 502. The decision instant plus the lead is 23 000.
     // Case A (period 1 000, k0 = 20 030): R = the first 20 030 + 1 000 j at or after 32 532 = 33 030. Without `m` the bound is 23 000 and R = 23 030, inside the
-    // drain, where the fake is expected to refuse it and the stutter rule to end the repeat (not run: the row that drops `m`, MT3D-02, is killed by the exact
-    // `R`); the part plays at 33 030.
+    // drain, where the fake is expected to refuse it (not run: the row that drops `m`, MT3D-02, is killed by the exact `R`); the part plays at 33 030.
     // Case B (period 12 502, k0 = 20 030): busy + m = 32 532 is the lattice point itself, so R = 32 532 and R - busy = m exactly.
     for (wave, period, expected) in [(0, 1_000, 33_030), (2, 12_502, 32_532)] {
         let mut rig = switch_rig(vec![o::ramp(1, 1_000), o::ramp(2, 100), o::ramp(3, 12_502)]);
@@ -595,6 +655,7 @@ fn mt3d_more_that_ends_a_repeat_a_resume_point_past_the_clock_and_a_failed_conti
     rig.tx.reports(Wall::ZERO);
     assert_eq!(emitted(&rig.events), [("late", None)]);
     assert_eq!((ended_notes(&rig.core), resumes(&rig.core).len(), rig.tx.open_next()), (1, 0, None), "{:?}", lock(&rig.core.rec).rejected);
+    assert_eq!(closing_sends(&rig.device).len(), 1, "the resume's close only: the booking is paused when the resume fails, so the abandon closes no device burst: {:?}", rig.device.calls());
     for fault in [FakeFault::FailSend(2), FakeFault::ShortSend(3), FakeFault::StalledSend(3)] {
         let mut rig = late_repeat_with(vec![fault.clone()]);
         rig.tx.reports(Wall::ZERO);
@@ -684,6 +745,143 @@ fn mt3d_a_second_resume_gives_a_third_record_and_no_discontinuity_event() {
     assert_eq!(records.iter().map(|row| row["target"]["ticks"].as_i64()).collect::<Vec<_>>(), [Some(20_000), Some(32_000), Some(r2)]);
     let kinds: Vec<String> = rig.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().map(|event| event.kind.as_str().to_owned()).collect();
     assert!(kinds.iter().all(|kind| !kind.contains("DISCONTINUITY")), "{kinds:?}");
+}
+
+#[test]
+fn mt3d_a_repeat_whose_every_part_is_dropped_late_keeps_resuming_and_transmits_nothing() {
+    // m7 (UR-22, KL-13, #106): a host that is always late for the device. Each cycle the part at R_i is handed to a device that is already past its start and is dropped
+    // late: the report resumes the repeat at R_(i+1) on its lattice, at least m + 32 samples (10 032) later (`busy` moved by the part's first send, and the margin
+    // `m` past it), one `TIME_ERROR { late_at_device }` and one `tx_resume` row per cycle; nothing is ever radiated; nothing ends the repeat. When the host then
+    // keeps the device's time (its time before the next part's start) the part plays and no further resume follows.
+    const CYCLES: usize = 6;
+    let mut rig = late_repeat();
+    let mut points = vec![20_000];
+    for cycle in 0..CYCLES {
+        rig.tx.reports(Wall::ZERO);
+        let r = rig.tx.open_next().expect("the repeat waits to resume");
+        assert_eq!(emitted(&rig.events), [("late", Some(r))], "cycle {cycle}: {:?}", lock(&rig.core.rec).rejected);
+        assert!(r % 1_000 == 0 && r - *points.last().unwrap() >= 10_032, "cycle {cycle}: R {r} after {points:?}");
+        points.push(r);
+        assert_eq!(resumes(&rig.core).len(), cycle + 1);
+        // The owner is scheduled in time (R - 9 ms) but the device's time is already past R: the fake drops the part's start, whole.
+        at(&rig, (r / 1_000 - 9) * MS);
+        rig.device.set_time((r / 1_000 + 1) * MS);
+        go(&mut rig);
+        at(&rig, (r / 1_000 + 1) * MS);
+    }
+    assert_eq!((ended_notes(&rig.core), resumes(&rig.core).len()), (0, CYCLES), "{:?}", lock(&rig.core.rec).rejected);
+    assert_counters(&rig.core);
+    let last = *points.last().unwrap();
+    assert!(rig.device.transmitted(rig.clock.instant(20_000), (last - 20_000 + 1_000) as usize).iter().all(Option::is_none), "nothing was radiated: {:?}", rig.device.calls());
+    // The host recovers: the report of the last drop is read at the next resume point, and the part there is handed before the device's time reaches it.
+    rig.tx.reports(Wall::ZERO);
+    let next = rig.tx.open_next().expect("the repeat waits to resume");
+    assert_eq!((resumes(&rig.core).len(), emitted(&rig.events).len()), (CYCLES + 1, 1));
+    at(&rig, (next / 1_000 - 9) * MS);
+    go(&mut rig);
+    assert!(rig.device.transmitted(rig.clock.instant(next), 1_000).iter().all(Option::is_some), "the part plays at {next}: {:?}", rig.device.calls());
+    assert_eq!((ended_notes(&rig.core), resumes(&rig.core).len()), (0, CYCLES + 1), "no further resume once the part plays");
+    assert_counters(&rig.core);
+}
+
+/// A starved repeat resumed `cycles` times, each part (but the last) handed before the next Underflow: the repeat is paused for its last resume's point, no part
+/// of it handed. Returns the sum of the planned gaps `R - H`, read from the rig's own view (R is `open_next()` once the report resumed, H the handed cursor
+/// before it) and not from the rows. Every resume is checked against `tx_resumes`, which counts them all, whatever the record bound left out.
+fn starved(rig: &mut SwitchRig, cycles: usize) -> i64 {
+    book_repeat(rig, 1, 20_000, 0);
+    at(rig, 17 * MS);
+    at(rig, 18 * MS);
+    hand(rig, 2);
+    let mut gap = 0;
+    let mut resume = |rig: &mut SwitchRig, tick: i64| {
+        let handed = rig.tx.open_next().expect("a handed cursor");
+        report(&mut rig.tx, TxCode::Underflow, &rig.clock, tick, 0);
+        gap += rig.tx.open_next().expect("paused until R") - handed;
+    };
+    at(rig, 24_500 * 200);
+    resume(rig, 24_000);
+    for cycle in 1..cycles {
+        let r = rig.tx.open_next().expect("the repeat waits to resume");
+        at(rig, (r / 1_000 - 9) * MS);
+        go(rig);
+        resume(rig, r + 1);
+        assert_eq!(lock(&rig.core.rec).stats["tx_resumes"], cycle as i64 + 1);
+    }
+    gap
+}
+
+#[test]
+fn mt3d_many_resumes_keep_going_and_are_counted_exactly() {
+    // C3 (UR-22, UR-30, #106): a repeat that is starved eight times in a row resumes after every one: the Run goes on (it is open before the Stop), every resume has
+    // its `tx_resume` row and its event, and the counters are the rows' sum. (The same Run past the record bound is the next test.)
+    const CYCLES: usize = 8;
+    let mut rig = repeat_rig();
+    let gap = starved(&mut rig, CYCLES);
+    assert!(rig.tx.open_next().is_some(), "the Run went on");
+    assert_eq!(ended_notes(&rig.core), 0, "{:?}", lock(&rig.core.rec).rejected);
+    assert_eq!(emitted(&rig.events).len(), CYCLES);
+    assert_eq!(resumes(&rig.core).len(), CYCLES);
+    let stats = lock(&rig.core.rec).stats.clone();
+    assert_eq!((stats["tx_resumes"], stats["tx_gap_samples"]), (CYCLES as i64, gap));
+    assert_counters(&rig.core);
+    stop(&mut rig);
+    assert_eq!(rig.tx.open_next(), None);
+}
+
+/// `record_bound.omitted` as the Run would write it now.
+fn omitted_now(core: &Core) -> serde_json::Value {
+    let written: BTreeMap<_, _> = lock(&core.rec).written().into_iter().collect();
+    written["record_bound"]["omitted"].clone()
+}
+
+/// The rows of the section `name` as the Run would write them now.
+fn written_now(core: &Core, name: &str) -> Vec<serde_json::Value> {
+    let written: BTreeMap<_, _> = lock(&core.rec).written().into_iter().collect();
+    written[name].as_array().expect("an array section").clone()
+}
+
+/// The records of this rig keep `limit` rows of each kind (set before the first row is written).
+fn with_limit(rig: &SwitchRig, limit: usize) {
+    *lock(&rig.core.rec) = Records::with_limit(limit);
+}
+
+/// The records of this rig keep one row of each kind, and the one of `resumed_part` is spent: the next intermediate part's record is counted and left out.
+fn spend_resumed_part_budget(rig: &SwitchRig) {
+    with_limit(rig, 1);
+    lock(&rig.core.rec).bursts.push(burst_key(true), serde_json::json!({ "spent": true }));
+}
+
+/// The burst records of this rig but the one `spend_resumed_part_budget` wrote.
+fn real_rows(rig: &SwitchRig) -> Vec<serde_json::Value> {
+    rows(rig).into_iter().filter(|row| row["spent"].is_null()).collect()
+}
+
+#[test]
+fn mt3d_many_resumes_past_the_bound_keep_going_and_are_counted_exactly() {
+    // C3 past the bound (UR-22, UR-30, #106): N = 3. Eight starved resumes: the Run goes on; `tx_resumes` and `tx_gap_samples` count all of them; the kept
+    // `tx_resume` rows are the first three and `record_bound` counts the other five; the Underflow rows likewise; the repeat's booked record, the first three
+    // intermediate parts and the closing record are kept (7 parts were handed: the 6 a later resume closed are bounded, the seventh is the closing record).
+    const CYCLES: usize = 8;
+    let mut rig = repeat_rig();
+    with_limit(&rig, 3);
+    let gap = starved(&mut rig, CYCLES);
+    assert!(rig.tx.open_next().is_some(), "the Run went on");
+    assert_eq!(ended_notes(&rig.core), 0, "{:?}", lock(&rig.core.rec).rejected);
+    let stats = lock(&rig.core.rec).stats.clone();
+    assert_eq!((stats["tx_resumes"], stats["tx_gap_samples"]), (CYCLES as i64, gap), "the counters are exact");
+    assert_eq!(resumes(&rig.core).len(), 3);
+    assert_eq!(emitted(&rig.events).len(), CYCLES, "every drop is told, whatever the rows keep");
+    stop(&mut rig);
+    assert_eq!(rig.tx.open_next(), None);
+    let underflows = written_now(&rig.core, "async").iter().filter(|row| row["code"] == "Underflow").count();
+    assert_eq!(underflows, 3);
+    let records = written_now(&rig.core, "bursts");
+    assert_eq!(
+        records.iter().map(|row| row["end"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["discontinuity", "discontinuity", "discontinuity", "discontinuity", "stop"],
+        "the booked record, three intermediate parts and the closing record: {records:?}"
+    );
+    assert_eq!(omitted_now(&rig.core), serde_json::json!({ "timing": { "tx_resume": 5 }, "async": { "Underflow": 5 }, "bursts": { "resumed_part": 3 } }));
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------
@@ -888,8 +1086,8 @@ fn mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_onc
     // V18 (UR-22): R = 32 000 (the first test's numbers), instant 6 400 000 ticks, the device lead 400 000. A wake with `now + lead` equal to R's instant is on time:
     // the part starts at R and nothing is told. One tick later R is missed: R moves to the first W0 lattice point at or after `now + lead` = 6 400 001, which is sample
     // 32 001, so 33 000, and the part that starts there is told with `send_asap` for the repeat's own target. A second miss before the part is sent moves it again
-    // (now = 40 ms: `now + lead` = 42 000, a lattice point) and tells nothing more: one event per gap, late by the whole move, 42 000 - 32 000 = 10 ms. The stall part of
-    // the gap stays 10 002 samples, so an Underflow after exactly that many samples of the part resumes it again (equality), where counting the wait would end it.
+    // (now = 40 ms: `now + lead` = 42 000, a lattice point) and tells nothing more: one event per gap, late by the whole move, 42 000 - 32 000 = 10 ms. The gap's counter
+    // is its planned span, 32 000 - 21 000 (UR-30): a lower bound when R moves, which the `send_asap` event's `late_by_ns` completes.
     let on_time = {
         let mut rig = late_repeat();
         rig.tx.reports(Wall::ZERO);
@@ -914,9 +1112,12 @@ fn mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_onc
     assert_eq!(part_start(&rig), Some(42_000), "{:?}", rig.device.calls());
     assert_eq!(send_asaps(&drained(&rig.events)), [(20_000, 10_000_000)]);
     assert_eq!(resumes(&rig.core).len(), 1, "a missed resume point is not a new resume");
+    let stats = lock(&rig.core.rec).stats.clone();
+    assert_eq!((stats["tx_resumes"], stats["tx_gap_samples"]), (1, 32_000 - 21_000), "planned, not moved");
+    assert_counters(&rig.core);
     // The part's burst record carries the same late start as the event (RM-14): `send_asap` by the same distance, the repeat's own target as the requested one.
     report(&mut rig.tx, TxCode::Underflow, &rig.clock, 42_000 + 10_002, 0);
-    assert_eq!((ended_notes(&rig.core), resumes(&rig.core).len()), (0, 2), "equality resumes: {:?}", lock(&rig.core.rec).rejected);
+    assert_eq!((ended_notes(&rig.core), resumes(&rig.core).len()), (0, 2), "the part's drop resumes again: {:?}", lock(&rig.core.rec).rejected);
     stop(&mut rig);
     let records = rows(&rig);
     let part = records.iter().find(|row| row["target"]["ticks"] == 42_000).expect("the part's record");
@@ -1088,10 +1289,10 @@ fn mt3d_a_halt_in_the_gap_after_a_switch_replaced_the_repeat_sends_nothing_and_c
 }
 
 #[test]
-fn mt3d_a_switch_part_keeps_the_stutter_bound_of_the_gap_it_replaced() {
-    // V11, V17 (UR-22, b'): the part that carries a switch across a gap resumed the repeat, so it is judged like any part: after the switch replaced the repeat at R =
-    // 20 000 (P = busy + m - H = 9 502 + 10 000 - 9 500 = 10 002 samples), an Underflow after P - 1 samples of it ends the repeat; after P it resumes again.
-    for (played, ends) in [(10_001, true), (10_002, false)] {
+fn mt3d_a_switch_part_resumes_like_any_part() {
+    // V11, V17 (UR-22, #106): the part that carries a switch across a gap is a part like any other: after the switch replaced the repeat at R = 20 000 an Underflow
+    // after 1, 10 001 (the old stall part less one) or 10 002 samples of it resumes the repeat again; nothing ends it.
+    for played in [1, 10_001, 10_002] {
         let mut rig = gap_rig(o::ramp(1, 1_000));
         owner_at(&rig, 3 * MS);
         book_switch(&mut rig, 2, 4_000, 1);
@@ -1101,9 +1302,12 @@ fn mt3d_a_switch_part_keeps_the_stutter_bound_of_the_gap_it_replaced() {
         assert_eq!(part_start(&rig), Some(20_000), "{:?}", rig.device.calls());
         assert!(held_keys(&rig.tx).is_empty());
         emitted(&rig.events);
+        let before = resumes(&rig.core).len();
         report(&mut rig.tx, TxCode::Underflow, &rig.clock, 20_000 + played, 0);
-        assert_eq!(ended_notes(&rig.core), usize::from(ends), "after {played}: {:?}", lock(&rig.core.rec).rejected);
-        assert_eq!(rig.tx.open_next().is_none(), ends, "after {played}");
+        assert_eq!(ended_notes(&rig.core), 0, "after {played}: {:?}", lock(&rig.core.rec).rejected);
+        assert!(rig.tx.open_next().is_some(), "after {played}");
+        assert_eq!(resumes(&rig.core).len(), before + 1, "after {played}");
+        assert_counters(&rig.core);
     }
 }
 
@@ -1222,7 +1426,7 @@ fn mt3d_a_switch_the_gap_moved_and_a_report_then_resumed_is_told_from_its_receip
     }
     assert!(joined, "the switch joined the part's device burst: {:?}", rig.device.calls());
     assert_eq!(part_start(&rig), Some(19_520));
-    // The part started at 19 520 played at least the stall part of its gap, P = 10 002 samples (the scripted tick 30 000), so the repeat resumes again.
+    // The part started at 19 520 and is dropped at the scripted tick 30 000, so the repeat resumes again.
     report(&mut rig.tx, TxCode::Underflow, &rig.clock, 30_000, 0);
     assert_eq!((ended_notes(&rig.core), resumes(&rig.core).len()), (0, 2), "{:?}", lock(&rig.core.rec).rejected);
     let r2 = rig.tx.open_next().expect("paused until R2");
@@ -1244,26 +1448,29 @@ fn mt3d_a_lost_sequence_while_the_repeat_is_paused_ends_it() {
         let mut rig = late_repeat();
         rig.tx.reports(Wall::ZERO);
         assert_eq!(rig.tx.open_next(), Some(32_000), "paused");
-        let (sends, before) = (tx_sends(&rig.device).len(), emitted(&rig.events));
-        assert_eq!(before, [("late", Some(32_000))]);
+        assert_eq!(emitted(&rig.events), [("late", Some(32_000))]);
+        let sends = tx_sends(&rig.device).len();
         rig.tx.report(TxReport { code, tick: None, channel: 0 });
         assert_eq!((ended_notes(&rig.core), rig.tx.open_next()), (1, None), "{code:?}: {:?}", lock(&rig.core.rec).rejected);
+        assert_eq!(tx_sends(&rig.device).len(), sends, "{code:?}: no device burst is open, so the abandon closes none: {:?}", rig.device.calls());
+        // The footprint is H + 5, not R + 5: a booking 5 000 samples past H (5 ms ahead of the owner, so on time) is accepted. (Booked now: later it would be late and
+        // dropped, never refused.)
+        book(&mut rig, 7, 1, 21_000 + 5_000);
+        assert!(super::e2a::refused_ids(&rig.events).is_empty(), "{code:?}: {:?}", lock(&rig.core.rec).rejected);
         for ms in [23, 24, 33] {
             at(&rig, ms * MS);
             go(&mut rig);
         }
-        assert_eq!(tx_sends(&rig.device).len(), sends, "{code:?}: no send at R: {:?}", rig.device.calls());
-        book(&mut rig, 7, 1, 21_000 + 5_000);
-        assert!(super::e2a::refused_ids(&rig.events).is_empty(), "{code:?}: {:?}", lock(&rig.core.rec).rejected);
-        assert_eq!(rows(&rig).iter().map(|row| row["end"].as_str()).collect::<Vec<_>>(), [Some("stop")], "{code:?}");
+        assert!(tx_sends(&rig.device).iter().all(|send| send.1.is_none_or(|at| at < rig.clock.instant(32_000))), "{code:?}: no send at R: {:?}", rig.device.calls());
+        assert_eq!(rows(&rig)[0]["end"].as_str(), Some("stop"), "{code:?}");
     }
 }
 
 #[test]
 fn mt3d_a_stopped_repeat_s_delayed_report_does_not_end_a_newer_repeat_that_waits_to_resume() {
-    // V3b, V12 (UR-22, sol-code major 2): A resumes at R = 32 000 and its part starts there. The part's Underflow after P - 1 = 10 001 samples is not read yet when A is stopped
-    // (its correlation stays pending) and the repeat B, booked after the Stop's region at 60 000, is handed ahead and found expired: it pauses until RB. The delayed
-    // Underflow (tick 42 001, before B's start) is then read: it tells A's part and retires nothing of B, whose pause is none of its business, so B resumes untouched.
+    // V3b, V12 (UR-22): A resumes at R = 32 000 and its part starts there. The part's Underflow (tick 42 001) is not read yet when A is stopped (its correlation stays
+    // pending) and the repeat B, booked after the Stop's region at 60 000, is handed ahead and found expired: it pauses until RB. The delayed Underflow is then read: it
+    // tells A's part and retires nothing of B (its tick is before B's start), and no device burst is open, so `!hit` gives `Dropped::Nothing`: B keeps waiting for RB untouched.
     let mut rig = resumed_part();
     report_nothing_yet(&mut rig);
     stop(&mut rig);
@@ -1290,4 +1497,194 @@ fn mt3d_a_stopped_repeat_s_delayed_report_does_not_end_a_newer_repeat_that_waits
 /// The unread report of `resumed_part`'s part is simply not read: nothing to do, but the test says it.
 fn report_nothing_yet(rig: &mut SwitchRig) {
     assert!(drained(&rig.events).is_empty(), "no report was read since the part was sent");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------
+// Sub-step B (UR-30, #106): the record bound. Which acknowledgement and which burst record is a booked burst's (never left out) and which a resume's (bounded).
+// ---------------------------------------------------------------------------------------------------------------------------------------------------
+
+#[test]
+fn mt3d_a_booked_bursts_ack_is_kept_and_a_resume_closes_are_bounded() {
+    // W2 (UR-30): N = 2. The booked first device burst's acknowledgement is kept whatever the bound; the acknowledgements of the four parts that resumed the repeat are
+    // a resume's: the first two are kept and the other two counted. Each report is checked to have retired its entry (`unacked`), so the row is keyed by what it matched.
+    let mut rig = repeat_rig();
+    with_limit(&rig, 2);
+    book_repeat(&mut rig, 1, 20_000, 0);
+    at(&rig, 17 * MS);
+    at(&rig, 18 * MS);
+    hand(&mut rig, 2);
+    report(&mut rig.tx, TxCode::BurstAck, &rig.clock, 24_000, 0);
+    assert!(rig.tx.unacked.is_empty(), "the ack retired the booked device burst's entry");
+    at(&rig, 24_500 * 200);
+    report(&mut rig.tx, TxCode::Underflow, &rig.clock, 24_000, 0);
+    for cycle in 0..4 {
+        let r = rig.tx.open_next().expect("the repeat waits to resume");
+        at(&rig, (r / 1_000 - 9) * MS);
+        go(&mut rig);
+        assert_eq!(rig.tx.unacked.len(), 1, "cycle {cycle}: the part's entry");
+        report(&mut rig.tx, TxCode::BurstAck, &rig.clock, r + 500, 0);
+        assert!(rig.tx.unacked.is_empty(), "cycle {cycle}: the part's ack matched its entry");
+        report(&mut rig.tx, TxCode::Underflow, &rig.clock, r + 600, 0);
+    }
+    let acks = written_now(&rig.core, "async").iter().filter(|row| row["code"] == "BurstAck").count();
+    assert_eq!(acks, 1 + 2, "the booked ack and the first two of the four resumes'");
+    assert_eq!(omitted_now(&rig.core)["async"]["BurstAck"], 2);
+}
+
+#[test]
+fn mt3d_a_report_driven_resume_leaves_its_close_ack_unmatched_and_so_bounded() {
+    // W3 (UR-30): an Underflow retires the dropped device burst's entry and resumes the repeat, whose close the fake acknowledges: read afterwards, that
+    // acknowledgement matches nothing, and an unmatched one is never a booked burst's: with N = 2 the first two are kept and the rest counted. (Five closes, but the
+    // fifth's acknowledgement lies ahead of the device's time and is not queued yet: four are read.)
+    let mut rig = repeat_rig();
+    with_limit(&rig, 2);
+    starved(&mut rig, 5);
+    let closes = closing_sends(&rig.device).len();
+    assert_eq!(closes, 5, "one close per resume: {:?}", rig.device.calls());
+    rig.tx.reports(Wall::ZERO);
+    let acks = written_now(&rig.core, "async").iter().filter(|row| row["code"] == "BurstAck").count();
+    assert_eq!((acks, omitted_now(&rig.core)["async"]["BurstAck"].as_u64()), (2, Some(2)), "{:?}", rig.device.calls());
+}
+
+#[test]
+fn mt3d_the_bound_keeps_the_booked_record_the_first_intermediate_part_and_the_closing_record() {
+    // W4a (UR-30): N = 1. A booked repeat resumed four times (parts P1..P4), then stopped: A's record is a booked burst's (kept), P1 the first intermediate part
+    // (kept), P2 and P3 are closed by a later resume (counted), P4 is the closing record (kept, though the budget of `resumed_part` is spent).
+    let mut rig = repeat_rig();
+    with_limit(&rig, 1);
+    starved(&mut rig, 4);
+    let r4 = rig.tx.open_next().expect("paused for the fourth resume");
+    at(&rig, (r4 / 1_000 - 9) * MS);
+    go(&mut rig);
+    stop(&mut rig);
+    let records = written_now(&rig.core, "bursts");
+    let targets: Vec<i64> = records.iter().map(|row| row["target"]["ticks"].as_i64().unwrap()).collect();
+    assert_eq!(targets.len(), 3, "{records:?}");
+    assert_eq!((targets[0], targets[2]), (20_000, r4), "{records:?}");
+    assert!(targets[0] < targets[1] && targets[1] < targets[2], "P1 lies between: {records:?}");
+    assert_eq!(records.iter().map(|row| row["end"].as_str().unwrap()).collect::<Vec<_>>(), ["discontinuity", "discontinuity", "stop"]);
+    assert_eq!(omitted_now(&rig.core)["bursts"], serde_json::json!({ "resumed_part": 2 }));
+}
+
+#[test]
+fn mt3d_a_switch_that_replaced_a_paused_repeat_is_a_booked_record() {
+    // W4b (UR-22, UR-30): N = 1. The switch S replaced the paused repeat A at R (`first` while paused), so S's record is a booked burst's. S is dropped (Underflow) and
+    // its part P resumes the repeat; P is dropped and P2 resumes; then a Stop. A and S are kept, P is the first intermediate part (kept), P2 the closing record: nothing
+    // is left out of `bursts`. (A switch counted as a part would spend the budget on S and leave P out.)
+    let mut rig = gap_rig(o::ramp(1, 1_000));
+    with_limit(&rig, 1);
+    owner_at(&rig, 3 * MS);
+    book_switch(&mut rig, 2, 4_000, 1);
+    drain_tx(&mut rig.tx);
+    rig.tx.reports(Wall::ZERO);
+    sweep(&mut rig, 13, 23);
+    assert_eq!(part_start(&rig), Some(20_000), "{:?}", rig.device.calls());
+    report(&mut rig.tx, TxCode::Underflow, &rig.clock, 20_001, 0);
+    for cycle in 0..2 {
+        let r = rig.tx.open_next().expect("the repeat waits to resume");
+        sweep(&mut rig, r / 1_000 - 9, r / 1_000 + 1);
+        assert_eq!(part_start(&rig), Some(r), "cycle {cycle}: {:?}", rig.device.calls());
+        if cycle == 0 {
+            report(&mut rig.tx, TxCode::Underflow, &rig.clock, r + 1, 0);
+        }
+    }
+    stop(&mut rig);
+    let records = written_now(&rig.core, "bursts");
+    assert_eq!(records.len(), 4, "A, S, P and the closing record P2: {records:?}");
+    assert_eq!(records.iter().map(|row| row["end"].as_str().unwrap()).collect::<Vec<_>>(), ["discontinuity", "discontinuity", "discontinuity", "stop"]);
+    assert_eq!(records[1]["target"]["ticks"], 20_000, "{records:?}");
+    assert_eq!(omitted_now(&rig.core)["bursts"], serde_json::Value::Null, "no burst record was left out: {records:?}");
+}
+
+#[test]
+fn mt3d_a_resumed_part_that_a_switch_replaces_is_bounded_like_any_part_a_resume_closes() {
+    // W4c (UR-22, UR-30; decided by the orchestrator, OQ-3): A's drop resumes the repeat at R1 = 20 000 and its part P1 is dropped in turn: the repeat waits for R2, and a
+    // switch S booked in that gap replaces it there. S's start of burst closes P1's record, which a resume opened, so it is an intermediate part: with its budget spent,
+    // it is counted and left out; A's record (a booked burst's) and S's are kept.
+    let mut rig = gap_rig(o::ramp(1, 1_000));
+    spend_resumed_part_budget(&rig);
+    owner_at(&rig, 3 * MS);
+    rig.tx.reports(Wall::ZERO);
+    sweep(&mut rig, 13, 23);
+    assert_eq!(part_start(&rig), Some(20_000), "{:?}", rig.device.calls());
+    report(&mut rig.tx, TxCode::Underflow, &rig.clock, 20_001, 0);
+    let r2 = rig.tx.open_next().expect("the repeat waits to resume");
+    book_switch(&mut rig, 3, 4_000, 1);
+    sweep(&mut rig, r2 / 1_000 - 9, r2 / 1_000 + 1);
+    assert_eq!(part_start(&rig), Some(r2), "S starts at R2: {:?}", rig.device.calls());
+    stop(&mut rig);
+    let records = real_rows(&rig);
+    assert_eq!(records.iter().map(|row| row["target"]["ticks"].as_i64().unwrap()).collect::<Vec<_>>(), [2_000, r2], "A and S, not P1: {records:?}");
+    assert_eq!(omitted_now(&rig.core)["bursts"], serde_json::json!({ "resumed_part": 1 }), "{records:?}");
+}
+
+#[test]
+fn mt3d_a_joined_booked_burst_makes_its_device_burst_s_ack_a_booked_ack() {
+    // W9 (UR-30): N = 1. The part at 32 000 is a resume's, so its acknowledgements are bounded: with the budget spent by two unmatched ones, they are counted. A booked
+    // burst that joins the part's device burst makes it a booked burst's end: the same acknowledgements, for each of the two channel positions, are kept, because any
+    // target of the correlation is booked. (Shortcut: the join is `join_burst` itself, which the owner calls on a booked burst's first send, not a switch run through
+    // the fake.)
+    for joined in [false, true] {
+        let mut rig = resumed_part();
+        with_limit(&rig, 1);
+        rig.tx.unacked.back_mut().expect("the part's correlation").channels = [0, 1].into();
+        for channel in [0, 1] {
+            report(&mut rig.tx, TxCode::BurstAck, &rig.clock, 1, channel);
+        }
+        assert_eq!(rig.tx.unacked.len(), 1, "an ack before the part's start matches nothing");
+        if joined {
+            let domain = rig.clock.domain;
+            rig.tx.join_burst(TimePoint::new(domain, 40_000));
+        }
+        for channel in [0, 1] {
+            report(&mut rig.tx, TxCode::BurstAck, &rig.clock, 50_000, channel);
+        }
+        assert!(rig.tx.unacked.is_empty(), "joined: {joined}");
+        let acks = written_now(&rig.core, "async").iter().filter(|row| row["code"] == "BurstAck").count();
+        // Two unmatched acks (one kept, one counted), then the part's two: kept when booked, counted when not.
+        assert_eq!((acks, omitted_now(&rig.core)["async"]["BurstAck"].as_u64()), if joined { (3, Some(1)) } else { (1, Some(3)) }, "joined: {joined}");
+    }
+}
+
+#[test]
+fn mt3d_the_closing_record_of_an_abandon_is_kept_when_the_intermediate_parts_budget_is_spent() {
+    // W4d (UR-30): the part P at 32 000 is the open record (`open_part`) and `resumed_part`'s budget is spent. A lost sequence ends the repeat by an abandon: the
+    // closing record is P's, the repeat's last, and it is kept. (A writer that keyed it by `open_part` would count it and leave it out.)
+    let mut rig = resumed_part();
+    spend_resumed_part_budget(&rig);
+    assert!(rig.tx.open_part, "the open record is a part's");
+    rig.tx.report(TxReport { code: TxCode::SeqError, tick: None, channel: 0 });
+    assert_eq!((ended_notes(&rig.core), rig.tx.open_next()), (1, None), "the repeat ended: {:?}", lock(&rig.core.rec).rejected);
+    let records = real_rows(&rig);
+    assert_eq!(records.len(), 1, "the closing record is kept: {records:?}");
+    assert_eq!((records[0]["end"].as_str(), records[0]["target"]["ticks"].as_i64()), (Some("stop"), Some(32_000)), "{records:?}");
+    assert_eq!(omitted_now(&rig.core)["bursts"], serde_json::Value::Null, "nothing was counted");
+}
+
+#[test]
+fn mt3d_the_closing_record_of_a_failed_reopen_is_kept_when_the_intermediate_parts_budget_is_spent() {
+    // W4e (UR-30): the recovery fails with the part P at 32 000 open and `resumed_part`'s budget spent: P is dropped, the repeat's close is short (the fake's send after the
+    // part's own sends), the reopen is refused, and the stream's clock ends: P's record is the closing one and is kept. The close's ordinal is found on an identical rig.
+    let closing = tx_sends(&resumed_part().device).len();
+    let mut rig = resumed_part_with(vec![FakeFault::ShortSend(closing), FakeFault::TxOpenFails(1)]);
+    spend_resumed_part_budget(&rig);
+    assert!(rig.tx.open_part, "the open record is a part's");
+    report(&mut rig.tx, TxCode::Underflow, &rig.clock, 32_001, 0);
+    assert!(rig.tx.pass(), "the recovery runs on this turn");
+    assert!(rig.tx.clock.is_none(), "a failed reopen ends the stream's clock: {:?} {:?}", lock(&rig.core.rec).rejected, rig.device.calls());
+    let records = real_rows(&rig);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!((records[0]["end"].as_str(), records[0]["target"]["ticks"].as_i64()), (Some("stop"), Some(32_000)), "{records:?}");
+    assert_eq!(omitted_now(&rig.core)["bursts"], serde_json::Value::Null);
+}
+
+#[test]
+fn mt3d_a_part_is_a_start_of_burst_after_the_first_send_while_paused() {
+    // K4 (UR-22, UR-30): only a send that is not its booking's first, while the booking is paused, is a part that resumes a repeat. A switch that replaced a paused repeat
+    // is `first` while paused: a booked burst, not a part.
+    let is = super::super::is_resume_part;
+    assert!(is(false, true), "a part after the first send, paused");
+    assert!(!is(true, true), "a switch that replaced a paused repeat");
+    assert!(!is(true, false), "a booking's first send");
+    assert!(!is(false, false), "a running repeat's later device burst");
 }

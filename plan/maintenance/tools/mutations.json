@@ -5262,7 +5262,7 @@
    "id": "P281",
    "name": "the selector accepts the removed `keys` mode (UR-5, RM-38)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "            .chain([\"args\", \"id\", \"clock_source\", \"time_source\", \"block_len\", \"reopen_on_unlock\"])",
+   "old": "            .chain([\"args\", \"id\", \"clock_source\", \"time_source\", \"block_len\", \"reopen_on_unlock\", \"record_rows_per_kind\"])",
    "new": "            .chain([\"args\", \"id\", \"clock_source\", \"time_source\", \"block_len\", \"reopen_on_unlock\", \"keys\"])",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -5532,8 +5532,8 @@
    "id": "P350",
    "name": "a pending transmit report is retained by the device channels, not the streamer's positions (UR-28)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "self.unacked.push_back(PendingReport { target, joined: Vec::new(), channels: (0..self.channels.count() as usize).collect(), told: false, resumes_at: None, resumed: stall });",
-   "new": "self.unacked.push_back(PendingReport { target, joined: Vec::new(), channels: self.channels.iter().map(|chan| chan as usize).collect(), told: false, resumes_at: None, resumed: stall });",
+   "old": "self.unacked.push_back(PendingReport { target, joined: Vec::new(), channels: (0..self.channels.count() as usize).collect(), told: false, resumes_at: None, part });",
+   "new": "self.unacked.push_back(PendingReport { target, joined: Vec::new(), channels: self.channels.iter().map(|chan| chan as usize).collect(), told: false, resumes_at: None, part });",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_28_a_report_is_correlated_by_its_position_in_the_streamer"
@@ -10576,7 +10576,7 @@
        "id": "P1209",
        "name": "a failed reopen finishes the in-flight burst record (D9b-1a fix 4)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) { lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect(\"a record\")); } streams.finished(key);",
+       "old": "if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) { lock(&self.core.rec).bursts.push(burst_key(false), serde_json::to_value(record).expect(\"a record\")); } streams.finished(key);",
        "new": "let _ = self.tracker.as_mut(); streams.finished(key);",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
@@ -24508,7 +24508,7 @@
   "id": "MT3-07",
   "name": "a TimeError retires no burst and names none (UR-28)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let reached = self.retire(report.channel, Some(tick), Reach::Late);",
+  "old": "let (reached, _) = self.retire(report.channel, Some(tick), Reach::Late);",
   "new": "let reached = Vec::<Reached>::new();",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -24558,7 +24558,7 @@
   "id": "MT3-12",
   "name": "an Underflow retires no burst (UR-28)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let reached = self.retire(report.channel, tick, Reach::Underflow);",
+  "old": "let (reached, _) = self.retire(report.channel, tick, Reach::Underflow);",
   "new": "let reached = Vec::<Reached>::new(); let _ = tick;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -24588,8 +24588,8 @@
   "id": "MT3-16",
   "name": "a TimeError abandons whatever device burst there is (UR-22)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "self.dropped(reached.last(), Some(tick), true, true)",
-  "new": "self.dropped(reached.last(), None, true, true)",
+  "old": "self.dropped(Some(tick), true, true)",
+  "new": "self.dropped(None, true, true)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "mt3_a_time_error_abandons_the_open_device_burst_only_when_its_tick_reaches_it"
@@ -24898,51 +24898,11 @@
   "id": "MT3D-09",
   "name": "a lost sequence resumes a repeat (UR-22)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let dropped = self.dropped(reached.last(), tick, cause == TxUnderflowCause::Starved, false);",
-  "new": "let dropped = self.dropped(reached.last(), tick, true, false);",
+  "old": "let dropped = self.dropped(tick, cause == TxUnderflowCause::Starved, false);",
+  "new": "let dropped = self.dropped(tick, true, false);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "mt3d_what_still_ends_a_repeat"
- },
- {
-  "id": "MT3D-10",
-  "name": "a late drop that reaches a part resumes it again (UR-22, b')",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let played = if late { 0 } else { tick.map_or(0, |tick| tick - reached.start) };",
-  "new": "let played = if late { stall } else { tick.map_or(0, |tick| tick - reached.start) };",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
- },
- {
-  "id": "MT3D-11",
-  "name": "equality ends a repeat (UR-22, b')",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "played < stall",
-  "new": "played <= stall",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
- },
- {
-  "id": "MT3D-12",
-  "name": "the stall part is measured to the resume point (UR-22, b')",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "book.resume_at(at, unaligned.saturating_sub(clock.instant(handed)));",
-  "new": "book.resume_at(at, clock.instant(at).saturating_sub(clock.instant(handed)));",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
- },
- {
-  "id": "MT3D-13",
-  "name": "an Underflow on a part always ends the repeat (UR-22, b')",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "played < stall",
-  "new": "true",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
  },
  {
   "id": "MT3D-14",
@@ -24962,7 +24922,7 @@
   "new": "self.open.as_ref().map(|open| open.next).or_else(|| self.device.next())",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "mt3d_a_second_drop_found_in_the_gap_abandons_at_the_handed_cursor"
+  "filter": "mt3d_a_lost_sequence_while_the_repeat_is_paused_ends_it"
  },
  {
   "id": "MT3D-16",
@@ -25068,31 +25028,11 @@
   "id": "MT3D-26",
   "name": "the part's device burst is not remembered (UR-28)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "if device_sob { self.remember_part(TimePoint::new(clock.domain, next), paused.map(|paused| paused.stall)); } else if continuing { self.join_burst(TimePoint::new(clock.domain, start)); } if first { self.core.stat(\"tx_bursts\", 1); }",
-  "new": "if device_sob && paused.is_none() { self.remember_part(TimePoint::new(clock.domain, next), paused.map(|paused| paused.stall)); } else if continuing { self.join_burst(TimePoint::new(clock.domain, start)); } if first { self.core.stat(\"tx_bursts\", 1); }",
+  "old": "if device_sob { self.remember_part(TimePoint::new(clock.domain, next), resume_part); } else if continuing { self.join_burst(TimePoint::new(clock.domain, start)); } if first { self.core.stat(\"tx_bursts\", 1); }",
+  "new": "if device_sob && paused.is_none() { self.remember_part(TimePoint::new(clock.domain, next), resume_part); } else if continuing { self.join_burst(TimePoint::new(clock.domain, start)); } if first { self.core.stat(\"tx_bursts\", 1); }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
- },
- {
-  "id": "MT3D-27",
-  "name": "a delayed report's stutter rule uses the newer gap's stall part (UR-22, b')",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "newest.and_then(|reached| reached.resumed.map(|stall| (stall, reached)))",
-  "new": "newest.and_then(|reached| reached.resumed.map(|stall| (self.with_book(|book| book.open.as_ref().and_then(|open| open.paused)).map_or(stall, |paused| paused.stall), reached)))",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "mt3d_a_delayed_underflow_that_retires_two_entries_applies_the_stutter_rule"
- },
- {
-  "id": "MT3D-28",
-  "name": "a running part is not judged by the stutter rule: the pause's part alone is ours (UR-22, b')",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let ours = hit || paused.is_some_and(|paused| paused.source == Some(reached.start));",
-  "new": "let ours = paused.is_some_and(|paused| paused.source == Some(reached.start));",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "mt3d_a_part_that_plays_less_than_the_stall_part_ends_the_repeat"
+  "filter": "mt3d_a_late_report_that_reaches_a_part_resumes_it_again"
  },
  {
   "id": "MT3D-29",
@@ -25182,7 +25122,7 @@
   "new": "self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device burst underflowed; burst not resumed\" })); self.abandon(true, self.cursor(), false);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "mt3d_a_delayed_underflow_that_retires_two_entries_applies_the_stutter_rule"
+  "filter": "mt3d_a_lost_sequence_while_the_repeat_is_paused_ends_it"
  },
  {
   "id": "MT3D-38",
@@ -25192,7 +25132,7 @@
   "new": "self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: the device dropped the burst late; burst not resumed\" })); self.abandon(true, self.cursor(), false);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "mt3d_a_second_drop_found_in_the_gap_abandons_at_the_handed_cursor"
+  "filter": "mt3d_more_that_ends_a_repeat_a_resume_point_past_the_clock_and_a_failed_continuation"
  },
  {
   "id": "MT3D-39",
@@ -25335,16 +25275,6 @@
   "filter": "mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_once"
  },
  {
-  "id": "MT3D-53",
-  "name": "the wait to a missed resume point is counted by the stutter rule (UR-22, V18)",
-  "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "assert!(open.paused.is_some(), \"the booking is paused\"); open.next = at;",
-  "new": "assert!(open.paused.is_some(), \"the booking is paused\"); let moved = at - open.next; open.next = at; open.paused.as_mut().expect(\"paused\").stall += moved;",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_once"
- },
- {
   "id": "MT3D-54",
   "name": "a switch that replaces a paused repeat is not a booking with nothing sent (UR-22, V15)",
   "file": "crates/ezsdr-radio/src/staging.rs",
@@ -25356,13 +25286,13 @@
  },
  {
   "id": "MT3D-55",
-  "name": "a switch that replaces a paused repeat loses the stutter bound of the gap (UR-22, b')",
+  "name": "a switch that replaces a paused repeat loses its pause (UR-22)",
   "file": "crates/ezsdr-radio/src/staging.rs",
   "old": "*open = Open { booking, next: open.next, first: true, paused: Some(paused) };",
   "new": "*open = Open { booking, next: open.next, first: true, paused: None };",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "mt3d_a_switch_part_keeps_the_stutter_bound_of_the_gap_it_replaced"
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "txbook_a_switch_replaces_a_paused_repeat_and_its_boundary_moves_with_the_resume_point"
  },
  {
   "id": "MT3D-56",
@@ -25593,36 +25523,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "mt3d_a_lost_sequence_while_the_repeat_is_paused_ends_it"
- },
- {
-  "id": "MT3D-79",
-  "name": "any paused booking is the pause a late report's part belongs to (UR-22, b')",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let ours = hit || paused.is_some_and(|paused| paused.source == Some(reached.start));",
-  "new": "let ours = hit || paused.is_some();",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "mt3d_a_stopped_repeat_s_delayed_report_does_not_end_a_newer_repeat_that_waits_to_resume"
- },
- {
-  "id": "MT3D-80",
-  "name": "a late report of the part that made the pause does not apply the stall rule (UR-22, V3b)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let ours = hit || paused.is_some_and(|paused| paused.source == Some(reached.start));",
-  "new": "let ours = hit;",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "mt3d_a_delayed_underflow_that_retires_two_entries_applies_the_stutter_rule"
- },
- {
-  "id": "MT3D-81",
-  "name": "a pause does not remember the device burst it closed (UR-22, b')",
-  "file": "crates/ezsdr-radio/src/staging.rs",
-  "old": "let source = self.device.first();",
-  "new": "let source = None;",
-  "crate": "ezsdr-radio",
-  "test_bin": "staging",
-  "filter": "txbook_a_pause_remembers_the_first_instant_of_the_device_burst_it_closed"
  },
  {
   "id": "BT1-01",
@@ -26393,5 +26293,405 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "mt3_c4_sweep_judges_a_trial_by_its_effective_delta"
+ },
+ {
+  "id": "N106-01",
+  "name": "a repeat resumes only once: the drop of a part ends it (UR-22, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "match self.clock.filter(|_| resumes && self.resumable()) {",
+  "new": "match self.clock.filter(|_| resumes && self.resumable() && !self.open_part) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_an_underflow_on_a_part_resumes_the_repeat_again_whatever_it_played"
+ },
+ {
+  "id": "N106-02",
+  "name": "a report read after the repeat's resume drops the paused booking again: the second channel's late report abandons it (UR-22, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "if !hit { return Dropped::Nothing; }",
+  "new": "if false { return Dropped::Nothing; }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_two_channels_late_resume_once_in_either_order_and_the_part_resumes_on_one_channel"
+ },
+ {
+  "id": "N106-03",
+  "name": "an Underflow that retires two entries carries the older entry's plan (UR-28, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "Dropped::Nothing => reached.last().and_then(|reached| reached.resumes_at),",
+  "new": "Dropped::Nothing => reached.first().and_then(|reached| reached.resumes_at),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_delayed_report_that_retires_two_entries_keeps_both_resumes"
+ },
+ {
+  "id": "N106-04",
+  "name": "a late report that retires two entries tells the newest with no plan (UR-28, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "_ => reached.resumes_at,",
+  "new": "_ => None,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_delayed_report_that_retires_two_entries_keeps_both_resumes"
+ },
+ {
+  "id": "N106-05",
+  "name": "a resume is not counted in `tx_resumes` (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.stat(\"tx_resumes\", 1);",
+  "new": "let _ = 1;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_many_resumes_keep_going_and_are_counted_exactly"
+ },
+ {
+  "id": "N106-06",
+  "name": "a resume's gap counts its planned point, not the span from the handed cursor (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.stat(\"tx_gap_samples\", planned - handed);",
+  "new": "self.core.stat(\"tx_gap_samples\", planned);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_missed_resume_point_moves_to_the_next_on_time_boundary_and_is_told_once"
+ },
+ {
+  "id": "N106-07",
+  "name": "a row is left out without being counted (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "*self.omitted.entry(bucket).or_default() += 1;",
+  "new": "let _ = bucket;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "bound_a_kind_keeps_its_first_n_rows_and_counts_the_rest"
+ },
+ {
+  "id": "N106-08",
+  "name": "a kind keeps one row more than its limit (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "if *kept < self.limit {",
+  "new": "if *kept <= self.limit {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "bound_a_limit_of_one"
+ },
+ {
+  "id": "N106-09",
+  "name": "one kept counter for the whole section instead of one per kind (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "let kept = self.kept.entry(bucket.clone()).or_default();",
+  "new": "let kept = self.kept.entry(OTHER.to_owned()).or_default();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "bound_two_kinds_keep_their_own_budgets"
+ },
+ {
+  "id": "N106-10",
+  "name": "an exempt row is tracked as a kind of its own (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "let RowKey::Kind(kind) = key else { self.rows.push(row); return; };",
+  "new": "let kind = match key { RowKey::Kind(kind) => kind, RowKey::Exempt => \"exempt\".to_owned() };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "bound_an_exempt_key_is_never_bounded"
+ },
+ {
+  "id": "N106-11",
+  "name": "a section tells any number of kinds apart (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "let bucket = if self.kept.contains_key(&kind) || named < KIND_CAP { kind } else { OTHER.to_owned() };",
+  "new": "let bucket = kind; let _ = named;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "bound_the_65th_kind_goes_to_other"
+ },
+ {
+  "id": "N106-12",
+  "name": "a row of a kind past the 64th is neither kept nor counted (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "let bucket = if self.kept.contains_key(&kind) || named < KIND_CAP { kind } else { OTHER.to_owned() };",
+  "new": "let bucket = if self.kept.contains_key(&kind) || named < KIND_CAP { kind } else { return; };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "bound_the_65th_kind_goes_to_other"
+ },
+ {
+  "id": "N106-13",
+  "name": "timing's omitted counts are written under async and async's under timing (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "[(\"bursts\", &self.bursts), (\"async\", &self.device_async), (\"rejected\", &self.rejected), (\"timing\", &self.timing)]",
+  "new": "[(\"bursts\", &self.bursts), (\"timing\", &self.device_async), (\"rejected\", &self.rejected), (\"async\", &self.timing)]",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "records_written_builds_every_section_and_record_bound_from_one_borrow"
+ },
+ {
+  "id": "N106-14",
+  "name": "record_bound is written only when something was left out (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "(\"record_bound\", json!({ \"rows_per_kind\": self.rows_per_kind, \"omitted\": omitted })), ]",
+  "new": "].into_iter().chain([(\"record_bound\", json!({ \"rows_per_kind\": self.rows_per_kind, \"omitted\": omitted }))].into_iter().filter(|_| !omitted.is_empty())).collect::<Vec<_>>()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "records_written_builds_every_section_and_record_bound_from_one_borrow"
+ },
+ {
+  "id": "N106-15",
+  "name": "record_bound says the default N, not the one in effect (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "\"rows_per_kind\": self.rows_per_kind",
+  "new": "\"rows_per_kind\": DEFAULT_RECORD_ROWS",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "records_written_builds_every_section_and_record_bound_from_one_borrow"
+ },
+ {
+  "id": "N106-16",
+  "name": "a Stop's applied instant is bounded like any timing row (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "const TIMING_EXEMPT: [&str; 5] = [\"tx_stop_applied\", \"rx_segment\",",
+  "new": "const TIMING_EXEMPT: [&str; 5] = [\"tx_stop_applied_\", \"rx_segment\",",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_30_a_stop_per_action_is_never_bounded_past_n"
+ },
+ {
+  "id": "N106-17",
+  "name": "a receive segment's row is bounded like any timing row (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "\"first_rx_block\", \"rx_stop_untimed\", \"rx_stop_late\"];",
+  "new": "\"first_rx_block\", \"rx_stop_untimed\", \"rx_stop_late_\"];",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "key_timing_by_what_and_the_five_exempt_names"
+ },
+ {
+  "id": "N106-18",
+  "name": "a rejected row's kind is its whole reason (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "match row[\"reason\"].as_str().and_then(rule_id) {",
+  "new": "match row[\"reason\"].as_str() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "key_rejected_by_call_then_kind_and_rule_then_field"
+ },
+ {
+  "id": "N106-19",
+  "name": "a rejected row's kind drops the rule id its reason starts with (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "Some(id) => RowKey::kind(format!(\"{kind}:{id}\")),",
+  "new": "Some(_) => RowKey::kind(kind),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "key_rejected_by_call_then_kind_and_rule_then_field"
+ },
+ {
+  "id": "N106-20",
+  "name": "a rejected row's call is ignored when it is keyed (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "if let Some(call) = row[\"call\"].as_str() {",
+  "new": "if let Some(call) = row[\"call\"].as_str().filter(|_| false) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "key_rejected_by_call_then_kind_and_rule_then_field"
+ },
+ {
+  "id": "N106-21",
+  "name": "a flush's acknowledgement shares the budget of the ordinary ones (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core/records.rs",
+  "old": "Some(\"BurstAck\") if row[\"tx_flush\"] == true => RowKey::kind(\"BurstAck:flush\"),",
+  "new": "Some(\"BurstAck\") if row[\"tx_flush\"] == true => RowKey::kind(\"BurstAck\"),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "key_async_by_code_with_booked_acks_exempt"
+ },
+ {
+  "id": "N106-22",
+  "name": "a booked burst's acknowledgement is bounded like a resume's (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.async_row(raw, booked);",
+  "new": "self.core.async_row(raw, false);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_booked_bursts_ack_is_kept_and_a_resume_closes_are_bounded"
+ },
+ {
+  "id": "N106-23",
+  "name": "a resume's acknowledgement is never bounded (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.async_row(raw, booked);",
+  "new": "self.core.async_row(raw, true);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_booked_bursts_ack_is_kept_and_a_resume_closes_are_bounded"
+ },
+ {
+  "id": "N106-24",
+  "name": "a switch that replaced a paused repeat is taken for a part that resumed it (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "paused && !first",
+  "new": "paused",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_that_replaced_a_paused_repeat_is_a_booked_record"
+ },
+ {
+  "id": "N106-25",
+  "name": "the part that a start of burst opens is the part that its own start closes (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.record(step); if part { self.open_part = resume_part; }",
+  "new": "if part { self.open_part = resume_part; } self.record(step);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_the_bound_keeps_the_booked_record_the_first_intermediate_part_and_the_closing_record"
+ },
+ {
+  "id": "N106-26",
+  "name": "a record a start of burst closes is always an intermediate part (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "rec.bursts.push(burst_key(self.open_part), serde_json::to_value(closed).expect(\"a record\"));",
+  "new": "rec.bursts.push(burst_key(true), serde_json::to_value(closed).expect(\"a record\"));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_the_bound_keeps_the_booked_record_the_first_intermediate_part_and_the_closing_record"
+ },
+ {
+  "id": "N106-27",
+  "name": "a burst that ended is bounded as an intermediate part (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "Ok(BurstStep::Ended { record }) => rec.bursts.push(burst_key(false), serde_json::to_value(record).expect(\"a record\")),",
+  "new": "Ok(BurstStep::Ended { record }) => rec.bursts.push(burst_key(true), serde_json::to_value(record).expect(\"a record\")),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_30_a_clean_run_with_more_than_n_booked_bursts_keeps_every_booked_row"
+ },
+ {
+  "id": "N106-28",
+  "name": "a Stop's closing record is bounded as an intermediate part (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": ".bursts.push(burst_key(false), serde_json::to_value(record).expect(\"a record\")); } front",
+  "new": ".bursts.push(burst_key(true), serde_json::to_value(record).expect(\"a record\")); } front",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_the_bound_keeps_the_booked_record_the_first_intermediate_part_and_the_closing_record"
+ },
+ {
+  "id": "N106-29",
+  "name": "record_rows_per_kind accepts 100001 (UR-5, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if (1..=100_000).contains(n)",
+  "new": "if (1..=100_001).contains(n)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_05_record_rows_per_kind_is_an_int_in_1_to_100000_and_defaults_to_1000"
+ },
+ {
+  "id": "N106-30",
+  "name": "record_rows_per_kind accepts 0 (UR-5, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if (1..=100_000).contains(n)",
+  "new": "if (0..=100_000).contains(n)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_05_record_rows_per_kind_is_an_int_in_1_to_100000_and_defaults_to_1000"
+ },
+ {
+  "id": "N106-31",
+  "name": "record_rows_per_kind defaults to another value (UR-5, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "None => Ok(core::DEFAULT_RECORD_ROWS),",
+  "new": "None => Ok(1_001),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_05_record_rows_per_kind_is_an_int_in_1_to_100000_and_defaults_to_1000"
+ },
+ {
+  "id": "N106-32",
+  "name": "the selector's record_rows_per_kind is ignored: the default is used (UR-5, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "=> Ok(*n as usize),",
+  "new": "=> Ok(core::DEFAULT_RECORD_ROWS),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_30_a_run_past_the_bound_says_what_it_left_out"
+ },
+ {
+  "id": "N106-33",
+  "name": "the device is called before record_rows_per_kind is checked (UR-5, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "let record_rows = record_rows_per_kind(binding)?;",
+  "new": "let _ = device.serial(); let record_rows = record_rows_per_kind(binding)?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_from_binding_refusals"
+ },
+ {
+  "id": "N106-34",
+  "name": "record_rows_per_kind is not an allowed selector key (UR-5, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "\"block_len\", \"reopen_on_unlock\", \"record_rows_per_kind\"]",
+  "new": "\"block_len\", \"reopen_on_unlock\"]",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_from_binding_refusals"
+ },
+ {
+  "id": "N106-35",
+  "name": "the catalogue opens the device before it refuses a bad record_rows_per_kind (UR-5, EA-7, #106)",
+  "file": "crates/ezsdr-server/src/catalogue.rs",
+  "old": "ezsdr_radio_uhd::record_rows_per_kind(binding).map_err(|e| built(&e))?;",
+  "new": "let _ = binding;",
+  "crate": "ezsdr-server",
+  "test_bin": "protocol",
+  "filter": "ea_07_a_bad_record_rows_per_kind_is_refused_with_the_ur_5_text_before_the_device_opens"
+ },
+ {
+  "id": "N106-36",
+  "name": "the Core keeps the default N, not the one the binding gave (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "self.record_rows, )?);",
+  "new": "core::DEFAULT_RECORD_ROWS, )?);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_30_a_run_past_the_bound_says_what_it_left_out"
+ },
+ {
+  "id": "N106-37",
+  "name": "an abandon's closing record is bounded as an intermediate part (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": ".bursts.push(burst_key(false), serde_json::to_value(record).expect(\"a record\")); } self.with_book(|book| book.end_open(end)); true",
+  "new": ".bursts.push(burst_key(self.open_part), serde_json::to_value(record).expect(\"a record\")); } self.with_book(|book| book.end_open(end)); true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_the_closing_record_of_an_abandon_is_kept_when_the_intermediate_parts_budget_is_spent"
+ },
+ {
+  "id": "N106-38",
+  "name": "a failed reopen's closing record is bounded as an intermediate part (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": ".bursts.push(burst_key(false), serde_json::to_value(record).expect(\"a record\")); } streams.finished(key);",
+  "new": ".bursts.push(burst_key(self.open_part), serde_json::to_value(record).expect(\"a record\")); } streams.finished(key);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_the_closing_record_of_a_failed_reopen_is_kept_when_the_intermediate_parts_budget_is_spent"
+ },
+ {
+  "id": "N106-39",
+  "name": "a booked burst that joins a part's device burst leaves its acknowledgement bounded (UR-30, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "pending.part = false;",
+  "new": "let _ = pending.part;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_joined_booked_burst_makes_its_device_burst_s_ack_a_booked_ack"
+ },
+ {
+  "id": "N106-40",
+  "name": "the Kernel bursts a dropped device burst joined do not carry its resume's plan (UR-28, #106)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "for target in reached.targets { self.time_error_resuming(TimeErrorOutcome::LateAtDevice, Duration::new(ClockDomainId::HOST_MONOTONIC, late_by_ns), target, resumes_at); }",
+  "new": "for (n, target) in reached.targets.into_iter().enumerate() { self.time_error_resuming(TimeErrorOutcome::LateAtDevice, Duration::new(ClockDomainId::HOST_MONOTONIC, late_by_ns), target, resumes_at.filter(|_| n == 0)); }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_switch_that_joins_a_resumed_part_is_named_with_it"
  }
 ]

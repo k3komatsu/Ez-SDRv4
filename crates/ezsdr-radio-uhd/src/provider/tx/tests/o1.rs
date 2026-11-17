@@ -87,7 +87,7 @@ impl Rig {
     }
 
     fn rows(&self) -> Vec<Row> {
-        lock(&self.rig.core.rec).bursts.clone()
+        lock(&self.rig.core.rec).bursts.to_vec()
     }
 
     /// The burst record with `samples` payload samples, as `(target, requested target, late)`.

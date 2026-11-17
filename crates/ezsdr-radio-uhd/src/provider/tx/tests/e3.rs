@@ -47,7 +47,7 @@ fn snap(core: &Core, device: &FakeDevice, tx: &Tx) -> Vec<String> {
     lines.push(format!("chain next {:?} tail {}", tx.chain().next(), tx.chain().tail().is_some()));
     lines.push(format!("open next {:?} first {:?}", tx.open_next(), tx.open_first()));
     let rec = lock(&core.rec);
-    for row in &rec.bursts {
+    for row in rec.bursts.iter() {
         lines.push(format!("record {} samples {} wraps {} blocks {} end {}", row["target"]["ticks"], row["samples"], row["wraps"], row["blocks"], row["end"].as_str().unwrap_or("?")));
     }
     lines.push(format!("rejected {}", rec.rejected.len()));
@@ -255,7 +255,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 1 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=1",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=1",
         ],
     ),
     (
@@ -267,7 +267,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 1 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=1",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=1",
         ],
     ),
     (
@@ -279,7 +279,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 2 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=2",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=2",
         ],
     ),
     (
@@ -291,7 +291,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 2 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=2",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=2",
         ],
     ),
     (
@@ -303,7 +303,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 3 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=3",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=3",
         ],
     ),
     (
@@ -315,7 +315,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 3 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=3",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=3",
         ],
     ),
     (
@@ -327,7 +327,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 4 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=4",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=4",
         ],
     ),
     (
@@ -339,7 +339,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 4 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=4",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=4",
         ],
     ),
     (
@@ -351,7 +351,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 5 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=5",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=5",
         ],
     ),
     (
@@ -363,7 +363,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 5 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=5",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=5",
         ],
     ),
     (
@@ -375,7 +375,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 31 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=31",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=31",
         ],
     ),
     (
@@ -387,7 +387,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 31 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=31",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=31",
         ],
     ),
     (
@@ -399,7 +399,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 32 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=32",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=32",
         ],
     ),
     (
@@ -411,7 +411,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 32 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=32",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=32",
         ],
     ),
     (
@@ -423,7 +423,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 33 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=33",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=33",
         ],
     ),
     (
@@ -436,7 +436,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 33 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=33",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=33",
         ],
     ),
     (
@@ -448,7 +448,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 34 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=34",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=34",
         ],
     ),
     (
@@ -461,7 +461,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 34 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=34",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=34",
         ],
     ),
     (
@@ -473,7 +473,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 40 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=40",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=40",
         ],
     ),
     (
@@ -486,7 +486,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 40 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=40",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=40",
         ],
     ),
     (
@@ -498,7 +498,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 100 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=100",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=100",
         ],
     ),
     (
@@ -511,7 +511,7 @@ const C1: Expected = &[
             "open next None first None",
             "record 5000 samples 100 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=100",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=100",
         ],
     ),
 ];
@@ -598,7 +598,7 @@ const C3: Expected = &[
             "record 5050 samples 4 wraps 1 blocks 1 end eob",
             "record 5054 samples 1 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=4 tx_errors=0 tx_samples=55",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=4 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=55",
         ],
     ),
     (
@@ -616,7 +616,7 @@ const C3: Expected = &[
             "record 5050 samples 4 wraps 1 blocks 1 end eob",
             "record 5054 samples 1 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=4 tx_errors=0 tx_samples=55",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=4 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=55",
         ],
     ),
     (
@@ -629,7 +629,7 @@ const C3: Expected = &[
             "record 5000 samples 100 wraps 1 blocks 1 end eob",
             "record 5100 samples 1 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=101",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=101",
         ],
     ),
     (
@@ -643,7 +643,7 @@ const C3: Expected = &[
             "record 5000 samples 100 wraps 1 blocks 1 end eob",
             "record 5100 samples 1 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=101",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=101",
         ],
     ),
     (
@@ -657,7 +657,7 @@ const C3: Expected = &[
             "record 5000 samples 33 wraps 1 blocks 1 end eob",
             "record 5033 samples 33 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=66",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=66",
         ],
     ),
     (
@@ -672,7 +672,7 @@ const C3: Expected = &[
             "record 5000 samples 33 wraps 1 blocks 1 end eob",
             "record 5033 samples 33 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=66",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=66",
         ],
     ),
 ];
@@ -689,7 +689,7 @@ const C4: Expected = &[
             "record 5000 samples 1500 wraps 1 blocks 1 end eob",
             "record 6500 samples 300 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=1800",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=1800",
         ],
     ),
     (
@@ -704,7 +704,7 @@ const C4: Expected = &[
             "record 5000 samples 1500 wraps 1 blocks 1 end eob",
             "record 6500 samples 300 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=1800",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=1800",
         ],
     ),
     (
@@ -719,7 +719,7 @@ const C4: Expected = &[
             "record 5000 samples 60 wraps 0 blocks 1 end eob",
             "record 5060 samples 50 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=110",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=110",
         ],
     ),
     (
@@ -734,7 +734,7 @@ const C4: Expected = &[
             "record 5000 samples 60 wraps 0 blocks 1 end eob",
             "record 5060 samples 50 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=110",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=110",
         ],
     ),
     (
@@ -746,7 +746,7 @@ const C4: Expected = &[
             "open next None first None",
             "record 5000 samples 20 wraps 0 blocks 1 end eob",
             "rejected 1",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=20",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=20",
         ],
     ),
     (
@@ -758,7 +758,7 @@ const C4: Expected = &[
             "open next None first None",
             "record 5000 samples 20 wraps 0 blocks 1 end eob",
             "rejected 1",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=20",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=20",
         ],
     ),
     (
@@ -773,7 +773,7 @@ const C4: Expected = &[
             "record 5000 samples 100 wraps 1 blocks 1 end eob",
             "record 5100 samples 50 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=150",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=150",
         ],
     ),
     (
@@ -788,7 +788,7 @@ const C4: Expected = &[
             "record 5000 samples 100 wraps 1 blocks 1 end eob",
             "record 5100 samples 50 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=150",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=150",
         ],
     ),
     (
@@ -803,7 +803,7 @@ const C4: Expected = &[
             "record 5000 samples 1000 wraps 1 blocks 1 end eob",
             "record 6000 samples 300 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=1300",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=1300",
         ],
     ),
     (
@@ -818,7 +818,7 @@ const C4: Expected = &[
             "record 5000 samples 1000 wraps 1 blocks 1 end eob",
             "record 6000 samples 300 wraps 1 blocks 1 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_samples=1300",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=2 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=1300",
         ],
     ),
 ];
@@ -834,7 +834,7 @@ const C5: Expected = &[
             "open next None first None",
             "record 5000 samples 100 wraps 1 blocks 2 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=100",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=100",
         ],
     ),
     (
@@ -847,7 +847,7 @@ const C5: Expected = &[
             "open next None first None",
             "record 5000 samples 100 wraps 1 blocks 2 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=100",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=100",
         ],
     ),
     (
@@ -860,7 +860,7 @@ const C5: Expected = &[
             "open next None first None",
             "record 5000 samples 100 wraps 1 blocks 2 end eob",
             "rejected 0",
-            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_samples=100",
+            "stats link_drops_seen=0 rx_before_origin=0 rx_blocks=0 rx_errors=0 rx_off_lattice=0 rx_overflows=0 rx_overlapping=0 rx_samples=0 tx_bursts=1 tx_errors=0 tx_gap_samples=0 tx_resumes=0 tx_samples=100",
         ],
     ),
 ];

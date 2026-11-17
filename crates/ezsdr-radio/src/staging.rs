@@ -380,21 +380,16 @@ pub struct Open<P> {
     pub paused: Option<Paused>,
 }
 
-/// A repeat that waits to resume (UR-22): the first sample the device has nothing past, and the Provider's own figure for the stall part of
-/// the gap, kept for the part that resumes it.
+/// A repeat that waits to resume (UR-22): the first sample the device has nothing past, the plan the drop announced and the lattice it resumes on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Paused {
     /// The handed cursor `H`: the first sample the device has nothing past, which an end of the repeat cuts at.
     pub handed: i64,
-    /// The stall part of the gap, in root ticks (UR-22).
-    pub stall: i64,
     /// The sample the repeat was to resume at: the plan the drop's event announced. The part's start differing from it (a missed resume point) is told
     /// once, when the part is sent (UR-22).
     pub planned: i64,
     /// The lattice `(origin, period)` the resume point, a missed one and a switch's boundary the gap passed are taken on: the replaced repeat's.
     pub lattice: (i64, i64),
-    /// The first instant of the device burst this pause closed: a late report that reaches the part that burst carried is about this pause, and no other's.
-    pub source: Option<i64>,
 }
 
 impl<P> Open<P> {
@@ -777,18 +772,15 @@ impl<P: Booked, T: Copy> TxBook<P, T> {
     /// paused at its handed cursor. It resumes only at [`TxBook::resume_at`].
     pub fn pause(&mut self, end: DeviceEnd, lattice: (i64, i64)) {
         assert!(self.ops.inflight.is_none(), "an open booking is paused with an operation in flight");
-        let source = self.device.first();
         self.device.end(end);
         let open = self.open.as_mut().expect("a booking is open");
-        open.paused = Some(Paused { handed: open.next, stall: 0, planned: open.next, lattice, source });
+        open.paused = Some(Paused { handed: open.next, planned: open.next, lattice });
     }
 
-    /// UR-22: the paused booking resumes at the sample `at`, its next, with the stall part `stall` of the gap before it. Its first whole send there
-    /// ends the pause.
-    pub fn resume_at(&mut self, at: i64, stall: i64) {
+    /// UR-22: the paused booking resumes at the sample `at`, its next. Its first whole send there ends the pause.
+    pub fn resume_at(&mut self, at: i64) {
         let open = self.open.as_mut().expect("a booking is open");
         let paused = open.paused.as_mut().expect("the booking is paused");
-        paused.stall = stall;
         paused.planned = at;
         open.next = at;
     }

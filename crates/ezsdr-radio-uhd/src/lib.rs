@@ -23,7 +23,7 @@ use ezsdr_kernel::spec::Namespace;
 pub use authority::{DeviceAuthority, REFERENCE_DID_NOT_LOCK};
 pub use device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, FakeFault, Iq, RxRecv, Settings, TxCode, TxReport, decimation, from_time_spec, to_time_spec};
 pub use host::{ClockMode, HostClock};
-pub use provider::UhdRadio;
+pub use provider::{UhdRadio, record_rows_per_kind};
 /// UHD's own calls for the C API tests and the bench (feature `uhd`, UR-3).
 #[cfg(feature = "uhd")]
 pub use uhd::{

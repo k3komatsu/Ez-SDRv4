@@ -184,6 +184,8 @@ pub struct UhdRadio {
     epoch: ezsdr_kernel::time::EpochRef,
     /// The description built from this binding's layout (RM-29).
     description: channels::Description,
+    /// Rows of each kind the Module keeps per section (UR-5's `record_rows_per_kind`, UR-30).
+    record_rows: usize,
     /// Its hold on the device's serial (UR-5): released when this instance drops.
     _serial: SerialGuard,
     rx_stall: Option<(Wall, Wall)>,
@@ -197,6 +199,16 @@ pub struct UhdRadio {
     stopped: bool,
     cleaned: bool,
     detached: BTreeSet<String>,
+}
+
+/// The rows of each kind the Module keeps per section (UR-5, UR-30): the binding's `record_rows_per_kind`, an Int in 1..=100000, else 1000. Pure and
+/// device-free, so that the server refuses a bad value before it opens the device.
+pub fn record_rows_per_kind(binding: &Binding) -> Result<usize, ModuleError> {
+    match binding.selector.get(&Ident::parse("record_rows_per_kind").expect("a selector key")) {
+        None => Ok(core::DEFAULT_RECORD_ROWS),
+        Some(Value::Scalar(Scalar::Int(n))) if (1..=100_000).contains(n) => Ok(*n as usize),
+        Some(_) => Err(rejected("UR-5: selector `record_rows_per_kind` must be an Int in 1..=100000")),
+    }
 }
 
 impl UhdRadio {
@@ -216,7 +228,7 @@ impl UhdRadio {
         if binding.feed.is_some() {
             return Err(rejected("UR-5: a Provider binding carries no feed"));
         }
-        let allowed: Vec<&str> = x3xx::SELECTOR_KEYS.into_iter().chain(["args", "id", "clock_source", "time_source", "block_len", "reopen_on_unlock"]).collect();
+        let allowed: Vec<&str> = x3xx::SELECTOR_KEYS.into_iter().chain(["args", "id", "clock_source", "time_source", "block_len", "reopen_on_unlock", "record_rows_per_kind"]).collect();
         if let Some(name) = binding.selector.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(rejected(format!("UR-5: unsupported selector key `{name}`")));
         }
@@ -243,6 +255,7 @@ impl UhdRadio {
             Some(Value::Scalar(Scalar::Int(n))) if (1..=65_536).contains(n) => *n as u32,
             Some(_) => return Err(rejected("UR-5: selector `block_len` must be an Int in 1..=65536")),
         };
+        let record_rows = record_rows_per_kind(binding)?;
         let layout = channels::from_selector(&binding.selector).map_err(|why| rejected(format!("UR-5: {why}")))?;
         // UR-5, design 33 D5: the serial is the device's identity and the first device
         // call; a live instance already bound to it is refused before anything is written
@@ -313,6 +326,7 @@ impl UhdRadio {
             clock_source,
             epoch,
             description,
+            record_rows,
             _serial: registration,
             rx_stall: None,
             #[cfg(test)]
@@ -416,18 +430,11 @@ impl UhdRadio {
     fn write_sections(&mut self, core: &Core) {
         core.settle_unresolved_switches();
         core.settle_switches();
-        let rec = lock(&core.rec);
+        // UR-30: the rows, the counts of what was left out and `record_bound` come from one borrow, so a row written meanwhile (a detached thread) cannot land between them.
         let sections = &mut self.instance.sections;
-        let mut put = |suffix: &str, value: Json| {
+        for (suffix, value) in lock(&core.rec).written() {
             sections.insert(section(suffix), value);
-        };
-        put("applied", Json::Array(rec.applied.clone()));
-        put("bursts", Json::Array(rec.bursts.clone()));
-        put("async", Json::Array(rec.device_async.clone()));
-        put("rejected", Json::Array(rec.rejected.clone()));
-        put("switches", Json::Array(rec.switches.clone()));
-        put("timing", Json::Array(rec.timing.clone()));
-        put("stats", json!(rec.stats));
+        }
         // UR-13, UR-30: whether each direction's rate set was compared; the section keeps
         // both fields whatever the answer.
         if let Some(device) = sections.get_mut(&section("device")).and_then(|value| value.as_object_mut()) {
@@ -504,7 +511,18 @@ impl Provider for UhdRadio {
         let EventSource::Node { node: source_root } = ctx.source else {
             return Err(rejected("KC-8: a Provider's event source root is a node"));
         };
-        let core = Arc::new(Core::new(self.device.clone(), source_root, root, ctx.time.clone(), ctx.clocks.clone(), ctx.events.clone(), ctx.inputs.clone(), links, self.description.clone())?);
+        let core = Arc::new(Core::new(
+            self.device.clone(),
+            source_root,
+            root,
+            ctx.time.clone(),
+            ctx.clocks.clone(),
+            ctx.events.clone(),
+            ctx.inputs.clone(),
+            links,
+            self.description.clone(),
+            self.record_rows,
+        )?);
         if let Some(error) = &self.reopened {
             core.timing(json!({ "what": "reopened_on_unlock", "first_error": error }));
         }
@@ -824,6 +842,24 @@ mod tests {
             tx: (0..tx).map(|k| PreparedStream { k, ..stream.clone() }).collect(),
         });
         (radio, radio_device, rig_device, events)
+    }
+
+    /// S3 (UR-5, UR-30): `record_rows_per_kind` is the one parse `from_binding` and the server share; no device is involved.
+    #[test]
+    fn ur_05_record_rows_per_kind_is_an_int_in_1_to_100000_and_defaults_to_1000() {
+        let binding = |selector: Json| -> Binding {
+            let mut selector = selector;
+            selector["args"] = json!("type=fake-rig");
+            serde_json::from_value(json!({ "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } }, "selector": selector })).unwrap()
+        };
+        assert_eq!(record_rows_per_kind(&binding(json!({}))).unwrap(), 1_000);
+        for (value, rows) in [(1, 1), (1_000, 1_000), (100_000, 100_000)] {
+            assert_eq!(record_rows_per_kind(&binding(json!({ "record_rows_per_kind": value }))).unwrap(), rows);
+        }
+        for value in [json!(0), json!(-1), json!(100_001), json!(1.5), json!("1000"), json!([1000]), json!(true)] {
+            let error = record_rows_per_kind(&binding(json!({ "record_rows_per_kind": value.clone() }))).unwrap_err();
+            assert_eq!(error.message, "UR-5: selector `record_rows_per_kind` must be an Int in 1..=100000", "{value}");
+        }
     }
 
     fn active_rx_chain(core: &Core, k: usize) {

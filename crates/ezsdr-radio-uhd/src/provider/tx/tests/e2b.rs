@@ -46,11 +46,11 @@ fn snapshot(core: &Core, device: &FakeDevice, events: &EventCollector, mut log: 
     json!({
         "calls": device.calls(),
         "applied": rec.applied,
-        "bursts": rec.bursts,
-        "rejected": rec.rejected,
+        "bursts": rec.bursts.to_vec(),
+        "rejected": rec.rejected.to_vec(),
         "switches": rec.switches,
-        "timing": rec.timing,
-        "device_async": rec.device_async,
+        "timing": rec.timing.to_vec(),
+        "device_async": rec.device_async.to_vec(),
         "stats": stats,
         "events": log,
     })
@@ -781,7 +781,7 @@ const C0: &str = r#"{
 "device_async": [],
 "events": [],
 "rejected": [],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":1,"tx_errors":0,"tx_samples":4},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":1,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":4},
 "switches": [],
 "timing": []
 }"#;
@@ -803,7 +803,7 @@ const C1: &str = r#"{
 "device_async": [],
 "events": [],
 "rejected": [],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":1,"tx_errors":0,"tx_samples":4},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":1,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":4},
 "switches": [],
 "timing": []
 }"#;
@@ -832,7 +832,7 @@ const C2_CONFIGURED: &str = r#"{
   {"kind":"tx_burst","reason":"UR-26: cancelled by Stop"},
   {"at":{"domain":{"local":2,"node":0},"ticks":3000000},"kind":"tx_burst","reason":"UR-21: the burst overlaps an accepted booking"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":1,"tx_errors":0,"tx_samples":200},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":1,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":200},
 "switches": [],
 "timing": []
 }"#;
@@ -862,7 +862,7 @@ const C2_REFUSED: &str = r#"{
   {"at":{"domain":{"local":2,"node":0},"ticks":3000000},"kind":"tx_burst","reason":"test: scripted refusal of an apply"},
   {"at":{"domain":{"local":2,"node":0},"ticks":3000000},"kind":"tx_burst","reason":"UR-21: the burst overlaps an accepted booking"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":1,"tx_errors":0,"tx_samples":200},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":1,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":200},
 "switches": [],
 "timing": []
 }"#;
@@ -884,7 +884,7 @@ const C3: &str = r#"{
 "rejected": [
   {"kind":"tx_burst","reason":"UR-26: cancelled by Stop"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": [
   {"at":3000000,"bound":5001000,"stream":0,"what":"tx_stop_applied"}
@@ -910,7 +910,7 @@ const C4_I: &str = r#"{
 "rejected": [
   {"kind":"tx_burst","reason":"UR-26: cancelled by Provider::stop"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": [
   {"at":2200000,"message":"test: lost before the configure's mark","what":"device_lost"}
@@ -937,7 +937,7 @@ const C4_II: &str = r#"{
 "rejected": [
   {"kind":"tx_burst","reason":"UR-26: cancelled by Provider::stop"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": [
   {"at":2200000,"message":"test: lost between the configure's channels","what":"device_lost"}
@@ -963,7 +963,7 @@ const C4_III: &str = r#"{
 "rejected": [
   {"kind":"tx_burst","reason":"UR-26: cancelled by Provider::stop"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": [
   {"at":3000000,"message":"test: lost after the configure's result","what":"device_lost"}
@@ -996,7 +996,7 @@ const C5: &str = r#"{
   {"at":{"domain":{"local":2,"node":0},"ticks":4200000},"kind":"tx_burst","reason":"UR-38: the repeat the switch replaces has not started on the device"},
   {"at":{"domain":{"local":2,"node":0},"ticks":4200000},"kind":"tx_burst","reason":"UR-38: the repeat the switch replaces has not started on the device"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":1,"tx_errors":0,"tx_samples":10000},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":1,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":10000},
 "switches": [
   {"action_id":5,"boundary":36000,"new_period":1000,"old_period":1000,"outcome":"pending","predecessor":2,"selected_at":{"domain":{"local":2,"node":0},"ticks":4800000}}
 ],
@@ -1017,7 +1017,7 @@ const C6: &str = r#"{
 "rejected": [
   {"at":{"domain":{"local":2,"node":0},"ticks":3000000},"kind":"tx_burst","reason":"fake: scripted refusal of a transmit apply"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": []
 }"#;
@@ -1039,7 +1039,7 @@ const C7_REOPENED: &str = r#"{
 "rejected": [
   {"kind":"tx_burst","reason":"UR-26: cancelled by Stop"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": []
 }"#;
@@ -1061,7 +1061,7 @@ const C7_FAILED: &str = r#"{
   {"at":{"domain":{"local":2,"node":0},"ticks":0},"kind":"tx_burst","reason":"UR-22: cancelled because the TX streamer could not be reopened"},
   {"at":{"domain":{"local":2,"node":0},"ticks":0},"kind":"tx_reopen","reason":"fake: scripted refusal of transmit open"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": []
 }"#;
@@ -1082,7 +1082,7 @@ const C8: &str = r#"{
   {"at":{"domain":{"local":2,"node":0},"ticks":2200000},"kind":"tx_burst","reason":"UR-21: the burst overlaps an accepted booking"},
   {"at":{"domain":{"local":2,"node":0},"ticks":2200000},"kind":"tx_burst","reason":"fake: scripted refusal of a transmit apply"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": []
 }"#;
@@ -1105,7 +1105,7 @@ const C9_A: &str = r#"{
   {"kind":"ezsdr.DEVICE_LOST","payload":{"message":"test: lost before the result's section"}}
 ],
 "rejected": [],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": [
   {"at":0,"message":"test: lost before the result's section","what":"device_lost"}
@@ -1131,7 +1131,7 @@ const C9_B: &str = r#"{
 "rejected": [
   {"kind":"tx_burst","reason":"UR-26: cancelled by Provider::stop"}
 ],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": [
   {"at":2200000,"message":"test: lost before the result's section","what":"device_lost"}
@@ -1152,7 +1152,7 @@ const C9_C: &str = r#"{
   {"kind":"ezsdr.DEVICE_LOST","payload":{"message":"test: lost before the result's section"}}
 ],
 "rejected": [],
-"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_samples":0},
+"stats": {"link_drops_seen":0,"rx_before_origin":0,"rx_blocks":0,"rx_errors":0,"rx_off_lattice":0,"rx_overflows":0,"rx_overlapping":0,"rx_samples":0,"tx_bursts":0,"tx_errors":0,"tx_gap_samples":0,"tx_resumes":0,"tx_samples":0},
 "switches": [],
 "timing": [
   {"at":0,"message":"test: lost before the result's section","what":"device_lost"}

@@ -139,6 +139,16 @@ fn ur_05_from_binding_refusals() {
     ] {
         assert!(refuse(binding(selector.clone(), Some(x3xx())), device.clone()).starts_with("UR-5:"), "{selector}");
     }
+    // UR-5, UR-30: `record_rows_per_kind` is an Int in 1..=100000, refused before the device is called (the serial is its first call).
+    for rows in [json!(0), json!(-1), json!(100_001), json!(1.5), json!("1000"), json!([1000]), json!(true)] {
+        let fresh = fake(FakeConfig::default());
+        let selector = json!({ "args": ARGS, "record_rows_per_kind": rows });
+        assert_eq!(refuse(binding(selector.clone(), Some(x3xx())), fresh.clone()), "UR-5: selector `record_rows_per_kind` must be an Int in 1..=100000", "{selector}");
+        assert!(fresh.calls().is_empty(), "{selector}: refused before any device call: {:?}", fresh.calls());
+    }
+    for rows in [1, 1_000, 100_000] {
+        assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS, "record_rows_per_kind": rows }), Some(x3xx())), device.clone()).is_ok(), "{rows}");
+    }
     // The id is only a node path now (sections are filed by source, RS-39): any one segment.
     assert!(UhdRadio::from_binding(&binding(json!({ "args": ARGS, "id": "Dev-1.a" }), Some(x3xx())), device.clone()).is_ok());
     let slow = fake(FakeConfig { master_clock_rate: 184_320_000, ..FakeConfig::default() });
@@ -1912,9 +1922,14 @@ fn bounded<T: Send + 'static>(what: &str, bound: Wall, f: impl FnOnce() -> T + S
 }
 
 fn tx_session(config: FakeConfig) -> (Run, Arc<FakeDevice>, TempDir) {
+    tx_session_with(config, json!({}))
+}
+
+/// [`tx_session`] with the radio binding's selector keys `selector` added.
+fn tx_session_with(config: FakeConfig, selector: Json) -> (Run, Arc<FakeDevice>, TempDir) {
     let dir = TempDir::new();
     let device = fake(config);
-    let profile = profile(&dir, json!({}), json!({}), true);
+    let profile = profile(&dir, selector, json!({}), true);
     let mut run = session_with(&profile, device.clone(), &rx0_tx0(&profile));
     past_t0(&mut run, ms(1));
     past_tx_origin(&mut run);
@@ -2581,19 +2596,32 @@ fn ur_28_the_device_reports_a_late_burst() {
     // A reservation whose delay cannot change the verdict is `send_asap_and_flag` (rule
     // (3)): a booking the test thread's delay made late is moved, not dropped.
     let _ = send(&mut run, "start_repeat", Some(ms(8)), &tone(100));
-    wait(&mut run, ms(100));
+    wait(&mut run, ms(400));
     let manifest = run.finish();
     let late: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::LateAtDevice).collect();
-    // UR-22: the repeat resumes at its lattice after the first drop, and `SlowSend` makes every send late, so the part is dropped too, plays nothing, and the
-    // repeat ends there: the first event carries the resume point, the second names the part and carries none.
-    assert_eq!(late.len(), 2, "{:?}", time_errors(&manifest));
+    // UR-22 (#106): `SlowSend` makes every send late, so every part is dropped too, plays nothing, and the repeat keeps resuming: one event per cycle, each carrying the
+    // plan, the part's record opening at it. How many cycles fit is a count of virtual time (the threads are participants of the manual clock): the test pins the
+    // floor and the relations, and `mt3d_a_repeat_whose_every_part_is_dropped_late_keeps_resuming_and_transmits_nothing` pins the exact cycle.
+    fn ticks(point: &TimePoint) -> i64 {
+        serde_json::to_value(point).unwrap()["ticks"].as_i64().unwrap()
+    }
     let records = bursts(&manifest);
+    assert!(late.len() >= 3, "{:?}", time_errors(&manifest));
     assert_eq!(late[0].target, records[0].target, "the late report names the moved start");
     assert!(late[0].late_by_ns > 0);
-    assert_eq!(late[0].resumes_at, Some(late[1].target), "the plan is the part's start");
-    assert_eq!((late[1].resumes_at, records.len()), (None, 2), "{records:?}");
-    assert_eq!(records[1].target, late[1].target);
-    assert_eq!(section(&manifest, "timing").as_array().unwrap().iter().filter(|row| row["what"] == "tx_resume").count(), 1);
+    for (index, event) in late.iter().enumerate() {
+        if let Some(next) = late.get(index + 1) {
+            assert_eq!(event.resumes_at, Some(next.target), "the plan is the next part's start: event {index}");
+            assert!(ticks(&next.target) - ticks(&event.target) >= 10_032, "resume points are a margin and a first send apart: {late:?}");
+        }
+        if let Some(record) = records.get(index + 1) {
+            assert_eq!(event.resumes_at, Some(record.target), "the part's record opens at the plan: event {index}");
+        }
+    }
+    assert!(late[..late.len() - 1].iter().all(|event| event.resumes_at.is_some()), "{late:?}");
+    let resumes = section(&manifest, "timing").as_array().unwrap().iter().filter(|row| row["what"] == "tx_resume" && row["cause"] == "late_at_device").count();
+    assert_eq!(resumes, late.iter().filter(|event| event.resumes_at.is_some()).count(), "one row per resume");
+    assert!(!rejections(&manifest).iter().any(|reason| reason.contains("not resumed")), "{:?}", rejections(&manifest));
 }
 
 #[test]
@@ -2625,7 +2653,7 @@ fn ur_22_a_repeat_the_device_reports_late_resumes_on_its_lattice() {
     let (origin, at) = (start.ticks_in(start.domain()).unwrap(), resumes_at.ticks_in(start.domain()).unwrap());
     assert!(at > origin && (at - origin) % 100 == 0, "R {at} is on the lattice from {origin}");
     let records = bursts(&manifest);
-    assert!(records.len() >= 2 && records[0].end == ezsdr_kernel::stream::BurstEnd::Discontinuity, "{records:?}");
+    assert!(records.len() >= 2 && records[0].end == BurstEnd::Discontinuity, "{records:?}");
     assert_eq!(records[1].target, resumes_at, "the part's record opens where it really started");
     let timing: Vec<_> = section(&manifest, "timing").as_array().unwrap().iter().filter(|row| row["what"] == "tx_resume").cloned().collect();
     assert_eq!(timing.len(), 1, "{timing:?}");
@@ -2651,7 +2679,7 @@ fn ur_22_a_late_send_asap_repeat_resumes() {
     assert_eq!(late.len(), 1, "{:?}", time_errors(&manifest));
     let resumes_at = late[0].resumes_at.expect("the repeat resumes");
     let records = bursts(&manifest);
-    assert!(records.len() >= 2 && records[0].end == ezsdr_kernel::stream::BurstEnd::Discontinuity, "{records:?}");
+    assert!(records.len() >= 2 && records[0].end == BurstEnd::Discontinuity, "{records:?}");
     assert_eq!((late[0].target, records[1].target), (records[0].target, resumes_at), "the part's record opens at R");
     let domain = resumes_at.domain();
     let (start, at) = (records[0].target.ticks_in(domain).unwrap(), resumes_at.ticks_in(domain).unwrap());
@@ -2861,14 +2889,80 @@ fn ur_29_a_lost_device_is_found_while_idle() {
 #[test]
 fn ur_30_the_sections_are_written() {
     let (manifest, _dir) = receive_run(FakeConfig::default(), 1, 1_000);
-    for suffix in ["device", "envelope", "applied", "bursts", "async", "rejected", "switches", "timing", "stats"] {
+    for suffix in ["device", "envelope", "applied", "bursts", "async", "rejected", "switches", "timing", "stats", "record_bound"] {
         assert!(manifest.section(&usrp(), &format!("ezsdr.radio.uhd.{suffix}")).is_some(), "{suffix}");
     }
+    // UR-30: `record_bound` is always written; a Run that left nothing out says so, with the N in effect.
+    assert_eq!(section(&manifest, "record_bound"), &json!({ "rows_per_kind": 1_000, "omitted": {} }));
     let stats = section(&manifest, "stats");
-    for key in ["rx_blocks", "rx_samples", "rx_overflows", "rx_errors", "rx_off_lattice", "rx_overlapping", "link_drops_seen", "tx_bursts", "tx_samples", "tx_errors"] {
+    for key in ["rx_blocks", "rx_samples", "rx_overflows", "rx_errors", "rx_off_lattice", "rx_overlapping", "link_drops_seen", "tx_bursts", "tx_samples", "tx_errors", "tx_resumes", "tx_gap_samples"] {
         assert!(stats[key].is_i64(), "{key}");
     }
     assert!(stats["rx_samples"].as_i64().unwrap() >= 1_000);
+}
+
+#[test]
+fn ur_30_a_run_past_the_bound_says_what_it_left_out() {
+    // UR-30: N = 3 (the binding's `record_rows_per_kind`, not the default 1000). Six reports of one code: the first three are rows, the other three are counted in
+    // `record_bound`, whose `rows_per_kind` is the N in effect; the sections keep their array shape. A reader that counts rows (`section`) refuses such a Manifest;
+    // `section_unchecked` is the opt-out of the tests about the bound itself.
+    let reports = vec![FakeFault::TxReport(Wall::from_millis(2_100), TxCode::Other(7)); 6];
+    let (mut run, _, _dir) = tx_session_with(FakeConfig { faults: reports, ..FakeConfig::default() }, json!({ "record_rows_per_kind": 3 }));
+    wait(&mut run, ms(200));
+    let manifest = run.finish();
+    let other = |row: &&Json| row["code"] == "Other(7)";
+    assert_eq!(section_unchecked(&manifest, "async").as_array().unwrap().iter().filter(other).count(), 3);
+    assert_eq!(section_unchecked(&manifest, "record_bound"), &json!({ "rows_per_kind": 3, "omitted": { "async": { "Other(7)": 3 } } }));
+    assert_eq!(omitted_rows(&manifest), ["async.Other(7): 3"]);
+    let typed: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section_unchecked(&manifest, "bursts").clone()).unwrap();
+    assert!(typed.is_empty(), "no burst was booked");
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| section(&manifest, "async").clone())).is_err(), "a reader that counts rows refuses a bounded Manifest");
+    // The pure reading of `record_bound`: nothing left out, or the lines of what was.
+    assert!(omitted_in(&json!({ "rows_per_kind": 1_000, "omitted": {} })).is_empty());
+    assert_eq!(omitted_in(&json!({ "rows_per_kind": 2, "omitted": { "timing": { "tx_resume": 5 }, "async": { "BurstAck": 2 } } })), ["async.BurstAck: 2", "timing.tx_resume: 5"]);
+}
+
+#[test]
+fn ur_30_a_clean_run_with_more_than_n_booked_bursts_keeps_every_booked_row() {
+    // UR-30: N = 3 and eight timed one-shot bursts: a Run with no fault keeps every row an Action's outcome is in: each booked burst's record and the
+    // acknowledgement of its end (the recovery flush's own acknowledgement is another kind), and nothing is left out.
+    let (mut run, _, _dir) = tx_session_with(FakeConfig::default(), json!({ "record_rows_per_kind": 3 }));
+    for i in 0..8 {
+        let _ = send(&mut run, "send", Some(ms(20 + 10 * i)), &tone(10));
+    }
+    wait(&mut run, ms(200));
+    let manifest = run.finish();
+    let acks = section_unchecked(&manifest, "async").as_array().unwrap().iter().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] != true).count();
+    assert_eq!(acks, 8, "{}", section_unchecked(&manifest, "async"));
+    assert_eq!(section_unchecked(&manifest, "bursts").as_array().unwrap().len(), 8);
+    assert_eq!(omitted_rows(&manifest), Vec::<String>::new(), "a clean Run leaves nothing out");
+}
+
+#[test]
+fn ur_30_a_repeat_the_device_drops_late_every_time_keeps_its_first_and_closing_records() {
+    // UR-30, UR-22 (#106): N = 1 and a repeat every part of which the fake drops late: it keeps resuming. The counters are exact whatever the rows keep; the repeat's
+    // booked record and its closing record are kept, the intermediate parts past the first are counted. How many cycles fit is virtual time: the test pins the relations
+    // and a floor (4 resumes, so that 2 or more parts are intermediate and one is left out), not the count.
+    let (mut run, _, _dir) = tx_session_with(FakeConfig { faults: vec![FakeFault::SlowSend(Wall::from_millis(20))], ..FakeConfig::default() }, json!({ "record_rows_per_kind": 1 }));
+    let _ = send(&mut run, "start_repeat", Some(ms(8)), &tone(100));
+    wait(&mut run, ms(400));
+    let manifest = run.finish();
+    let stats = section_unchecked(&manifest, "stats");
+    let resumes = stats["tx_resumes"].as_i64().unwrap();
+    assert!(resumes >= 4, "{resumes} resumes: {stats}");
+    let left_out = |section: &str, kind: &str| section_unchecked(&manifest, "record_bound")["omitted"][section][kind].as_i64().unwrap_or(0);
+    let kept = section_unchecked(&manifest, "timing").as_array().unwrap().iter().filter(|row| row["what"] == "tx_resume").count() as i64;
+    assert_eq!((kept, kept + left_out("timing", "tx_resume")), (1, resumes), "every resume is counted: {stats}");
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section_unchecked(&manifest, "bursts").clone()).unwrap();
+    let omitted_parts = left_out("bursts", "resumed_part");
+    assert!(omitted_parts >= 1, "an intermediate part was left out: {}", section_unchecked(&manifest, "record_bound"));
+    let total = records.len() as i64 + omitted_parts;
+    assert!(total == resumes || total == resumes + 1, "the booked record and one per part: {total} for {resumes} resumes");
+    assert_eq!(records[0].end, BurstEnd::Discontinuity, "the booked record is kept");
+    assert_eq!(records.last().unwrap().end, BurstEnd::Stop, "the closing record is kept");
+    let time_errors = section_unchecked(&manifest, "async").as_array().unwrap().iter().filter(|row| row["code"] == "TimeError").count();
+    assert_eq!(time_errors, 1, "the first TimeError row");
+    assert!(left_out("async", "TimeError") >= 1, "{}", section_unchecked(&manifest, "record_bound"));
 }
 
 #[test]

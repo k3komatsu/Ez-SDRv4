@@ -610,8 +610,33 @@ pub fn require_stream_timing(manifest: &Manifest, trial: &str, tx: bool) {
     );
 }
 
-pub fn section<'a>(manifest: &'a Manifest, suffix: &str) -> &'a Json {
+/// The binding selector of a bench Run whose reader counts rows: the most rows of each kind the Module may keep (UR-5, UR-30).
+pub fn throughput_selector() -> Json {
+    json!({ "record_rows_per_kind": 100_000 })
+}
+
+/// What a `record_bound` section says the Provider left out of its bounded sections, one `<section>.<kind>: <count>` line each (UR-30); none when nothing was.
+pub fn omitted_in(record_bound: &Json) -> Vec<String> {
+    let omitted = record_bound["omitted"].as_object().into_iter().flatten();
+    omitted.flat_map(|(section, kinds)| kinds.as_object().into_iter().flatten().map(move |(kind, count)| format!("{section}.{kind}: {count}"))).collect()
+}
+
+/// What the Manifest's Provider left out (UR-30): a reader that counts rows is right only when this is empty.
+pub fn omitted_rows(manifest: &Manifest) -> Vec<String> {
+    manifest.section(&usrp(), "ezsdr.radio.uhd.record_bound").map(omitted_in).unwrap_or_default()
+}
+
+/// The Provider's section `suffix`, whatever the Provider left out of it: the reader is the record bound's own test, or counts nothing.
+pub fn section_unchecked<'a>(manifest: &'a Manifest, suffix: &str) -> &'a Json {
     manifest.section(&usrp(), &format!("ezsdr.radio.uhd.{suffix}")).unwrap_or_else(|| panic!("no section {suffix}"))
+}
+
+/// The Provider's section `suffix`. It panics when the Provider left rows out of the Manifest (UR-30), so that a test that counts rows is not read on rows the bound
+/// cut: raise the binding's `record_rows_per_kind`, or read it with [`section_unchecked`] where the bound is what the test is about.
+pub fn section<'a>(manifest: &'a Manifest, suffix: &str) -> &'a Json {
+    let left_out = omitted_rows(manifest);
+    assert!(left_out.is_empty(), "UR-30: the Provider left rows out of the Manifest ({left_out:?}); `section({suffix})` counts nothing then");
+    section_unchecked(manifest, suffix)
 }
 
 /// The first artifact the Sink of `output` returned (RS-44).

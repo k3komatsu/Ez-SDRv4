@@ -1580,7 +1580,7 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 | C4 | cascade：A（C1 の late burst の形，20 ms，1 ms 遅れ）の最初の TimeError の tick を t0 とし，B（時刻つき，1 chunk，SOB+EOB）を `t0 + S × per + δ` に置く．δ は固定の格子（粗：−20・−10・50・100 µs，細：0〜30 µs を 1 µs 刻み，fake の limit とその +20 µs），各 δ 10 trial．1・10 MS/s | drain の終わりの境界，fake の pad が覆うか（UR-33，M3） | `hw_mt3_c4_cascade_boundary` | あり |
 | C5 | 2 channel（slot A と B の 1 つの 2 channel streamer，受信も両方）で，開始が host の基準の時刻の ±数百 µs の burst | 片方の channel だけ鳴ることがあるか（RM-11 の「何も送られなかった」） | `hw_mt3_c5_two_channel_late_start`．**slot B にも送信する**：slot B の board と att を owner が確かめ，`EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1` を付けた 1 本だけ（11-15 の (4) と同じ規則．配線が無ければ `NOT RUNNABLE` で送信しない） | あり（slot A と B） |
 | C6 | 保持した尾の close を 1 ms 遅らせる（Module の close：尾と零の 2 sample，SOB なし EOB，尾の時刻）．1・10 MS/s | Underflow，その後 TimeError，ACK なしか（M2） | `hw_mt3_c6_held_tail_starves` | あり |
-| C7 | Module の水準（Session）で，`start_repeat` を開始で遅らせた場合と，途中で飢えさせた場合（`tests/fake.rs` の `Descheduled` を `UhdDevice` に）．m = 10・1・0.2 ms の掃引，1 cell ≥ 10 trial，**両 board** | [from, R) の無音，R で波形が位相連続で戻る，cap に達しない．τ（Module の道での host から radio への遅れ）を測るのは C7 だけ．そのあと owner が m を決める | **bt2，まだ無い**（production の hook が要る．repeat の再開の段階（段階 D）の後） | あり |
+| C7 | Module の水準（Session）で，`start_repeat` を開始で遅らせた場合と，途中で飢えさせた場合（`tests/fake.rs` の `Descheduled` を `UhdDevice` に）．m = 10・1・0.2 ms の掃引，1 cell ≥ 10 trial，**両 board** | [from, R) の無音，R で波形が位相連続で戻る，repeat は drop のたびに再開する（cap は無い）．開始で遅らせる cell は，どの part も late で落とされても repeat が何も送らずに再開し続ける（1 周期に `TIME_ERROR { late_at_device }` が 1 つ）ことの確認も兼ねる．τ（Module の道での host から radio への遅れ）を測るのは C7 だけ．そのあと owner が m を決める | **bt2，まだ無い**（production の hook が要る．repeat の再開の段階（段階 D）の後） | あり |
 
 ### C1 の流し方
 

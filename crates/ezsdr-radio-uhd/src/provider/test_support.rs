@@ -1,5 +1,5 @@
 //! A controlled Provider clock for command-order tests without host deadlines.
-use super::core::Core;
+use super::core::{Core, DEFAULT_RECORD_ROWS};
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, Iq, RxRecv, Settings, TxReport};
 use crate::host::{ClockMode, HostClock};
 use ezsdr_kernel::event::{EventCollector, EventSink, EventSource, Target};
@@ -124,7 +124,9 @@ fn core_on(
     description: ezsdr_radio::channels::Description,
 ) -> Arc<Core> {
     let root = time.primary_root();
-    Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(), root, time, clocks, events, Arc::new(inputs), links, description).expect("the rx node is inside the instance root"))
+    Arc::new(
+        Core::new(device, ResourceId::parse("usrp").unwrap(), root, time, clocks, events, Arc::new(inputs), links, description, DEFAULT_RECORD_ROWS).expect("the rx node is inside the instance root"),
+    )
 }
 
 /// A target the Kernel would resolve to `node` (KC-23): its first segment as the resource

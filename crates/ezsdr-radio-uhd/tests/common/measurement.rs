@@ -3179,7 +3179,8 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
         let id = tx_rate_id(*rate);
         let (bytes, waveform) = super::waveform_of(&super::pn(plan.tx_waveform_samples));
         let run_dir = super::TempDir::new();
-        let profile = super::bench_profile(&*device, &run_dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+        // UR-30: a repeat that resumes thousands of times in a trial keeps its first rows only; this reader counts rows, so it asks for the most the selector allows.
+        let profile = super::bench_profile(&*device, &run_dir, super::throughput_selector(), Json::Object(Default::default()), false);
         let spec = tx_at_channel_zero_frequency(
             super::with_burst(super::with_tx(super::receive_spec(0, *rate as f64, super::bench_hz(&*device), None), *rate as f64), &waveform, true, "send_asap_and_flag", 0),
             &*device,
@@ -3215,6 +3216,10 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
         let horizon = burst_start_root_tick.checked_add(i64::try_from(duration_ticks).map_err(|_| "TX throughput horizon overflow")?).ok_or("TX throughput horizon overflow")?;
         advance_root(&mut run, clock.root, horizon)?;
         let manifest = run.finish();
+        let left_out = super::omitted_rows(&manifest);
+        if !left_out.is_empty() {
+            return Err(format!("TX throughput Run: the Provider left rows out of the Manifest ({left_out:?}); raise `record_rows_per_kind`"));
+        }
         let stats = manifest.section(&super::usrp(), "ezsdr.radio.uhd.stats").ok_or("TX throughput Run has no stats section")?;
         let async_reports = manifest.section(&super::usrp(), "ezsdr.radio.uhd.async").ok_or("TX throughput Run has no async section")?;
         let bursts = manifest.section(&super::usrp(), "ezsdr.radio.uhd.bursts").ok_or("TX throughput Run has no burst section")?;
