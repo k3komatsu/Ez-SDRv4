@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-11-16-stage4 (private)
+asset:   2026-11-16-stage4.tar.xz  321512 bytes
+sha256:  1f7e2476aa86b378d7fd6d48698662d333b8bf296fcea8103cec7726c058405b
+source:  ~/.cache/ezsdr-bench/2026-11-16 (logs, chains, hw.sh, probes, bench-host records) and ~/.cache/ezsdr-bench/2026-11-17 (the evening T200 isolation: bare UHD 1 M per send, v3, its scripts and client) on usrp-lnx03
+fetch:   gh release download 2026-11-16-stage4 -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-11-16-stage4 bench/2026-11-16-stage4/results

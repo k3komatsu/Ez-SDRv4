@@ -3,7 +3,7 @@
 One directory per bench session, `YYYY-MM-DD-<topic>/` (AGENTS.md §9, Bench records; owner 2026-11-10):
 
 - `conditions.json`: commit, boards (serial, FPGA, daughterboards), attenuation and wiring, reference, UHD image, RF envelope, rates and grids.
-- `results/`: machine-readable rows made from the raw logs by `plan/phase8/tools/bench_extract.py`, never typed by hand: `verdicts.tsv` (hardware-test VERDICT lines), `cells.csv` (`tx_repro` sweep cells), `measurements/` (measurement records without their observations). A session whose logs have none of these keeps only the header row; its raw logs hold the rest.
+- `results/`: machine-readable rows made from the raw logs by `plan/phase8/tools/bench_extract.py`, never typed by hand: `verdicts.tsv` (hardware-test VERDICT lines), `cells.csv` (`tx_repro` sweep cells), `decisions.tsv` (decision and summary lines, since 2026-11-16), `trials.jsonl` (S2 and S4 trial rows), `measurements/` (measurement records without their observations). A session whose logs have none of these keeps only the header row; its raw logs hold the rest.
 - `README.md`: the human summary and the decisions it fed.
 - `raw.txt`: the raw logs' archive in a release of the private repository `k3komatsu/Ez-SDRv4-bench-raw`, with its sha256 and how to fetch it.
 

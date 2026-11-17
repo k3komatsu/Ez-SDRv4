@@ -1,0 +1,36 @@
+{
+  "session": "2026-11-16-stage4",
+  "dates": "2026-11-16 08:54-18:47 (stage-4 cells, the procedure of plan/phase8/bench.md \"2026-11-15 の手順\"), 20:03-20:36 (T200 isolation)",
+  "commit": "8d876903 (bench worktree ~/local_work/Ez-SDRv4-bench, prebuilt in the cargo-target volume); evening bare-UHD runs from 90d55d0c (t200-bare-uhd.sh with EZSDR_T200_BARE_SPP)",
+  "tools": {
+    "hardware tests": "crates/ezsdr-radio-uhd/tests/hardware.rs at 8d876903, run by hw() in hw.sh (docker run --network=host --cap-add=SYS_NICE --ulimit rtprio=99, cargo test --release --features uhd)",
+    "chains": "chain37.sh, chain37b.sh (#2), chain36*.sh (#1), chain17a-c.sh (evening) in the raw archive",
+    "bare UHD": "plan/phase8/tools/t200-bare-uhd.sh (uhd-repro/tx_repro.cpp case t200, set_thread_priority_safe(1.0, true))",
+    "v3": "v3-t200.sh in the raw archive: ghcr.io/k3komatsu/ezsdr:v3.0.28_uhd4.10, MultiUSRP + CyclicTX, the image's own Python client"
+  },
+  "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0); v3 runs: ghcr.io/k3komatsu/ezsdr:v3.0.28_uhd4.10",
+  "boards": [
+    { "id": "#2", "board_arg": "37", "serial": "347D541", "fpga": "39.3 (HG)", "slot_a": "UBX-160 v2 (until the move at about 12:00)", "slot_b": "empty", "addr": "192.168.47.37", "nic": "enp1s0f0np0" },
+    { "id": "#1", "board_arg": "36", "serial": "347D545", "fpga": "39.3 (HG)", "slot_a": "OBX", "slot_b": "UBX-160 v2 32BC76F (moved from #2, reseated once)", "addr": "192.168.40.36", "nic": "enp1s0f1np1" }
+  ],
+  "rf": { "wiring": "each used slot's TX/RX -> >= 30 dB attenuator -> the same slot's RX2", "attenuation_db": 30, "owner_confirmed": "before #2's first transmit, before (2b), and a standing confirmation while the wiring is unchanged (both slots of #1, and #2)", "frequency_hz": 1000000000, "tx_gain_db": 0 },
+  "reference": "internal",
+  "host": "usrp-lnx03 (16 cores); i40e, MTU 9000, frame 8000 bytes (UHD caps send_frame_size=9000 to 8000), rings 8160, wmem_max 32 MiB, rmem_max 50 MB, governor performance, C-states POLL/C1/C2/C3 enabled (C3 exit 350 us), NIC IRQs on cores 0-15, adaptive coalescing (H0; bench-host.*.txt); kernel 7.0.0-42; sched_rt_runtime_us 950000",
+  "host_load": "another project's simulation loaded the host from about 14:08 to about 16:20 (#1's first S2, hw_s2_throughput_repeats.36.log, invalid); backup rsync at 18:19-18:25 and about 19:50-20:03 (chains waited for it)",
+  "power_cycles": ["#1 after the SIGSEGV at 15:44 (hw_s2_throughput_repeats.36.3.log)"],
+  "invalid_logs": {
+    "hw_s2_throughput_repeats.36.log": "host loaded by another project",
+    "hw_s2_throughput_repeats.36.2.log": "aborted before a decision",
+    "hw_s2_throughput_repeats.36.3.log": "flush timeout and SIGSEGV after an earlier docker kill; power cycle followed",
+    "hw_s2_throughput_repeats.36.4.log": "aborted before a decision",
+    "tx_repro-t200-H0-37-1.log": "about 20 s of transmit started by chain37's broken stop check, killed by PID",
+    "2026-11-17/v3-t200-v3-36-*.log": "the client lacked scipy: nothing transmitted",
+    "2026-11-17/v3-t200-v3b-36-2.log": "the v3 server found no device right after the previous run's kill: nothing transmitted"
+  },
+  "items": {
+    "#2 (UBX slot A)": ["#67 cells", "rxzeros", "PN", "T3 (P75 a-c)", "OFS 1 channel", "S5", "S2 + duplex", "S4", "T200 H0: bare UHD, probe, record, record 20k"],
+    "#1 (OBX slot A, UBX slot B)": ["#67 cells", "rxzeros", "PN", "T3", "OFS 2 channels (slot B confirmed)", "S5", "S2 + duplex", "T200 H0: bare UHD, probe, record, record 20k", "S4"],
+    "evening, #1": ["bare UHD 1 M samples per send (3 x 300 s)", "v3 MultiUSRP + CyclicTX, 1 M-sample tone (3 x 300 s)"]
+  },
+  "rates_hz": { "S2": [100000000, 200000000], "S4": [1000000, 10000000, 25000000, 50000000, 100000000, 200000000], "T200": [200000000] }
+}

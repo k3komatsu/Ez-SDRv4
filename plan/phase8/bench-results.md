@@ -457,3 +457,12 @@ owner が電源を入れ直した後，att は三つの board とも 30 dB（own
 - 受信の start lead は最小 5 ms．開き直しの先頭の 0 は 1〜200 MS/s で 14/10/14/11/13/9〜10/3〜4/0（前回と同じ）．C2 の繰り返しの切り替えは二台とも PASS．
 - 記録 suite（#1 OBX）：負荷なしで受信 200 MS/s，送信 100 MS/s まで．`h4` の負荷の下では受信が 50 MS/s まで（100 と 200 MS/s は overflow），送信は同じ．profile の 1 GB/s は実測より緩い（段階 4）．
 - H1：遅れた burst は FPGA が packet ごとに，1 sample / tick で捨てる．DUC は最初の時刻を burst の終わりまで運ぶので，すべて時刻つきの burst は device burst ごと捨てられる（何も鳴らず BurstAck なし．R1/R2 とも 9 trial，1 MS/s の 20 000 sample の 1 送信，#1 だけ）．時刻なしの尾は鳴る（Module は送らない形）．TIME_ERROR の数（R1 365〜368，R2 313〜454）は届いた report の数で packet の数ではない（error FIFO は 32 件）．Fake は D9b-1a（`80dd2f6`）以来，遅れた packet だけを捨てていた（保守表 3 の段階 A で device burst ごとの drain に直した．Module の chunk の形・他の rate・#2・後ろに積んだ burst は未確認：bench.md の C1〜C7）．H2：途中で飢えると尾は届いた時に鳴る．#56 の Stop の遅れは負荷なしで最大 2.9 ms，負荷つきで最大 3.0 ms．H4 の余裕の最小は 4.6 ms と 3.9 ms．
+
+## 2026-11-16：段階 4 の cell を両盤で，T200 H0，夜に T200 の切り分け（#2＝X300 347D541＋UBX〈slot A，昼に #1 の slot B へ移した〉，#1＝X300 347D545＋OBX〈slot A〉＋UBX〈slot B〉，commit `8d876903`）
+
+条件と機械で読める結果は [bench/2026-11-16-stage4](../../bench/2026-11-16-stage4/README.md)（生の log は非公開の `k3komatsu/Ez-SDRv4-bench-raw` の release）．att は 30 dB（owner の確認と「配線を変えない間は続けてよい」）．基準は内部．14:08〜16:20 ごろ別 project の sim が host を占め，#1 の最初の S2 は無効（受信も全 cell 落ちた）．
+
+- #67 の 4 cell は両盤とも予定どおり（`close_before_origin` だけ 30/30 FAIL）．受信の先頭の 0 は方向 D が両盤で成り立たない（規則は B）．PN は 200 MS/s が両盤とも未決．T3：古い burst の終わりの ACK が新しい streamer に出る（tick で照合），ACK は 150 ms 後も読める．OFS は #1 の 1・2 channel で 100 ms 以内 → #75 (3) を 1・2・10 MS/s，1・2 channel，#1 の条件で enable してよい．S5：命令の lead 5 ms，受信の start lead 10 ms は 100 MS/s で足りない（両盤），2 channel の pass は試験の不具合で走らない．
+- S2（60 s）：受信 100・200 MS/s は両盤 10/10，送信 100 MS/s は 8/10，200 MS/s は 0/10 と 2/10，duplex の失敗はすべて送信の underflow．S4：1〜100 MS/s は両盤 20/20（再開は resume から 69〜87 ms），200 MS/s は capture の後片付けが RS-8a の 5 s を超える．
+- T200（200 MS/s，300 s）：素の UHD でも両盤 19〜34 回 underflow（最高の実時間優先度），Module の repeat は #1 で underflow のたびに再開して 300 s 送り切り，#2 は 2 回続いた underflow の直後に送るのを止めた（b′，INFERRED）．夜の切り分け（#1）：1 回の send を 1 M sample にしても 21〜22 回，v3（UHD 4.10，MultiUSRP＋CyclicTX）も約 49〜63 回 → 送り方では直らない．X300 HG の受け口は 256 KB（200 MS/s で約 0.33 ms）．
+- 決めたこと（owner，2026-11-16）：T200 の調査はここで止め，200 MS/s の連続の繰り返しは 8c の Replay で（KL-5）．#106：b′ をやめて repeat は毎回再開し，Module の Run ごとの記録に上限をつける（設計は AGENTS §9 の段階 0）．
