@@ -121,8 +121,6 @@ pub struct ContinuityBuilder {
     valid: Vec<Vec<Segment>>,
     /// Per channel: where a break remembered but not yet emitted began (SC-31d).
     pending: Vec<Option<TimePoint>>,
-    /// The previous pushed block's mask; empty before the first push (SC-31d).
-    was_valid: super::ChannelMask,
     /// The carries no Gap has recorded yet: one pushed with a contiguous block or
     /// with a rejected push, held whole for the next Gap or `finish` (SC-30b, SC-30c).
     pending_carry: DropCarry,
@@ -166,7 +164,6 @@ impl ContinuityBuilder {
             open: vec![None; channels as usize],
             valid: vec![Vec::new(); channels as usize],
             pending: vec![None; channels as usize],
-            was_valid: super::ChannelMask(0),
             pending_carry: DropCarry::default(),
             gaps: Vec::new(),
             channel_gaps: Vec::new(),
@@ -179,7 +176,7 @@ impl ContinuityBuilder {
     /// A rejected push keeps the carry, so `finish` records it in this map: those
     /// samples belong to the domain and channel count that just ended (SC-30c).
     ///
-    /// Rule: SC-12, SC-13, SC-14, SC-30, SC-30a, SC-30b, SC-30c, SC-31, SC-31d.
+    /// Rule: SC-12, SC-13, SC-14, SC-30, SC-30a, SC-30b, SC-30c, SC-31, SC-31c, SC-31d.
     pub fn push(&mut self, h: &BlockHeader, carry: DropCarry) -> Result<(), StreamError> {
         self.pending_carry.merge(carry);
         if h.first_sample_time.domain() != self.domain {
@@ -249,7 +246,6 @@ impl ContinuityBuilder {
             }
         }
 
-        let was_valid = self.was_valid;
         for c in 0..h.channels {
             let i = c as usize;
             if h.valid.is_set(c) {
@@ -266,14 +262,14 @@ impl ContinuityBuilder {
                 let at = seg.start.checked_add(Duration::new(self.domain, seg.len as i64))?;
                 self.valid[i].push(seg);
                 self.pending[i] = Some(at);
-            } else if was_valid.is_set(c) {
-                // SC-31d: the stream gap already closed this channel's segment, so the
-                // break starts here, not at the last valid sample.
+            } else if self.pending[i].is_none() && !self.valid[i].is_empty() {
+                // SC-31c, SC-31d: valid earlier in the map (a closed segment), no segment open and no
+                // break held: a stream gap closed the segment or ended the break, so a break starts
+                // here, not at the last valid sample.
                 self.pending[i] = Some(t);
             }
         }
 
-        self.was_valid = h.valid;
         self.first.get_or_insert(expected);
         self.end = Some(end);
         self.expected_next = Some(end);

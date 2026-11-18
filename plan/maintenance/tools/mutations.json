@@ -27274,5 +27274,35 @@
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "sb_9a_a_registered_checks_violation_carrying_a_map_key_that_is_not_ascii_is_recorded_without_it"
+ },
+ {
+  "id": "N102-1",
+  "name": "SC-31d: an invalid channel with no break held restarts one at every block of a run (#102)",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "} else if self.pending[i].is_none() && !self.valid[i].is_empty() {",
+  "new": "} else if !self.valid[i].is_empty() {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_31c_invalid_across_gaps_in_a_row"
+ },
+ {
+  "id": "N102-3",
+  "name": "SC-31c: a channel valid earlier in the map never starts a break after a stream gap (#102)",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "&& !self.valid[i].is_empty() {",
+  "new": "&& false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_31c_channel_lost_at_the_overflow"
+ },
+ {
+  "id": "N102-4",
+  "name": "SC-31c: a channel not yet valid is treated as valid earlier (#102)",
+  "file": "crates/ezsdr-kernel/src/stream/continuity.rs",
+  "old": "&& !self.valid[i].is_empty() {",
+  "new": "&& true {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "stream_contract",
+  "filter": "sc_31c_never_valid_channel_has_no_gap"
  }
 ]

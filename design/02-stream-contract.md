@@ -275,10 +275,10 @@ impl ContinuityBuilder {
 - **SC-31a** *Withdrawn.* A `ChannelGap` carries no cause: an alignment failure discards samples on every channel, a stream gap qualified by `ALIGNMENT` (SC-13, SC-31; spec 18 UR-19).
 - **SC-31b** A per-channel break caused by a **stream** gap produces no `ChannelGap`.
   *Test:* `sc_31b_stream_gap_emits_no_channel_gaps`.
-- **SC-31c** A channel that was valid somewhere in the map and is invalid at its end produces a `ChannelGap` running to the map's end. A channel that was never valid produces nothing.
-  *Test:* `sc_31c_channel_that_never_returns`, `sc_31c_channel_lost_at_the_overflow`, `sc_31c_never_valid_channel_has_no_gap`.
-- **SC-31d** A channel that loses validity while the stream continues produces a `ChannelGap`, not merely a hole between two `Segment`s. A channel's break is held as a pending close and emitted only when its extent is known: when the channel returns, when a stream gap ends it early, or at `finish`. A break that coincides with a stream gap is recorded from the gap's end, not from the channel's last valid sample.
-  *Test:* `sc_31d_a_channel_break_is_a_channel_gap`, `sc_31d_break_across_a_stream_gap_is_split`, `sc_31c_channel_lost_at_the_overflow`.
+- **SC-31c** Once a channel has been valid in the map, each later run of delivered samples in which it is invalid is a `ChannelGap` that ends where the channel returns or at the map's end (SC-31d for a run that spans a stream gap). A channel not yet valid produces nothing.
+  *Test:* `sc_31c_channel_that_never_returns`, `sc_31c_channel_lost_at_the_overflow`, `sc_31c_never_valid_channel_has_no_gap`, `sc_31c_invalid_around_a_stream_gap_keeps_its_gap`, `sc_31c_invalid_across_gaps_in_a_row_keeps_each_gap`, `sc_31c_a_channel_not_yet_valid_has_no_gap`.
+- **SC-31d** A channel that loses validity while the stream continues produces a `ChannelGap`, not merely a hole between two `Segment`s. A channel's break is held as a pending close and emitted only when its extent is known: when the channel returns, when a stream gap ends it early, or at `finish`. A stream gap ends a channel's pending break at the gap's start; a channel valid earlier in the map (SC-31c) that is invalid in the block after the gap starts a new break at that block, never at its last valid sample, whether it was valid or invalid before the gap.
+  *Test:* `sc_31d_a_channel_break_is_a_channel_gap`, `sc_31d_break_across_a_stream_gap_is_split`, `sc_31c_channel_lost_at_the_overflow`, `sc_31c_invalid_around_a_stream_gap_keeps_its_gap`.
 - **SC-32** A SigMF export maps each run of delivered samples between stream gaps — the stream's valid segments — to a capture segment with `core:sample_start` and `core:global_index`, and carries the gaps and per-channel validity in an `ezsdr` extension namespace; a SigMF capture segment belongs to the whole Recording, so a channel's own breaks are annotations, not segments.
   *Test:* spec 10's `hd_15_a_capture_is_a_sigmf_recording` (two capture segments around a stream gap, the `ezsdr:gaps` entry and the per-channel `ezsdr:valid`) and `hd_15_channel_validity` (a channel's own breaks as annotations beside one capture segment, `ezsdr:valid` per channel); none named here for a capture with more than one ContinuityMap, which spec 10's `hd_15_a_capture_across_a_clock_change_has_no_metadata` records as a `.sigmf-data` Recording without metadata (HD-15).
 
@@ -323,7 +323,6 @@ push(h, carry):                            -- carry is what receive returned wit
      for each channel with a pending close at s:                          -- SC-31d
         channel_gaps.push(ChannelGap{ c, s, E − s }); clear it            -- it ends where the stream gap begins
      close every open segment at E
-  was_valid = the previous pushed block's mask         (empty before the first push)
   for each channel c in 0..h.channels:
      if valid bit c is set:
         if a pending close at s exists for c:                             -- SC-31d
@@ -331,8 +330,8 @@ push(h, carry):                            -- carry is what receive returned wit
         open a segment at h.t if none is open, then extend it to h.t + len
      else:
         if a segment is open for c: close it and record a pending close at its end
-        else if c was set in was_valid: record a pending close at h.t   -- SC-31d
-        else: nothing — a channel that was never valid has no gap        -- SC-31c
+        else if c has a closed segment and no pending close: record a pending close at h.t   -- SC-31c, SC-31d
+        else: nothing — a channel not yet valid has no gap               -- SC-31c
   first = E on the first block; expected_next = h.t + len
 
 finish(carry):
@@ -405,6 +404,9 @@ finish(carry):
 | `sc_31c_channel_lost_at_the_overflow` | 4 channels to t=200, then t=350 with `GAP_BEFORE｜RESTARTED` and channel 2 cleared, never restored | one `Gap` 200→350, and one `ChannelGap` for channel 2 from 350 to the end | SC-31c, SC-31d |
 | `sc_31d_break_across_a_stream_gap_is_split` | channel 2 dropped at 100, a stream gap 200→350, channel 2 restored at 350 | `ChannelGap{2, 100, 100}` only; the gap's 150 samples are not charged to channel 2 | SC-31d |
 | `sc_31c_never_valid_channel_has_no_gap` | channel 3 never set in any mask | no `ChannelGap` for channel 3 | SC-31c |
+| `sc_31c_invalid_around_a_stream_gap_keeps_its_gap` | channel 2 valid in 0–100, invalid in 100–200, a stream gap 200→350, invalid in 350–450, then `finish`; the same with channel 2 returning at 450 | `ChannelGap{2, 100, 100}` and `ChannelGap{2, 350, 100}` in both | SC-31c, SC-31d |
+| `sc_31c_invalid_across_gaps_in_a_row_keeps_each_gap` | channel 2 valid in 0–100, invalid in 100–300, stream gaps 300→400 and 500→600, invalid in 400–500 and 600–700; the same with channel 2 valid only in 0–100, stream gaps 100→200 and 300→400, invalid in 200–300 and 400–500 | `ChannelGap{2, 100, 200}`, `{2, 400, 100}`, `{2, 600, 100}`; then `{2, 200, 100}`, `{2, 400, 100}` | SC-31c, SC-31d |
+| `sc_31c_a_channel_not_yet_valid_has_no_gap` | a first block at 40 with `GAP_BEFORE` and lost 40, channel 2 invalid, then a block with every channel valid | no `ChannelGap`; channel 2's segment starts at the second block | SC-31c |
 | `sc_30_continuity_jump_overflow_is_time_error` | a block whose time makes the jump computation overflow | `StreamError::Time(Overflow)`, not a panic | SC-30 |
 | `sc_24_burst_sob_eob_basic` | start at 1000 len 100, then 1100 len 50, then 1150 len 10 with end | `Started`, `Continued`, `Ended` with 160 samples; state idle | SC-24, SC-28 |
 | `sc_24_burst_single_block` | start and end on one block | `Ended` | SC-24 |
@@ -513,3 +515,4 @@ Link Modules beyond spec 10's pool (SC-9, HD-2) and `HostLink` (HD-5): a single-
 | 2026-11-15 | SC-23a, SC-31 | Test lines narrowed to what their tests assert, tests that pin a condition named, and conditions no test asserts listed under none named (third test-line sweep); no change of behaviour | [plan 32](../plan/maintenance/32-test-line-sweep.md) |
 | 2026-11-15 | SC-10a, SC-20a, SC-25, SC-29, SC-29a, SC-30, SC-33 | rule text aligned with what the Kernel does (Kernel rule sweep); no change of behaviour | [plan 32](../plan/maintenance/32-test-line-sweep.md) |
 | 2026-11-17 | SC-25, SC-28 | #106: SC-25 says a resume is counted and a drop the device reports is told by an event (not that the gap is recorded in full); SC-28 lets a Provider that resumes a repeat bound its intermediate parts' records, counting them (spec 18 UR-30) | [#106](https://github.com/k3komatsu/Ez-SDRv4/issues/106) |
+| 2026-11-18 | SC-31c, SC-31d | #102: a channel invalid on both sides of a stream gap gets a `ChannelGap` after the gap too, and SC-31c names a channel not yet valid as producing nothing | [#102](https://github.com/k3komatsu/Ez-SDRv4/issues/102) |

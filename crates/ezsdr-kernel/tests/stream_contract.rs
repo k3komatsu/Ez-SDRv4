@@ -1024,6 +1024,94 @@ fn sc_31c_never_valid_channel_has_no_gap() {
 }
 
 #[test]
+fn sc_31c_invalid_around_a_stream_gap_keeps_its_gap() {
+    // #102: the channel is already invalid when the stream gap flushes its break, so
+    // the block after the gap must start a second one.
+    let mut b = builder(4, true);
+    push(&mut b, header(t(0), 100, 4));
+    let mut h = header(t(100), 100, 4);
+    h.valid = ChannelMask::from_bits(0b1011);
+    push(&mut b, h);
+    let mut h = header(t(350), 100, 4);
+    h.flags = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
+    h.lost = Some(150);
+    h.valid = ChannelMask::from_bits(0b1011);
+    push(&mut b, h);
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps.len(), 1);
+    assert_eq!(map.channel_gaps, [ChannelGap { channel: 2, start: t(100), len: 100 }, ChannelGap { channel: 2, start: t(350), len: 100 }]);
+
+    // A return after the gap closes the second break where the channel comes back.
+    let mut b = builder(4, true);
+    push(&mut b, header(t(0), 100, 4));
+    let mut h = header(t(100), 100, 4);
+    h.valid = ChannelMask::from_bits(0b1011);
+    push(&mut b, h);
+    let mut h = header(t(350), 100, 4);
+    h.flags = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
+    h.lost = Some(150);
+    h.valid = ChannelMask::from_bits(0b1011);
+    push(&mut b, h);
+    push(&mut b, header(t(450), 100, 4));
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.channel_gaps, [ChannelGap { channel: 2, start: t(100), len: 100 }, ChannelGap { channel: 2, start: t(350), len: 100 }]);
+    assert_eq!(map.valid[2], [Segment { start: t(0), len: 100 }, Segment { start: t(450), len: 100 }]);
+}
+
+#[test]
+fn sc_31c_invalid_across_gaps_in_a_row_keeps_each_gap() {
+    // Several stream gaps in a row with the channel invalid throughout: one
+    // ChannelGap per run, each from its block to the next gap's start.
+    let mut b = builder(4, true);
+    push(&mut b, header(t(0), 100, 4));
+    for at in [100, 200] {
+        let mut h = header(t(at), 100, 4);
+        h.valid = ChannelMask::from_bits(0b1011);
+        push(&mut b, h);
+    }
+    for at in [400, 600] {
+        let mut h = header(t(at), 100, 4);
+        h.flags = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
+        h.lost = Some(100);
+        h.valid = ChannelMask::from_bits(0b1011);
+        push(&mut b, h);
+    }
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps.len(), 2);
+    assert_eq!(map.channel_gaps, [ChannelGap { channel: 2, start: t(100), len: 200 }, ChannelGap { channel: 2, start: t(400), len: 100 }, ChannelGap { channel: 2, start: t(600), len: 100 }]);
+
+    // Valid only before two gaps: each gap's block starts its own break.
+    let mut b = builder(4, true);
+    push(&mut b, header(t(0), 100, 4));
+    for at in [200, 400] {
+        let mut h = header(t(at), 100, 4);
+        h.flags = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
+        h.lost = Some(100);
+        h.valid = ChannelMask::from_bits(0b1011);
+        push(&mut b, h);
+    }
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.channel_gaps, [ChannelGap { channel: 2, start: t(200), len: 100 }, ChannelGap { channel: 2, start: t(400), len: 100 }]);
+}
+
+#[test]
+fn sc_31c_a_channel_not_yet_valid_has_no_gap() {
+    // The map begins with a stream gap and the channel invalid from its first block:
+    // not yet valid is not a gap, so no ChannelGap is produced.
+    let mut b = builder(4, true);
+    let mut h = header(t(40), 100, 4);
+    h.flags = BlockFlags::GAP_BEFORE;
+    h.lost = Some(40);
+    h.valid = ChannelMask::from_bits(0b1011);
+    push(&mut b, h);
+    push(&mut b, header(t(140), 100, 4));
+    let map = b.finish(DropCarry::default());
+    assert_eq!(map.gaps.len(), 1);
+    assert!(map.channel_gaps.is_empty());
+    assert_eq!(map.valid[2], [Segment { start: t(140), len: 100 }]);
+}
+
+#[test]
 fn sc_30_continuity_jump_overflow_is_time_error() {
     // The jump itself must overflow, not the block's own `end_time`: the second
     // header is placed so that `first + len` still fits and only `t - expected`
