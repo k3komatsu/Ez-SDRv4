@@ -1018,8 +1018,8 @@
   "id": "J92",
   "name": "RS-35: EVENTS_DROPPED sourced unforeseen, not kernel",
   "file": "crates/ezsdr-kernel/src/event.rs",
-  "old": "                let source = EventSource::Kernel;\n                let handle = self.mint(self.scope, &source, &dropped_kind);",
-  "new": "                let source = EventSource::Unforeseen;\n                let handle = self.mint(self.scope, &source, &dropped_kind);",
+  "old": "                let source = EventSource::Kernel {};\n                let handle = self.mint(self.scope, &source, &dropped_kind);",
+  "new": "                let source = EventSource::Unforeseen {};\n                let handle = self.mint(self.scope, &source, &dropped_kind);",
   "crate": "ezsdr-kernel",
   "test_bin": "run_session",
   "filter": "rs_33_counters_exact_under_drop"
@@ -1729,7 +1729,7 @@
   "name": "KC-8 (spec 27 §2): a Provider is given the kernel source, not its node",
   "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
   "old": "            Inst::Provider(n) => EventSource::Node { node: self.providers[n].id.clone() },",
-  "new": "            Inst::Provider(_) => EventSource::Kernel,",
+  "new": "            Inst::Provider(_) => EventSource::Kernel {},",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_08_each_instance_is_given_its_source_root"
@@ -1739,7 +1739,7 @@
   "name": "KC-8 (spec 27 §2): a Sink is given the fallback source, not its output",
   "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
   "old": "            Inst::Sink(n) => EventSource::Output { output: self.sinks[n].output.clone() },",
-  "new": "            Inst::Sink(_) => EventSource::Unforeseen,",
+  "new": "            Inst::Sink(_) => EventSource::Unforeseen {},",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_08_each_instance_is_given_its_source_root"
@@ -1749,7 +1749,7 @@
   "name": "KC-8 (spec 27 §2): an Executor is given the kernel source, not its Island",
   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
   "old": "                Some(island) => EventSource::Island { island: island.id },",
-  "new": "                Some(_island) => EventSource::Kernel,",
+  "new": "                Some(_island) => EventSource::Kernel {},",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_08_each_instance_is_given_its_source_root"
@@ -1759,7 +1759,7 @@
   "name": "MA-5 (spec 27 §2): prepare hands every instance the kernel source",
   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
   "old": "                source: source.clone(),",
-  "new": "                source: crate::event::EventSource::Kernel,",
+  "new": "                source: crate::event::EventSource::Kernel {},",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kc_08_each_instance_is_given_its_source_root"
@@ -2573,7 +2573,7 @@
   "name": "RS-32/RS-33 (item 3): a view special-cases kernel and unforeseen as inside its root",
   "file": "crates/ezsdr-kernel/src/event.rs",
   "old": "            (EventSource::Island { island: root }, EventSource::Island { island }) => root == island,\n            _ => false,",
-  "new": "            (EventSource::Island { island: root }, EventSource::Island { island }) => root == island,\n            (_, EventSource::Kernel | EventSource::Unforeseen) => true,\n            _ => false,",
+  "new": "            (EventSource::Island { island: root }, EventSource::Island { island }) => root == island,\n            (_, EventSource::Kernel {} | EventSource::Unforeseen {}) => true,\n            _ => false,",
   "crate": "ezsdr-kernel",
   "test_bin": "run_session",
   "filter": "rs_33_a_view_refuses_kernel_and_unforeseen"
@@ -27224,5 +27224,55 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "a_restart_trial_on_a_probe_that_dropped_rows_is_an_error_not_a_trial"
+ },
+ {
+  "id": "N105-1",
+  "name": "a Provider's `effective` map is not checked for a non-ASCII key at prepare (#104)",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "if carried.into_iter().any(|value| value.check_ascii_keys(\"effective\").is_err()) {",
+  "new": "if carried.into_iter().any(|_| false) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_9a_a_provider_effective_map_key_refuses_the_run_at_prepare"
+ },
+ {
+  "id": "N105-2",
+  "name": "a `CoerceReport`'s coercion carrying a non-ASCII map key passes validate (#104)",
+  "file": "crates/ezsdr-kernel/src/plan/matching.rs",
+  "old": "coercion.requested.check_ascii_keys(\"coercion\").is_ok() && coercion.applied.check_ascii_keys(\"coercion\").is_ok()",
+  "new": "true",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_9a_a_coercion_preview_carrying_a_map_key_that_is_not_ascii_is_refused_at_validate"
+ },
+ {
+  "id": "N105-3",
+  "name": "a coercion's value carrying a non-ASCII map key is admitted to the action log (#104)",
+  "file": "crates/ezsdr-kernel/src/session.rs",
+  "old": "if coercions.iter().any(|c| c.requested.check_ascii_keys(\"coercion\").is_err() || c.applied.check_ascii_keys(\"coercion\").is_err()) {",
+  "new": "if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "run_session",
+  "filter": "sb_9a_a_coerced_value_carrying_a_map_key_that_is_not_ascii_is_refused_at_admission"
+ },
+ {
+  "id": "N105-4",
+  "name": "a stray coercion's `requested` carrying a non-ASCII map key is checked only after SB-44's partition (#104)",
+  "file": "crates/ezsdr-kernel/src/plan/matching.rs",
+  "old": "(Vec<_>, Vec<_>) = report.coercions.into_iter().partition(|coercion| coercion.requested.check_ascii_keys(\"coercion\").is_ok() && coercion.applied.check_ascii_keys(\"coercion\").is_ok());",
+  "new": "(Vec<_>, Vec<_>) = report.coercions.into_iter().partition(|coercion| !req.requires.contains_key(&coercion.key) || (coercion.requested.check_ascii_keys(\"coercion\").is_ok() && coercion.applied.check_ascii_keys(\"coercion\").is_ok()));",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_9a_a_stray_coercion_carrying_a_map_key_that_is_not_ascii_is_refused_without_transcribing_it"
+ },
+ {
+  "id": "N105-5",
+  "name": "a registered check's violation keeps a `requested` carrying a non-ASCII map key (#104)",
+  "file": "crates/ezsdr-kernel/src/binding.rs",
+  "old": "if violation.requested.as_ref().is_some_and(|value| value.check_ascii_keys(\"requested\").is_err()) {",
+  "new": "if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "sb_9a_a_registered_checks_violation_carrying_a_map_key_that_is_not_ascii_is_recorded_without_it"
  }
 ]

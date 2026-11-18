@@ -248,7 +248,7 @@ fn emit_livelock(shared: &Shared, at: TimePoint) {
         return;
     };
     let _ = collector.emit_control(Event {
-        source: crate::event::EventSource::Kernel,
+        source: crate::event::EventSource::Kernel {},
         time: at,
         severity: crate::event::Severity::Fatal,
         kind: EventKind::parse(EventKind::STEP_LIVELOCK).expect("Kernel event kind"),

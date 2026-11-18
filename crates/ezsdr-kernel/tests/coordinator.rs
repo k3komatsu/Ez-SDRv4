@@ -16,8 +16,8 @@ use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, SpecError, Value};
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, TimePoint};
 use support::{
-    FakeHostClock, Probe, ProbeExecutor, RecordingSink, SimAuthority, SteppedProvider, TestLinkModule, TestProvider, mref, ns, run_checks, run_kinds, run_registry, run_registry_classed,
-    run_registry_non_namespace_provider,
+    FakeHostClock, Probe, ProbeExecutor, RecordingSink, SimAuthority, SteppedProvider, TestLimitsCheck, TestLinkModule, TestProvider, mref, ns, run_checks, run_kinds, run_registry,
+    run_registry_classed, run_registry_non_namespace_provider,
 };
 
 #[allow(dead_code)]
@@ -358,6 +358,60 @@ fn kc_12_a_prepare_failure_stops_the_loop_and_cleans_up_what_was_prepared() {
 }
 
 #[test]
+fn sb_9a_a_provider_effective_map_key_refuses_the_run_at_prepare() {
+    // SB-9a: a `Value` map carrying a non-ASCII key is refused **where it enters**.
+    // `collect_prepare` files a Provider's `PrepareReport.effective` into the Manifest
+    // (RS-38), and that path passes no `from_json`, so `Manifest::seal()` refused the
+    // key at cleanup step 7 — after the Run had armed and transmitted (RS-11). It is
+    // refused at `prepare` now, before anything arms, and the refusal never transcribes
+    // the key (KC-24).
+    let spec = spec_one();
+    let profile = profile_one();
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    let non_ascii = Value::Map([("radio.ü".to_owned(), Scalar::Int(1))].into_iter().collect());
+    assembly.providers.insert(Ident::parse("radio").expect("fixture name"), Box::new(SteppedProvider::new("radio", TestProvider::new("radio", 2).with_effective("test.flag", non_ascii), &probe)));
+    let run = start_spec_run(&spec, &profile, assembly).expect("entry creates a Run");
+    assert!(
+        matches!(
+            run.state(),
+            RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare, ref reason } } if reason.contains("SB-9a:")
+        ),
+        "{:?}",
+        run.state()
+    );
+    assert!(!format!("{:?}", run.state()).contains('ü'), "the offending key is never transcribed");
+    let _ = run.finish();
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line.starts_with("radio:prepare:")), "{lines:?}");
+    assert!(!lines.iter().any(|line| line == "radio:arm" || line == "radio:start"), "nothing arms or transmits: {lines:?}");
+}
+
+#[test]
+fn sb_9a_a_registered_checks_violation_carrying_a_map_key_that_is_not_ascii_is_recorded_without_it() {
+    // SB-9a, KC-24: a registered check's `Violation.requested` is a `Value` the Kernel
+    // files into the admission result and the Manifest, and no `from_json` runs on that
+    // path. Left unchecked, one carrying a non-ASCII map key made the refused Run's
+    // Manifest unsealable; the refusal stands and only the value it could not record is
+    // dropped.
+    let mut spec = spec_one();
+    spec["resources"]["radio"]["requires"]["test.grid"] = serde_json::json!({ "kind": "eq", "value": 20.0 });
+    let mut profile = profile_one();
+    profile["environment"] = serde_json::json!({ "test.limits": { "max_grid": 1.0 } });
+    let mut assembly = with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio");
+    assembly.checks.register(Arc::new(TestLimitsCheck::new().with_non_ascii_requested()));
+    let run = start_spec_run(&spec, &profile, assembly).expect("entry creates a Run");
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, .. } }), "{:?}", run.state());
+    let manifest = run.finish();
+    assert_eq!(manifest.admission.violations.len(), 1, "the check's refusal still happens: {:?}", manifest.admission.violations);
+    let violation = &manifest.admission.violations[0];
+    assert_eq!(violation.check, ns("test.limits"));
+    assert_eq!(violation.requested, None, "the offending value is not recorded: {violation:?}");
+    assert!(!failure(&manifest).contains('ü'), "the offending key is never transcribed: {}", failure(&manifest));
+    assert!(manifest.hash.is_some(), "the refused Run's Manifest seals: {:?}", manifest.termination.cleanup_failures);
+}
+
+#[test]
 fn sb_41_the_reports_follow_plan_order() {
     // SB-41, KC-12 (spec 20, KH-1): the fragments are prepared in dependency order — `b`
     // before `a` here, against Ident order — which the plan records; the reports are
@@ -628,7 +682,7 @@ fn kc_22_a_same_instant_wakeup_loop_is_step_livelock() {
     let manifest = run.finish();
     assert!(matches!(manifest.termination.reason, Termination::Stopped { cause: ezsdr_kernel::run::StopCause::Policy { .. } }));
     assert!(manifest.events.delivered.iter().any(|event| event.kind.as_str() == "ezsdr.STEP_LIVELOCK"
-        && event.source == EventSource::Kernel
+        && event.source == EventSource::Kernel {}
         && event.payload == serde_json::json!({ "rounds": ezsdr_kernel::module_api::STEP_ROUND_CAP })));
     assert!(manifest.run.transitions.iter().any(|t| matches!(t.state, RunState::Stopping { mode: ezsdr_kernel::run::CleanupMode::Abort })));
 }
@@ -1907,7 +1961,7 @@ fn rs_36_a_dropped_stopping_body_ends_the_run() {
         manifest.events.delivered.iter().any(|event| event.kind.as_str() == "ezsdr.EVENTS_DROPPED"
             && event.payload == serde_json::json!({ "kind": "ezsdr.DEVICE_LOST", "count": 1 })
             && event.time == TimePoint::new(root, 150)
-            && event.source == EventSource::Kernel),
+            && event.source == EventSource::Kernel {}),
         "{:?}",
         manifest.events.delivered
     );
@@ -2109,7 +2163,7 @@ fn kc_45_manifest_fields() {
             .iter()
             .any(|row| row.source == EventSource::Output { output: Ident::parse("rec").unwrap() } && row.kind == ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap() && row.count == 0)
     );
-    assert!(manifest.events.counters.iter().any(|row| row.source == EventSource::Kernel && row.kind == ezsdr_kernel::event::EventKind::parse("ezsdr.STEP_LIVELOCK").unwrap() && row.count == 0));
+    assert!(manifest.events.counters.iter().any(|row| row.source == EventSource::Kernel {} && row.kind == ezsdr_kernel::event::EventKind::parse("ezsdr.STEP_LIVELOCK").unwrap() && row.count == 0));
     assert!(manifest.policy.is_some() && manifest.plan.is_some());
     assert_eq!(manifest.prepare.reports.len(), 2);
     for module in ["ezsdr.test.provider", "ezsdr.test.sink", "ezsdr.test.link"] {
@@ -2297,7 +2351,7 @@ fn kc_08_an_executor_event_from_a_second_island_has_its_own_counter() {
         manifest.events.counters,
         manifest.events.delivered
     );
-    assert!(!manifest.events.counters.iter().any(|row| row.source == EventSource::Unforeseen && row.kind.as_str() == "test.custom" && row.count > 0));
+    assert!(!manifest.events.counters.iter().any(|row| row.source == EventSource::Unforeseen {} && row.kind.as_str() == "test.custom" && row.count > 0));
     // Item 3 (Sol review P1-1): the two fragments of one Executor were prepared with
     // one view each, and those views refuse each other's handle — the previous view
     // takes its own, neither takes the other's.
@@ -3511,11 +3565,9 @@ fn rs_36_a_dropped_stop_body_stops_the_run_orderly() {
     let kind = ezsdr_kernel::event::EventKind::parse("ezsdr.LINK_BACKPRESSURE").unwrap();
     assert!(!manifest.events.delivered.iter().any(|event| event.kind == kind), "the body was dropped, so no test can react to it: {:?}", manifest.events.delivered);
     assert!(
-        manifest
-            .events
-            .delivered
-            .iter()
-            .any(|event| event.kind.as_str() == "ezsdr.EVENTS_DROPPED" && event.payload == serde_json::json!({ "kind": "ezsdr.LINK_BACKPRESSURE", "count": 1 }) && event.source == EventSource::Kernel),
+        manifest.events.delivered.iter().any(|event| event.kind.as_str() == "ezsdr.EVENTS_DROPPED"
+            && event.payload == serde_json::json!({ "kind": "ezsdr.LINK_BACKPRESSURE", "count": 1 })
+            && event.source == EventSource::Kernel {}),
         "{:?}",
         manifest.events.delivered
     );

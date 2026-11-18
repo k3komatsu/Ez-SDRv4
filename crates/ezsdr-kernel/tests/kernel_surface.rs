@@ -101,11 +101,23 @@ fn ov_01_citing_a_withdrawn_rule_satisfies_nothing() {
     assert!(!cites_a_rule("Rule: SB-25a."));
     assert!(!cites_a_rule("Rule: MA-43."));
     assert!(cites_a_rule("Rule: SB-25a, SB-25."));
+    // `WITHDRAWN` is the whole list of the Kernel's withdrawn rules, so each id in it
+    // is rejected on its own: a list missing one lets a doc comment citing only that id
+    // pass (OV-23).
+    for id in WITHDRAWN {
+        assert!(!cites_a_rule(&format!("Rule: {id}.")), "OV-23: {id} is withdrawn and fails the citation check");
+    }
+    // Written out, not read from `WITHDRAWN`: a loop over the list proves only that its
+    // members are rejected, never that the list is complete (Sol review, #105 item 2).
+    for id in ["SC-31a", "SB-22h", "SB-48", "SB-49", "KA-14"] {
+        assert!(!cites_a_rule(&format!("Rule: {id}.")), "OV-23: {id} is withdrawn and fails the citation check");
+    }
 }
 
 /// The rules withdrawn so far. OV-1 keeps their numbers, and nothing may cite one as
-/// the rule it implements.
-const WITHDRAWN: [&str; 7] = ["SB-25a", "SB-28", "SB-32", "RS-32a", "RS-37", "MA-4", "MA-43"];
+/// the rule it implements. Only the Kernel's own prefixes count (`RULE_PREFIXES`): a
+/// withdrawn `RM-`, `MR-`, `UR-` or `SE-` rule is no Kernel item's concern.
+const WITHDRAWN: [&str; 12] = ["SC-31a", "SB-22h", "SB-25a", "SB-28", "SB-32", "SB-48", "SB-49", "RS-32a", "RS-37", "MA-4", "MA-43", "KA-14"];
 
 /// The allow-list key for an item: `<module>::<name>`.
 ///
@@ -365,7 +377,10 @@ fn ov_23_allow_list_entries_name_a_token_or_a_justification() {
 #[test]
 fn ov_23b_kernel_growth_is_the_new_count() {
     let allowed = allow_list();
-    let new: BTreeSet<&String> = allowed.iter().filter(|(_, why)| why.starts_with("NEW:")).map(|(n, _)| n).collect();
+    // OV-23b: the count is of public **items**, so the `testing` feature's allow-list
+    // line — `FEATURE:testing` is exclusion metadata, not an item — is not one, which
+    // is why `total` subtracts it below too.
+    let new: BTreeSet<&String> = allowed.iter().filter(|(n, why)| why.starts_with("NEW:") && n.as_str() != "FEATURE:testing").map(|(n, _)| n).collect();
     // Audit §13's `data` line ends with the catch-all "Stream Contract (normative)",
     // which would otherwise absorb every type spec 02 invents; OV-23b makes each one
     // an explicit `NEW:` instead.
@@ -408,7 +423,9 @@ fn ov_23b_kernel_growth_is_the_new_count() {
     // 113 of 292: stage 1 of note 47 added `session::InitialRequests` (RS-12), NEW:.
     // 114 of 293: issue #90 added `hash::ContentHasher` (OV-17), NEW:, so the capture
     // Sink hashes as it writes without a `sha2` dependency outside the Kernel (PO-4).
-    assert_eq!((new.len(), total), (114, 293), "OV-23b, GZ-2: the Kernel's public surface changed");
+    // 113 of 293: the count no longer includes the `FEATURE:testing` line, which is
+    // exclusion metadata and not a public item (OV-23b); no item was added or removed.
+    assert_eq!((new.len(), total), (113, 293), "OV-23b, GZ-2: the Kernel's public surface changed");
 }
 
 #[test]

@@ -124,13 +124,23 @@ pub(super) fn match_constraints(name: &Ident, req: &ResourceReq, node: &Resource
         out.rejected.retain(|r| !(r.resource == *name && r.key == refused.key));
         out.rejected.push(RejectedConstraint { resource: name.clone(), key: refused.key.clone(), constraint: req.requires[&refused.key].clone(), reason: refused.reason.clone() });
     }
+    // SB-9a, before SB-44's partition: the preview's `requested` and `applied` are
+    // `Value`s no `from_json` passes, and a map key the canonicaliser refuses would be
+    // refused at cleanup step 7, after the Run transmitted (RS-11). The check covers
+    // **every** coercion the report returns, because SB-44 copies a stray's unchecked
+    // `requested` into its violation and that violation reaches the Manifest too. A
+    // coercion carrying one is refused here, at `validate`, and is neither a stray's
+    // violation nor recorded. The reason names the resource and never the offending
+    // key (KC-24).
+    let (clean, non_ascii): (Vec<_>, Vec<_>) =
+        report.coercions.into_iter().partition(|coercion| coercion.requested.check_ascii_keys("coercion").is_ok() && coercion.applied.check_ascii_keys("coercion").is_ok());
     // SB-44: a `Coercion` for a key the request does not name is a malformed report at
     // this stage for the same reason D42 made it one at `prepare` — nothing was
     // requested, so nothing was coerced. D42 guarded `prepare` only, and the same
     // report reaching `validate` entered `coercions_preview` unchecked: the SB-45/46
     // policy loop then fired that key's default for a key nobody asked about, and the
     // Manifest recorded a substitution of a value nobody requested.
-    let (strays, previewed): (Vec<_>, Vec<_>) = report.coercions.into_iter().partition(|c| !req.requires.contains_key(&c.key));
+    let (strays, previewed): (Vec<_>, Vec<_>) = clean.into_iter().partition(|c| !req.requires.contains_key(&c.key));
     for stray in &strays {
         out.violations.push(Violation {
             check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
@@ -141,6 +151,14 @@ pub(super) fn match_constraints(name: &Ident, req: &ResourceReq, node: &Resource
                  not name",
                 stray.key
             ),
+        });
+    }
+    for _ in non_ascii {
+        out.violations.push(Violation {
+            check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
+            key: None,
+            requested: None,
+            reason: format!("SB-9a: {name}'s Provider reports a coercion carrying a map key that is not ASCII"),
         });
     }
     // A stray is refused above and **not recorded**: `coercions_preview` reaches the

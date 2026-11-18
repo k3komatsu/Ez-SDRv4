@@ -3025,6 +3025,53 @@ fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_validate() {
 }
 
 #[test]
+fn sb_9a_a_coercion_preview_carrying_a_map_key_that_is_not_ascii_is_refused_at_validate() {
+    // SB-9a: a `Value` map carrying a non-ASCII key is refused where it enters. A
+    // `CoerceReport`'s coercions enter `coercions_preview`, which reaches the Manifest
+    // through `AdmissionResult` (SB-38) and passes no `from_json`; left unchecked, the
+    // Run armed and transmitted and `Manifest::seal()` refused the key at cleanup step
+    // 7 (RS-11). `validate` refuses it, before anything arms, without transcribing the
+    // key (KC-24) and without recording the coercion.
+    let spec = minimal_spec();
+    let mut with_grid = spec.clone();
+    with_grid.resources.get_mut(&id("radio")).expect("the fixture's resource").requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let p = TestProvider::new("radio", 2).with_grid(20.0).with_non_ascii_coercion();
+    let providers = one_provider("radio", &p);
+    let admission = validate(&with_grid, &profile, &fx.inputs(&providers)).expect("runs");
+    assert!(!admission.is_admitted(), "a coercion carrying a non-ASCII map key is refused");
+    assert!(admission.violations.iter().any(|v| v.check == ns("ezsdr.coercion") && v.reason.starts_with("SB-9a:")), "{:?}", admission.violations);
+    assert!(admission.violations.iter().all(|v| !format!("{v:?}").contains('ü')), "the offending key is never transcribed: {:?}", admission.violations);
+    assert!(admission.coercions_preview.is_empty(), "the refused coercion is not recorded: {:?}", admission.coercions_preview);
+}
+
+#[test]
+fn sb_9a_a_stray_coercion_carrying_a_map_key_that_is_not_ascii_is_refused_without_transcribing_it() {
+    // SB-9a: the check runs over **every** coercion the report returns, before SB-44's
+    // partition. Checked after it, a stray's `requested` was copied into its SB-44
+    // violation unchecked, and that violation reaches the Manifest through
+    // `AdmissionResult` (SB-38) with no `from_json` on the path: the refused Run's
+    // Manifest was unsealable. It is refused as SB-9a's violation instead, and neither
+    // the reason nor any `requested` carries the key (KC-24).
+    let spec = minimal_spec();
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let p = TestProvider::new("radio", 2).with_non_ascii_stray_coercion();
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("runs");
+    assert!(!admission.is_admitted(), "a stray coercion carrying a non-ASCII map key is refused");
+    assert_eq!(admission.violations.len(), 1, "it is SB-9a's refusal alone, not SB-44's: {:?}", admission.violations);
+    let violation = &admission.violations[0];
+    assert_eq!(violation.check, ns("ezsdr.coercion"));
+    assert!(violation.reason.starts_with("SB-9a:"), "{violation:?}");
+    assert_eq!(violation.key, None);
+    assert_eq!(violation.requested, None, "the offending value is never recorded: {violation:?}");
+    assert!(!format!("{violation:?}").contains('ü'), "the offending key is never transcribed: {violation:?}");
+    assert!(admission.coercions_preview.is_empty(), "the refused coercion is not recorded: {:?}", admission.coercions_preview);
+}
+
+#[test]
 fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_prepare() {
     // The refusal above is `validate`'s; D42's is a **second implementation** at
     // `prepare`, and `prepare` is the point whose reports the Manifest records. A
@@ -3050,6 +3097,33 @@ fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_prepare() {
     let err = collect_prepare(vec![(id("radio"), Ok(stray))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a coercion of a key the request does not name");
     let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
     assert!(v.iter().any(|x| x.check == ns("ezsdr.coercion") && x.reason.contains("SB-44") && x.reason.contains("test.flag") && x.reason.contains("does not name")), "{v:?}");
+}
+
+#[test]
+fn sb_9a_a_report_coercion_carrying_a_map_key_that_is_not_ascii_is_refused_at_prepare() {
+    // The report is filed into the Manifest whole (RS-38), so its `coercions` carry
+    // `Value`s into the Manifest beside `effective`, and no `from_json` runs there
+    // (SB-9a). MA-12's "equal to what `coerce` returned" is a producer obligation, and
+    // SB-44 already refuses a report whose coercions are malformed, so this is the
+    // same door on the same path.
+    let spec = minimal_spec();
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("runs");
+    assert!(admission.is_admitted(), "{admission:?}");
+    let coercion = ezsdr_kernel::spec::Coercion {
+        key: key("test.grid"),
+        requested: Value::num(19.5).unwrap(),
+        applied: Value::Map([("radio.ü".to_owned(), Scalar::Int(1))].into_iter().collect()),
+        reason: "a map key that is not ASCII".to_owned(),
+    };
+    let report = PrepareReport { effective: BTreeMap::new(), coercions: vec![coercion], warnings: Vec::new() };
+    let err = collect_prepare(vec![(id("radio"), Ok(report))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a report coercion carrying a non-ASCII map key");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
+    assert!(v.iter().any(|x| x.check == ns("ezsdr.effective") && x.reason.starts_with("SB-9a:")), "{v:?}");
+    assert!(v.iter().all(|x| !format!("{x:?}").contains('ü')), "the offending key is never transcribed: {v:?}");
 }
 
 #[test]

@@ -14,7 +14,7 @@ use ezsdr_kernel::module_api::{CoercionFidelity, EnvelopeFidelity, ExecutionClas
 use ezsdr_kernel::policy::{EventKindRegistry, Policy, Reaction};
 use ezsdr_kernel::run::{CleanupMode, CleanupStep, Lease, LeaseMode, RunError, RunState, RunStateMachine, Stage, StopCause, Termination, run_cleanup};
 use ezsdr_kernel::session::{Admitter, Outcome, SessionAction, SessionLog, implicit_spec};
-use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, Namespace, Value};
+use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::{BlockFlags, ContinuityBuilder, DropCarry, LatePolicy};
 use ezsdr_kernel::time::{AbsoluteDeadline, TimePoint};
 use support::{FakeHostClock, RecordingCleanup, TestLimitsCheck, TestProvider, TestSink, id, key, mref, ns, some_hash, test_provider_descriptor, test_sink_descriptor, test_vocabulary};
@@ -468,7 +468,7 @@ fn rs_33_counters_exact_under_drop() {
     assert_eq!(dropped[0].payload["count"], serde_json::json!(29_992));
     // RS-35: stamped at the drain's instant, with the Kernel as its source.
     assert_eq!(dropped[0].time, t(9));
-    assert_eq!(dropped[0].source, EventSource::Kernel);
+    assert_eq!(dropped[0].source, EventSource::Kernel {});
     // RS-35's invariant: the counter equals the delivered bodies plus the drops.
     assert_eq!(row.count, bodies as u64 + 29_992);
 }
@@ -543,7 +543,7 @@ fn rs_33_unforeseen_pair_uses_the_fallback_row() {
     let fallback = counters.last().expect("the fallback row is last");
     assert_eq!(fallback.count, 1);
     assert_eq!(fallback.kind.as_str(), "ezsdr.unforeseen");
-    assert_eq!(fallback.source, EventSource::Unforeseen, "one fallback row, not one per source");
+    assert_eq!(fallback.source, EventSource::Unforeseen {}, "one fallback row, not one per source");
 }
 
 #[test]
@@ -599,11 +599,11 @@ fn rs_33_a_view_refuses_kernel_and_unforeseen() {
     let kind = EventKind::parse("test.custom").expect("parses");
     let collector = Arc::new(collector(8, &policy, &[(root.clone(), kind.clone())]));
     let view = collector.view(root.clone());
-    for source in [EventSource::Kernel, EventSource::Unforeseen] {
+    for source in [EventSource::Kernel {}, EventSource::Unforeseen {}] {
         assert_eq!(view.resolve(&source, &kind), Err(RunError::EventSourceOutsideRoot { root: root.clone(), source: source.clone() }), "{source} is no Module's to name");
     }
     // The Kernel's own sink still resolves its own source (KC-31).
-    assert!(collector.resolve(&EventSource::Kernel, &kind).is_ok());
+    assert!(collector.resolve(&EventSource::Kernel {}, &kind).is_ok());
 }
 
 #[test]
@@ -625,7 +625,7 @@ fn rs_33_an_unforeseen_pair_inside_the_root_uses_the_fallback_row() {
     view.emit(handle, t(1), Severity::Info, &[]).expect("emits");
     let fallback = collector.counters().pop().expect("the fallback row is last");
     assert_eq!(fallback.kind.as_str(), "ezsdr.unforeseen");
-    assert_eq!(fallback.source, EventSource::Unforeseen);
+    assert_eq!(fallback.source, EventSource::Unforeseen {});
     assert_eq!(fallback.count, 2, "both unforeseen pairs share the one fallback row");
     let planned = view.resolve(&node, &kind).expect("inside the root");
     view.emit(planned, t(2), Severity::Info, &[]).expect("emits");
@@ -649,7 +649,7 @@ fn rs_32_a_control_event_from_outside_the_root_is_refused() {
     let provider = collector.view(node.clone());
     assert!(provider.emit_control(event(&node)).is_ok(), "its own root");
     assert!(provider.emit_control(event(&support::node_source("radio/rx"))).is_ok(), "a node below it");
-    for outside in [support::node_source("radio2"), EventSource::Kernel, EventSource::Unforeseen] {
+    for outside in [support::node_source("radio2"), EventSource::Kernel {}, EventSource::Unforeseen {}] {
         assert_eq!(provider.emit_control(event(&outside)), Err(RunError::EventSourceOutsideRoot { root: node.clone(), source: outside.clone() }), "{outside} is no event source of this Provider");
     }
     let sink = collector.view(output.clone());
@@ -700,7 +700,7 @@ fn rs_33_duplicate_pairs_share_one_counter_row() {
 #[test]
 fn rs_33_planned_kernel_source_shares_its_meta_counter_row() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = EventSource::Kernel;
+    let source = EventSource::Kernel {};
     let kind = EventKind::parse(EventKind::EVENTS_DROPPED).expect("parses");
     let c = collector(8, &policy, &[(source.clone(), kind.clone())]);
 
@@ -710,7 +710,7 @@ fn rs_33_planned_kernel_source_shares_its_meta_counter_row() {
 #[test]
 fn rs_33_drain_uses_the_planned_kernel_source_for_meta_events() {
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = EventSource::Kernel;
+    let source = EventSource::Kernel {};
     let kind = EventKind::parse("test.custom").expect("parses");
     let c = collector(1, &policy, &[(source.clone(), kind.clone())]);
     let handle = c.resolve(&source, &kind).expect("the Kernel's own sink resolves any source");
@@ -967,6 +967,25 @@ fn rs_16_rejected_action_not_dispatched() {
     let mut log = SessionLog::new();
     log.append(t(0), SessionAction::SetParameter { target: support::target("radio"), key: key("test.grid"), value: Value::num(40.0).unwrap() }, Outcome::Rejected { violations }).expect("well-formed");
     assert!(matches!(log.entries()[0].outcome, Outcome::Rejected { .. }));
+}
+
+#[test]
+fn sb_9a_a_coerced_value_carrying_a_map_key_that_is_not_ascii_is_refused_at_admission() {
+    // SB-9a: a `Value` map key is refused where it enters. A `CoerceReport`'s
+    // `applied` comes back through `Admitter::admit` and is recorded in the action log
+    // as `Outcome::Admitted`'s coercions (RS-16) — the Manifest's copy of it, and
+    // `from_json` never runs on that path. Unchecked, `Manifest::seal()` refused the
+    // key at cleanup step 7, after the Run had transmitted (RS-11).
+    let checks = AdmissionCheckRegistry::new();
+    let environment: BTreeMap<Namespace, serde_json::Value> = BTreeMap::new();
+    let reg = registry();
+    let spec_coercion = BTreeMap::new();
+    let admitter = Admitter { checks: &checks, environment: &environment, spec_coercion: &spec_coercion, registry: &reg, is_session: true };
+    let non_ascii = Value::Map([("radio.ü".to_owned(), Scalar::Int(1))].into_iter().collect());
+    let coercion = ezsdr_kernel::spec::Coercion { key: key("test.flag"), requested: Value::from(false), applied: non_ascii, reason: "a map key that is not ASCII".to_owned() };
+    let violations = admitter.admit(&BTreeMap::new(), &BTreeMap::new(), &[coercion], CheckStage::Runtime).expect_err("a coercion carrying a non-ASCII map key is refused");
+    assert!(violations.iter().any(|v| v.check == ns("ezsdr.coercion") && v.reason.starts_with("SB-9a:")), "{violations:?}");
+    assert!(violations.iter().all(|v| !format!("{v:?}").contains('ü')), "the offending key is never transcribed: {violations:?}");
 }
 
 #[test]
@@ -1266,6 +1285,32 @@ fn sb_04_a_manifest_refuses_a_nested_value() {
         let mut bad = doc.clone();
         *bad.pointer_mut(slot).expect("the slot") = nested.clone();
         assert!(Manifest::from_json(&bad).is_err(), "{nested}");
+    }
+}
+
+#[test]
+fn sb_09_an_event_source_refuses_an_unknown_field() {
+    // SB-9 applies at **every object** of every Kernel document, and `EventSource` is
+    // one: `Manifest`'s counter rows and delivered events carry it. Written as unit
+    // variants of an internally tagged enum, `Kernel` and `Unforeseen` accepted any
+    // extra field whatever `deny_unknown_fields` said — serde's documented limit for
+    // that shape — so a sealed Manifest with `{"kind":"kernel","extra":1}` was read
+    // back, while the schema says `additionalProperties: false`. The empty struct
+    // variants give serde a field set to police.
+    for source in [EventSource::Kernel {}, EventSource::Unforeseen {}] {
+        let plain = serde_json::to_value(&source).expect("serialises");
+        assert_eq!(serde_json::from_value::<EventSource>(plain.clone()).expect("the plain form reads"), source);
+        let mut extra = plain.clone();
+        extra["extra"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<EventSource>(extra.clone()).is_err(), "{extra} is not an EventSource");
+
+        let mut m = manifest_fixture(Termination::Completed {});
+        m.events.counters.push(CounterRow { source, kind: EventKind::parse("ezsdr.STEP_LIVELOCK").expect("a Kernel kind"), count: 1 });
+        let doc = serde_json::to_value(&m).expect("serialises");
+        Manifest::from_json(&doc).expect("the plain source reads");
+        let mut bad = doc.clone();
+        *bad.pointer_mut("/events/counters/0/source").expect("the counter's source") = extra;
+        assert!(Manifest::from_json(&bad).is_err(), "{bad}");
     }
 }
 

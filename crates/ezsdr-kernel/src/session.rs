@@ -246,6 +246,19 @@ impl Admitter<'_> {
         if !violations.is_empty() {
             return Err(violations);
         }
+        // SB-9a, before the policy: a `CoerceReport`'s `applied` reaches the action log
+        // as `Outcome::Admitted`'s coercions (RS-16) and the sealed Manifest through
+        // it, with no `from_json` on that path. Left to hashing time, `seal()` refused
+        // the key at cleanup step 7, after the Run had transmitted (RS-11). The
+        // refusal never transcribes the key (KC-24).
+        if coercions.iter().any(|c| c.requested.check_ascii_keys("coercion").is_err() || c.applied.check_ascii_keys("coercion").is_err()) {
+            return Err(vec![Violation {
+                check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
+                key: None,
+                requested: None,
+                reason: "SB-9a: a coercion carries a map key that is not ASCII".to_owned(),
+            }]);
+        }
         // 2. the coercion policy (SB-45, SB-46)
         let mut out = Admitted { coercions: coercions.to_vec(), warnings: Vec::new() };
         for c in coercions {

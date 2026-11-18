@@ -660,9 +660,9 @@ pub struct AuthorityDescriptor {
     /// binding, so a profile hash names one version of the Module that picks the
     /// ExecutionClass (SB-22f, D98).
     pub module: ModuleRef,
-    /// The domains it advances: a primary root, that root's derived domains,
-    /// `host.monotonic`, and for a simulation Authority every root it simulates
-    /// (TM-16a, MA-29).
+    /// The domains it advances: its primary root, `host.monotonic`, and for a
+    /// simulation Authority every root it simulates. The `TimeAuthority` it provides
+    /// governs the derived domains of each of those roots (TM-16a, MA-29).
     pub governs: Vec<ClockDomainId>,
     /// How it paces its primary root; MA-41 cross-checks it (MA-29).
     pub pacing: Pacing,
@@ -861,7 +861,7 @@ impl fmt::Display for ModuleError {
 impl std::error::Error for ModuleError {}
 
 /// What one `step` did. `progressed` is true exactly when the instance consumed an
-/// input or produced an output (MA-20).
+/// input, produced an output or pushed an Action (MA-20).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StepOutcome {
@@ -1117,8 +1117,8 @@ pub trait Executor: Send {
     /// Consumes every input at or before `until`, emits every output and event at
     /// or before `until`, emits nothing after it, never blocks on input, never
     /// calls `wait_until` (TM-16d), and reports `progressed` true exactly when it
-    /// consumed an input or produced an output. Required, because without it a
-    /// deterministic Run is a wish (MA-20).
+    /// consumed an input, produced an output or pushed an Action. Required, because
+    /// without it a deterministic Run is a wish (MA-20).
     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError>;
     /// Stops (MA-7).
     fn stop(&mut self, mode: StopMode) -> Result<(), ModuleError>;
@@ -1275,8 +1275,13 @@ pub fn step_until_quiescent(instances: &mut [SteppedInstance<'_>], until: TimePo
     // puts it through RS-33's counters, and it is reacted to when drained (KC-31);
     // the returned error is what stops this loop.
     let kind = crate::event::EventKind::parse(crate::event::EventKind::STEP_LIVELOCK).expect("a Kernel kind is well formed");
-    let _ =
-        events.emit_control(crate::event::Event { source: EventSource::Kernel, time: until, severity: crate::event::Severity::Fatal, kind, payload: serde_json::json!({ "rounds": STEP_ROUND_CAP }) });
+    let _ = events.emit_control(crate::event::Event {
+        source: EventSource::Kernel {},
+        time: until,
+        severity: crate::event::Severity::Fatal,
+        kind,
+        payload: serde_json::json!({ "rounds": STEP_ROUND_CAP }),
+    });
     Err(ModuleError {
         kind: ModuleErrorKind::Internal,
         message: format!("MA-30: {} stepping rounds at one instant", STEP_ROUND_CAP),

@@ -150,6 +150,8 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
 pub struct TestLimitsCheck {
     section: Namespace,
     stages: Vec<CheckStage>,
+    /// Makes each violation's `requested` a `Value` map whose key is not ASCII.
+    non_ascii_requested: bool,
 }
 
 impl Default for TestLimitsCheck {
@@ -161,7 +163,14 @@ impl Default for TestLimitsCheck {
 impl TestLimitsCheck {
     /// A check that runs at all three points of SB-30.
     pub fn new() -> TestLimitsCheck {
-        TestLimitsCheck { section: ns("test.limits"), stages: vec![CheckStage::Validate, CheckStage::Prepare, CheckStage::Runtime] }
+        TestLimitsCheck { section: ns("test.limits"), stages: vec![CheckStage::Validate, CheckStage::Prepare, CheckStage::Runtime], non_ascii_requested: false }
+    }
+
+    /// Makes each violation's `requested` a `Value` map whose key is not ASCII, so a
+    /// registered check's violation can carry one into the admission result (SB-9a).
+    pub fn with_non_ascii_requested(mut self) -> TestLimitsCheck {
+        self.non_ascii_requested = true;
+        self
     }
 }
 
@@ -197,7 +206,8 @@ impl AdmissionCheck for TestLimitsCheck {
                     _ => continue,
                 };
                 if n > ceiling {
-                    out.push(Violation { check: ns("test.limits"), key: Some(k.clone()), requested: Some(v.clone()), reason: format!("{name}: test.grid {n} exceeds the declared ceiling {ceiling}") });
+                    let requested = if self.non_ascii_requested { Value::Map([("radio.ü".to_owned(), Scalar::Int(1))].into_iter().collect()) } else { v.clone() };
+                    out.push(Violation { check: ns("test.limits"), key: Some(k.clone()), requested: Some(requested), reason: format!("{name}: test.grid {n} exceeds the declared ceiling {ceiling}") });
                 }
             }
         }
@@ -232,6 +242,9 @@ pub struct TestProvider {
     pub grid: Option<f64>,
     /// Whether `coerce` reports a coercion of a key the request does not name (SB-44).
     pub stray_coercion: bool,
+    /// Makes the stray coercion's `requested` a `Value` map whose key is not ASCII
+    /// (SB-9a).
+    pub non_ascii_stray: bool,
     /// Which phase to fail at (MA-44).
     pub fail_at: FailAt,
     /// The recorded call log (MA-44).
@@ -263,6 +276,8 @@ pub struct TestProvider {
     pub snaps: Vec<(Key, f64)>,
     /// Additional values inserted into `prepare`'s effective report (KC-27).
     pub effective: BTreeMap<Key, Value>,
+    /// Makes every coercion carry a `Value` map whose key is not ASCII (SB-9a).
+    pub non_ascii_coercion: bool,
 }
 
 impl TestProvider {
@@ -323,6 +338,7 @@ impl TestProvider {
             },
             grid: None,
             stray_coercion: false,
+            non_ascii_stray: false,
             fail_at: FailAt::Never,
             log: Mutex::new(Vec::new()),
             coerce_calls: Arc::new(AtomicU64::new(0)),
@@ -336,6 +352,7 @@ impl TestProvider {
             omit_applied: None,
             snaps: Vec::new(),
             effective: BTreeMap::new(),
+            non_ascii_coercion: false,
         }
     }
 
@@ -439,6 +456,21 @@ impl TestProvider {
     /// Adds a value to the effective configuration returned by `prepare` (KC-27).
     pub fn with_effective(mut self, key_name: &str, value: Value) -> TestProvider {
         self.effective.insert(key(key_name), value);
+        self
+    }
+
+    /// Makes every `coerce`d value a `Value` map whose key is not ASCII, so a coercion
+    /// preview entering `validate`'s admission result carries one (SB-9a).
+    pub fn with_non_ascii_coercion(mut self) -> TestProvider {
+        self.non_ascii_coercion = true;
+        self
+    }
+
+    /// Makes the stray coercion's `requested` a `Value` map whose key is not ASCII, so
+    /// a report can carry one on the branch SB-44 refuses (SB-9a).
+    pub fn with_non_ascii_stray_coercion(mut self) -> TestProvider {
+        self.stray_coercion = true;
+        self.non_ascii_stray = true;
         self
     }
 
@@ -564,7 +596,8 @@ impl Provider for TestProvider {
         }
         let mut report = CoerceReport::default();
         if self.stray_coercion {
-            report.coercions.push(Coercion { key: key("test.flag"), requested: Value::from(false), applied: Value::from(true), reason: "a key the request does not name".to_owned() });
+            let requested = if self.non_ascii_stray { Value::Map([("radio.ü".to_owned(), Scalar::Int(1))].into_iter().collect()) } else { Value::from(false) };
+            report.coercions.push(Coercion { key: key("test.flag"), requested, applied: Value::from(true), reason: "a key the request does not name".to_owned() });
         }
         for (k, c) in &request.constraints {
             let Constraint::Eq { value: v } = c else {
@@ -609,6 +642,11 @@ impl Provider for TestProvider {
         }
         if let Some(key) = &self.omit_applied {
             report.applied.remove(key);
+        }
+        if self.non_ascii_coercion {
+            for coercion in &mut report.coercions {
+                coercion.applied = Value::Map([("radio.ü".to_owned(), Scalar::Int(1))].into_iter().collect());
+            }
         }
         Ok(report)
     }

@@ -106,7 +106,7 @@
   "description": "What an Authority declares (MA-29).",
   "properties": {
     "governs": {
-      "description": "The domains it advances: a primary root, that root's derived domains,\n`host.monotonic`, and for a simulation Authority every root it simulates\n(TM-16a, MA-29).",
+      "description": "The domains it advances: its primary root, `host.monotonic`, and for a\nsimulation Authority every root it simulates. The `TimeAuthority` it provides\ngoverns the derived domains of each of those roots (TM-16a, MA-29).",
       "items": {
         "$ref": "#/$defs/ClockDomainId"
       },

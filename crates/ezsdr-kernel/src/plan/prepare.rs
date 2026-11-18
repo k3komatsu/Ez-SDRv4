@@ -59,6 +59,20 @@ pub(super) fn collect_prepare(
     for (fragment, r) in reports {
         match r {
             Ok(report) => {
+                // SB-9a: a `Value` map key is refused where it enters. The whole report
+                // is filed into the Manifest's prepare section (RS-38) and hashed at
+                // cleanup step 7, and no `from_json` runs on this path, so a key the
+                // canonicaliser refuses was refused only after the Run transmitted. The
+                // reason names the fragment and never the offending key (KC-24).
+                let carried = report.effective.values().chain(report.coercions.iter().flat_map(|coercion| [&coercion.requested, &coercion.applied]));
+                if carried.into_iter().any(|value| value.check_ascii_keys("effective").is_err()) {
+                    return Err(PrepareError::Violations(vec![Violation {
+                        check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
+                        key: None,
+                        requested: None,
+                        reason: format!("SB-9a: {fragment}'s prepare report carries a map key that is not ASCII"),
+                    }]));
+                }
                 ok.insert(fragment, report);
             }
             Err(error) => return Err(PrepareError::Fragment { fragment, error }),

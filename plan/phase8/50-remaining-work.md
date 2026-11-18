@@ -38,7 +38,7 @@
 
 | 順 | 段 | 中身 | 難しさ | 分類・レビュー |
 |---|---|---|---|---|
-| 1 | #105・#104 | Kernel の小さなずれ（EventSource の unit variant，撤回した規則の一覧，MA-20 の doc），PrepareReport と coercion の非 ASCII の key（SB-9a） | 低 | 規則の決まった小さな段 |
+| 1 | #105・#104（**済** 2026-11-18，`reviews/n105-*`） | Kernel の小さなずれ（EventSource の unit variant，撤回した規則の一覧，MA-20 の doc），PrepareReport と coercion の非 ASCII の key（SB-9a） | 低 | 規則の決まった小さな段 |
 | 2 | #102 | 両側で invalid な channel の ChannelGap が map の終わりまで落ちる（SC-31c） | 中：Stream Contract の読み | 危険な段の実装役，Opus のレビュー |
 | 3 | #103 | device-paced の start の batch が受付の lock の外で admit される（KC-24a） | 高：Kernel の並行性 | 危険な段，Sol |
 | 4 | #107 | mt3 C4 の rehearsal の網羅の確認が t0 の位相に頼る（10 回に 2 回落ちる） | 低〜中：時刻に頼る試験 | 危険な段の実装役（小さい） |

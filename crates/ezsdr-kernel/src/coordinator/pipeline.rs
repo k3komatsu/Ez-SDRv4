@@ -503,7 +503,7 @@ impl RunHandle {
             pairs.insert((source, device_lost.clone()));
         }
         for kind in kernel_kinds {
-            pairs.insert((EventSource::Kernel, kind));
+            pairs.insert((EventSource::Kernel {}, kind));
         }
         let pairs: Vec<_> = pairs.into_iter().collect();
         let Some(policy) = self.shared.policy.get() else {

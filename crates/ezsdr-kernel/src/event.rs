@@ -122,9 +122,13 @@ pub enum EventSource {
         island: IslandId,
     },
     /// The Kernel itself (RS-35, KC-22).
-    Kernel,
+    // Written as an empty struct variant, not a unit variant: serde ignores a unit
+    // variant's unknown fields even under `deny_unknown_fields`, so `{"kind":
+    // "kernel","extra":1}` parsed; the schema says `additionalProperties: false`
+    // (SB-9).
+    Kernel {},
     /// RS-33's fallback row for a pair the plan did not foresee.
-    Unforeseen,
+    Unforeseen {},
 }
 
 impl fmt::Display for EventSource {
@@ -133,8 +137,8 @@ impl fmt::Display for EventSource {
             EventSource::Node { node } => write!(f, "node {}", node.path()),
             EventSource::Output { output } => write!(f, "output {output}"),
             EventSource::Island { island } => write!(f, "island {}", island.local),
-            EventSource::Kernel => f.write_str("kernel"),
-            EventSource::Unforeseen => f.write_str("unforeseen"),
+            EventSource::Kernel {} => f.write_str("kernel"),
+            EventSource::Unforeseen {} => f.write_str("unforeseen"),
         }
     }
 }
@@ -374,8 +378,8 @@ impl EventCollector {
             }
             Entry::Occupied(entry) => *entry.get(),
         };
-        let fallback_source = source_of(EventSource::Unforeseen);
-        let kernel_source = source_of(EventSource::Kernel);
+        let fallback_source = source_of(EventSource::Unforeseen {});
+        let kernel_source = source_of(EventSource::Kernel {});
         let dropped_kind = EventKind(EventKind::EVENTS_DROPPED.to_owned());
         let dropped_row_kind = *kind_index.entry(dropped_kind.clone()).or_insert_with(|| {
             kind_list.push(dropped_kind);
@@ -513,7 +517,7 @@ impl EventCollector {
             if count > 0 {
                 // RS-35's invariant is stated "for every kind", so the meta-event is
                 // counted like any other body it is delivered beside (RS-33, RS-38).
-                let source = EventSource::Kernel;
+                let source = EventSource::Kernel {};
                 let handle = self.mint(self.scope, &source, &dropped_kind);
                 self.counts[handle.row as usize].fetch_add(1, Ordering::Relaxed);
                 out.push(Event {

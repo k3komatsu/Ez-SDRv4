@@ -283,8 +283,8 @@ pub fn check_event_view(probe: &Probe, name: &str, ctx: &PrepareContext) -> Opti
     let kind = EventKind::parse("test.custom").expect("a test kind");
     let own = ctx.events.resolve(&ctx.source, &kind);
     let other = other_source(&ctx.source).is_none_or(|source| ctx.events.resolve(&source, &kind).is_err());
-    let kernel = ctx.events.resolve(&EventSource::Kernel, &kind).is_err();
-    let unforeseen = ctx.events.resolve(&EventSource::Unforeseen, &kind).is_err();
+    let kernel = ctx.events.resolve(&EventSource::Kernel {}, &kind).is_err();
+    let unforeseen = ctx.events.resolve(&EventSource::Unforeseen {}, &kind).is_err();
     probe.record(format!("events:{name}:own={}:other={other}:kernel={kernel}:unforeseen={unforeseen}", own.is_ok()));
     own.ok()
 }

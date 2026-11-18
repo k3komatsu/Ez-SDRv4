@@ -358,7 +358,17 @@ impl AdmissionCheckRegistry {
                 continue;
             }
             if let Some(section) = environment.get(check.section()) {
-                out.extend(check.check(section, effective, proposed, stage));
+                for mut violation in check.check(section, effective, proposed, stage) {
+                    // SB-9a, KC-24: a check's `requested` is a `Value` the Kernel records
+                    // in the admission result and the Manifest, and no `from_json` runs on
+                    // that path. One carrying a non-ASCII map key would leave the refused
+                    // Run's Manifest unsealable; the refusal stands and only the value it
+                    // could not record is dropped.
+                    if violation.requested.as_ref().is_some_and(|value| value.check_ascii_keys("requested").is_err()) {
+                        violation.requested = None;
+                    }
+                    out.push(violation);
+                }
             }
         }
         out
