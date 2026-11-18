@@ -42,7 +42,7 @@
 | 2 | #102（**済** 2026-11-18，`reviews/n102-*`．Sonnet が DeepSeek を率いる試し） | 両側で invalid な channel の ChannelGap が map の終わりまで落ちる（SC-31c） | 中：Stream Contract の読み | 危険な段の実装役，Opus のレビュー |
 | 3 | #103（**済** 2026-11-18，`reviews/n103-*`） | device-paced の start の batch が受付の lock の外で admit される（KC-24a） | 高：Kernel の並行性 | 危険な段，Sol |
 | 4 | #107（**済** 2026-11-19，#109 と一緒に，`reviews/n107-*`） | mt3 C4 の rehearsal の網羅の確認が t0 の位相に頼る（10 回に 2 回落ちる） | 低〜中：時刻に頼る試験 | 危険な段の実装役（小さい） |
-| 5 | #75 の残り | (3) 以外のコードの項目．着手の前に issue を棚卸しする | 中（INFERRED） | 危険な段，Sol |
+| 5 | #75 の残り（**閉じた** 2026-11-19：棚卸しの結果，issue の項目は 79f55e1 と f8c9e2bf ですべて済．残りのコードの項目は無かった） | (3) 以外のコードの項目．着手の前に issue を棚卸しする | 中（INFERRED） | 危険な段，Sol |
 
 ### 二つの流れの決まり
 
