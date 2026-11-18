@@ -2,19 +2,20 @@ mod support;
 
 use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ezsdr_kernel::binding::BindingProfile;
-use ezsdr_kernel::coordinator::{Assembly, connect, start_spec_run};
+use ezsdr_kernel::coordinator::{Assembly, connect, start_probe, start_spec_run};
 use ezsdr_kernel::event::{Action, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::RunKind;
-use ezsdr_kernel::module_api::Pacing;
+use ezsdr_kernel::module_api::{ActionSubmitter, Pacing, UpdateClass};
 use ezsdr_kernel::run::{Lease, LeaseMode, RunState, Stage, StopCause, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, SpecError, Value};
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, TimePoint};
+use support::start_window::{ClockEvent, ClockLog, StartTrace, WatchedAuthority, WatchedClock, seen_for, start_on_worker, with_seen};
 use support::{
     FakeHostClock, Probe, ProbeExecutor, RecordingSink, SimAuthority, SteppedProvider, TestLimitsCheck, TestLinkModule, TestProvider, mref, ns, run_checks, run_kinds, run_registry,
     run_registry_classed, run_registry_non_namespace_provider,
@@ -524,12 +525,33 @@ fn kc_14_an_arm_failure_is_failed_arm() {
 
 #[test]
 fn kc_18_a_start_failure_is_failed_arm() {
+    // #103: an admitted batch is not dispatched when an instance fails to start, and
+    // `Running` is never recorded. The Provider's own `start` fails, so this is not an
+    // earlier refusal.
+    let mut spec = spec_one();
+    add_schedule(
+        &mut spec,
+        "radio",
+        0,
+        serde_json::json!({
+            "kind": "update_parameter",
+            "target": serde_json::to_value(support::target("radio")).unwrap(),
+            "key": "test.gain",
+            "value": 3.0
+        }),
+    );
     let probe = Probe::new();
     let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
-    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2).failing_at(support::FailAt::Start), &probe)));
-    let run = start_spec_run(&spec_one(), &profile_one(), assembly).expect("entry creates a Run");
+    assembly
+        .providers
+        .insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2).failing_at(support::FailAt::Start), &probe).declaring("radio/rx", 1, 1)));
+    let run = start_spec_run(&spec, &profile_one(), assembly).expect("entry creates a Run");
     assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }));
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()].get(&Key::parse("test.gain").unwrap()), None);
+    assert!(probe.lines().iter().any(|line| line.starts_with("p:start:")), "{:?}", probe.lines());
+    assert!(!probe.lines().iter().any(|line| line.starts_with("p:action:") || line.starts_with("p:update:")), "{:?}", probe.lines());
     let manifest = run.finish();
+    assert!(failure(&manifest).starts_with("KC-30: radio: "), "{}", failure(&manifest));
     assert!(!manifest.run.transitions.iter().any(|row| matches!(row.state, RunState::Running {})));
 }
 
@@ -986,6 +1008,11 @@ fn kc_17_scheduled_updates_are_admitted_cumulatively() {
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 1, 1)));
     let run = start_spec_run(&spec, &profile, assembly).expect("entry creates a Run");
     assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }));
+    assert_eq!(
+        run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("test.grid").unwrap()],
+        Value::num(20.0).unwrap(),
+        "the requires value the prepare report seeds, not the scheduled 40.0 which was never published"
+    );
     let reason = failure(&run.finish()).to_owned();
     assert!(reason.starts_with("KC-17: entry 1"));
     assert!(reason.contains("test.limits"));
@@ -4225,4 +4252,207 @@ fn sb_09a_module_action_rejects_a_non_ascii_map_key_before_dispatch() {
             assert!(manifest.hash.is_some());
         }
     }
+}
+
+#[test]
+fn kc_24a_start_a_simulation_first_step_follows_the_batch() {
+    // #103: the start's batch is dispatched under the admission lock, before the
+    // first round; a submission from that round is admitted after it (KC-24a).
+    let (mut spec, mut profile) = executor_docs();
+    add_schedule(
+        &mut spec,
+        "radio",
+        0,
+        serde_json::json!({
+            "kind": "update_parameter",
+            "target": serde_json::to_value(support::target("radio")).unwrap(),
+            "key": "test.gain",
+            "value": 1.0
+        }),
+    );
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    let log = with_seen(&mut assembly, &mut profile);
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 1, 1)));
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).submitting(Action::UpdateParameter {
+            target: support::target("radio"),
+            key: Key::parse("test.gain").unwrap(),
+            value: Value::num(2.0).unwrap(),
+            class: UpdateClass::HardwareTimed,
+            at: None,
+        })),
+    );
+    let trace = StartTrace::default();
+    let recorded = trace.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, probe| {
+            let reading = probe.read().expect("the Run is alive");
+            recorded.push(point, reading);
+            if point == start_probe::Point::Released {
+                assert!(!reading.admission_held, "KC-24a: the admission lock is still held when the start releases it; the round would relock it");
+            }
+        },
+        move || start_spec_run(&spec, &profile, assembly),
+    );
+    let run = started.finish();
+    trace.assert_extent(&[
+        start_probe::Point::Entered,
+        start_probe::Point::BeforePublish,
+        start_probe::Point::BeforeDispatch,
+        start_probe::Point::Dispatching { next: 0 },
+        start_probe::Point::Released,
+    ]);
+    assert!(probe.lines().iter().any(|line| line == "x:submit:ok:2"), "{:?}", probe.lines());
+    assert_eq!(seen_for(&log, &Value::num(2.0).unwrap()), vec![Some(Value::num(1.0).unwrap())], "{:?}", probe.lines());
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("test.gain").unwrap()], Value::num(2.0).unwrap());
+    assert!(matches!(run.state(), RunState::Running {}));
+    assert!(run.finish().termination.cleanup_failures.is_empty());
+}
+
+#[test]
+fn kc_24a_start_reads_the_transition_clocks_outside_the_lock() {
+    // KC-24a: the two reads a transition records are taken before the admission
+    // lock is held, so no Module holds a lock those callbacks need while it waits.
+    // Each callback is observed on its own, and their order and samples are pinned:
+    // the Authority's now() first, then the host clock's UTC, both before the lock.
+    let probe = Probe::new();
+    let mut rig = rig(Pacing::FreeRunning);
+    let (authority, root) = SimAuthority::new(&rig.clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+    rig.root = root;
+    rig.manual = authority.manual();
+    let log = ClockLog::default();
+    let (clock, slot) = WatchedClock::new(rig.host.clone(), log.clone());
+    rig.assembly.authority = Box::new(WatchedAuthority::new(Box::new(authority), slot.clone(), log.clone()));
+    rig.assembly.host_clock = Arc::new(clock);
+    rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+    let primary = rig.root;
+    let trace = StartTrace::default();
+    let recorded = trace.clone();
+    let hook_slot = slot.clone();
+    let hook_log = log.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, probe| {
+            let reading = probe.read().expect("the Run is alive");
+            recorded.push(point, reading);
+            hook_log.push(ClockEvent::Point(point));
+            if point == start_probe::Point::Entered {
+                *hook_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe.clone());
+            }
+        },
+        move || start_spec_run(&spec_one(), &profile_one(), rig.assembly),
+    );
+    let run = started.finish();
+    let manifest = run.finish();
+    let events = log.events();
+    for event in &events {
+        match event {
+            ClockEvent::Now { held, .. } => assert!(!held, "KC-24a: TimeAuthority::now ran under the admission lock; events: {events:?}"),
+            ClockEvent::Utc { held, .. } => assert!(!held, "KC-24a: HostClock::utc_nanos ran under the admission lock; events: {events:?}"),
+            ClockEvent::Point(_) => {}
+        }
+    }
+    let bp = events.iter().position(|event| *event == ClockEvent::Point(start_probe::Point::BeforePublish)).expect("the start reached BeforePublish");
+    assert!(bp >= 2, "KC-24a: no clock reads were logged before BeforePublish; events: {events:?}");
+    let now_sample = match events[bp - 2] {
+        ClockEvent::Now { sample, .. } => sample,
+        ref other => panic!("KC-24a: the event before the UTC read is {other:?}, not the Authority's now"),
+    };
+    let utc_sample = match events[bp - 1] {
+        ClockEvent::Utc { sample, .. } => sample,
+        ref other => panic!("KC-24a: the event before the publication is {other:?}, not the host clock's UTC read"),
+    };
+    let row = manifest.run.transitions.iter().find(|row| matches!(row.state, RunState::Running {})).expect("the Run recorded Running");
+    assert_eq!(row.host_utc_nanos, utc_sample, "the recorded UTC is not the sampled one; events: {events:?}");
+    let at = row.at.expect("Running carries its runtime instant");
+    assert_eq!(at.ticks_in(primary).expect("on the primary root"), now_sample, "the recorded instant is not the sampled one; events: {events:?}");
+}
+
+#[test]
+fn kc_24a_start_a_submission_from_start_is_refused_not_blocked() {
+    // #103: `start_instances` runs before the admission lock, so a submission from
+    // an instance's `start` is refused at KC-24 step 2 instead of waiting for it.
+    let (spec, mut profile) = executor_docs();
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    let log = with_seen(&mut assembly, &mut profile);
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+    let slot: Arc<Mutex<Option<start_probe::Probe>>> = Arc::new(Mutex::new(None));
+    assembly.executors.insert(
+        Ident::parse("exec").unwrap(),
+        Box::new(ProbeExecutor::new("x", &probe).submitting_from_start(
+            Action::UpdateParameter { target: support::target("radio"), key: Key::parse("test.gain").unwrap(), value: Value::num(2.0).unwrap(), class: UpdateClass::HardwareTimed, at: None },
+            slot.clone(),
+        )),
+    );
+    let trace = StartTrace::default();
+    let recorded = trace.clone();
+    let hook_slot = slot.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, probe| {
+            let reading = probe.read().expect("the Run is alive");
+            recorded.push(point, reading);
+            if point == start_probe::Point::Entered {
+                *hook_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe.clone());
+            }
+        },
+        move || start_spec_run(&spec, &profile, assembly),
+    );
+    let run = started.finish();
+    assert!(probe.lines().iter().any(|line| line == "x:start:held=false"), "{:?}", probe.lines());
+    assert!(probe.lines().iter().any(|line| line.starts_with("x:start:err:ezsdr.run_state:RS-18")), "{:?}", probe.lines());
+    assert!(!probe.lines().iter().any(|line| line.starts_with("x:start:ok:")), "{:?}", probe.lines());
+    assert!(matches!(run.state(), RunState::Running {}));
+    assert!(seen_for(&log, &Value::num(2.0).unwrap()).is_empty());
+    assert!(!run.effective()[&Ident::parse("radio").unwrap()].contains_key(&Key::parse("test.gain").unwrap()));
+    trace.assert_extent(&[start_probe::Point::Entered, start_probe::Point::BeforePublish, start_probe::Point::BeforeDispatch]);
+    let _ = run.finish();
+}
+
+#[test]
+fn kc_24a_start_an_end_before_the_check_dispatches_nothing() {
+    // #103: the end check after the publication returns before the batch's dispatch.
+    let (mut spec, profile) = executor_docs();
+    add_schedule(
+        &mut spec,
+        "radio",
+        0,
+        serde_json::json!({
+            "kind": "update_parameter",
+            "target": serde_json::to_value(support::target("radio")).unwrap(),
+            "key": "test.gain",
+            "value": 7.0
+        }),
+    );
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 1, 1)));
+    let slot: Arc<Mutex<Option<Arc<dyn ActionSubmitter>>>> = Arc::new(Mutex::new(None));
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe).sharing_submitter(slot.clone())));
+    let trace = StartTrace::default();
+    let recorded = trace.clone();
+    let hook_slot = slot.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, probe| {
+            let reading = probe.read().expect("the Run is alive");
+            recorded.push(point, reading);
+            if point == start_probe::Point::BeforePublish {
+                let submitter = hook_slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
+                let id = submitter.submit(Action::Abort { cause: StopCause::Abort { message: "test".to_owned() } });
+                assert!(id.is_ok(), "{id:?}");
+            }
+        },
+        move || start_spec_run(&spec, &profile, assembly),
+    );
+    let run = started.finish();
+    assert!(!run.effective()[&Ident::parse("radio").unwrap()].contains_key(&Key::parse("test.gain").unwrap()));
+    assert_eq!(run.state(), RunState::CleanedUp { termination: Termination::Stopped { cause: StopCause::Abort { message: "test".to_owned() } } });
+    assert!(run.finish().termination.undelivered.is_empty());
+    trace.assert_extent(&[start_probe::Point::Entered, start_probe::Point::BeforePublish]);
+    assert!(!trace.points().iter().any(|(point, _)| *point == start_probe::Point::BeforeDispatch), "{:?}", trace.points());
 }

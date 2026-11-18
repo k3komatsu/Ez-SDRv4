@@ -245,6 +245,8 @@ fn fallback_root(assembly: &Assembly) -> ClockDomainId {
 
 impl RunHandle {
     pub(super) fn pipeline(&mut self) {
+        #[cfg(feature = "testing")]
+        super::start_probe::reach(&self.shared, super::start_probe::Point::Entered);
         if let Some(reason) = self.entry_failure.clone() {
             self.fail(Stage::Validate, reason);
             return;
@@ -326,7 +328,12 @@ impl RunHandle {
         if !self.start_instances() || lock(&self.shared.end).is_some() {
             return;
         }
-        self.shared.move_to(RunState::Running {});
+        let transition = self.shared.sample_transition();
+        // KC-24a: taken after `start_instances` (a submission from `start` is refused at KC-24 step 2 and must not meet the lock) and held from the publication of `Running` through the batch's last dispatch.
+        let admission = lock(&self.shared.admission);
+        #[cfg(feature = "testing")]
+        super::start_probe::reach(&self.shared, super::start_probe::Point::BeforePublish);
+        self.shared.publish(RunState::Running {}, transition);
         if lock(&self.shared.end).is_some() {
             return;
         }
@@ -334,10 +341,17 @@ impl RunHandle {
         if device_paced {
             super::paced::start_data_thread(&self.shared);
         }
-        let dispatched: Vec<_> = {
-            let _admission = lock(&self.shared.admission);
-            if self.shared.frozen.load(std::sync::atomic::Ordering::Acquire) { Vec::new() } else { batch.into_iter().map(|admitted| super::admission::dispatch(&self.shared, admitted).1).collect() }
-        };
+        #[cfg(feature = "testing")]
+        super::start_probe::reach(&self.shared, super::start_probe::Point::BeforeDispatch);
+        let mut dispatched = Vec::with_capacity(batch.len());
+        for admitted in batch {
+            #[cfg(feature = "testing")]
+            super::start_probe::reach(&self.shared, super::start_probe::Point::Dispatching { next: dispatched.len() });
+            dispatched.push(super::admission::dispatch(&self.shared, admitted).1);
+        }
+        drop(admission);
+        #[cfg(feature = "testing")]
+        super::start_probe::reach(&self.shared, super::start_probe::Point::Released);
         if device_paced {
             super::paced::wait_finished(&self.shared, &dispatched);
         }

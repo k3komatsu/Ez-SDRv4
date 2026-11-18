@@ -12,7 +12,7 @@ use ezsdr_kernel::id::{ClockDomainId, RunId};
 use ezsdr_kernel::manifest::{ArtifactRef, BindingSection, ClocksSection, EventsSection, Manifest, PrepareSection, RunKind, RunSection, SpecSection, TerminationSection, mark_open_artifacts};
 use ezsdr_kernel::module_api::{CoercionFidelity, EnvelopeFidelity, ExecutionClass, Factories, Fidelity, ModuleRegistry, RfFidelity, Sink, StopMode, TransportFidelity, UpdateClass};
 use ezsdr_kernel::policy::{EventKindRegistry, Policy, Reaction};
-use ezsdr_kernel::run::{CleanupMode, CleanupStep, Lease, LeaseMode, RunError, RunState, RunStateMachine, Stage, StopCause, Termination, run_cleanup};
+use ezsdr_kernel::run::{CleanupMode, CleanupStep, HostClock, Lease, LeaseMode, RunError, RunState, RunStateMachine, Stage, StopCause, Termination, run_cleanup};
 use ezsdr_kernel::session::{Admitter, Outcome, SessionAction, SessionLog, implicit_spec};
 use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::{BlockFlags, ContinuityBuilder, DropCarry, LatePolicy};
@@ -70,6 +70,34 @@ fn rs_02_happy_path_transitions() {
     assert!(matches!(run.move_to(RunState::Running {}, None, &clock), Err(RunError::IllegalTransition { .. })));
     let mut fresh = RunStateMachine::new(&clock);
     assert!(matches!(fresh.move_to(RunState::Running {}, None, &clock), Err(RunError::IllegalTransition { .. })));
+}
+
+#[test]
+fn rs_02_an_illegal_transition_reads_no_clock() {
+    struct CountingClock(std::sync::atomic::AtomicU64);
+
+    impl HostClock for CountingClock {
+        fn monotonic_millis(&self) -> u64 {
+            0
+        }
+
+        fn utc_nanos(&self) -> i64 {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            1_700_000_000_000_000_000
+        }
+    }
+
+    let clock = CountingClock(std::sync::atomic::AtomicU64::new(0));
+    let reads = || clock.0.load(std::sync::atomic::Ordering::SeqCst);
+    let mut run = RunStateMachine::new(&clock);
+    assert_eq!(reads(), 1, "the Created transition reads the clock once");
+    assert!(matches!(run.move_to(RunState::Running {}, None, &clock), Err(RunError::IllegalTransition { .. })));
+    assert_eq!(reads(), 1, "an illegal transition reads no clock");
+    run.move_to(RunState::Validated {}, None, &clock).expect("a legal transition");
+    assert_eq!(reads(), 2, "a legal transition reads the clock once");
+    assert_eq!(run.transitions().last().expect("the transition was recorded").host_utc_nanos, 1_700_000_000_000_000_000);
+    assert!(matches!(run.finish(Termination::Completed {}, None, &clock), Err(RunError::IllegalTransition { .. })));
+    assert_eq!(reads(), 2, "the second illegal transition reads no clock");
 }
 
 #[test]

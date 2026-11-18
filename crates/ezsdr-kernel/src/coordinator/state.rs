@@ -126,6 +126,12 @@ pub(super) struct EndRequest {
     pub(super) mode: CleanupMode,
 }
 
+/// The two reads a transition records: the Authority's `now()` and the host clock's UTC time. Both are calls into supplied code, so a transition published under `admission` reads them first (KC-24a).
+pub(super) struct Transition {
+    at: Option<TimePoint>,
+    utc: i64,
+}
+
 /// What never changes after entry (KC-6).
 pub(super) struct Context {
     pub(super) kind: RunKind,
@@ -378,10 +384,19 @@ impl Shared {
         }
     }
 
-    pub(super) fn move_to(&self, state: RunState) {
-        let at = Some(self.now());
-        let result = lock(&self.machine).move_to(state, at, &*self.ctx.host_clock);
+    pub(super) fn sample_transition(&self) -> Transition {
+        Transition { at: Some(self.now()), utc: self.ctx.host_clock.utc_nanos() }
+    }
+
+    /// Records a transition with the reads `sample_transition` took: the machine lock only, no callback.
+    pub(super) fn publish(&self, state: RunState, transition: Transition) {
+        let result = lock(&self.machine).move_to_at(state, transition.at, transition.utc);
         debug_assert!(result.is_ok(), "coordinator attempted an illegal state transition: {result:?}");
+    }
+
+    pub(super) fn move_to(&self, state: RunState) {
+        let transition = self.sample_transition();
+        self.publish(state, transition);
     }
 }
 

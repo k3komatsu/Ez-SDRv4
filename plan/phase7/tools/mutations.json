@@ -1472,5 +1472,117 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_stopped_stream_ends_at_its_cut_and_its_late_tail_stays_off_the_new_clock"
+ },
+ {
+  "id": "N103-1",
+  "name": "the start's lock is taken after the data thread starts (the old window)",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        let admission = lock(&self.shared.admission);\n        #[cfg(feature = \"testing\")]\n        super::start_probe::reach(&self.shared, super::start_probe::Point::BeforePublish);\n        self.shared.publish(RunState::Running {}, transition);\n        if lock(&self.shared.end).is_some() {\n            return;\n        }\n        let device_paced = self.shared.device_paced();\n        if device_paced {\n            super::paced::start_data_thread(&self.shared);\n        }\n        #[cfg(feature = \"testing\")]\n        super::start_probe::reach(&self.shared, super::start_probe::Point::BeforeDispatch);\n",
+  "new": "        #[cfg(feature = \"testing\")]\n        super::start_probe::reach(&self.shared, super::start_probe::Point::BeforePublish);\n        self.shared.publish(RunState::Running {}, transition);\n        if lock(&self.shared.end).is_some() {\n            return;\n        }\n        let device_paced = self.shared.device_paced();\n        if device_paced {\n            super::paced::start_data_thread(&self.shared);\n        }\n        #[cfg(feature = \"testing\")]\n        super::start_probe::reach(&self.shared, super::start_probe::Point::BeforeDispatch);\n        let admission = lock(&self.shared.admission);\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_24a_start_the_data_threads_first_submission_follows_the_batch"
+ },
+ {
+  "id": "N103-2",
+  "name": "the start's lock is taken after `Running` is published",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        let admission = lock(&self.shared.admission);\n        #[cfg(feature = \"testing\")]\n        super::start_probe::reach(&self.shared, super::start_probe::Point::BeforePublish);\n        self.shared.publish(RunState::Running {}, transition);\n",
+  "new": "        #[cfg(feature = \"testing\")]\n        super::start_probe::reach(&self.shared, super::start_probe::Point::BeforePublish);\n        self.shared.publish(RunState::Running {}, transition);\n        let admission = lock(&self.shared.admission);\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_24a_start_a_worker_submission_across_the_transition_is_admitted_after_the_batch"
+ },
+ {
+  "id": "N103-3",
+  "name": "the start's lock is held across KC-21a's wait",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        drop(admission);\n        #[cfg(feature = \"testing\")]\n        super::start_probe::reach(&self.shared, super::start_probe::Point::Released);\n        if device_paced {\n            super::paced::wait_finished(&self.shared, &dispatched);\n        }\n",
+  "new": "        #[cfg(feature = \"testing\")]\n        super::start_probe::reach(&self.shared, super::start_probe::Point::Released);\n        if device_paced {\n            super::paced::wait_finished(&self.shared, &dispatched);\n        }\n        drop(admission);\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_24a_start_the_lock_is_free_at_the_wait"
+ },
+ {
+  "id": "N103-4",
+  "name": "the start's lock is held to the end of the start (across the round)",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        drop(admission);\n",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_a_simulation_first_step_follows_the_batch"
+ },
+ {
+  "id": "N103-5",
+  "name": "the start's lock is taken before the instances start",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        if !self.start_instances() || lock(&self.shared.end).is_some() {\n            return;\n        }\n        let transition = self.shared.sample_transition();\n        // KC-24a: taken after `start_instances` (a submission from `start` is refused at KC-24 step 2 and must not meet the lock) and held from the publication of `Running` through the batch's last dispatch.\n        let admission = lock(&self.shared.admission);\n",
+  "new": "        let shared = self.shared.clone();\n        let admission = lock(&shared.admission);\n        if !self.start_instances() || lock(&self.shared.end).is_some() {\n            return;\n        }\n        let transition = self.shared.sample_transition();\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_a_submission_from_start_is_refused_not_blocked"
+ },
+ {
+  "id": "N103-6",
+  "name": "the start releases its lock in the gap before scheduled entry 1",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "            #[cfg(feature = \"testing\")]\n            super::start_probe::reach(&self.shared, super::start_probe::Point::Dispatching { next: dispatched.len() });",
+  "new": "            let regap = !dispatched.is_empty();\n            if regap {\n                admission = None;\n            }\n            #[cfg(feature = \"testing\")]\n            super::start_probe::reach(&self.shared, super::start_probe::Point::Dispatching { next: dispatched.len() });\n            if regap {\n                admission = Some(lock(&self.shared.admission));\n            }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_24a_start_a_submission_between_scheduled_entries_is_admitted_after_the_last",
+  "old2": "        let admission = lock(&self.shared.admission);",
+  "new2": "        let mut admission = Some(lock(&self.shared.admission));"
+ },
+ {
+  "id": "N103-7",
+  "name": "the transition's clocks are read under the start's lock",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        let transition = self.shared.sample_transition();\n        // KC-24a: taken after `start_instances` (a submission from `start` is refused at KC-24 step 2 and must not meet the lock) and held from the publication of `Running` through the batch's last dispatch.\n        let admission = lock(&self.shared.admission);\n",
+  "new": "        // KC-24a: taken after `start_instances` (a submission from `start` is refused at KC-24 step 2 and must not meet the lock) and held from the publication of `Running` through the batch's last dispatch.\n        let admission = lock(&self.shared.admission);\n        let transition = self.shared.sample_transition();\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_reads_the_transition_clocks_outside_the_lock"
+ },
+ {
+  "id": "N103-8",
+  "name": "the end check after `Running` is published is removed",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        self.shared.publish(RunState::Running {}, transition);\n        if lock(&self.shared.end).is_some() {\n            return;\n        }\n",
+  "new": "        self.shared.publish(RunState::Running {}, transition);\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_an_end_before_the_check_dispatches_nothing"
+ },
+ {
+  "id": "N103-9",
+  "name": "an end requested while the batch is about to dispatch discards the batch",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "        #[cfg(feature = \"testing\")]\n        super::start_probe::reach(&self.shared, super::start_probe::Point::BeforeDispatch);\n",
+  "new": "        #[cfg(feature = \"testing\")]\n        super::start_probe::reach(&self.shared, super::start_probe::Point::BeforeDispatch);\n        if lock(&self.shared.end).is_some() {\n            return;\n        }\n",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_24a_start_an_end_in_the_window_records_the_batch_as_undelivered"
+ },
+ {
+  "id": "N103-10",
+  "name": "the host clock's UTC read moves under the start's lock",
+  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
+  "old": "lock(&self.machine).move_to_at(state, transition.at, transition.utc)",
+  "new": "lock(&self.machine).move_to_at(state, transition.at, self.ctx.host_clock.utc_nanos())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_reads_the_transition_clocks_outside_the_lock"
+ },
+ {
+  "id": "N103-11",
+  "name": "the Authority's `now()` moves under the start's lock",
+  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
+  "old": "lock(&self.machine).move_to_at(state, transition.at, transition.utc)",
+  "new": "lock(&self.machine).move_to_at(state, Some(self.now()), transition.utc)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_reads_the_transition_clocks_outside_the_lock"
  }
 ]

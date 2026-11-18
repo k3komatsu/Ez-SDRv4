@@ -6,6 +6,95 @@ mod paced;
 mod pipeline;
 mod state;
 mod stepping;
+#[cfg(feature = "testing")]
+pub mod start_probe {
+    //! Pause points on the control thread's `start` (KC-18, KC-24a), for the tests that pin the admission lock's extent. Compiled only with the `testing` feature; inert unless a hook is installed on the calling thread.
+
+    use std::cell::RefCell;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, TryLockError, Weak};
+
+    use super::state::Shared;
+
+    /// Where the control thread is.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Point {
+        /// First line of the pipeline.
+        Entered,
+        /// The lock is taken, the Run is still `Armed`.
+        BeforePublish,
+        /// `Running` is published and the data thread (device-paced) started; nothing dispatched yet.
+        BeforeDispatch,
+        /// About to dispatch the batch's entry `next`.
+        Dispatching {
+            /// Index of the entry.
+            next: usize,
+        },
+        /// Right after the lock was dropped, before the wait and the round.
+        Released,
+    }
+
+    /// What a hook can read without blocking.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Reading {
+        /// The admission lock is held by some thread (a `try_lock` that would block).
+        pub admission_held: bool,
+        /// An end has been requested.
+        pub end_requested: bool,
+        /// Dispatch is frozen (RS-6 step 1).
+        pub dispatch_frozen: bool,
+    }
+
+    /// A weak handle on the Run's shared state; reading it never keeps the Run alive.
+    #[derive(Clone)]
+    pub struct Probe(Weak<Shared>);
+
+    impl Probe {
+        /// A reading, or `None` once the Run is gone. Non-blocking except for a brief lock of `end`.
+        pub fn read(&self) -> Option<Reading> {
+            let shared = self.0.upgrade()?;
+            let admission_held = matches!(shared.admission.try_lock(), Err(TryLockError::WouldBlock));
+            let end_requested = super::state::lock(&shared.end).is_some();
+            let dispatch_frozen = shared.frozen.load(Ordering::Acquire);
+            Some(Reading { admission_held, end_requested, dispatch_frozen })
+        }
+    }
+
+    type Hook = Box<dyn FnMut(Point, &Probe)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Installs `hook` on the calling thread until the guard drops: the pipeline of a Run started on this thread calls it at each [`Point`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if a hook is already installed on this thread.
+    pub fn install(hook: impl FnMut(Point, &Probe) + 'static) -> Installed {
+        HOOK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none(), "a start_probe hook is already installed on this thread");
+            *slot = Some(Box::new(hook));
+        });
+        Installed(std::marker::PhantomData)
+    }
+
+    /// Removes the hook on drop. Thread-bound, so it cannot clear another thread's installation.
+    pub struct Installed(std::marker::PhantomData<*const ()>);
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            HOOK.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    pub(super) fn reach(shared: &Arc<Shared>, point: Point) {
+        let Some(mut hook) = HOOK.with(|slot| slot.borrow_mut().take()) else { return };
+        hook(point, &Probe(Arc::downgrade(shared)));
+        HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
 
 use std::collections::BTreeMap;
 use std::fmt;

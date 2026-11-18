@@ -16,6 +16,7 @@ pub use run_doubles::*;
 pub mod paced;
 #[allow(unused_imports)]
 pub use paced::*;
+pub mod start_window;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;

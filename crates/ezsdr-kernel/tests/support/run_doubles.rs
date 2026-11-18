@@ -25,6 +25,7 @@ use super::doubles::{
     FailAt, TestExecutor, TestLimitsCheck, TestProvider, id, mref, ns, test_executor_descriptor, test_link_descriptor, test_link_module_descriptor, test_provider_descriptor, test_sink_descriptor,
     test_vocabulary,
 };
+use super::start_window::{self, Gate, ProbeSlot, SubmitterSlot};
 use super::{MemLink, block, header};
 
 /// Shared, ordered observations from coordinator test doubles.
@@ -1070,6 +1071,14 @@ pub struct ProbeExecutor {
     pub out: Option<Arc<dyn ActionSubmitter>>,
     pub submitted: bool,
     submit_at: Option<i64>,
+    /// `submitting_after`: the gate its step waits on before the submit.
+    submit_gate: Option<Gate>,
+    /// `submitting_from_worker`: the gate and Action its `start` spawns a thread for.
+    worker: Option<(Gate, Action)>,
+    /// `submitting_from_start`: the Action to submit from `start`, and the cell holding the start's probe.
+    from_start: Option<(Action, ProbeSlot)>,
+    /// `sharing_submitter`: where `prepare` stores the Run's ActionSubmitter.
+    submitter_slot: Option<SubmitterSlot>,
     abort_in_stop: Option<String>,
     pub event: Option<(EventSource, EventKind, Severity)>,
     events: Option<Arc<dyn EventSink>>,
@@ -1100,6 +1109,10 @@ impl ProbeExecutor {
             out: None,
             submitted: false,
             submit_at: None,
+            submit_gate: None,
+            worker: None,
+            from_start: None,
+            submitter_slot: None,
             abort_in_stop: None,
             event: None,
             events: None,
@@ -1161,6 +1174,32 @@ impl ProbeExecutor {
         self
     }
 
+    /// Like [`submitting`](Self::submitting), but its step waits on `gate` before the submit.
+    pub fn submitting_after(mut self, gate: Gate, action: Action) -> ProbeExecutor {
+        self.submit = Some(action);
+        self.submit_at = None;
+        self.submit_gate = Some(gate);
+        self
+    }
+
+    /// Its `start` spawns a thread that waits on `gate`, then submits `action`.
+    pub fn submitting_from_worker(mut self, gate: Gate, action: Action) -> ProbeExecutor {
+        self.worker = Some((gate, action));
+        self
+    }
+
+    /// Submits from `start` only when the start's probe says the admission lock is free.
+    pub fn submitting_from_start(mut self, action: Action, slot: ProbeSlot) -> ProbeExecutor {
+        self.from_start = Some((action, slot));
+        self
+    }
+
+    /// Stores the Run's ActionSubmitter in `slot` from `prepare`.
+    pub fn sharing_submitter(mut self, slot: SubmitterSlot) -> ProbeExecutor {
+        self.submitter_slot = Some(slot);
+        self
+    }
+
     /// Submits `Abort` from an orderly `stop`, escalating the cleanup (KC-32).
     pub fn aborting_in_orderly_stop(mut self, message: &str) -> ProbeExecutor {
         self.abort_in_stop = Some(message.to_owned());
@@ -1187,6 +1226,9 @@ impl Executor for ProbeExecutor {
         let names = ctx.components.keys().map(ToString::to_string).collect::<Vec<_>>().join(",");
         self.record(format!("prepare:island_{}:{names}", island.id.local));
         self.out = Some(ctx.actions_out.clone());
+        if let Some(slot) = &self.submitter_slot {
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(ctx.actions_out.clone());
+        }
         self.actions = Some(ctx.actions.clone());
         self.probe.record(format!("source:{}:{}", self.name, ctx.source));
         if self.view_checks {
@@ -1211,6 +1253,45 @@ impl Executor for ProbeExecutor {
 
     fn start(&mut self) -> Result<(), ModuleError> {
         self.record("start");
+        if let Some((gate, action)) = self.worker.take() {
+            let out = self.out.clone();
+            let probe = self.probe.clone();
+            let name = self.name.clone();
+            std::thread::spawn(move || {
+                start_window::wait(&gate);
+                probe.record(format!("{name}:worker:begin"));
+                let Some(out) = out else {
+                    probe.record(format!("{name}:worker:err:test:no Action submitter"));
+                    return;
+                };
+                match out.submit(action) {
+                    Ok(id) => probe.record(format!("{name}:worker:ok:{}", id.0)),
+                    Err(violations) => match violations.first() {
+                        Some(first) => probe.record(format!("{name}:worker:err:{}:{}", first.check, first.reason)),
+                        None => probe.record(format!("{name}:worker:err:unknown:no violation detail")),
+                    },
+                }
+            });
+        }
+        if let Some((action, slot)) = self.from_start.take() {
+            let reading = slot.lock().unwrap_or_else(|e| e.into_inner()).clone().and_then(|probe| probe.read());
+            match reading {
+                Some(reading) => {
+                    self.record(format!("start:held={}", reading.admission_held));
+                    if !reading.admission_held {
+                        let out = self.out.as_ref().ok_or_else(|| ModuleError::rejected("test: no Action submitter"))?;
+                        match out.submit(action) {
+                            Ok(id) => self.record(format!("start:ok:{}", id.0)),
+                            Err(violations) => match violations.first() {
+                                Some(first) => self.record(format!("start:err:{}:{}", first.check, first.reason)),
+                                None => self.record("start:err:unknown:no violation detail"),
+                            },
+                        }
+                    }
+                }
+                None => self.record("start:held=unknown"),
+            }
+        }
         Ok(())
     }
 
@@ -1232,6 +1313,9 @@ impl Executor for ProbeExecutor {
         if due {
             let action = self.submit.take().expect("checked above");
             let out = self.out.as_ref().ok_or_else(|| ModuleError::rejected("test: no Action submitter"))?;
+            if let Some(gate) = &self.submit_gate {
+                start_window::wait(gate);
+            }
             if let Some((counter, snapshot)) = &self.coercion_counter_snapshot {
                 snapshot.store(counter.load(Ordering::SeqCst), Ordering::SeqCst);
             }

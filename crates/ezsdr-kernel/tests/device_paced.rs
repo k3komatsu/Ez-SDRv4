@@ -12,6 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::binding::{AdmissionCheck, AdmissionCheckRegistry, CheckStage, Violation};
+use ezsdr_kernel::coordinator::start_probe::{Point, Reading};
 use ezsdr_kernel::coordinator::{Assembly, RunHandle, RunHandleError, connect, start_spec_run};
 use ezsdr_kernel::event::{Action, EventKind, Target};
 use ezsdr_kernel::id::ClockDomainId;
@@ -22,6 +23,7 @@ use ezsdr_kernel::run::{CleanupMode, CleanupStep, Lease, RunState, Stage, StopCa
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::{ClockRegistry, Duration, TimePoint};
+use support::start_window::{OpenOnDrop, StartTrace, gate, infra, open, seen_for, start_on_worker, wait_end_requested, wait_or_panicked, with_seen};
 use support::{
     Probe, RecordingSink, SimAuthority, SteppedProvider, TestLinkModule, TestProvider, ThreadedProvider, WallAuthority, WallPark, mref, ns, release, release_one, run_checks, run_kinds, run_registry,
 };
@@ -1509,4 +1511,270 @@ fn kg_12_run_child_is_refused_in_a_device_paced_session() {
     }
     assert!(child_probe.lines().is_empty(), "{:?}", child_probe.lines());
     let _ = manifest_of(run);
+}
+
+// ---------------------------------------------------------------- KC-24a (#103)
+
+/// One scheduled `test.gain` update at `offset_ticks` on the `radio` clock.
+fn gain_entry(offset_ticks: i64, value: f64) -> serde_json::Value {
+    serde_json::json!({
+        "at": { "clock": "radio", "offset_ticks": offset_ticks },
+        "action": {
+            "kind": "update_parameter",
+            "target": serde_json::to_value(support::target("radio")).unwrap(),
+            "key": "test.gain",
+            "value": value
+        }
+    })
+}
+
+/// The competing update an Executor submits: `test.gain = B = 2.0`.
+fn competing_update() -> Action {
+    Action::UpdateParameter { target: support::target("radio"), key: Key::parse("test.gain").unwrap(), value: Value::num(2.0).unwrap(), class: UpdateClass::HardwareTimed, at: None }
+}
+
+/// The Run's effective `test.gain`.
+fn effective_gain(run: &RunHandle) -> Value {
+    run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("test.gain").unwrap()].clone()
+}
+
+#[test]
+fn kc_24a_start_a_worker_submission_across_the_transition_is_admitted_after_the_batch() {
+    // #103: the worker is released at `Point::BeforePublish`, where the admission lock
+    // is held and the Run is still `Armed`; its submission is admitted after the start's
+    // batch (`x:worker:ok:2`), in both classes. The test observes the release point, not
+    // that the worker's call into the Kernel has reached the lock: a lock taken later
+    // than `BeforePublish` lets the worker finish first inside the hook (`...RS-18`).
+    for simulation in [false, true] {
+        let probe = Probe::new();
+        let (mut spec, mut profile) = executor_docs();
+        spec["schedule"] = serde_json::json!([gain_entry(0, 1.0)]);
+        let gate = gate();
+        let mut assembly = if simulation {
+            let clocks = Arc::new(ClockRegistry::new());
+            let (authority, _) = SimAuthority::new(&clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+            profile["environment"] = serde_json::json!({});
+            provider(assembly_with(Box::new(authority), clocks), "radio", SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 1, 1))
+        } else {
+            provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)))
+        };
+        let log = with_seen(&mut assembly, &mut profile);
+        assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(support::ProbeExecutor::new("x", &probe).submitting_from_worker(gate.clone(), competing_update())));
+        let _release = OpenOnDrop(gate.clone());
+        let trace = StartTrace::default();
+        let recorded = trace.clone();
+        let hook_gate = gate.clone();
+        let hook_lines = probe.clone();
+        let mut started = start_on_worker(
+            &probe,
+            move |point, p| {
+                let r = p.read().expect("the Run is alive");
+                recorded.push(point, r);
+                if point == Point::BeforePublish {
+                    let held = r.admission_held;
+                    open(&hook_gate);
+                    assert!(
+                        hook_lines.wait_until(|l| l.iter().any(|x| x == "x:worker:begin"), Wall::from_secs(10)),
+                        "{}",
+                        infra(format!("{simulation}: the worker never reached its submit; {:?}", hook_lines.lines()))
+                    );
+                    if !held {
+                        assert!(
+                            hook_lines.wait_until(|l| l.iter().any(|x| x.starts_with("x:worker:ok:") || x.starts_with("x:worker:err:")), Wall::from_secs(10)),
+                            "{}",
+                            infra(format!("{simulation}: the ungated worker never returned from its submit; {:?}", hook_lines.lines()))
+                        );
+                    }
+                }
+            },
+            move || start_spec_run(&spec, &profile, assembly),
+        );
+        assert!(
+            wait_or_panicked(&mut started, &probe, |l| l.iter().any(|x| x.starts_with("x:worker:ok:") || x.starts_with("x:worker:err:"))),
+            "{}",
+            infra(format!("{simulation}: the worker's submission never returned; {:?}", probe.lines()))
+        );
+        let run = started.finish();
+        let lines = probe.lines();
+        assert!(lines.iter().any(|line| line == "x:worker:ok:2"), "{simulation}: {:?}", lines);
+        assert!(!lines.iter().any(|line| line.starts_with("x:worker:err:")), "{simulation}: {:?}", lines);
+        trace.assert_extent(&[Point::Entered, Point::BeforePublish, Point::BeforeDispatch, Point::Dispatching { next: 0 }]);
+        assert_eq!(seen_for(&log, &Value::num(2.0).unwrap()), vec![Some(Value::num(1.0).unwrap())], "{simulation}: {:?}", lines);
+        assert_eq!(effective_gain(&run), Value::num(2.0).unwrap(), "{simulation}");
+        assert!(matches!(run.state(), RunState::Running {}), "{simulation}: {:?}", run.state());
+        let manifest = run.finish();
+        assert!(manifest.termination.cleanup_failures.is_empty(), "{simulation}: {:?}", manifest.termination.cleanup_failures);
+    }
+}
+
+/// T2a/T2b: two scheduled entries, the Executor's first step released at `release`.
+fn data_thread_submission(release: Point) {
+    let probe = Probe::new();
+    let (mut spec, mut profile) = executor_docs();
+    spec["schedule"] = serde_json::json!([gain_entry(0, 1.0), gain_entry(1, 3.0)]);
+    let mut assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)));
+    let log = with_seen(&mut assembly, &mut profile);
+    let gate = gate();
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(support::ProbeExecutor::new("x", &probe).submitting_after(gate.clone(), competing_update())));
+    let _release = OpenOnDrop(gate.clone());
+    let trace = StartTrace::default();
+    let recorded = trace.clone();
+    let hook_gate = gate.clone();
+    let hook_lines = probe.clone();
+    let mut started = start_on_worker(
+        &probe,
+        move |point, p| {
+            let r = p.read().expect("the Run is alive");
+            recorded.push(point, r);
+            if point == release {
+                let held = r.admission_held;
+                assert!(
+                    hook_lines.wait_until(|l| l.iter().any(|x| x.starts_with("x:step:")), Wall::from_secs(10)),
+                    "{}",
+                    infra(format!("{release:?}: the Executor's step never began; {:?}", hook_lines.lines()))
+                );
+                open(&hook_gate);
+                if !held {
+                    assert!(
+                        hook_lines.wait_until(|l| l.iter().any(|x| x.starts_with("x:submit:")), Wall::from_secs(10)),
+                        "{}",
+                        infra(format!("{release:?}: the ungated Executor never submitted; {:?}", hook_lines.lines()))
+                    );
+                }
+            }
+        },
+        move || start_spec_run(&spec, &profile, assembly),
+    );
+    assert!(
+        wait_or_panicked(&mut started, &probe, |l| l.iter().any(|x| x.starts_with("x:submit:ok:"))),
+        "{}",
+        infra(format!("{release:?}: the Executor's submission was not admitted; {:?}", probe.lines()))
+    );
+    let run = started.finish();
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line == "x:submit:ok:3"), "{release:?}: {:?}", lines);
+    assert_eq!(seen_for(&log, &Value::num(2.0).unwrap()), vec![Some(Value::num(3.0).unwrap())], "{release:?}: {:?}", lines);
+    assert_eq!(effective_gain(&run), Value::num(2.0).unwrap(), "{release:?}");
+    let stepped_after_submit = |l: &[String]| l.iter().position(|x| x.starts_with("x:submit:")).is_some_and(|at| l[at..].iter().any(|x| x.starts_with("x:step:")));
+    assert!(probe.wait_until(stepped_after_submit, Wall::from_secs(10)), "{}", infra(format!("{release:?}: the data thread did not step after the submit; {:?}", lines)));
+    trace.assert_extent(&[Point::Entered, Point::BeforePublish, Point::BeforeDispatch, Point::Dispatching { next: 0 }, Point::Dispatching { next: 1 }]);
+    let manifest = run.finish();
+    assert!(manifest.termination.cleanup_failures.is_empty(), "{release:?}: {:?}", manifest.termination.cleanup_failures);
+}
+
+#[test]
+fn kc_24a_start_the_data_threads_first_submission_follows_the_batch() {
+    // #103: the Executor is released inside the window, at `BeforeDispatch`; on the
+    // fixed path its submit is admitted after the whole batch whenever it runs (the old
+    // order forces its completion first).
+    data_thread_submission(Point::BeforeDispatch);
+}
+
+#[test]
+fn kc_24a_start_a_submission_between_scheduled_entries_is_admitted_after_the_last() {
+    // #103: the Executor is released inside the window, between entry 0's and entry 1's
+    // dispatch; on the fixed path its submit is admitted after the whole batch whenever
+    // it runs (the old order forces its completion first).
+    data_thread_submission(Point::Dispatching { next: 1 });
+}
+
+#[test]
+fn kc_24a_start_an_end_in_the_window_records_the_batch_as_undelivered() {
+    // #103: an end requested while the start holds the lock cannot freeze the dispatch
+    // before the batch's dispatch; the deaf Provider never takes it, so the freeze
+    // records it as undelivered.
+    let probe = Probe::new();
+    let mut spec = spec_one();
+    spec["schedule"] = serde_json::json!([gain_entry(0, 1.0)]);
+    let loss = gate();
+    let _release = OpenOnDrop(loss.clone());
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)).deaf().losing_device_on(loss.clone()));
+    let trace = StartTrace::default();
+    let recorded = trace.clone();
+    let readings: Arc<Mutex<Option<(Reading, Reading)>>> = Arc::new(Mutex::new(None));
+    let hook_readings = readings.clone();
+    let hook_loss = loss.clone();
+    let hook_lines = probe.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, p| {
+            let r = p.read().expect("the Run is alive");
+            recorded.push(point, r);
+            if point == Point::BeforeDispatch {
+                let first = r;
+                let held = first.admission_held;
+                open(&hook_loss);
+                assert!(wait_end_requested(p), "{}", infra("the end the loss requests was never seen"));
+                if !held {
+                    assert!(hook_lines.wait_for("radio:stop", Wall::from_secs(10)), "{}", infra(format!("the Provider's stop never began; {:?}", hook_lines.lines())));
+                }
+                let after = p.read().expect("the Run is alive");
+                *hook_readings.lock().unwrap() = Some((first, after));
+            }
+        },
+        move || start_spec_run(&spec, &profile_one(), assembly),
+    );
+    let run = started.finish();
+    let (first, after) = readings.lock().unwrap().take().expect("the hook ran");
+    assert!(first.admission_held, "KC-24a: the admission lock is not held at BeforeDispatch");
+    assert!(after.admission_held, "KC-24a: the admission lock was not held after the end request");
+    assert!(after.end_requested, "the end the loss requested was not requested");
+    assert!(!after.dispatch_frozen, "KC-24a: the dispatch froze before the batch's dispatch");
+    trace.assert_extent(&[Point::Entered, Point::BeforePublish, Point::BeforeDispatch, Point::Dispatching { next: 0 }]);
+    let manifest = run.finish();
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
+    assert_eq!(manifest.termination.undelivered, vec![ezsdr_kernel::event::ActionId(1)]);
+    assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
+    assert!(!probe.lines().iter().any(|line| line.starts_with("radio:took:") || line.starts_with("radio:after_stop:")), "{:?}", probe.lines());
+}
+
+#[test]
+fn kc_24a_start_the_lock_is_free_at_the_wait() {
+    // #103: the lock is free at `Released`, so the Executor's submission is admitted
+    // while the start waits for the Provider that holds the batch's Action; the start is
+    // still waiting while the Provider holds, and it returns a live Run once the
+    // Provider acknowledges. A guard held across the wait is the kill (asserted at
+    // `Released`).
+    let probe = Probe::new();
+    let (mut spec, mut profile) = executor_docs();
+    spec["schedule"] = serde_json::json!([gain_entry(0, 1.0)]);
+    let hold = gate();
+    let gate_x = gate();
+    let mut assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)).hold_after_take(hold.clone()));
+    // The check is installed as in T1/T2; T6's verdict is the `Released` read below.
+    let _log = with_seen(&mut assembly, &mut profile);
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(support::ProbeExecutor::new("x", &probe).submitting_after(gate_x.clone(), competing_update())));
+    let _release_hold = OpenOnDrop(hold.clone());
+    let _release_gate_x = OpenOnDrop(gate_x.clone());
+    let trace = StartTrace::default();
+    let recorded = trace.clone();
+    let hook_gate = gate_x.clone();
+    let mut started = start_on_worker(
+        &probe,
+        move |point, p| {
+            let r = p.read().expect("the Run is alive");
+            recorded.push(point, r);
+            if point == Point::Released {
+                open(&hook_gate);
+                assert!(!r.admission_held, "KC-24a: the admission lock is still held when the start releases it; KC-21a's wait would run under it");
+            }
+        },
+        move || start_spec_run(&spec, &profile, assembly),
+    );
+    assert!(wait_or_panicked(&mut started, &probe, |l| l.iter().any(|x| x == "radio:took:UpdateParameter")), "{}", infra(format!("{:?}", probe.lines())));
+    assert!(
+        wait_or_panicked(&mut started, &probe, |l| l.iter().any(|x| x.starts_with("x:submit:ok:"))),
+        "{}",
+        infra("the Executor's submission was not admitted while the control thread waited for the Provider")
+    );
+    assert!(!started.returned(), "KC-21a: the start returned while the Provider still held the batch's Action: its wait was skipped");
+    open(&hold);
+    let run = started.finish();
+    assert!(matches!(run.state(), RunState::Running {}), "{}", infra(format!("KC-21a's 5 s budget expired and failed the Run: {:?}", run.state())));
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line == "x:submit:ok:2"), "{:?}", lines);
+    assert_eq!(effective_gain(&run), Value::num(2.0).unwrap(), "{:?}", lines);
+    trace.assert_extent(&[Point::Entered, Point::BeforePublish, Point::BeforeDispatch, Point::Dispatching { next: 0 }, Point::Released]);
+    let manifest = run.finish();
+    assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
 }

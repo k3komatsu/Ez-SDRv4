@@ -647,12 +647,28 @@ impl RunStateMachine {
 
     /// Moves to `to`, recording it. An illegal transition is refused (RS-2, RS-5).
     pub fn move_to(&mut self, to: RunState, at: Option<TimePoint>, clock: &dyn HostClock) -> Result<(), RunError> {
-        if !self.state.can_move_to(&to) {
-            return Err(RunError::IllegalTransition { from: self.state.clone(), to });
-        }
-        self.transitions.push(TransitionRecord { state: to.clone(), at, host_utc_nanos: clock.utc_nanos() });
-        self.state = to;
+        self.check_move(&to)?;
+        self.record(to, at, clock.utc_nanos());
         Ok(())
+    }
+
+    /// `move_to` with the host UTC time already read, so that a caller holding a lock can take the clock first (KC-24a).
+    pub(crate) fn move_to_at(&mut self, to: RunState, at: Option<TimePoint>, host_utc_nanos: i64) -> Result<(), RunError> {
+        self.check_move(&to)?;
+        self.record(to, at, host_utc_nanos);
+        Ok(())
+    }
+
+    fn check_move(&self, to: &RunState) -> Result<(), RunError> {
+        if !self.state.can_move_to(to) {
+            return Err(RunError::IllegalTransition { from: self.state.clone(), to: to.clone() });
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, to: RunState, at: Option<TimePoint>, host_utc_nanos: i64) {
+        self.transitions.push(TransitionRecord { state: to.clone(), at, host_utc_nanos });
+        self.state = to;
     }
 
     /// A failure at any stage moves the Run to `Stopping { abort }` with
