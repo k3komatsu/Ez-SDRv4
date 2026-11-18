@@ -1,0 +1,20 @@
+{
+ "session": "2026-11-18-mt3",
+ "dates": "2026-11-18 14:58-15:05 (#1: S5 receive start lead, cells C1-C6), 15:08 (#1: C5 with the moved grid), 15:18-15:24 (#2: S5, C1, C3, C4, C6)",
+ "commit": "5b8f2b32 (#1: S5 and C1-C6, the first C5); 72a5eea1 on work/bench1118 (#1: C5 with the grid 0-1500 us; #2: every run). The two differ in C5's grid only (crates/ezsdr-radio-uhd/tests/common/mt3_two.rs DELTAS_US). Bench worktree ~/local_work/Ez-SDRv4-bench, built in the cargo-target volume ezsdr-v4-cargo-target",
+ "tools": {"hardware tests": "crates/ezsdr-radio-uhd/tests/hardware.rs (hw_s5_rx_start_lead, hw_mt3_c1..c6), run by hw() in hw.sh (plan/phase8/bench.md, the note 47 stage 5 definition: docker run --network=host --cap-add=SYS_NICE --ulimit rtprio=99, cargo test --release --features uhd)", "chains": "chain-c.sh (#1), chain-37.sh (#2) in the raw archive; each stops on a power-cycle marker"},
+ "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0)",
+ "boards": [
+  {"id": "#1", "board_arg": "36", "serial": "347D545", "fpga": "39.3 (HG, d375d68)", "slot_a": "OBX (3654040)", "slot_b": "UBX-160 v2 32BC76F", "addr": "192.168.40.36", "nic": "enp1s0f1np1", "until": "15:09"},
+  {"id": "#2", "board_arg": "37", "serial": "347D541", "fpga": "39.3 (HG, d375d68)", "slot_a": "UBX-160 v2 32BC76F (moved back from #1 slot B at about 15:15)", "slot_b": "empty", "addr": "192.168.47.37", "nic": "enp1s0f0np0", "from": "15:17"}
+ ],
+ "rf": {"wiring": "each used slot's TX/RX -> 30 dB attenuator -> the same slot's RX2 (#1 slots A and B, then #2 slot A)", "attenuation_db": 30, "owner_confirmed": "#1 both slots before the first transmit with a standing confirmation while the wiring stayed unchanged; #2 slot A after the move, before its first transmit", "frequency_hz": 1000000000, "tx_gain_db": 0, "tone": "100 kHz from the carrier, amplitude 0.4"},
+ "reference": "internal",
+ "host": "usrp-lnx03 (16 cores); i40e, MTU 9000, frame 8000 bytes, rings 8160, wmem_max 32 MiB, rmem_max 50 MB, netdev_max_backlog 30000 (set before; not rebooted since)",
+ "host_load": "load average below 2 throughout; no other project's simulation seen (top at 14:55 and uptime before each chain)",
+ "power_cycles": [],
+ "invalid_logs": {},
+ "items": {"#1 (OBX slot A, UBX slot B)": ["S5 receive start lead, 1 channel, 10 and 100 MS/s", "C1", "C2", "C3", "C4", "C6", "C5 (grid -200..200 us)", "C5 (grid 0..1500 us)"], "#2 (UBX slot A)": ["S5 receive start lead, 1 channel, 10 and 100 MS/s", "C1", "C3", "C4", "C6"]},
+ "rates_hz": {"S5": [10000000, 100000000], "C1": [1000000, 10000000], "C2": [100000000, 200000000], "C3": [1000000, 10000000], "C4": [1000000, 10000000], "C5": [1000000], "C6": [1000000, 10000000]},
+ "trials": {"S5": "100 a rung, rungs 3/4/5/7.5/10 ms, two conditions (restart-same, restart-retune)", "C1-C3, C6": "10 a rate", "C4": "10 a delta, 38 deltas a rate", "C5": "10 clear and 10 a delta"}
+}

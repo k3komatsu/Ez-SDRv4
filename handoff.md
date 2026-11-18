@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-11-09)
+# Ez-SDR v4 — Handoff (2026-11-18)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．**今のことだけ**を書く：どこに何があるか，何が未解決か，owner の判断待ち，次に何をするか．終わった作業の記録はその置き場（`plan/phaseN/00-overview.md` か各計画ファイル）に書き，ここには1行の参照だけ残す（AGENTS.md §9．`rules.py` が 300 行・40 000 byte を超えると落ちる）．2026-10-14 までここにあった記録も同じ日に各置き場へ移した．
 
@@ -32,7 +32,7 @@
 | H1〜H5 | H1：開始が遅れた複数 packet の burst．H2：burst 途中の Underflow（再開時刻，ずれ）．H3：TX の `max_num_samps`．H4：負荷下の uhd-tx・uhd-control の起床遅延．H5：保持した最後のサンプルの 2 ms 期限 | Phase 8 の bench |
 | 受信の start lead | `rx_start_lead_ns` は 10 ms（段階 4a，2026-11-18）．1・10 MS/s で測った値，100 MS/s 以上は INFERRED（11-16 の 100 MS/s は probe の行の上限のため測れず，段階 4a で直した）．overflow と再開が重なると遅れる（#108，KL-7） | 次の bench（`hw_s5_rx_start_lead`），#108 は段階 4b |
 | 測って決め直す値 | 受信の start lead の 100 MS/s 以上（上の行），overflow の gap（`overflow_restart_gap_ns`，段階 4b），UR-17 の受信要求長の上限（残すと決定済み，実測で見直す） | 次の bench・段階 4b |
-| 保守表の 3 の実機 | 実装は済（2026-11-14，`reviews/mt3-*`）．実機の cell C1〜C6〈道具あり，C2〜C6 は `reviews/bt1-*`〉と C7〈道具は bt2〉．C2〜C7 の中身（Module の分け方の遅れ，rate，#2，32 sample の先頭，連鎖の境目，2 channel，負荷下の報告の順，repeat の再開と m の掃引）．11-16 の bench では流していない．保守表 4 は受け入れた（owner 2026-11-14，KL-13）．表は [audits-2026-10.md](plan/maintenance/audits-2026-10.md) | 次の bench（C1〜C6），C7 は bt2 の後 |
+| 保守表の 3 の実機 | 実装は済（2026-11-14，`reviews/mt3-*`）．2026-11-18 に C1・C3・C4・C6 は両盤 PASS，C5 は #1 で split（RM-11・KL-45 を直した），C2 は 20/20 未決（[bench/2026-11-18-mt3](bench/2026-11-18-mt3/README.md)）．残り：C2 の道具の作り直し（100・200 MS/s では host が遅れを取り戻せないので「最後の chunk を期限前に渡す」前提が作れない），C7〈道具は bt2：repeat の再開と m の掃引，#106 の実機の確認を兼ねる〉，C5 を別の盤で．保守表 4 は受け入れた（owner 2026-11-14，KL-13）．表は [audits-2026-10.md](plan/maintenance/audits-2026-10.md) | bt2 と C2 の道具は段階 4b の後 |
 | spec 22 の残り | 手順3（DA-5 (b)：spec 11 を 08 へ統合）と手順5（spec 10・14・16）．受理済み（2026-10-07）で未実施，Phase 8 の後（手順3は取りやめも owner に確認）．手順2（spec 07・09・18 を DA-1 形式に．文書監査の D4・D5・D3 の spec 側・D11 を含む）は 2026-10-14〜15 に済み，記録は spec 22 の Status 行と各 spec の Changes 行 | 手順3の取りやめ（owner） |
 | 文書監査の残り（2026-10-14） | D2（RX_OVERFLOW の `restart_gap_ns`・`lost`・件数が Mock と UHD で違う，#51 と同じ機構）・D10（値ごとの「緩い向き」）は Phase 8 の計画で（D12〜D14 は 2026-10-16 に済み：`rules.py` が OV/PO の ID を守る，AGENTS.md §2 に OV/PO の扱い，凍結チェックリストに PO，AGENTS.md と handoff の重複を削った） | Phase 8（D2 は段階2，D10 は P2 の比較テスト．D3 は段階1a で済み） |
 | テストのない条件（2026-10-16） | Test 行の網羅調査（[計画32](plan/maintenance/32-test-line-sweep.md)）が `none named` に書いた 130 条件を仕分けた．A1（30 件，Kernel・Sink など）はテストを足し済み（2026-10-16，T01〜T33）．A2（14 件，RM/MR/UR）は 2026-10-25 に済み（T34〜T45，[reviews/a2-opus](plan/phase8/reviews/a2-opus.md)）．B（4 件，実機が要る）は Phase 8 の段階 4．C（82 件）は `none named` のまま | Phase 8 段階4（B） |

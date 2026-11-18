@@ -466,3 +466,13 @@ owner が電源を入れ直した後，att は三つの board とも 30 dB（own
 - S2（60 s）：受信 100・200 MS/s は両盤 10/10，送信 100 MS/s は 8/10，200 MS/s は 0/10 と 2/10，duplex の失敗はすべて送信の underflow．S4：1〜100 MS/s は両盤 20/20（再開は resume から 69〜87 ms），200 MS/s は capture の後片付けが RS-8a の 5 s を超える．
 - T200（200 MS/s，300 s）：素の UHD でも両盤 19〜34 回 underflow（最高の実時間優先度），Module の repeat は #1 で underflow のたびに再開して 300 s 送り切り，#2 は 2 回続いた underflow の直後に送るのを止めた（b′，INFERRED）．夜の切り分け（#1）：1 回の send を 1 M sample にしても 21〜22 回，v3（UHD 4.10，MultiUSRP＋CyclicTX）も約 49〜63 回 → 送り方では直らない．X300 HG の受け口は 256 KB（200 MS/s で約 0.33 ms）．
 - 決めたこと（owner，2026-11-16）：T200 の調査はここで止め，200 MS/s の連続の繰り返しは 8c の Replay で（KL-5）．#106：b′ をやめて repeat は毎回再開し，Module の Run ごとの記録に上限をつける（設計は AGENTS §9 の段階 0）．
+
+## 2026-11-18：受信の start lead の 100 MS/s と保守表 3 の cell C1〜C6（#1＝X300 347D545＋OBX〈slot A〉＋UBX〈slot B〉，その後 #2＝X300 347D541＋UBX〈slot A〉，commit `5b8f2b32`・`72a5eea1`）
+
+条件と機械で読める結果は [bench/2026-11-18-mt3](../../bench/2026-11-18-mt3/README.md)（生の log は非公開の `k3komatsu/Ez-SDRv4-bench-raw` の release）．att は使った slot とも 30 dB（owner の確認．#1 は配線を変えない間の確認，#2 は盤を戻した後に改めて）．基準は内部，host は静か，電源の入れ直しなし．
+
+- 受信の start lead（1 channel，100 trial / rung）：10 ms は両盤の 4 condition とも全 trial 成功．最小の clean な rung は同じ設定の再開が 4 ms（10 MS/s）と 5 ms（100 MS/s），周波数を変える再開が両 rate で 7.5 ms．試行を重ねても余裕は下がらない．11-16 に 100 MS/s で測れなかったのは道具の不具合（段階 4a で直した）．
+- C1・C3・C4・C6（1・10 MS/s）は両盤とも PASS：遅れた device burst は Module の chunk の形でも，最初の send が 32 sample でも丸ごと捨てられる．C4 の境界は両盤とも 19 µs で全部捨てられ 21 µs で全部鳴る（fake の pad は 242〜256 µs）．C6 は Underflow の後に TimeError，ACK なし．
+- C2（100・200 MS/s，#1）は 20/20 INCONCLUSIVE：最後の chunk が自分の時刻の 0.9〜1.5 ms 後に渡った（host が実時間より速く送れるという道具の前提が外れた）．遅れた burst が鳴った trial は無い．道具の作り直しは bt2 と一緒に．
+- C5（#1，1 MS/s，slot B も送信）：格子 −200〜200 µs は全 trial が両 channel で捨てられ未決（最初の send は自分の時刻の 128〜729 µs 後）．格子を 0〜1500 µs に移すと遷移をまたぎ，**90 trial のうち 2 回で slot A だけが鳴り slot B は捨てられた（split）**．
+- 決めたこと（owner，2026-11-18）：RM-11 の `late_at_device` は「少なくとも 1 channel で何も送信されなかった」に直し，KL-45 に記す．受信の start lead 10 ms はそのまま（100 MS/s も実測）．

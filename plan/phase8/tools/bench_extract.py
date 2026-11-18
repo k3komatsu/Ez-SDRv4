@@ -27,11 +27,13 @@ def clean(line):
 def verdict_of(text):
     if text.startswith("E9 INCONCLUSIVE:"):  # ssh-drop-tx.sh: no measurement; the E9 measurement lines carry no verdict
         return "INCONCLUSIVE"
+    if m := re.search(r": (Pass|Fail|Inconclusive)\(", text):  # the mt3 cells print the Rust `Verdict` with Debug
+        return m.group(1).upper()
     return next((v for v in ("PASS", "FAIL", "INCONCLUSIVE") if f": {v}" in text), "")
 
 # The hardware tests' decision names (tests/*.rs `format!("<NAME> decision`), matched on the raw line: UHD's characters in front of a
 # name are not part of it, and `clean` would cut the L and U out of the text (INCONCLUSIVE, OVERFLOW).
-DECISION = re.compile(r"(?:(?:OFS|P75 [a-z]|RXZPN|RXZ|S\d|T200) decision\b|T200 bare summary\b|t200 summary\b).*")
+DECISION = re.compile(r"(?:(?:OFS|P75 [a-z]|RXZPN|RXZ|S\d|T200) decision\b|T200 bare summary\b|t200 summary\b|MT3 C\d (?:cell|boundary|reading|marginal|clear cell)\b).*")
 TRIAL = re.compile(r"(S\d) trial (\{.*\})\s*$")
 
 def v3_underflows(text):
@@ -122,6 +124,8 @@ if __name__ == "__main__":
     assert verdict_of("E9 INCONCLUSIVE: no tone before the kill (quiet)") == "INCONCLUSIVE"
     assert verdict_of("E9 the tone on the independent receiver ended after the kill: the first quiet reading at +80 ms") == ""
     assert verdict_of("C1 x: PASS: y") == "PASS" and verdict_of("C2 x: FAIL: y") == "FAIL"
+    assert verdict_of('mt3 c1 1 MS/s trial 0: Pass("no tone")') == "PASS" and verdict_of('mt3 c4 1 MS/s: Inconclusive("x")') == "INCONCLUSIVE"
+    assert DECISION.search("MT3 C4 boundary 1 MS/s: x").group(0) == "MT3 C4 boundary 1 MS/s: x" and not DECISION.search("MT3 C5 trace [{}]")
     assert clean("BurLLstAck=2 ULnderflow=1") == "BurstAck=2 Underflow=1"
     assert DECISION.search("ULLS2 decision tx-200msps: INCONCLUSIVE").group(0) == "S2 decision tx-200msps: INCONCLUSIVE"
     assert DECISION.search("OOFS decision: x").group(0) == "OFS decision: x" and board_of("tx_repro-t200-H0-37r-1.log") == "37"

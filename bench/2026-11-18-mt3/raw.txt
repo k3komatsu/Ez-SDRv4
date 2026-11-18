@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-11-18-mt3 (private)
+asset:   2026-11-18-mt3.tar.xz  1680608 bytes
+sha256:  9d75d8fd58aee16eb82c0b4fc2df23078273086b800a0d30ae8f19db652c0cfc
+source:  ~/.cache/ezsdr-bench/2026-11-18 on usrp-lnx03 (the hardware-test logs, the chains, hw.sh, the two probes, the build log)
+fetch:   gh release download 2026-11-18-mt3 -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-11-18-mt3 bench/2026-11-18-mt3/results

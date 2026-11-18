@@ -1846,7 +1846,7 @@ fn hw_mt3_c4_cascade_boundary() {
 fn hw_mt3_c5_two_channel_late_start() {
     // Cell C5 (maintenance table 3, Fable m1): can one channel of a two-channel burst play alone? One two-channel stream on slots A and B (receive on both), C1's trial: an on-time control, then a
     // burst of 20 ms at 1 MS/s whose first sample is timed at the host's reference instant plus a delta. The clear cell (1 ms before it) must drop on both channels (C1's verdict per channel); the
-    // marginal grid (-200, -100, -50, -20, 0, 20, 50, 100, 200 us, ten trials each) must straddle the transition, which the host's control-call latency decides. A SPLIT (one channel played,
+    // marginal grid (`mt3_two::DELTAS_US`, 0 to 1 500 us, ten trials each) must straddle the transition, which the host's control-call latency decides. A SPLIT (one channel played,
     // the other dropped) FAILS the test: it is a device fact for the contract review (RM-11), not a tool defect. INCONCLUSIVE (no transition, too few decided trials, a clear cell that is not PASS)
     // fails it too. TRANSMITS ON SLOT B TOO: it runs only through `two_channel_gate` (an OBX or UBX in both slots and `EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1`, set only after the owner confirmed slot B's
     // TX/RX -> attenuator -> RX2); otherwise it prints `MT3 C5 NOT RUNNABLE` and transmits nothing. Bounded to 15 min.

@@ -17,9 +17,10 @@ use super::raw::TICKS_PER_MS;
 use super::tone::Verdict;
 use ezsdr_radio_uhd::TxCode;
 
-/// The marginal grid: the first sample timed at the reference instant plus each of these, in microseconds. The host's control-call latency decides where the transition lies, so the grid
-/// is wide (INFERRED: the latency is not measured) and the reading is INCONCLUSIVE unless it straddles the transition.
-pub const DELTAS_US: [i64; 9] = [-200, -100, -50, -20, 0, 20, 50, 100, 200];
+/// The marginal grid: the first sample timed at the reference instant plus each of these, in microseconds. The host's control-call latency decides where the transition lies, and the
+/// reading is INCONCLUSIVE unless the grid straddles it. On #1 (2026-11-18) the first send was handed 128-729 us after its first sample's time across -200..200 us, all of them dropped on
+/// both channels, so the grid starts at 0 and reaches 1.5 ms (INFERRED: the transition lies where the first send reaches the radio before its time).
+pub const DELTAS_US: [i64; 9] = [0, 200, 300, 400, 500, 600, 700, 1000, 1500];
 /// Trials a delta, and the clear cell's.
 pub const C5_TRIALS: usize = 10;
 /// Decided trials (both channels played or dropped) the cells next to the transition need.
