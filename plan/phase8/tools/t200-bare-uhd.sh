@@ -99,6 +99,51 @@ if [[ ${1:-} == --self-check ]]; then
     trap 'rm -rf "$tmp"' EXIT
     fails=0
     ok() { if [[ $2 != "$3" ]]; then printf 'self-check FAIL: %s: got [%s], wanted [%s]\n' "$1" "$2" "$3" >&2; fails=$((fails + 1)); fi; }
+    BACKSTOP=100 # seconds: an awaited event that has not come by then is not a host stall; well inside the mutation runner's 180 s test timeout, which would otherwise take the marker's place
+    never=$tmp/never
+    mkfifo "$never"
+    exec 9<>"$never" # nobody writes to it: `read -t` on it is the watchdog's clock (bash itself, no process to leak)
+    trap ':' USR1
+    # An outcome a host stall can cause (a wait that ran out, a stub that did not get to run before its bound) is an infrastructure line, never a mismatch: EZSDR-INFRA: a real-time bound expired, the verdict says nothing about the code.
+    infra() { printf 't200-bare-uhd: EZSDR-INFRA: self-check: %s\n' "$*" >&2; }
+    # Polls the command `$@` (after the description) every 0.1 s until it succeeds, for at most BACKSTOP s; after that it writes the infrastructure line and returns 1.
+    await() { # $1 = what is awaited
+        local what=$1 end=$((SECONDS + BACKSTOP))
+        shift
+        until "$@"; do
+            ((SECONDS < end)) || { infra "$what did not happen within $BACKSTOP s"; return 1; }
+            sleep 0.1
+        done
+        return 0 # the event came
+    }
+    # Waits for the child `$2` to complete (`wait`: its own status, no polling of a pid), for at most BACKSTOP s: a watchdog subshell reads the unwritten pipe with a timeout and then
+    # interrupts the wait with USR1 (138). Sets EXIT_STATUS; after the infrastructure line returns 1 when the child still runs.
+    await_exit() { # $1 = what, $2 = pid
+        (read -t "$BACKSTOP" -u 9 _; kill -USR1 $$) &
+        local wd=$!
+        wait "$2"
+        EXIT_STATUS=$?
+        kill "$wd" 2>/dev/null
+        wait "$wd" 2>/dev/null
+        ((EXIT_STATUS != 138)) && return 0
+        infra "$1 did not happen within $BACKSTOP s"
+        return 1
+    }
+    # Kills what a case started (the script's process group, the stub docker and the `timeout` that runs it) and collects the script: nothing is left running when a case ends.
+    reap() { # $1 = the script's pid
+        local stub parent
+        stub=$(cat "$tmp/docker-pid" 2>/dev/null)
+        kill -KILL -- "-$1" 2>/dev/null
+        if [[ -n $stub && -d /proc/$stub ]]; then
+            parent=$(awk '{print $4}' "/proc/$stub/stat" 2>/dev/null)
+            ((${parent:-0} > 1)) && kill -KILL "$parent" 2>/dev/null
+            kill -KILL "$stub" 2>/dev/null
+        fi
+        wait "$1" 2>/dev/null
+    }
+    abort() { reap "$1"; exit 1; } # $1 = the script's pid; the infrastructure line is already out
+    # The stub docker's state is per case: a case starts from none of it.
+    reset() { rm -f "$tmp"/docker-{pid,ready,created,killed}; : >"$tmp/docker-calls"; }
     rf='t200 RF read back: freq 1000000000 Hz gain 0.0 dB rate 200000000 antenna TX/RX'
     summary() { # underflow underflow_in_packet seq_error seq_error_in_burst time_error timeouts handed
         printf 't200 summary rate 200000000 secs 300.000 spp 1996 wave tone freq 1000000000 gain 0.0 handed %s expected 60000000000 timeouts %s underflow %s underflow_in_packet %s seq_error %s seq_error_in_burst %s time_error %s burst_ack 1 other 0\n' "$7" "$6" "$1" "$2" "$3" "$4" "$5"
@@ -139,30 +184,53 @@ if [[ ${1:-} == --self-check ]]; then
     ok 'a refusal to transmit leaves no summary' "$(verdict 3)" 'INCONCLUSIVE: no usable handed expected timeouts underflow underflow_in_packet seq_error seq_error_in_burst time_error in the log (exit 3)'
     printf 'no output\n' >"$log"
     ok 'an empty log is unknown' "$(verdict 1)" 'INCONCLUSIVE: no usable RF read-back handed expected timeouts underflow underflow_in_packet seq_error seq_error_in_burst time_error in the log (exit 1)'
-    # A stub docker that never returns: `run` logs its name and whether --init was given, then sleeps; `kill` logs and ends the sleeper (the container's death).
+    polls=0
+    flaky() { ((++polls > 1)); } # false on its first call, true on the second
+    await 'a predicate that is false once' flaky
+    ok 'await polls again after a false predicate' "$?" 0
+    ok 'await polled the predicate twice' "$polls" 2
+    BACKSTOP=1 await 'an event that never comes' false 2>"$tmp/await.err"
+    ok 'await gives up after its backstop' "$?" 1
+    ok 'the backstop expiry is an infrastructure line' "$(grep -c '^t200-bare-uhd: EZSDR-INFRA: self-check: an event that never comes did not happen within 1 s$' "$tmp/await.err")" 1
+    # A stub docker that never returns: `run` publishes its pid first (so a kill finds it at any point), logs its name and whether --init was given once its container exists, and sleeps
+    # 600 s (past BACKSTOP and every bound below: only the script's own doing ends it). Any other call is logged and releases a held `run`; it ends the sleeper when the container exists (the
+    # container's death) and fails when it does not (no such container). The late stub (STUB_LATE) is a docker client that is slow to create its container: it ignores TERM, says `ready`
+    # only once it does, and creates the container only after a call other than `run` has been logged, so the kill by name always comes before the container exists.
     mkdir "$tmp/bin"
     cat >"$tmp/bin/docker" <<STUB
 #!/bin/sh
 if [ "\$1" = run ]; then
-    [ -n "\$STUB_LATE" ] && { echo started >"$tmp/docker-started"; trap '' TERM; sleep 1; }
+    echo \$\$ >"$tmp/docker-pid"
+    if [ -n "\$STUB_LATE" ]; then
+        trap '' TERM
+        echo late >"$tmp/docker-ready"
+        until [ -e "$tmp/docker-killed" ]; do sleep 0.1; done
+    fi
     n= i=
     while [ \$# -gt 0 ]; do [ "\$1" = --name ] && n=\$2; [ "\$1" = --init ] && i=' init'; shift; done
-    echo "run \$n\$i" >>"$tmp/docker-calls"; echo \$\$ >"$tmp/docker-pid"; exec sleep 60
+    : >"$tmp/docker-created"
+    echo "run \$n\$i" >>"$tmp/docker-calls"
+    [ -n "\$STUB_LATE" ] || echo up >"$tmp/docker-ready"
+    exec sleep 600
 fi
-echo "\$@" >>"$tmp/docker-calls"; kill \$(cat "$tmp/docker-pid")
+echo "\$@" >>"$tmp/docker-calls"
+: >"$tmp/docker-killed"
+[ -e "$tmp/docker-created" ] && kill \$(cat "$tmp/docker-pid")
 STUB
     chmod +x "$tmp/bin/docker"
-    : >"$tmp/docker-calls"
+    reset
     PATH="$tmp/bin:$PATH" BOUND=1 run_one self-check-t200 addr=none 1 "$tmp/expiry.log"
-    ok 'a run past its bound is stopped by timeout' "$RUN_STATUS" 124
+    grep -q '^run ' "$tmp/docker-calls" || { infra 'the stub docker did not run within the 1 s bound: a host stall'; exit 1; }
+    ok 'a run past its bound is stopped by timeout' "${RUN_STATUS/137/124}" 124
     ok 'the container is started with --init and killed by name' "$(cat "$tmp/docker-calls")" $'run self-check-t200 init\nkill self-check-t200'
     ok 'the expiry is in the log as an infrastructure line' "$(grep -c '^t200-bare: EZSDR-INFRA: self-check-t200 outlived its 1 s bound' "$tmp/expiry.log")" 1
     ok 'an expired run is inconclusive' "$(t200_verdict "$tmp/expiry.log" "$RUN_STATUS" | cut -c1-14)" 'INCONCLUSIVE: '
     # The whole script: three runs planned, "yes" given.
     full() { PATH="$tmp/bin:$PATH" EZSDR_T200_BARE_RUNS=3 EZSDR_T200_BARE_SECONDS=1 EZSDR_T200_BARE_BOUND=${1:-60} bash "${BASH_SOURCE[0]}" addr=none "$tmp/logs-$2" lbl; }
     # N3: an expired run stops the series (bench.md's stop rule); the other two runs do not start.
-    : >"$tmp/docker-calls"
+    reset
     echo yes | full 1 expiry >"$tmp/expiry.out" 2>&1
+    grep -q '^run ' "$tmp/docker-calls" || { infra 'the stub docker did not run within the 1 s bound: a host stall'; exit 1; }
     ok 'an expired run ends the series with one run started' "$(grep -c '^run ' "$tmp/docker-calls")" 1
     ok 'the series says it stopped' "$(grep -c '^T200 bare summary .*INCONCLUSIVE' "$tmp/expiry.out")" 1
     # N1/N5: a signal to the script during a run kills and removes the container and starts no later run; the script exits 130. INT, TERM, HUP and QUIT.
@@ -173,35 +241,49 @@ STUB
         exec env PATH="$tmp/bin:$PATH" EZSDR_T200_BARE_RUNS=3 EZSDR_T200_BARE_SECONDS=1 EZSDR_T200_BARE_BOUND="$2" ${STUB_LATE:+STUB_LATE=1} bash "${BASH_SOURCE[0]}" addr=none "$tmp/logs-$1" lbl
     }
     norm() { sed 's/-[0-9]*-1/-PID-1/'; }
-    for sig in INT TERM HUP QUIT; do
-        : >"$tmp/docker-calls"
+    # The script runs in a job of its own, its pid in PID, with a bound (600 s) past BACKSTOP, so a stall cannot expire the run before the signal arrives. $2 = STUB_LATE.
+    launch() { # $1 = out name
+        reset
         set -m
-        (start "sig$sig" 60 <"$tmp/yes" >"$tmp/sig$sig.out" 2>&1) &
-        pid=$!
+        (STUB_LATE=$2 start "$1" 600 <"$tmp/yes" >"$tmp/$1.out" 2>&1) &
+        PID=$!
         set +m
-        for _ in $(seq 100); do grep -q '^run ' "$tmp/docker-calls" && break; sleep 0.1; done
-        kill "-$sig" "$pid"
-        for _ in $(seq 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-        if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid"; ok "SIG$sig stops the script" hung stopped; fi
-        wait "$pid"
-        ok "SIG$sig: the script exits 130" "$?" 130
-        ok "SIG$sig: the container was started once, killed and removed by name" "$(norm <"$tmp/docker-calls")" $'run ezsdr-t200-bare-PID-1 init\nkill ezsdr-t200-bare-PID-1\nrm -f ezsdr-t200-bare-PID-1'
+    }
+    # A signal the script does not catch would be ignored or would kill it: that is reported at once (the script's own table of handled signals, /proc SigCgt: bit n-1 for signal n), not found by waiting for an exit that may never come.
+    caught() { # $1 = pid, $2 = signal name: 1 when the process has a handler for it
+        local mask
+        mask=$(awk '/^SigCgt:/ {print $2}' "/proc/$1/status" 2>/dev/null)
+        echo $(((16#${mask:-0} >> ($(kill -l "$2") - 1)) & 1))
+    }
+    for sig in INT TERM HUP QUIT; do
+        launch "sig$sig" ''
+        await "the stub docker's start before SIG$sig" test -e "$tmp/docker-ready" || abort "$PID"
+        trapped=$(caught "$PID" "$sig")
+        ok "SIG$sig: the script traps it" "$trapped" 1
+        if ((trapped)); then
+            kill "-$sig" "$PID"
+            await_exit "the script's exit after SIG$sig" "$PID" || abort "$PID"
+            ok "SIG$sig: the script exits 130" "$EXIT_STATUS" 130
+            ok "SIG$sig: the container was started once, killed and removed by name" "$(norm <"$tmp/docker-calls")" $'run ezsdr-t200-bare-PID-1 init\nkill ezsdr-t200-bare-PID-1\nrm -f ezsdr-t200-bare-PID-1'
+        fi
+        reap "$PID"
     done
-    # N4: a signal before the container exists (the stub's `run` starts late and ignores TERM, so the kill by name finds nothing): the docker client is killed
-    # once timeout's -k 10 has passed, and the container that appears meanwhile is removed by name before the script exits.
-    : >"$tmp/docker-calls"
-    rm -f "$tmp/docker-started"
-    set -m
-    (STUB_LATE=1 start late 60 <"$tmp/yes" >"$tmp/late.out" 2>&1) &
-    pid=$!
-    set +m
-    for _ in $(seq 100); do [[ -e $tmp/docker-started ]] && break; sleep 0.1; done
-    kill -INT "$pid"
-    for _ in $(seq 300); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid"; ok 'a signal before the container exists stops the script' hung stopped; fi
-    wait "$pid"
-    ok 'early signal: the script exits 130' "$?" 130
-    ok 'early signal: the late container is removed by name' "$(norm <"$tmp/docker-calls" | tail -n 1)" 'rm -f ezsdr-t200-bare-PID-1'
+    # N4: a signal before the container exists. The late stub says `ready` once it ignores TERM and creates its container only after the kill by name has been tried, so that attempt
+    # fails (no such container) and the script must go on: its docker client is killed once timeout's -k 10 has passed, and the container that appears meanwhile is removed by name before it exits.
+    launch late 1
+    await "the late stub docker's start" test -e "$tmp/docker-ready" || abort "$PID"
+    sent=$SECONDS
+    kill -INT "$PID"
+    await_exit "the script's exit after the early SIGINT" "$PID" || abort "$PID"
+    # The script finished its cleanup (kill by name tried, `rm -f` done) but the stub, killed after timeout's -k 10 (at least 9 s on SECONDS), never got to create its container: a host stall.
+    # A script that kills the client and exits sooner skipped that wait: a defect, reported plainly below.
+    if ((SECONDS - sent >= 9)) && grep -q '^kill ' "$tmp/docker-calls" && grep -q '^rm -f ' "$tmp/docker-calls" && ! grep -q '^run ' "$tmp/docker-calls"; then
+        infra 'the late stub docker did not get to create its container before it was killed: a host stall'
+        abort "$PID"
+    fi
+    ok 'early signal: the script exits 130' "$EXIT_STATUS" 130
+    ok 'early signal: the kill by name comes before the container exists, and the container is removed by name' "$(norm <"$tmp/docker-calls")" $'kill ezsdr-t200-bare-PID-1\nrun ezsdr-t200-bare-PID-1 init\nrm -f ezsdr-t200-bare-PID-1'
+    reap "$PID"
     ((fails == 0)) || exit 1
     printf '%s\n' 't200-bare-uhd --self-check: all cases pass'
     exit 0

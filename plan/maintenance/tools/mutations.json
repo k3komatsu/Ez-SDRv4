@@ -23773,7 +23773,8 @@
   "new": ":",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it",
+  "kill": "bound"
  },
  {
   "id": "S4B-50",
@@ -27304,5 +27305,45 @@
   "crate": "ezsdr-kernel",
   "test_bin": "stream_contract",
   "filter": "sc_31c_never_valid_channel_has_no_gap"
+ },
+ {
+  "id": "N107-1",
+  "name": "the C4 cell does not align B's time to the sample grid (#107: the rehearsal covers the alignment whatever t0's phase)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mt3_cascade.rs",
+  "old": "e.b_first = align_to(t0 + a_ticks + delta, per);",
+  "new": "e.b_first = t0 + a_ticks + delta;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "mt3_c4_rehearsal_the_fake_drops_b_before_its_own_limit_and_plays_it_at_and_after"
+ },
+ {
+  "id": "N107-2",
+  "name": "the t200 self-check's await returns failure when the event has come (#109)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "return 0 # the event came",
+  "new": "return 1 # the event came",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "N107-3",
+  "name": "the t200 self-check's backstop expiry line loses its EZSDR-INFRA marker (#109)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "printf 't200-bare-uhd: EZSDR-INFRA: self-check:",
+  "new": "printf 't200-bare-uhd: EZSDR-INFRX: self-check:",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
+ },
+ {
+  "id": "N107-4",
+  "name": "the t200 script gives up its cleanup when the kill by name fails, as it does for a container that does not exist yet (#109 F1)",
+  "file": "plan/phase8/tools/t200-bare-uhd.sh",
+  "old": "docker kill \"$RUN_NAME\" >/dev/null 2>&1",
+  "new": "docker kill \"$RUN_NAME\" >/dev/null 2>&1 || exit 130",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "t200_bare_uhd_script_judges_a_run_and_bounds_it"
  }
 ]

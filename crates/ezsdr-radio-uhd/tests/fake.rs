@@ -8167,16 +8167,18 @@ fn mt3_c3_rehearsal_a_late_burst_with_a_32_sample_first_send_is_dropped_whole() 
 fn mt3_c4_rehearsal_the_fake_drops_b_before_its_own_limit_and_plays_it_at_and_after() {
     // The body of `hw_mt3_c4_cascade_boundary` on the FakeDevice (AGENTS section 9), at the bench's two rates: B, handed behind A's drain, is dropped at every delta below the fake's limit
     // and played at the limit and after. The bench's grid ends 220 us short of the limit (its fine part, 0 to 30 us), so the rehearsal books both sides of the boundary itself: the
-    // one sample below the limit (dropped) and the limit and the limit plus the comparison's uncertainty (played; the latter is where a dropped B fails the sweep) and 20 us past it, ten trials each through the sweep's own verdict, and a coarse and a fine delta below it. A
+    // one sample below the limit (dropped) and the limit and the limit plus the comparison's uncertainty (played; the latter is where a dropped B fails the sweep) and 20 us past it, ten trials each through the sweep's own verdict, and a coarse and a fine delta below it,
+    // and one half a sample off the sample grid (B's time is aligned up to the grid from t0, whose phase against it is the clock's and varies from run to run: this delta makes the alignment run whatever it is). A
     // limit that is off by a sample, a send or a burst's share turns it red. (A trial costs the manual clock about 0.15 s of wall time, so this is not the bench's whole grid.)
     for rate in common::mt3_cascade::C4_RATES {
         let device = fake(FakeConfig::default());
         let per = MCR / rate as i64;
         let limit = common::mt3_cascade::planned_limit(rate);
-        let below = common::mt3_cascade::cascade_cell(&*device, rate, &[-20 * common::mt3_cascade::US, 30 * common::mt3_cascade::US, limit - per], 2);
+        let below = common::mt3_cascade::cascade_cell(&*device, rate, &[-20 * common::mt3_cascade::US, 30 * common::mt3_cascade::US, limit - per, limit - per - per / 2], 2);
         for trial in &below {
             assert_eq!(trial.outcome(), common::mt3_cascade::Outcome::Dropped, "delta {} ticks (limit {limit}) at {rate} S/s: {:?}", trial.delta, trial.evidence);
             assert!(trial.effective_delta().is_some_and(|delta| delta < limit), "the delta aligned to the sample grid is still below the limit");
+            assert_eq!(trial.evidence.b_first % per, 0, "B's time is on the sample grid: delta {} ticks: {:?}", trial.delta, trial.evidence);
         }
         let unc = common::mt3_cascade::uncertainty_ticks(per);
         // The cells carry each dropped trial's effective delta (B's time aligned up to the sample grid): the sweep judges by it, not by the nominal delta.
@@ -8185,7 +8187,10 @@ fn mt3_c4_rehearsal_the_fake_drops_b_before_its_own_limit_and_plays_it_at_and_af
             assert_eq!(cell.dropped, 2, "{cell:?}");
             assert!(cell.dropped_at.iter().all(|at| *at >= cell.delta && *at < cell.delta + per), "an effective delta is the nominal one aligned up by less than a sample: {cell:?}");
         }
-        assert!(below_cells.iter().any(|cell| cell.dropped_at.iter().any(|at| *at != cell.delta)), "t0 is not on the sample grid, so some trial's B was aligned up: {below_cells:?}");
+        assert!(
+            below_cells.iter().any(|cell| cell.dropped_at.iter().any(|at| *at != cell.delta)),
+            "some trial's B was aligned up to the sample grid (one delta is half a sample off it, so whatever t0's phase is, one of them is): {below_cells:?}"
+        );
         let effective: Vec<i64> = below.iter().filter(|trial| trial.delta == below_cells[0].delta).filter_map(|trial| trial.effective_delta()).collect();
         assert_eq!(below_cells[0].dropped_at, effective, "the cell holds the trials' effective deltas");
         let (cells, failed) = common::mt3_cascade::report_sweep(&*device, rate, &[limit, limit + unc, limit + 20 * common::mt3_cascade::US], common::mt3_cascade::C4_TRIALS);
