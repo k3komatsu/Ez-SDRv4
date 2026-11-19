@@ -25,7 +25,7 @@ use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::{ClockRegistry, Duration, ScheduleHandle, TimePoint};
 use support::start_window::{
-    Call, CallKind, ClockLog, Gate as ParkGate, Hooks, OpenOnDrop, StartTrace, WatchedAuthority, WatchedClock, far_future_stop, gate, infra, open, seen_for, start_on_worker, sweep, wait,
+    Call, CallKind, ClockLog, Gate as ParkGate, Held, Hooks, OpenOnDrop, StartTrace, WatchedAuthority, WatchedClock, far_future_stop, gate, infra, open, seen_for, start_on_worker, sweep, wait,
     wait_end_requested, wait_or_panicked, with_seen,
 };
 use support::{
@@ -1785,47 +1785,42 @@ fn kc_24a_start_the_lock_is_free_at_the_wait() {
 }
 
 #[test]
-fn kc_24a_freeze_takes_the_wake_handle_with_the_admission_lock_free() {
-    // #111: RS-6 step 1 takes `wake_handle` after it drops the admission lock, so a
-    // Module thread's submission meets no lock while the wake's `schedule` is still
-    // inside the Authority, and the freeze waits for the handle outside that lock.
-    // Killer for N111-23 (the take moved above the drop; its hook is part of the take):
-    // the verdict is the lock state the hook reads at the take, a positive reading that
-    // arrives on the fixed tree and the mutant alike — the mutant reads it with the
-    // admission lock still held, before it blocks on the parked wake, and fails by
-    // assertion with no timeout.
+fn kc_24a_a_wakes_schedule_holds_no_lock_and_blocks_no_one() {
+    // #120, KC-24a, KC-46a: the data thread's ordinary wake is parked inside the Authority's
+    // `schedule` (the handle not yet returned). It holds no lock of the coordinator's, so a
+    // Module thread's `disconnect_signal` (its own wake) returns, the cleanup's freeze runs
+    // to `Done` and a Module's submission during it is refused, all while that `schedule`
+    // is still parked. The parked wake's handle is accepted after the cleanup's freeze took
+    // the wake list and closed it, so its publisher holds no handle and cancels nothing.
     // The fixture is the Spec Run of `executor_docs()`: a Session's implicit Spec has no
-    // graph, so no Executor — and so no shared submitter — is prepared in one.
-    // Deschedule: W_s starts only after the freeze's BeforeWakeTake reading arrived, so the
-    // admission lock is already free on the fixed tree and a late W_s only delays; the bound is
-    // the usual 10 s infra bound, never the verdict. W_d stays parked on G_s until the refusal
-    // was read.
+    // graph, so no Executor -- and so no shared submitter -- is prepared in one. No
+    // `next_wakeup` runs, so no wake callback fires and W's cancel returns true.
+    // Deschedule: W (the signal's thread) and W_f start only after `schedule:parked` was
+    // seen; the parked Schedule's entry in the log, with its `held`, was written before the
+    // park, so a late W or W_f only delays the infra-bounded waits; the data thread stays
+    // parked on G until the refusal and the freeze's `Done` were read.
     let probe = Probe::new();
     let gate_s = gate();
     let _release = OpenOnDrop(gate_s.clone());
     let log = ClockLog::default();
-    let driver = Arc::new(Mutex::new(None::<std::thread::ThreadId>));
     let parked = Arc::new(AtomicBool::new(false));
     let on_schedule = {
         let probe = probe.clone();
         let gate = gate_s.clone();
-        let driver = driver.clone();
         let parked = parked.clone();
-        move |call: &Call| {
-            let Some(driver) = *driver.lock().unwrap_or_else(|e| e.into_inner()) else {
-                return;
-            };
-            if call.thread != driver || parked.swap(true, Ordering::SeqCst) {
+        move |_call: &Call| {
+            if std::thread::current().name() != Some("ezsdr-data") || parked.swap(true, Ordering::SeqCst) {
                 return;
             }
             probe.record("schedule:parked");
             wait(&gate);
         }
     };
+    let marks = release();
     let (rig, _) = paced_parked(|authority| authority);
     let mut assembly = rig.assembly;
     assembly.authority = Box::new(WatchedAuthority::new(assembly.authority, log.clone()).with_hooks(Hooks { on_schedule: Some(Arc::new(on_schedule)), ..Hooks::default() }));
-    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1))));
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(ThreadedProvider::new("radio", "radio", &probe).marking_on("test.MARK", marks.clone())));
     let slot: Arc<Mutex<Option<Arc<dyn ActionSubmitter>>>> = Arc::new(Mutex::new(None));
     assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(support::ProbeExecutor::new("x", &probe).sharing_submitter(slot.clone())));
     let (freeze_tx, freeze_rx) = mpsc::channel();
@@ -1845,49 +1840,52 @@ fn kc_24a_freeze_takes_the_wake_handle_with_the_admission_lock_free() {
     let run = started.finish();
     let signal = run.disconnect_signal();
     let submitter = slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
-    let driver_thread = {
-        let driver = driver.clone();
-        std::thread::spawn(move || {
-            *driver.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
-            signal();
-        })
-    };
-    assert!(probe.wait_for("schedule:parked", Wall::from_secs(10)), "{}", infra("the signal's wake did not reach schedule within 10 s"));
+    release_one(&marks);
+    assert!(probe.wait_for("schedule:parked", Wall::from_secs(10)), "{}", infra("the data thread's wake did not reach schedule within 10 s"));
+    // (1) the parked `schedule` holds nothing.
+    let parked_calls: Vec<Call> = log.calls().into_iter().filter(|call| call.kind == CallKind::Schedule && call.handle.is_none()).collect();
+    assert_eq!(parked_calls.len(), 1, "the data thread's wake is the one Schedule not yet returned: {parked_calls:?}");
+    assert_eq!(parked_calls[0].held, Held::default(), "KC-24a: the wake called `schedule` under a lock: {:?}", parked_calls[0]);
+    // (2) a Module thread's `disconnect_signal` returns while that `schedule` is parked.
+    let (id_tx, id_rx) = mpsc::channel();
+    let (signalled_tx, signalled_rx) = mpsc::channel();
+    let w = std::thread::spawn(move || {
+        let _ = id_tx.send(std::thread::current().id());
+        signal();
+        let _ = signalled_tx.send(());
+    });
+    let w_id = id_rx.recv_timeout(Wall::from_secs(10)).expect("W started");
+    if signalled_rx.recv_timeout(Wall::from_secs(10)).is_err() {
+        open(&gate_s);
+        panic!("{}", infra("`disconnect_signal` did not return within 10 s while the wake's schedule was parked: it waits for a lock the wake holds"));
+    }
+    // (3) its own wake's `schedule` ran under no lock either.
+    let w_calls: Vec<Call> = log.calls().into_iter().filter(|call| call.kind == CallKind::Schedule && call.thread == w_id).collect();
+    assert_eq!(w_calls.len(), 1, "W's wake made one Schedule: {w_calls:?}");
+    assert_eq!(w_calls[0].held, Held::default(), "KC-24a: the signal's wake called `schedule` under a lock: {:?}", w_calls[0]);
     let (manifest_tx, manifest_rx) = mpsc::channel();
     let finisher = std::thread::spawn(move || {
         let _ = manifest_tx.send(run.finish());
     });
-    // The next reading of `wanted` on the freeze channel, or `None` after 10 s without it.
-    let next_reading = |wanted: FreezePoint| -> Option<FreezeReading> {
-        let deadline = Instant::now() + Wall::from_secs(10);
-        loop {
-            match freeze_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok((point, reading)) if point == wanted => return Some(reading),
-                Ok(_) => {}
-                Err(_) => return None,
+    // (4) the freeze reaches `Done` while the data thread's `schedule` is still parked.
+    let deadline = Instant::now() + Wall::from_secs(10);
+    let done = loop {
+        match freeze_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok((FreezePoint::Done, reading)) => break reading,
+            Ok(_) => {}
+            Err(_) => {
+                open(&gate_s);
+                panic!("{}", infra("the cleanup's freeze did not reach Done within 10 s while the wake's schedule was parked"));
             }
         }
     };
-    // `BeforeDrop` is reached with the admission lock held on the fixed path and the mutant alike; W_s starts only after the take.
-    if next_reading(FreezePoint::BeforeDrop).is_none() {
-        open(&gate_s);
-        panic!("{}", infra("the freeze did not reach BeforeDrop within 10 s"));
-    }
-    let reading = match next_reading(FreezePoint::BeforeWakeTake) {
-        Some(reading) => reading,
-        None => {
-            open(&gate_s);
-            panic!("{}", infra("the freeze did not reach BeforeWakeTake within 10 s"));
-        }
-    };
-    assert!(!reading.held.admission, "KC-24a: the wake handle is taken under the admission lock: {reading:?}");
-    assert!(reading.dispatch_frozen, "KC-24a: dispatch is not frozen at BeforeWakeTake: {reading:?}");
+    assert!(done.held.freeze && !done.held.admission && done.dispatch_frozen, "KC-24a: Done is not under the gate alone with dispatch frozen: {done:?}");
+    // (5) a submission during the freeze is refused at RS-6, not blocked.
     let action = Action::UpdateParameter { target: support::target("radio"), key: Key::parse("test.gain").unwrap(), value: Value::num(2.0).unwrap(), class: UpdateClass::HardwareTimed, at: None };
     let (done_tx, done_rx) = mpsc::channel();
     let w_s = std::thread::spawn(move || {
         let _ = done_tx.send(submitter.submit(action));
     });
-    // The refusal arrives while G_s is still closed, i.e. while the wake's `schedule` is inside the Authority.
     let result = match done_rx.recv_timeout(Wall::from_secs(10)) {
         Ok(result) => result,
         Err(_) => {
@@ -1902,16 +1900,26 @@ fn kc_24a_freeze_takes_the_wake_handle_with_the_admission_lock_free() {
     assert_eq!(violations.len(), 1, "KC-24a: the refusal is one violation: {violations:?}");
     assert_eq!(violations[0].check.as_str(), "ezsdr.dispatch", "KC-24a: the refusal is not RS-6's: {violations:?}");
     assert_eq!(violations[0].reason, "RS-6: dispatch is frozen", "KC-24a: the refusal is not RS-6's: {violations:?}");
+    // (6) the parked wake's handle is not cancelled by anyone once the Authority returns it: the list is closed.
     open(&gate_s);
     let manifest = match manifest_rx.recv_timeout(Wall::from_secs(10)) {
         Ok(manifest) => manifest,
         Err(_) => panic!("{}", infra("the freeze did not return a Manifest within 10 s after the gate opened")),
     };
     finisher.join().expect("W_f does not panic");
-    driver_thread.join().expect("W_d does not panic");
+    w.join().expect("W does not panic");
     w_s.join().expect("W_s does not panic");
     assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
     assert_eq!(manifest.termination.reason, client_disconnect(), "{:?}", manifest.termination);
+    let calls = log.calls();
+    let w_handle = w_calls[0].handle.expect("W's schedule returned its handle");
+    let w_cancels = cancels_of(&calls, w_handle);
+    assert_eq!(w_cancels.len(), 1, "RS-6 step 1: the freeze cancels W's wake once; calls: {calls:?}");
+    assert!(w_cancels[0].held.freeze && w_cancels[0].returned == Some(true), "KC-24a: W's wake is cancelled under the gate and was pending: {:?}", w_cancels[0]);
+    let late: Vec<&Call> = calls.iter().filter(|call| call.kind == CallKind::Schedule && call.thread != w_id).collect();
+    assert_eq!(late.len(), 1, "the data thread made the one other Schedule: {calls:?}");
+    let late_cancels = cancels_of(&calls, late[0].handle.expect("the parked schedule returned its handle"));
+    assert!(late_cancels.is_empty(), "KC-46a: the wake accepted after the cleanup's freeze was cancelled, by the freeze or its publisher; calls: {calls:?}");
 }
 
 #[test]
@@ -2042,11 +2050,30 @@ struct Threads {
     control: ThreadCell,
     data: ThreadCell,
     done: ThreadCell,
+    /// The Run's probe, stored at `Entered`.
+    run: Arc<Mutex<Option<start_probe::Probe>>>,
 }
 
 impl Threads {
     fn new() -> Threads {
-        Threads { control: Arc::new(Mutex::new(None)), data: Arc::new(Mutex::new(None)), done: Arc::new(Mutex::new(None)) }
+        Threads { control: Arc::new(Mutex::new(None)), data: Arc::new(Mutex::new(None)), done: Arc::new(Mutex::new(None)), run: Arc::new(Mutex::new(None)) }
+    }
+
+    /// A reading of the Run, or `None` before `Entered` and after the Run is gone.
+    fn read(&self) -> Option<Reading> {
+        self.run.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(start_probe::Probe::read)
+    }
+
+    /// Waits, as a condition, until a reading satisfies `pred`; fails through `infra` after 10 s.
+    fn wait_reading(&self, what: &str, pred: impl Fn(&Reading) -> bool) -> Reading {
+        let deadline = Instant::now() + Wall::from_secs(10);
+        loop {
+            if let Some(reading) = self.read().filter(&pred) {
+                return reading;
+            }
+            assert!(Instant::now() < deadline, "{}", infra(format!("the Run's reading did not show {what} within 10 s: {:?}", self.read())));
+            std::thread::yield_now();
+        }
     }
 }
 
@@ -2134,6 +2161,7 @@ fn entered(point: Point, p: &start_probe::Probe, probe: &Probe, threads: &Thread
         return false;
     }
     *threads.control.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
+    *threads.run.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
     p.on_freeze(freeze_trace(probe, threads));
     true
 }
@@ -2168,11 +2196,10 @@ fn kc_24a_freeze_cancels_the_wake_handle_exactly_once() {
     // #111, RS-6 step 1, KC-46a: the data thread's freeze cancels the horizon it drained; the
     // unconditional wake it schedules afterwards is taken and cancelled once, by the control
     // cleanup's freeze, after that wake's `schedule` returned. N111-6 leaves the wake uncancelled.
-    // Deschedule: the data thread holds `wake_handle` while it is inside `schedule` (the
-    // `wake:schedule` line is recorded at that call's entry), and the test opens G_r only after
-    // it, so the control freeze meets the handle in the slot or waits on the lock for it; W_c is
-    // parked in the `next_wakeup` return hook until both lines were seen, so no other order is
-    // reachable. A descheduled data thread only delays `wake:schedule`.
+    // Deschedule: the test opens G_r only after the Run's reading shows the data thread's wake
+    // published (not merely scheduled), so the control freeze meets the handle in the list and
+    // never meets a handle still in flight; W_c is parked in the `next_wakeup` return hook until
+    // then, so no other order is reachable. A descheduled data thread only delays the reading.
     let probe = Probe::new();
     let loss = gate();
     let _release = OpenOnDrop(loss.clone());
@@ -2194,22 +2221,9 @@ fn kc_24a_freeze_cancels_the_wake_handle_exactly_once() {
             wait(&gate);
         }
     };
-    let on_schedule = {
-        let probe = probe.clone();
-        let threads = threads.clone();
-        move |call: &Call| {
-            if threads.data.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|data| data == call.thread) {
-                probe.record(format!("wake:schedule:{:?}", call.thread));
-            }
-        }
-    };
     let (rig, park) = paced_parked(|authority| authority);
     let mut assembly = rig.assembly;
-    assembly.authority = Box::new(WatchedAuthority::new(assembly.authority, log.clone()).with_hooks(Hooks {
-        on_schedule: Some(Arc::new(on_schedule)),
-        on_next_wakeup_return: Some(Arc::new(on_next_wakeup_return)),
-        ..Hooks::default()
-    }));
+    assembly.authority = Box::new(WatchedAuthority::new(assembly.authority, log.clone()).with_hooks(Hooks { on_next_wakeup_return: Some(Arc::new(on_next_wakeup_return)), ..Hooks::default() }));
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)).losing_device_on(loss.clone())));
     let hook = {
         let probe = probe.clone();
@@ -2223,7 +2237,7 @@ fn kc_24a_freeze_cancels_the_wake_handle_exactly_once() {
     armed.store(true, Ordering::SeqCst);
     open(&loss);
     assert!(probe.wait_for("loop:parked", Wall::from_secs(10)), "{}", infra("the horizon's cancel did not wake the control loop within 10 s"));
-    assert!(probe.wait_until(|lines| lines.iter().any(|line| line.starts_with("wake:schedule:")), Wall::from_secs(10)), "{}", infra("the data thread's wake did not reach schedule within 10 s"));
+    threads.wait_reading("the data thread's wake published", |reading| reading.wake_handles >= 1);
     open(&gate_r);
     let (result, run) = worker.join();
     assert!(matches!(result, Err(RunHandleError::Ended { .. })), "{result:?}");
@@ -2242,15 +2256,18 @@ fn kc_24a_freeze_cancels_the_wake_handle_exactly_once() {
 }
 
 #[test]
-fn kc_24a_a_wake_issued_after_the_freeze_is_not_cancelled() {
-    // KC-46a: a wake the data thread issues after RS-6 step 1's cancels stays scheduled. The
-    // data thread's first `now` after its freeze's `Done` is `wake`'s own read, taken before it
-    // takes `wake_handle`; the control freeze passes the slot while the data thread is parked
-    // there, so the wake is stored after it.
+fn kc_46a_a_wake_scheduled_across_the_cleanups_freeze_is_never_cancelled() {
+    // KC-46a: a wake whose `schedule` returns after the cleanup's freeze took the wake list is
+    // held by no one: its publisher cancels nothing and the wake stays a no-op. The data thread's
+    // first `now` after its freeze's `Done` is its end-wake's own read, taken after the
+    // closed-list check and before `schedule`; the control freeze takes and closes the list
+    // while the data thread is parked there, so the wake's handle arrives after it.
     // Deschedule: W_c is parked in the `next_wakeup` return hook until the data thread recorded
     // `wake:now_parked` and the data thread is parked in `now()`, before it takes any lock, so
     // nothing either holds can block the control freeze; the test opens G_n only after freeze #2
-    // recorded `Done`, so the slot is taken before the wake is stored whatever the order.
+    // recorded `Done`, so the list is closed before the wake's handle arrives whatever the order.
+    // The parked data thread is joined by cleanup step 3 under RS-8a's default 5 s bound, so G_n
+    // must open within it, or step 3 is abandoned and the final cleanup-failure assertion fails.
     let probe = Probe::new();
     let loss = gate();
     let _release = OpenOnDrop(loss.clone());
@@ -2279,8 +2296,8 @@ fn kc_24a_a_wake_issued_after_the_freeze_is_not_cancelled() {
         }
     };
     // The horizon's cancel wakes the control loop while the data thread is still stopping the
-    // Provider; W_c waits here until that thread parked in `now`, so the control freeze passes
-    // `wake_handle` while the data thread is parked before taking it.
+    // Provider; W_c waits here until that thread parked in `now`, so the control freeze takes
+    // the wake list while the data thread is parked in the wake's `now`, before it publishes.
     let on_next_wakeup_return = {
         let probe = probe.clone();
         let gate = gate_wc.clone();
@@ -2334,13 +2351,14 @@ fn kc_24a_a_wake_issued_after_the_freeze_is_not_cancelled() {
     let (horizon, _) = scheduled_at(&calls, tick, recorded_thread(&threads.control));
     let data = recorded_thread(&threads.data);
     let (wake, _) = scheduled_by(&calls, data);
-    assert!(cancels_of(&calls, wake).is_empty(), "KC-46a: a wake issued after the freeze is not cancelled; calls: {calls:?}");
+    let wake_cancels = cancels_of(&calls, wake);
+    assert!(wake_cancels.is_empty(), "KC-46a: a wake accepted after the cleanup's freeze was cancelled, by the freeze or its publisher; calls: {calls:?}");
     assert_eq!(cancels_of(&calls, horizon).len(), 1, "RS-6 step 1: the horizon is cancelled once; calls: {calls:?}");
     let by_data: Vec<&Call> = calls.iter().filter(|call| call.thread == data).collect();
     let parked = parked_at.lock().unwrap_or_else(|e| e.into_inner()).expect("the data thread's now parked");
     assert!(parked > 0 && by_data.len() > parked, "the data thread issued its wake after the parked now: {by_data:?}");
     assert_eq!(by_data[parked - 1].kind, CallKind::Now, "the parked call is the data thread's now: {by_data:?}");
-    assert_eq!(by_data[parked].kind, CallKind::Schedule, "KC-46a: the parked now is the wake's own read, before it takes the wake handle: {by_data:?}");
+    assert_eq!(by_data[parked].kind, CallKind::Schedule, "KC-46a: the parked now is the wake's own read, before `schedule`: {by_data:?}");
     assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
 }
 
@@ -2820,6 +2838,75 @@ fn kc_24a_a_withdrawal_cancel_precedes_the_provider_stop() {
     assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
 }
 
+type Signal = Arc<dyn Fn() + Send + Sync>;
+
+#[test]
+fn kc_24a_a_cancel_that_calls_disconnect_signal_schedules_nothing_under_the_gate() {
+    // KC-24a, KC-46a (#120 review): the horizon's withdrawal cancels under the freeze gate, and a supplied
+    // `cancel` that synchronously delivers `disconnect_signal` makes the signal's wake run on that thread:
+    // `wake` schedules nothing there (its `now()` and `schedule()` would run under the gate, and an Authority
+    // that serialises `schedule` with `cancel` would wait for itself), and the end request the signal set is
+    // still served: `wait_for` returns the client disconnect, the Run is cleaned up orderly.
+    // Deschedule: the signal is called inside the withdrawal's cancel on W_c itself, so no other thread's
+    // schedule orders anything; the mark is released only once W_c waits for the horizon.
+    let probe = Probe::new();
+    let mark_release = release();
+    let log = ClockLog::default();
+    let signal_cell: Arc<Mutex<Option<Signal>>> = Arc::new(Mutex::new(None));
+    let on_cancel = {
+        let signal_cell = signal_cell.clone();
+        let called = Arc::new(AtomicBool::new(false));
+        move |_: &Call| {
+            if !called.swap(true, Ordering::SeqCst) {
+                let signal = signal_cell.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("W_c stored the signal before it waited");
+                signal();
+            }
+        }
+    };
+    let (rig, park) = paced_parked(|authority| authority);
+    let mut assembly = rig.assembly;
+    assembly.authority = Box::new(WatchedAuthority::new(assembly.authority, log.clone()).with_hooks(Hooks { on_cancel: Some(Arc::new(on_cancel)), ..Hooks::default() }));
+    assembly
+        .providers
+        .insert(Ident::parse("radio").unwrap(), Box::new(ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)).marking_on("test.MARK", mark_release.clone())));
+    let (tick_tx, tick_rx) = mpsc::channel();
+    let (spec, profile) = (spec_one(), profile_one());
+    let cell = signal_cell.clone();
+    let worker = on_control_worker(
+        |_, _| {},
+        move || {
+            let mut run = start_spec_run(&spec, &profile, assembly).expect("the Run starts");
+            running(&run);
+            *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(run.disconnect_signal()));
+            let horizon = after(&run, Wall::from_secs(3600));
+            let _ = tick_tx.send(horizon.ticks_in(horizon.domain()).expect("the horizon is on the primary root"));
+            let result = run.wait_for(&[kind("test.MARK")], 0, horizon).map(|_| ());
+            (result, run)
+        },
+    );
+    let tick = tick_rx.recv_timeout(Wall::from_secs(10)).unwrap_or_else(|_| panic!("{}", infra("the control worker did not start the Run within 10 s")));
+    assert!(park.wait_parked_until(tick, Wall::from_secs(10)), "{}", infra("the control loop never waited for the horizon"));
+    release_one(&mark_release);
+    let (result, run): EndedRun = worker.join();
+    assert_eq!(result, Err(RunHandleError::Ended { termination: client_disconnect() }), "the end request the signal set was not served");
+    let manifest = manifest_of(run);
+    assert_eq!(manifest.termination.reason, client_disconnect());
+    let calls = log.calls();
+    let cancels: Vec<&Call> = calls.iter().filter(|call| call.kind == CallKind::Cancel).collect();
+    assert!(!cancels.is_empty() && cancels[0].held.freeze, "the fixture never reached the withdrawal's cancel under the gate; calls: {calls:?}");
+    for call in &calls {
+        let exempt_freeze = call.kind == CallKind::Cancel;
+        assert!(
+            call.held == ezsdr_kernel::coordinator::lock_record::Held { freeze: call.held.freeze && exempt_freeze, ..Default::default() },
+            "KC-24a: {:?} on {:?} ran under a coordinator lock ({:?}) -- the signal's wake ran under the gate; calls: {calls:?}",
+            call.kind,
+            call.thread,
+            call.held
+        );
+    }
+    assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
+}
+
 #[test]
 fn kc_24a_an_early_withdrawal_skips_when_a_freeze_holds_the_gate() {
     // KC-24a: a withdrawal that meets a freeze holding the gate skips its remove-and-cancel — the
@@ -2913,10 +3000,11 @@ fn kc_24a_sweep_a_device_loss_run_makes_no_supplied_call_under_a_lock() {
     // cancels H while Running and schedules its unconditional wake; the control freeze
     // cancels that wake handle while Stopping; over the whole log no supplied call runs
     // under the admission or the machine lock.
-    // Deschedule: if the data thread is descheduled before its freeze's Cancel or inside
-    // `schedule` (where it holds `wake_handle`), the test's 10 s wait for the wake's
-    // return extends; `finish` cannot take that handle before the wake stores it, since
-    // it waits on the same lock, so no order that flips the assertions is reachable.
+    // Deschedule: `finish` runs only after the Run's reading shows the data thread's wake
+    // published, so the cleanup's freeze always takes the handle from the list (a handle
+    // still in flight would be held by no one instead, a different window); a
+    // data thread descheduled before its freeze's Cancel or inside `schedule` only extends
+    // the test's 10 s wait for the reading.
     let probe = Probe::new();
     let loss = gate();
     let _release = OpenOnDrop(loss.clone());
@@ -2931,6 +3019,8 @@ fn kc_24a_sweep_a_device_loss_run_makes_no_supplied_call_under_a_lock() {
     assembly.authority = Box::new(WatchedAuthority::new(assembly.authority, log.clone()));
     assembly.host_clock = Arc::new(WatchedClock::new(Arc::new(FakeHostClock::new()), log.clone()));
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)).losing_device_on(loss.clone())));
+    let threads = Threads::new();
+    let hook_run = threads.run.clone();
     let freezes = Arc::new(Mutex::new(Vec::<(FreezePoint, FreezeReading)>::new()));
     let hook_freezes = freezes.clone();
     let hook_lines = probe.clone();
@@ -2938,6 +3028,7 @@ fn kc_24a_sweep_a_device_loss_run_makes_no_supplied_call_under_a_lock() {
         &probe,
         move |point, p| {
             if point == Point::Entered {
+                *hook_run.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
                 let hook_freezes = hook_freezes.clone();
                 let hook_lines = hook_lines.clone();
                 p.on_freeze(move |point, reading| {
@@ -2957,14 +3048,8 @@ fn kc_24a_sweep_a_device_loss_run_makes_no_supplied_call_under_a_lock() {
         let freezes = freezes.lock().unwrap_or_else(|e| e.into_inner());
         freezes.iter().find(|(point, _)| *point == FreezePoint::Serialise).expect("the data thread's freeze was recorded").1.thread
     };
-    let deadline = Instant::now() + Wall::from_secs(10);
-    let wake = loop {
-        if let Some(call) = log.calls().into_iter().find(|call| call.kind == CallKind::Schedule && call.thread == data && call.handle.is_some()) {
-            break call;
-        }
-        assert!(Instant::now() < deadline, "{}", infra("the data thread's wake Schedule did not return within 10 s"));
-        std::thread::yield_now();
-    };
+    threads.wait_reading("the data thread's end-wake published", |reading| reading.wake_handles >= 1);
+    let wake = log.calls().into_iter().find(|call| call.kind == CallKind::Schedule && call.thread == data && call.handle.is_some()).expect("the published wake's Schedule is in the log");
     let wake_handle = wake.handle.expect("checked above");
     let manifest = run.finish_checked();
     let calls = log.calls();
@@ -2986,23 +3071,25 @@ fn kc_24a_sweep_a_device_loss_run_makes_no_supplied_call_under_a_lock() {
 fn kc_24a_sweep_a_paced_orderly_finish_makes_no_supplied_call_under_a_lock() {
     // KC-24a (#111, #119): in a paced Run finished at once, the cleanup's freeze cancels
     // H once while Stopping, and the sweep finds no supplied call under the admission or
-    // the machine lock over the start, the data thread's passes and the cleanup.
+    // the machine lock over the start, the data thread's passes and the cleanup; a Sink and
+    // its link make RS-6 step 6's `drops()` (#121) one of the calls the sweep covers.
     // Deschedule: `finish` requests the end on this thread and its freeze takes H from
     // `scheduled` under the freeze gate; the data thread may be descheduled in a pass,
     // but none of its calls carries an assertion and step 3 joins it.
-    let mut spec = spec_one();
+    let (mut spec, profile) = output_docs(64);
     spec["schedule"] = serde_json::json!([{
         "at": { "clock": "radio", "offset_ticks": 3_600_000_000i64 },
         "action": { "kind": "stop", "target": null }
     }]);
     let probe = Probe::new();
     let rig = paced();
-    let mut assembly = rig.assembly;
+    let mut assembly = sink(rig.assembly, RecordingSink::new("rec", &probe), &probe);
     let log = ClockLog::default();
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe).logging_drops(&log)));
     assembly.authority = Box::new(WatchedAuthority::new(assembly.authority, log.clone()));
     assembly.host_clock = Arc::new(WatchedClock::new(Arc::new(FakeHostClock::new()), log.clone()));
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1))));
-    let run = start_spec_run(&spec, &profile_one(), assembly).expect("the fixture Run starts");
+    let run = start_spec_run(&spec, &profile, assembly).expect("the fixture Run starts");
     let start = run.start_instant().expect("the Run was armed").ticks_in(rig.root).expect("the start is on the primary root");
     let (handle, _instant) = far_future_stop(&log.calls(), start);
     let manifest = run.finish_checked();
@@ -3011,5 +3098,380 @@ fn kc_24a_sweep_a_paced_orderly_finish_makes_no_supplied_call_under_a_lock() {
     let cancels: Vec<(usize, &Call)> = calls.iter().enumerate().filter(|(_, call)| call.kind == CallKind::Cancel && call.handle == Some(handle)).collect();
     assert_eq!(cancels.len(), 1, "RS-6 step 1: H is cancelled exactly once; calls: {calls:?}");
     assert!(phases.stopping.contains(&cancels[0].0), "KC-24a: the Cancel of H is not in the Stopping window; phases: {phases:?}; calls: {calls:?}");
+    let drops: Vec<(usize, &Call)> = calls.iter().enumerate().filter(|(_, call)| call.kind == CallKind::Drops).collect();
+    assert_eq!(drops.len(), 1, "RS-6 step 6: one link, one drops() call; calls: {calls:?}");
+    assert!(phases.stopping.contains(&drops[0].0), "RS-6 step 6: the drops() call is not in the Stopping window; phases: {phases:?}; calls: {calls:?}");
+    assert_eq!(drops[0].1.held, Held::default(), "KC-24a: drops() ran under a lock; calls: {calls:?}");
     assert!(manifest.termination.cleanup_failures.is_empty(), "the cleanup recorded failures: {:?}", manifest.termination.cleanup_failures);
+}
+
+#[test]
+fn kc_24a_a_device_lost_stop_stamps_its_event_under_the_gate_only() {
+    // KC-24a's named exception: when the data thread's early stop fails with DeviceLost,
+    // the coordinator reads `now()` to stamp the DEVICE_LOST event with the freeze gate
+    // held (the Provider `stop` runs under it). That one `Now` holds the gate and nothing
+    // else -- no `end`, `done`, `scheduled` or other lock with it -- and no other `Now` of
+    // the Run is made with the gate held. The Provider double never calls the time handle
+    // it was given, so a `Now` under the gate is the coordinator's.
+    // Deschedule: the data thread's freeze and stop run in one hold of the gate and are
+    // joined by `finish`'s step 3, so the log is complete when `finish` returns; no wait
+    // here reads a wall clock.
+    let probe = Probe::new();
+    let loss = gate();
+    let _release = OpenOnDrop(loss.clone());
+    let rig = paced();
+    let mut assembly = rig.assembly;
+    let log = ClockLog::default();
+    assembly.authority = Box::new(WatchedAuthority::new(assembly.authority, log.clone()));
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(ThreadedProvider::new("radio", "radio", &probe).losing_device_on(loss.clone()).losing_device_in_stop()));
+    let run = start_spec_run(&spec_one(), &profile_one(), assembly).expect("the fixture Run starts");
+    open(&loss);
+    assert!(probe.wait_for("radio:stop", Wall::from_secs(10)), "{}", infra("the data thread's early stop did not reach the Provider within 10 s"));
+    let manifest = run.finish_checked();
+    let calls = log.calls();
+    let under_gate: Vec<&Call> = calls.iter().filter(|call| call.kind == CallKind::Now && call.held.freeze).collect();
+    assert_eq!(under_gate.len(), 1, "KC-24a: exactly one now() is made under the freeze gate, the DEVICE_LOST stamp; calls: {calls:?}");
+    assert_eq!(under_gate[0].held, Held { freeze: true, ..Held::default() }, "KC-24a: the DEVICE_LOST stamp holds a lock beside the gate; calls: {calls:?}");
+    let stop_failure =
+        manifest.termination.cleanup_failures.iter().filter(|failure| failure.step == ezsdr_kernel::run::CleanupStep::StopProviders && failure.reason.contains("device lost in stop")).count();
+    assert_eq!(stop_failure, 1, "the Provider's stop did not fail with DeviceLost: {:?}", manifest.termination.cleanup_failures);
+}
+
+// ---------------------------------------------------------------- KC-46a: the wake list
+
+/// A paced Session (Attached Lease) on the test thread whose Provider emits `test.MARK` per `marks` unit and loses its device when `loss` opens, with every supplied call logged. No control loop runs, so no wake callback fires and every wake cancel returns true.
+struct WakeSession {
+    run: RunHandle,
+    root: ClockDomainId,
+    marks: support::Release,
+    loss: ParkGate,
+    _loss_release: OpenOnDrop,
+    _installed: start_probe::Installed,
+}
+
+fn wake_session(probe: &Probe, log: &ClockLog, threads: &Threads, hooks: Hooks) -> WakeSession {
+    let marks = release();
+    let loss = gate();
+    let rig = paced();
+    let mut assembly = rig.assembly;
+    assembly.authority = Box::new(WatchedAuthority::new(assembly.authority, log.clone()).with_hooks(hooks));
+    assembly.host_clock = Arc::new(WatchedClock::new(Arc::new(FakeHostClock::new()), log.clone()));
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(ThreadedProvider::new("radio", "radio", probe).marking_on("test.MARK", marks.clone()).losing_device_on(loss.clone())));
+    let installed = {
+        let (probe, threads) = (probe.clone(), threads.clone());
+        start_probe::install(move |point, p| {
+            entered(point, p, &probe, &threads);
+        })
+    };
+    let run = session(assembly, &profile_one());
+    WakeSession { run, root: rig.root, marks, loss: loss.clone(), _loss_release: OpenOnDrop(loss), _installed: installed }
+}
+
+fn on_data_thread() -> bool {
+    std::thread::current().name() == Some("ezsdr-data")
+}
+
+/// An `on_schedule_return` hook: the data thread's first `schedule` return is recorded in `accepted` (`wake:accepted`) and parked on `park`.
+fn park_first_data_wake(probe: &Probe, park: &ParkGate, accepted: &Arc<Mutex<Option<Call>>>) -> impl Fn(&Call) + Send + Sync + 'static {
+    let (probe, park, accepted) = (probe.clone(), park.clone(), accepted.clone());
+    move |call: &Call| {
+        if !on_data_thread() || accepted.lock().unwrap_or_else(|e| e.into_inner()).replace(call.clone()).is_some() {
+            return;
+        }
+        probe.record("wake:accepted");
+        wait(&park);
+    }
+}
+
+#[test]
+fn kc_24a_sweep_a_paced_run_with_an_ordinary_and_a_signal_wake_cancels_both() {
+    // #120 shape 2, KC-46a: the data thread's ordinary wake (h1) is published, then a Module
+    // thread's `disconnect_signal` schedules the unconditional wake (h2): h2's publish must not
+    // replace h1, so the cleanup's freeze cancels both, once each, while each is still pending.
+    // No `next_wakeup` runs, so no callback fires and both cancels return true.
+    // Deschedule: the signal is called only after the reading shows h1 published, and `finish`
+    // only after `disconnect_signal` returned (the publish of h2 is inside that call), so the
+    // freeze sees both handles whatever the data thread's schedule.
+    let probe = Probe::new();
+    let log = ClockLog::default();
+    let threads = Threads::new();
+    let s = wake_session(&probe, &log, &threads, Hooks::default());
+    let signal = s.run.disconnect_signal();
+    release_one(&s.marks);
+    threads.wait_reading("the ordinary wake published", |reading| reading.wake_handles == 1);
+    let test_thread = std::thread::current().id();
+    signal();
+    let manifest = s.run.finish_checked();
+    let calls = log.calls();
+    let phases = sweep(&calls, &manifest.run.transitions, s.root);
+    let wakes: Vec<&Call> = calls.iter().filter(|call| call.kind == CallKind::Schedule && call.handle.is_some()).collect();
+    assert_eq!(wakes.len(), 2, "one ordinary wake and one signal wake were scheduled; calls: {calls:?}");
+    let h1 = wakes.iter().find(|call| call.thread != test_thread).expect("the data thread's ordinary wake").handle.unwrap();
+    let h2 = wakes.iter().find(|call| call.thread == test_thread).expect("the signal's wake").handle.unwrap();
+    for (name, handle) in [("ordinary", h1), ("signal", h2)] {
+        let cancels = cancels_of(&calls, handle);
+        assert_eq!(cancels.len(), 1, "RS-6 step 1: the {name} wake is cancelled exactly once; calls: {calls:?}");
+        assert_eq!(cancels[0].returned, Some(true), "RS-6 step 1: the {name} wake was still pending: {:?}", cancels[0]);
+        assert!(cancels[0].held.freeze, "KC-24a: the {name} wake is cancelled under the freeze gate: {:?}", cancels[0]);
+        let at = calls.iter().position(|call| call.kind == CallKind::Cancel && call.handle == Some(handle)).unwrap();
+        assert!(phases.stopping.contains(&at), "KC-24a: the {name} wake's Cancel is not in the Stopping window; phases: {phases:?}");
+    }
+    assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
+}
+
+#[test]
+fn kc_24a_a_wake_published_before_the_early_freeze_is_cancelled_once_across_both_freezes() {
+    // #120, KC-46a, RS-6 step 1: an ordinary wake (h1) is published; the device is then lost,
+    // so the data thread's early freeze takes the list and cancels h1 and the data thread
+    // publishes its end-wake (h2); the cleanup's freeze cancels h2. Each handle is cancelled
+    // exactly once over the two freezes (a freeze that read the list without taking it would
+    // cancel h1 twice), h1 by the data thread, h2 by the cleanup.
+    // Deschedule: the loss opens only after h1 is published, and `finish` runs only after h2
+    // is published (the reading), so each freeze sees the list the plan names.
+    let probe = Probe::new();
+    let log = ClockLog::default();
+    let threads = Threads::new();
+    let s = wake_session(&probe, &log, &threads, Hooks::default());
+    release_one(&s.marks);
+    threads.wait_reading("the ordinary wake published", |reading| reading.wake_handles == 1 && reading.wake_last_generation == 1);
+    open(&s.loss);
+    let published = threads.wait_reading("the end-wake published", |reading| reading.wake_last_generation == 2 && reading.wake_next == 2);
+    assert_eq!(published.wake_handles, 1, "RS-6 step 1: the data thread's freeze took the list, so only the end-wake is in it: {published:?}");
+    let manifest = s.run.finish_checked();
+    let calls = log.calls();
+    let wakes: Vec<&Call> = calls.iter().filter(|call| call.kind == CallKind::Schedule && call.handle.is_some()).collect();
+    assert_eq!(wakes.len(), 2, "the ordinary wake and the end-wake were scheduled; calls: {calls:?}");
+    let data = wakes[0].thread;
+    assert_eq!(wakes[1].thread, data, "both wakes are the data thread's: {wakes:?}");
+    let (h1, h2) = (wakes[0].handle.unwrap(), wakes[1].handle.unwrap());
+    let c1 = cancels_of(&calls, h1);
+    let c2 = cancels_of(&calls, h2);
+    assert_eq!(c1.len(), 1, "RS-6 step 1: h1 is cancelled once over both freezes; calls: {calls:?}");
+    assert_eq!(c2.len(), 1, "RS-6 step 1: h2 is cancelled once over both freezes; calls: {calls:?}");
+    assert!(c1[0].thread == data && c2[0].thread != data, "KC-46a: the data thread's freeze cancels h1, the cleanup's h2: {c1:?} {c2:?}");
+    assert!(c1[0].held.freeze && c2[0].held.freeze && c1[0].returned == Some(true) && c2[0].returned == Some(true), "KC-24a: both cancels run under the gate and found a pending wake: {c1:?} {c2:?}");
+    assert!(manifest.termination.cleanup_failures.is_empty(), "the cleanup recorded failures: {:?}", manifest.termination.cleanup_failures);
+}
+
+#[test]
+fn kc_46a_the_wake_list_is_bounded() {
+    // KC-46a: the wake list holds the wakes not yet fired and at most one fired handle: after
+    // ten rounds of a wake that fires, it holds one entry, not ten.
+    // `woken_rounds`' pattern: each round's release comes only after the control loop is
+    // seen parked for a fresh horizon, so the round's wake fires and is the only one in
+    // flight; the final handle's publication is observed (`wake_last_generation ==
+    // wake_next`) before the list is counted, so the count never reads a list one
+    // publication short.
+    // Deschedule: the control loop parks before each release, the data thread's wake of a
+    // round publishes before the next round's wake (the round's `found` follows its
+    // callback, which follows its own `schedule`), and the final wait is a condition.
+    let probe = Probe::new();
+    let marks = release();
+    let threads = Threads::new();
+    let (rig, park) = paced_parked(|authority| authority);
+    let double = ThreadedProvider::new("radio", "radio", &probe).marking_on("test.MARK", marks.clone());
+    let mut run = {
+        let (probe, threads) = (probe.clone(), threads.clone());
+        let _installed = start_probe::install(move |point, p| {
+            entered(point, p, &probe, &threads);
+        });
+        session(provider(rig.assembly, "radio", double), &profile_one())
+    };
+    let mark = kind("test.MARK");
+    let mut from = 0;
+    for round in 0..10 {
+        let horizon = after(&run, Wall::from_secs(3600));
+        let tick = horizon.ticks_in(horizon.domain()).unwrap();
+        let (found_tx, found) = mpsc::channel();
+        let (run_tx, returned) = mpsc::channel();
+        let mark = mark.clone();
+        let worker = std::thread::spawn(move || {
+            let index = run.wait_for(std::slice::from_ref(&mark), from, horizon).unwrap().expect("the delivered mark is found before the horizon");
+            let _ = found_tx.send(index);
+            let _ = run_tx.send(run);
+        });
+        assert!(park.wait_parked_until(tick, Wall::from_secs(10)), "{}", infra(format!("round {round}: the control loop never waited for the horizon")));
+        release_one(&marks);
+        from = found.recv_timeout(Wall::from_secs(10)).unwrap_or_else(|_| panic!("{}", infra(format!("round {round}: a delivery did not wake the waiting call")))) + 1;
+        run = returned.recv_timeout(Wall::from_secs(10)).unwrap_or_else(|_| panic!("{}", infra("the worker did not return the Run within 10 s")));
+        worker.join().expect("the round's worker does not panic");
+    }
+    let reading = threads.wait_reading("the last wake published", |reading| reading.wake_next >= 10 && reading.wake_last_generation == reading.wake_next);
+    assert_eq!(reading.wake_handles, 1, "KC-46a: ten fired wakes left more than one entry in the list: {reading:?}");
+    let _ = run.finish_checked();
+}
+
+/// Runs `finish` on a worker and returns its Manifest channel; the test waits on it with the infra bound.
+fn finish_on_worker(run: RunHandle) -> (std::thread::JoinHandle<()>, mpsc::Receiver<Manifest>) {
+    let (tx, rx) = mpsc::channel();
+    (std::thread::spawn(move || drop(tx.send(run.finish()))), rx)
+}
+
+fn manifest_within(rx: &mpsc::Receiver<Manifest>, what: &str) -> Manifest {
+    rx.recv_timeout(Wall::from_secs(10)).unwrap_or_else(|_| panic!("{}", infra(format!("{what}: no Manifest within 10 s"))))
+}
+
+#[test]
+fn kc_46a_a_wake_accepted_before_the_cleanups_freeze_and_published_after_it_is_never_cancelled() {
+    // KC-46a, RS-6 step 1: the data thread's ordinary wake is parked after the Authority
+    // accepted it (handle h) and before h reaches the list. The cleanup's freeze then takes
+    // the (empty) list and closes it; when the publisher resumes, it finds the list closed
+    // and drops h: nothing cancels it, and the wake stays scheduled as a no-op.
+    // No `next_wakeup` runs, so h never fires. Deschedule: the park opens only after the
+    // freeze reached `Done` on the cleanup's thread with the list closed and empty (the
+    // reading), so the publisher's decision never races the freeze; the data thread's own
+    // schedule is irrelevant until then. The parked data thread is joined by cleanup step 3
+    // under RS-8a's default 5 s bound: if the park stays shut for longer, step 3 is abandoned
+    // and the final cleanup-failure assertion fails, so the test opens it as soon as it can.
+    let probe = Probe::new();
+    let log = ClockLog::default();
+    let threads = Threads::new();
+    let park = gate();
+    let _open = OpenOnDrop(park.clone());
+    let accepted = Arc::new(Mutex::new(None::<Call>));
+    let on_schedule_return = park_first_data_wake(&probe, &park, &accepted);
+    let s = wake_session(&probe, &log, &threads, Hooks { on_schedule_return: Some(Arc::new(on_schedule_return)), ..Hooks::default() });
+    release_one(&s.marks);
+    assert!(probe.wait_for("wake:accepted", Wall::from_secs(10)), "{}", infra("the data thread's wake was not accepted within 10 s"));
+    // The publisher is parked, so the list is stable: open and empty, one wake issued.
+    let before = threads.read().expect("the Run is live");
+    assert!(!before.wake_closed && before.wake_handles == 0 && before.wake_next == 1, "KC-46a: the parked wake's list is not the open, empty one: {before:?}");
+    let (finisher, manifest_rx) = finish_on_worker(s.run);
+    threads.wait_reading("the list closed by the cleanup's freeze", |reading| reading.wake_closed);
+    assert!(probe.wait_until(|lines| lines.iter().any(|line| line.starts_with("freeze:Done:")), Wall::from_secs(10)), "{}", infra("the cleanup's freeze did not reach Done within 10 s"));
+    let h = accepted.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the accepted wake was recorded");
+    assert!(cancels_of(&log.calls(), h.handle.unwrap()).is_empty(), "KC-46a: the freeze cancelled a handle it never held; calls: {:?}", log.calls());
+    open(&park);
+    let manifest = manifest_within(&manifest_rx, "the cleanup after the wake was published");
+    finisher.join().expect("W_f does not panic");
+    // The data thread is joined by cleanup step 3, so a cancel its publisher made would be in the log by now.
+    let calls = log.calls();
+    assert!(cancels_of(&calls, h.handle.unwrap()).is_empty(), "KC-46a: the wake published into the closed list was cancelled, by the freeze or its publisher; calls: {calls:?}");
+    assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
+}
+
+#[test]
+fn kc_46a_the_data_threads_end_wake_published_after_its_freeze_is_cancelled_by_the_cleanups() {
+    // KC-46a, RS-6, RS-7: the data thread's end-wake (h) is accepted after its own early
+    // performance of step 1 and parked before it reaches the list. The data thread's
+    // performance did not close the list, so h is pushed to the open list when the park
+    // opens, and the cleanup's performance cancels it: after the data thread's Provider stop,
+    // under the freeze gate, on the cleanup's thread, once.
+    // The Provider's loss opens the data thread's stop; no `next_wakeup` runs, so h never fires.
+    // Deschedule: the park is the data thread's only schedule return; the test reads the list
+    // open and empty while it is parked, and `finish` runs only after the reading shows h
+    // published, so the cleanup's performance always meets it in the list.
+    let probe = Probe::new();
+    let log = ClockLog::default();
+    let threads = Threads::new();
+    let park = gate();
+    let _open = OpenOnDrop(park.clone());
+    let accepted = Arc::new(Mutex::new(None::<Call>));
+    let on_schedule_return = park_first_data_wake(&probe, &park, &accepted);
+    let on_cancel = {
+        let probe = probe.clone();
+        move |call: &Call| probe.record(format!("cancel:{:?}", call.handle.unwrap()))
+    };
+    let s = wake_session(&probe, &log, &threads, Hooks { on_schedule_return: Some(Arc::new(on_schedule_return)), on_cancel: Some(Arc::new(on_cancel)), ..Hooks::default() });
+    open(&s.loss);
+    assert!(probe.wait_until(|lines| lines.iter().any(|line| line.starts_with("freeze:Done:")), Wall::from_secs(10)), "{}", infra("the data thread's freeze did not reach Done within 10 s"));
+    let data = *threads.data.lock().unwrap_or_else(|e| e.into_inner()).as_ref().expect("the data thread's freeze was recorded");
+    // The list was taken at that performance and is stable until the cleanup's: still open.
+    let after_freeze = threads.read().expect("the Run is live");
+    assert!(!after_freeze.wake_closed, "KC-46a: the data thread's performance closed the wake list: {after_freeze:?}");
+    assert!(probe.wait_for("wake:accepted", Wall::from_secs(10)), "{}", infra("the data thread's end-wake was not accepted within 10 s"));
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| *line == format!("freeze:Done:{data:?}")), "the end-wake is not after the data thread's performance of step 1: {lines:?}");
+    // The publisher is parked after the data thread's performance, so the list is stable: that performance left it open and empty.
+    let parked = threads.read().expect("the Run is live");
+    assert!(!parked.wake_closed && parked.wake_handles == 0 && parked.wake_next == 1, "KC-46a: the data thread's performance closed the wake list or left a handle: {parked:?}");
+    open(&park);
+    threads.wait_reading("the end-wake published", |reading| reading.wake_handles == 1 && reading.wake_last_generation == reading.wake_next);
+    let manifest = s.run.finish_checked();
+    let calls = log.calls();
+    let h = accepted.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the accepted wake was recorded");
+    let cancels = cancels_of(&calls, h.handle.unwrap());
+    assert_eq!(cancels.len(), 1, "KC-46a: the end-wake is cancelled exactly once; calls: {calls:?}");
+    assert_ne!(cancels[0].thread, data, "KC-46a: the data thread's performance closed the list: it cancelled its own end-wake; {cancels:?}");
+    assert!(cancels[0].held.freeze && cancels[0].returned == Some(true), "KC-24a: the cleanup cancels the end-wake under the gate while it is pending: {cancels:?}");
+    let lines = probe.lines();
+    let last_stop = lines.iter().rposition(|line| line.starts_with("freeze:BeforeStop:")).expect("the data thread stopped the Provider");
+    let cancelled = lines.iter().position(|line| *line == format!("cancel:{:?}", h.handle.unwrap())).expect("the cancel was recorded");
+    assert!(last_stop < cancelled, "RS-7: the end-wake's cancel is not after the data thread's last Provider stop: {lines:?}");
+    assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
+}
+
+#[test]
+fn kc_46a_a_wake_after_the_cleanups_freeze_schedules_nothing() {
+    // KC-46a: once the cleanup's performance of step 1 closed the list, the data thread's
+    // ordinary wakes schedule nothing (no `schedule`, so no handle to cancel): a wake that
+    // scheduled and at once cancelled would sit beside every delivery until the data thread
+    // is joined.
+    // The freeze hook parks the cleanup thread at its `Done` (list closed, gate held); the
+    // Provider then emits a mark, the data thread delivers it and calls `wake`, and the test
+    // waits for three data-thread `now()` reads after the mark was emitted. The first pass whose
+    // drain follows the emission is the one in progress or the next; a wake that did not stop at
+    // the closed list reads `now()` itself, and its `schedule` follows that read. Of the three
+    // reads, the last begins a pass after that wake call returned, whichever pass delivered and
+    // whether or not the wake reads the time. The log must hold no Schedule and no Cancel after
+    // the `Done`.
+    // Deschedule: the data thread descheduled anywhere only delays the pass count; the mark
+    // is released only after the park was reached, so the order the test names cannot flip.
+    // The cleanup thread sits at `Done` under RS-8a's default 5 s bound for FreezeDispatch, so
+    // the three reads must come within it, or the freeze is abandoned and the final
+    // cleanup-failure assertion fails (rather than the 10 s infra bound).
+    let probe = Probe::new();
+    let log = ClockLog::default();
+    let threads = Threads::new();
+    let hold = gate();
+    let _open = OpenOnDrop(hold.clone());
+    let data_nows = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let on_now = {
+        let data_nows = data_nows.clone();
+        move |_call: &Call| {
+            if on_data_thread() {
+                data_nows.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    };
+    let done_at = Arc::new(Mutex::new(None::<usize>));
+    let s = {
+        let s = wake_session(&probe, &log, &threads, Hooks { on_now: Some(Arc::new(on_now)), ..Hooks::default() });
+        let run_probe = threads.run.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("Entered stored the Run's probe");
+        let (hold, log, done_at, probe) = (hold.clone(), log.clone(), done_at.clone(), probe.clone());
+        run_probe.on_freeze(move |point, _reading| {
+            if point == FreezePoint::Done {
+                *done_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(log.calls().len());
+                probe.record("freeze:parked");
+                wait(&hold);
+            }
+        });
+        s
+    };
+    let (finisher, manifest_rx) = finish_on_worker(s.run);
+    assert!(probe.wait_for("freeze:parked", Wall::from_secs(10)), "{}", infra("the cleanup's freeze did not reach Done within 10 s"));
+    let closed = threads.read().expect("the Run is live");
+    assert!(closed.wake_closed, "KC-46a: the cleanup's performance did not close the wake list: {closed:?}");
+    release_one(&s.marks);
+    assert!(probe.wait_for("radio:marked:test.MARK", Wall::from_secs(10)), "{}", infra("the Provider did not emit its mark within 10 s"));
+    let emitted = data_nows.load(Ordering::SeqCst);
+    let deadline = Instant::now() + Wall::from_secs(10);
+    while data_nows.load(Ordering::SeqCst) < emitted + 3 {
+        assert!(Instant::now() < deadline, "{}", infra("the data thread did not read the time three times within 10 s"));
+        std::thread::yield_now();
+    }
+    // The mark was delivered, so the data thread called `wake` on the closed list; the list is
+    // closed before `wake` counts a generation, so none was counted. (A wake that went on to
+    // `schedule` counts first, so this holds whatever the log has caught by now.)
+    let after = threads.read().expect("the Run is live");
+    assert!(after.delivered_len > closed.delivered_len, "{}", infra(format!("the mark was not delivered: {closed:?} -> {after:?}")));
+    assert_eq!(after.wake_next, 0, "KC-46a: a wake counted a generation after the cleanup's freeze closed the list: {after:?}");
+    let calls = log.calls();
+    let from = done_at.lock().unwrap_or_else(|e| e.into_inner()).expect("the freeze recorded its Done");
+    let after_done: Vec<&Call> = calls[from..].iter().filter(|call| matches!(call.kind, CallKind::Schedule | CallKind::Cancel)).collect();
+    assert!(after_done.is_empty(), "KC-46a: a wake scheduled or cancelled after the cleanup's freeze closed the list: {after_done:?}");
+    open(&hold);
+    let manifest = manifest_within(&manifest_rx, "the cleanup after the freeze was released");
+    finisher.join().expect("W_f does not panic");
+    assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
 }

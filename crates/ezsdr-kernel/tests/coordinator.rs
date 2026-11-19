@@ -2251,13 +2251,8 @@ fn kc_45_manifest_fields() {
     assert!(matches!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }));
 }
 
-#[test]
-fn ka_18_nonzero_link_drops_reach_the_manifest() {
-    // SC-20: the Manifest's `links` is `shared.links` and step 6's `link_drops` zipped by
-    // index, so a record must carry **its own** link's count. One link cannot tell that
-    // apart from a record that always reads the first: the Plan here has two, and only
-    // the Island's drops.
-    // The feed keeps `output_docs`'s capacity of 4, so only the Island's link drops.
+/// A Spec Run with two links: the graph link `radio.rx -> c1.in` (capacity 1, placement first) and the feed `radio.rx -> rec.in`, and the Executor `exec` hosting `c1` (SC-20).
+fn two_link_docs() -> (serde_json::Value, serde_json::Value) {
     let (mut spec, mut profile) = output_docs();
     let mut component = support::recorder_component(support::cf32());
     component.id = Ident::parse("c1").unwrap();
@@ -2287,6 +2282,17 @@ fn ka_18_nonzero_link_drops_reach_the_manifest() {
             "to": { "component": "c1", "port": "in" }
         }),
     );
+    (spec, profile)
+}
+
+#[test]
+fn ka_18_nonzero_link_drops_reach_the_manifest() {
+    // SC-20: the Manifest's `links` is `shared.links` and step 6's `link_drops` zipped by
+    // index, so a record must carry **its own** link's count. One link cannot tell that
+    // apart from a record that always reads the first: the Plan here has two, and only
+    // the Island's drops.
+    // The feed keeps `output_docs`'s capacity of 4, so only the Island's link drops.
+    let (spec, profile) = two_link_docs();
     let probe = Probe::new();
     let mut assembly = output_assembly(&probe, None, None);
     assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe)));
@@ -4637,7 +4643,7 @@ fn kc_24a_freeze_runs_cancels_outside_the_admission_lock() {
     let points: Vec<start_probe::FreezePoint> = readings.iter().map(|(point, _)| *point).collect();
     assert_eq!(
         points,
-        [start_probe::FreezePoint::Serialise, start_probe::FreezePoint::Serialised, start_probe::FreezePoint::BeforeDrop, start_probe::FreezePoint::BeforeWakeTake, start_probe::FreezePoint::Done,],
+        [start_probe::FreezePoint::Serialise, start_probe::FreezePoint::Serialised, start_probe::FreezePoint::BeforeDrop, start_probe::FreezePoint::Done,],
         "one performance of RS-6 step 1 reaches each point once, in order: {readings:?}"
     );
     let thread = readings[0].1.thread;
@@ -4649,10 +4655,8 @@ fn kc_24a_freeze_runs_cancels_outside_the_admission_lock() {
     assert!(serialised.held.freeze && !serialised.held.admission, "KC-24a: Serialised is not between the gate and the admission lock: {serialised:?}");
     let before_drop = at(start_probe::FreezePoint::BeforeDrop);
     assert!(before_drop.held.freeze && before_drop.held.admission && before_drop.dispatch_frozen, "KC-24a: BeforeDrop is not under both locks with dispatch frozen: {before_drop:?}");
-    let before_wake = at(start_probe::FreezePoint::BeforeWakeTake);
-    assert!(before_wake.held.freeze && !before_wake.held.admission && before_wake.dispatch_frozen, "KC-24a: the wake handle is taken under the admission lock: {before_wake:?}");
     let done = at(start_probe::FreezePoint::Done);
-    assert!(done.held.freeze && !done.held.admission, "KC-24a: Done is not under the gate alone: {done:?}");
+    assert!(done.held.freeze && !done.held.admission && done.dispatch_frozen, "KC-24a: Done is not under the gate alone with dispatch frozen: {done:?}");
 
     assert!(manifest.termination.cleanup_failures.is_empty(), "the cleanup recorded failures: {:?}", manifest.termination.cleanup_failures);
     assert!(manifest.termination.undelivered.is_empty(), "RS-16: the freeze discarded Actions: {:?}", manifest.termination.undelivered);
@@ -5102,4 +5106,236 @@ fn kc_24a_start_an_end_before_the_check_dispatches_nothing() {
     assert!(run.finish_checked().termination.undelivered.is_empty());
     trace.assert_extent(&[start_probe::Point::Entered, start_probe::Point::BeforePublish]);
     assert!(!trace.points().iter().any(|(point, _)| *point == start_probe::Point::BeforeDispatch), "{:?}", trace.points());
+}
+
+#[test]
+fn kc_24a_sweep_a_simulation_device_lost_stamps_its_event_under_no_lock() {
+    // KC-24a (#120 review): a Simulation Provider's `DeviceLost` is stamped by the Authority's `now()`
+    // after the round's fault vector was taken out, so the fault vector's mutex is not held across it:
+    // every call of the Run, `now()` of the `DEVICE_LOST` stamp included, ran with no lock held.
+    // Deschedule: the whole Run runs on this thread, so no preemption reorders the log.
+    let (mut spec, profile) = output_docs();
+    spec["schedule"] = serde_json::json!([{ "at": { "clock": "radio", "offset_ticks": 1_000_000_000_000i64 }, "action": { "kind": "stop", "target": null } }]);
+    spec["policies"] = serde_json::json!({ "failure": { "ezsdr.DEVICE_LOST": "continue" } });
+    let probe = Probe::new();
+    let log = ClockLog::default();
+    let mut rig = rig(Pacing::FreeRunning);
+    rig.assembly.authority = Box::new(WatchedAuthority::new(rig.assembly.authority, log.clone()));
+    rig.assembly.host_clock = Arc::new(WatchedClock::new(rig.host.clone(), log.clone()));
+    rig.assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 10, 1).registering_at_arm("radio/rx").device_lost_at(0)),
+    );
+    rig.assembly.sinks.insert(Ident::parse("rec").unwrap(), Box::new(RecordingSink::new("rec", &probe)));
+    rig.assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe)));
+    let run = start_spec_run(&spec, &profile, rig.assembly).expect("the fixture Run starts");
+    rig.manual.advance_to(TimePoint::new(rig.root, 500)).expect("the manual clock advances");
+    let manifest = run.finish_checked();
+    let lost = ezsdr_kernel::event::EventKind::parse("ezsdr.DEVICE_LOST").unwrap();
+    assert!(manifest.events.delivered.iter().any(|event| event.kind == lost), "the fixture never lost its device, so the sweep says nothing about the stamp");
+    let calls = log.calls();
+    sweep(&calls, &manifest.run.transitions, rig.root);
+}
+
+/// The field types of `struct Shared` that are not locks of the coordinator's own.
+const NON_LOCK_FIELDS: [&str; 10] =
+    ["Context", "Vec<ProviderSlot>", "Vec<SinkSlot>", "Vec<ExecutorSlot>", "Arc<dyn Authority>", "Arc<dyn TimeAuthority>", "ClockDomainId", "Atomic", "OnceLock<", "Arc<AtomicU64>"];
+/// The fields that stay a raw `Mutex`: a Module's thread takes `store` without the coordinator, and a test installs `freeze_hook`.
+const RAW_MUTEX_FIELDS: [&str; 2] = ["store", "freeze_hook"];
+
+/// The fields of `struct Shared` whose type is neither `Locked<..>`, a named non-lock type nor an excluded field.
+fn unrecorded_fields(text: &str) -> Vec<String> {
+    let body = text.split("pub(super) struct Shared {").nth(1).and_then(|rest| rest.split("\n}\n").next()).expect("the source has `struct Shared`");
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//") && !line.starts_with("#["))
+        .filter_map(|line| {
+            let (name, ty) = line.trim_start_matches("pub(super) ").split_once(':')?;
+            let ty = ty.trim();
+            let holds_lock = ["Mutex<", "RwLock<", "Condvar"].iter().any(|lock| ty.contains(lock));
+            let known = ty.starts_with("Locked<") || (NON_LOCK_FIELDS.iter().any(|prefix| ty.starts_with(prefix)) && !holds_lock) || RAW_MUTEX_FIELDS.contains(&name);
+            (!known).then(|| name.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn kc_24a_every_shared_lock_is_a_recording_lock() {
+    // KC-24a: every field of `struct Shared` is a `Locked<T>` (so the sweep sees its guard), a named non-lock type, or one of the two raw mutexes. A mutex behind a type alias, an `RwLock` or any other new type is unknown and fails. Out of scope: the slot locks (`ProviderSlot` and the like, a Module's own) and `Queue.state`, which live outside `Shared`; the round's fault vector lives there too and is checked below.
+    let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/coordinator/state.rs")).unwrap();
+    let unknown = unrecorded_fields(&text);
+    assert!(unknown.is_empty(), "KC-24a: a field of `Shared` that is not a `Locked<T>` or a named non-lock type: {unknown:?}");
+    for name in RAW_MUTEX_FIELDS {
+        let declared = text.lines().any(|line| line.trim_start().starts_with(&format!("pub(super) {name}: ")) && line.contains("Mutex<"));
+        assert!(declared, "the exclusion list names {name}, which is no longer a raw mutex field of `Shared`");
+    }
+    for (from, to) in [("pub(super) links: Locked<", "pub(super) links: Mutex<"), ("pub(super) links: Locked<Vec<(DataLinkDecl, Arc<dyn crate::stream::DataLink>)>>", "pub(super) links: LinkTable")] {
+        let mutated = text.replace(from, to);
+        assert_ne!(mutated, text, "the self-check's replacement matched");
+        assert!(unrecorded_fields(&mutated).contains(&"links".to_owned()), "the scan misses `{to}`");
+    }
+    let stepping = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/coordinator/stepping.rs")).unwrap();
+    assert!(stepping.contains("struct Fault(Locked<"), "KC-24a: the round's fault vector is a raw mutex, so a supplied call under it is not seen");
+    let hidden = text.replace("pub(super) routing: OnceLock<Routing>", "pub(super) routing: OnceLock<Mutex<Routing>>");
+    assert_ne!(hidden, text, "the self-check's replacement matched");
+    assert!(unrecorded_fields(&hidden).contains(&"routing".to_owned()), "the scan accepts a lock inside an allowed type");
+}
+
+#[test]
+fn kc_24a_sweep_a_run_with_a_link_makes_no_supplied_call_under_a_lock() {
+    // KC-24a (#121): a Simulation Run with a Sink and a link, finished: RS-6 step 6's
+    // `drops()` is a supplied call, made in the Stopping window and, like every other,
+    // with no lock of the coordinator's held; the Manifest reads the count it returned.
+    // Deschedule: the whole Run runs on this thread (the Sink's and the Provider's calls
+    // too), so no thread's preemption reorders the log.
+    let (mut spec, profile) = output_docs();
+    // H, the far-future untimed stop (KC-20), so the Run schedules and cancels like T11's.
+    spec["schedule"] = serde_json::json!([{ "at": { "clock": "radio", "offset_ticks": 1_000_000_000_000i64 }, "action": { "kind": "stop", "target": null } }]);
+    let probe = Probe::new();
+    let log = ClockLog::default();
+    let mut rig = rig(Pacing::FreeRunning);
+    rig.assembly.authority = Box::new(WatchedAuthority::new(rig.assembly.authority, log.clone()));
+    rig.assembly.host_clock = Arc::new(WatchedClock::new(rig.host.clone(), log.clone()));
+    rig.assembly
+        .providers
+        .insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 10, 1).registering_at_arm("radio/rx")));
+    rig.assembly.sinks.insert(Ident::parse("rec").unwrap(), Box::new(RecordingSink::new("rec", &probe)));
+    rig.assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe).logging_drops(&log)));
+    let run = start_spec_run(&spec, &profile, rig.assembly).expect("the fixture Run starts");
+    rig.manual.advance_to(TimePoint::new(rig.root, 500)).expect("the manual clock advances");
+    let manifest = run.finish_checked();
+    let calls = log.calls();
+    let phases = sweep(&calls, &manifest.run.transitions, rig.root);
+    let drops: Vec<(usize, &Call)> = calls.iter().enumerate().filter(|(_, call)| call.kind == CallKind::Drops).collect();
+    assert_eq!(drops.len(), 1, "RS-6 step 6: one link, one drops() call; calls: {calls:?}");
+    assert!(phases.stopping.contains(&drops[0].0), "RS-6 step 6: the drops() call is not in the Stopping window; phases: {phases:?}; calls: {calls:?}");
+    assert_eq!(drops[0].1.held, support::start_window::Held::default(), "KC-24a: drops() ran under a lock; calls: {calls:?}");
+    assert_eq!(manifest.links.len(), 1, "{:?}", manifest.links);
+    assert_eq!(manifest.links[0].drops, Some(0), "SC-20: the Manifest lost the count step 6 read");
+    assert!(manifest.termination.cleanup_failures.is_empty(), "the cleanup recorded failures: {:?}", manifest.termination.cleanup_failures);
+}
+
+/// What `run_with_wedged_drops` returns once the Manifest has arrived. `_release` opens the wedge when it drops.
+struct WedgedDrops {
+    manifest: ezsdr_kernel::manifest::Manifest,
+    probe: Probe,
+    log: ClockLog,
+    before_release: Arc<std::sync::atomic::AtomicUsize>,
+    /// The abandoned `drops()` had not returned when the Manifest arrived.
+    still_parked: bool,
+    _release: OpenOnDrop,
+}
+
+/// Two links, the second's `drops()` wedged in RS-6 step 6 after the first returned a seeded 1: finishes the Run on a thread and waits for its Manifest. With `early_release`, the wedge opens on the `CleanedUp` transition's `Now`, after the timeout was recorded and before the Manifest is assembled; without it, it stays parked until the Manifest has arrived.
+fn run_with_wedged_drops(early_release: bool) -> WedgedDrops {
+    let (spec, profile) = two_link_docs();
+    let probe = Probe::new();
+    let log = ClockLog::default();
+    let wedge = gate();
+    let _release = OpenOnDrop(wedge.clone());
+    let run_probe: Arc<Mutex<Option<start_probe::Probe>>> = Arc::new(Mutex::new(None));
+    let before_release = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+    let on_now = {
+        let (probe, log, wedge, run_probe, before_release) = (probe.clone(), log.clone(), wedge.clone(), run_probe.clone(), before_release.clone());
+        let released = AtomicBool::new(false);
+        move |_call: &Call| {
+            if log.calls().iter().filter(|call| call.kind == CallKind::Drops).count() < 2 || released.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let reading = || run_probe.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(start_probe::Probe::read).map(|reading| reading.link_drops_len);
+            before_release.store(reading().unwrap_or(usize::MAX - 1), Ordering::SeqCst);
+            open(&wedge);
+            let begun = std::time::Instant::now();
+            while reading() != Some(2) && begun.elapsed() < std::time::Duration::from_secs(10) {
+                std::thread::yield_now();
+            }
+            probe.record(if reading() == Some(2) { "hook:late_write_done" } else { "hook:late_write_timeout" });
+        }
+    };
+    let mut assembly = output_assembly(&probe, None, None);
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe)));
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe).seeding_one_drop_into("c1").wedging_drops_of(1, &wedge, &log)));
+    let on_now: Option<support::start_window::CallHook> = early_release.then(|| Arc::new(on_now) as support::start_window::CallHook);
+    assembly.authority = Box::new(WatchedAuthority::new(assembly.authority, log.clone()).with_hooks(Hooks { on_now, ..Hooks::default() }));
+    assembly.host_clock = Arc::new(WatchedClock::new(Arc::new(FakeHostClock::new()), log.clone()));
+    let slot = run_probe.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, p| {
+            if point == start_probe::Point::Entered {
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
+            }
+        },
+        move || start_spec_run(&spec, &profile, assembly),
+    );
+    let run = started.finish();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let finisher = std::thread::spawn(move || {
+        let _ = tx.send(run.finish());
+    });
+    let manifest = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(manifest) => manifest,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            finisher.join().expect("the finisher does not panic");
+            panic!("the finisher returned no Manifest");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("{}", infra("the Manifest did not arrive within 30 s")),
+    };
+    let still_parked = !probe.lines().iter().any(|line| line == "link:drops:returned:1");
+    finisher.join().expect("the finisher does not panic");
+    WedgedDrops { manifest, probe, log, before_release, still_parked, _release }
+}
+
+#[test]
+fn kc_24a_cleanup_calls_drops_with_no_lock_and_a_wedged_drops_does_not_hang_the_manifest() {
+    // KC-24a, KC-44, KC-45 (#121): the second of two links' `drops()` wedges in RS-6 step 6
+    // after the first returned a seeded 1. (1) Both `drops()` entries logged no lock held;
+    // (2) while it is wedged and RS-8a has abandoned the step, `link_drops` holds nothing
+    // (the snapshot is all or none); the abandoned call is then released on the
+    // `CleanedUp` transition's `Now` -- after the timeout was recorded, before the
+    // Manifest is assembled -- and writes its complete snapshot; (3) the Manifest arrives
+    // with the `FlushEvents` timeout recorded and (4) every link's `drops` null, the late
+    // snapshot refused.
+    // Deschedule: the hook runs on the cleanup thread at the `CleanedUp` sample, which
+    // follows the abandonment whatever the worker's schedule: it keys on the logged
+    // `drops()` entries, not on the worker's later probe line, and every wait in it is a
+    // condition; the test thread only waits for the Manifest.
+    let WedgedDrops { manifest, probe, log, before_release, .. } = run_with_wedged_drops(true);
+    assert!(probe.wait_for("hook:late_write_done", std::time::Duration::from_secs(10)), "{}; lines: {:?}", infra("the release hook did not see the late snapshot written"), probe.lines());
+    assert!(probe.wait_for("link:drops:returned:1", std::time::Duration::from_secs(10)), "{}", infra("the abandoned drops() did not return within 10 s"));
+    let calls = log.calls();
+    let drops: Vec<(usize, &Call)> = calls.iter().enumerate().filter(|(_, call)| call.kind == CallKind::Drops).collect();
+    assert_eq!(drops.len(), 2, "RS-6 step 6: two links, two drops() calls; calls: {calls:?}");
+    for (_, call) in &drops {
+        assert_eq!(call.held, support::start_window::Held::default(), "KC-24a: drops() ran under a lock; calls: {calls:?}");
+    }
+    // The hook opened the gate at the first `Now` after the second entry: the CleanedUp transition's, the last `Utc`'s predecessor on its thread.
+    let released_at = calls.iter().enumerate().skip(drops[1].0).find(|(_, call)| call.kind == CallKind::Now).map(|(index, _)| index).expect("a Now follows the wedged drops() entry");
+    assert_eq!(calls.iter().rposition(|call| call.kind == CallKind::Utc), Some(released_at + 1), "the release was not at the CleanedUp sample; calls: {calls:?}");
+    assert_eq!(before_release.load(Ordering::SeqCst), 0, "RS-6 step 6: a partial snapshot was stored while the second drops() was wedged");
+    let flush: Vec<_> = manifest.termination.cleanup_failures.iter().filter(|failure| failure.step == ezsdr_kernel::run::CleanupStep::FlushEvents).collect();
+    assert!(flush.len() == 1 && flush[0].timed_out, "RS-8a: step 6 was not recorded as abandoned: {:?}", manifest.termination.cleanup_failures);
+    assert_eq!(manifest.links.iter().map(|link| link.drops).collect::<Vec<_>>(), [None, None], "KC-45: an abandoned step 6's late snapshot reached the Manifest");
+    assert!(manifest.hash.is_some());
+}
+
+#[test]
+fn kc_24a_a_wedged_drops_parked_until_the_manifest_arrives_does_not_hold_it_up() {
+    // KC-24a, KC-45 (#121): the second link's `drops()` stays wedged for the whole of RS-6
+    // step 6, RS-8a's abandonment of it and the Manifest's assembly. The Manifest arrives with
+    // the `FlushEvents` timeout recorded and every `drops` null while the abandoned call has
+    // not returned: assembly waits on no lock and no signal the wedged call holds; the call
+    // is released only afterwards, and the sealed Manifest is not changed by its late return.
+    // Deschedule: the wedge opens only after the Manifest arrived (the helper's order), and
+    // the only timing is the 30 s infra backstop.
+    let WedgedDrops { manifest, probe, log, still_parked, _release, .. } = run_with_wedged_drops(false);
+    assert!(still_parked, "the abandoned drops() returned before the Manifest arrived, so the Manifest did not arrive while it was parked; lines: {:?}", probe.lines());
+    let flush: Vec<_> = manifest.termination.cleanup_failures.iter().filter(|failure| failure.step == ezsdr_kernel::run::CleanupStep::FlushEvents).collect();
+    assert!(flush.len() == 1 && flush[0].timed_out, "RS-8a: step 6 was not recorded as abandoned: {:?}", manifest.termination.cleanup_failures);
+    assert_eq!(manifest.links.iter().map(|link| link.drops).collect::<Vec<_>>(), [None, None], "KC-45: a Manifest sealed while step 6's call was parked carries a count");
+    assert!(manifest.hash.is_some());
+    drop(_release);
+    assert!(probe.wait_for("link:drops:returned:1", std::time::Duration::from_secs(10)), "{}", infra("the abandoned drops() did not return within 10 s"));
+    let calls = log.calls();
+    assert_eq!(calls.iter().filter(|call| call.kind == CallKind::Drops).count(), 2, "RS-6 step 6: two links, two drops() calls; calls: {calls:?}");
 }

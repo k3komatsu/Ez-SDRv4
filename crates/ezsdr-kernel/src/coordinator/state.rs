@@ -163,12 +163,28 @@ pub(super) struct Routing {
     pub(super) reverse: Vec<Ident>,
 }
 
-/// One of the coordinator's serialising locks (KC-24a: admission, machine, freeze gate). The mutex is private to this module, so it is taken only through `Shared`'s recording helpers; `is_held` is the one non-blocking observation a probe may make.
-pub(super) struct Serial<T>(Mutex<T>);
+/// A lock of the coordinator's own (KC-24a). The mutex is private to this module, so it is taken only through `lock`, which tolerates poison and counts the guard in the taking thread's record under `which`; `is_held` is the one non-blocking observation a probe may make.
+pub(super) struct Locked<T>(Mutex<T>, Which);
 
-impl<T> Serial<T> {
-    pub(super) fn new(value: T) -> Serial<T> {
-        Serial(Mutex::new(value))
+impl<T> Locked<T> {
+    /// A lock the record counts only as "some coordinator lock" (`Which::State`).
+    pub(super) fn new(value: T) -> Locked<T> {
+        Locked(Mutex::new(value), Which::State)
+    }
+
+    /// One of the serialising locks (admission, machine, freeze gate), which the record names.
+    pub(super) fn serial(which: Which, value: T) -> Locked<T> {
+        Locked(Mutex::new(value), which)
+    }
+
+    /// Poison-tolerant lock (§0.6 rule 7).
+    pub(super) fn lock(&self) -> Guard<'_, T> {
+        recorded(lock(&self.0), self.1)
+    }
+
+    /// The lock, or `None` when another thread holds it; a poisoned lock is taken like `try_slot`.
+    pub(super) fn try_lock(&self) -> Option<Guard<'_, T>> {
+        try_slot(&self.0).map(|guard| recorded(guard, self.1))
     }
 
     /// Whether some thread holds the lock, by a `try_lock` that records nothing and never blocks.
@@ -176,6 +192,22 @@ impl<T> Serial<T> {
     pub(super) fn is_held(&self) -> bool {
         matches!(self.0.try_lock(), Err(TryLockError::WouldBlock))
     }
+}
+
+/// A wake whose `schedule` returned its handle (KC-46a).
+pub(super) struct PendingWake {
+    #[cfg(feature = "testing")]
+    pub(super) generation: u64,
+    pub(super) handle: ScheduleHandle,
+    /// Set by the wake's callback: a fired wake needs no cancel and leaves the list at the next publish.
+    pub(super) fired: Arc<AtomicBool>,
+}
+
+/// The wake handles the coordinator holds (KC-46a, RS-6 step 1): a performance of step 1 takes the whole list; the cleanup's performance, the last, also closes it, and a wake whose `schedule` returns after that holds no handle and leaves its callback scheduled as a no-op.
+#[derive(Default)]
+pub(super) struct WakeList {
+    pub(super) handles: Vec<PendingWake>,
+    pub(super) closed: bool,
 }
 
 /// Everything a cleanup step can touch (spec 06 §3).
@@ -189,50 +221,50 @@ pub(super) struct Shared {
     pub(super) primary: ClockDomainId,
     pub(super) last_now: AtomicI64,
     pub(super) routing: OnceLock<Routing>,
-    pub(super) machine: Serial<RunStateMachine>,
+    pub(super) machine: Locked<RunStateMachine>,
     pub(super) collector: OnceLock<Arc<EventCollector>>,
     pub(super) policy: OnceLock<Policy>,
-    pub(super) configuration: Mutex<BTreeMap<Ident, BTreeMap<Key, Value>>>,
+    pub(super) configuration: Locked<BTreeMap<Ident, BTreeMap<Key, Value>>>,
     pub(super) next_action: AtomicU64,
     pub(super) frozen: AtomicBool,
-    pub(super) delivered: Mutex<Vec<Event>>,
-    pub(super) marks: Mutex<Vec<(EventKind, TimePoint)>>,
-    pub(super) end: Mutex<Option<EndRequest>>,
-    pub(super) also: Mutex<Vec<Termination>>,
+    pub(super) delivered: Locked<Vec<Event>>,
+    pub(super) marks: Locked<Vec<(EventKind, TimePoint)>>,
+    pub(super) end: Locked<Option<EndRequest>>,
+    pub(super) also: Locked<Vec<Termination>>,
     /// The ids RS-6 step 1 discarded from the queues (RS-16).
-    pub(super) undelivered: Mutex<Vec<ActionId>>,
+    pub(super) undelivered: Locked<Vec<ActionId>>,
     /// Each Sink's artifacts, under its output (RS-38).
-    pub(super) artifacts: Mutex<BTreeMap<Ident, Vec<ArtifactRef>>>,
-    pub(super) links: Mutex<Vec<(DataLinkDecl, Arc<dyn crate::stream::DataLink>)>>,
-    pub(super) link_drops: Mutex<Vec<u64>>,
-    pub(super) counters: Mutex<Option<Vec<crate::event::CounterRow>>>,
-    pub(super) prepared: Mutex<BTreeSet<Ident>>,
-    pub(super) done: Mutex<BTreeSet<(u8, Inst)>>,
+    pub(super) artifacts: Locked<BTreeMap<Ident, Vec<ArtifactRef>>>,
+    pub(super) links: Locked<Vec<(DataLinkDecl, Arc<dyn crate::stream::DataLink>)>>,
+    pub(super) link_drops: Locked<Vec<u64>>,
+    pub(super) counters: Locked<Option<Vec<crate::event::CounterRow>>>,
+    pub(super) prepared: Locked<BTreeSet<Ident>>,
+    pub(super) done: Locked<BTreeSet<(u8, Inst)>>,
     pub(super) drained: AtomicBool,
     pub(super) closing: AtomicBool,
-    pub(super) scheduled: Mutex<Vec<ScheduleHandle>>,
-    pub(super) cleanup_failures: Mutex<Vec<CleanupFailure>>,
+    pub(super) scheduled: Locked<Vec<ScheduleHandle>>,
+    pub(super) cleanup_failures: Locked<Vec<CleanupFailure>>,
     /// The Run's input store (KC-9, KC-28), here rather than in the `RunHandle` because
     /// admission reads it for a Module's burst too, from inside a round (KE-2).
     pub(super) store: Arc<Mutex<BTreeMap<crate::hash::ContentHash, Arc<[u8]>>>>,
     /// Serializes admission with dispatch and with the freeze (KC-24a).
-    pub(super) admission: Serial<()>,
+    pub(super) admission: Locked<()>,
     /// Serialises the performances of RS-6 step 1, the data thread's Provider stops of its early stop (KC-46b) and the control loop's withdrawal of its horizon (KC-24a). Taken before `admission`, and never by a Module's thread.
-    pub(super) freeze_gate: Serial<()>,
+    pub(super) freeze_gate: Locked<()>,
     /// The hook a test installs to watch a performance of RS-6 step 1 (testing builds only).
     #[cfg(feature = "testing")]
     pub(super) freeze_hook: Mutex<Option<super::start_probe::FreezeHook>>,
     /// The device-paced data thread, while it runs (KC-46).
-    pub(super) data: Mutex<Option<super::paced::DataThread>>,
+    pub(super) data: Locked<Option<super::paced::DataThread>>,
     /// The generation of the wake not yet fired, 0 for none, and the last one
     /// issued (KC-46a).
     pub(super) wake_pending: Arc<AtomicU64>,
     pub(super) wake_next: AtomicU64,
-    /// The pending wake's handle, apart from `scheduled` (KC-46a).
-    pub(super) wake_handle: Mutex<Option<ScheduleHandle>>,
+    /// The handles of the wakes the coordinator holds, apart from `scheduled` (KC-46a).
+    pub(super) wake_list: Locked<WakeList>,
     /// A Detached Lease's expiry in the host clock's monotonic milliseconds,
     /// mirrored for the data thread (KC-36).
-    pub(super) lease_deadline: Mutex<Option<u64>>,
+    pub(super) lease_deadline: Locked<Option<u64>>,
     /// Whether the data thread has performed RS-6 steps 1 and 2 (KC-46b).
     pub(super) stopped_early: AtomicBool,
 }
@@ -263,26 +295,20 @@ pub(super) fn try_slot<T: ?Sized>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     }
 }
 
-/// Which serialising lock a recording guard counts (KC-24a). Only testing builds record it.
+/// Which lock a recording guard counts (KC-24a); every build counts, only testing builds read it by name.
 #[derive(Clone, Copy)]
 pub(super) enum Which {
     Admission,
     Machine,
     Freeze,
+    /// Any other lock of the coordinator's own.
+    State,
 }
 
-#[cfg(feature = "testing")]
-pub(super) type Guard<'a, T> = super::lock_record::Recorded<'a, T>;
-#[cfg(not(feature = "testing"))]
-pub(super) type Guard<'a, T> = MutexGuard<'a, T>;
+pub(super) type Guard<'a, T> = super::record::Recorded<'a, T>;
 
-#[cfg(feature = "testing")]
 fn recorded<T>(guard: MutexGuard<'_, T>, which: Which) -> Guard<'_, T> {
-    super::lock_record::Recorded::new(guard, which)
-}
-#[cfg(not(feature = "testing"))]
-fn recorded<T>(guard: MutexGuard<'_, T>, _which: Which) -> Guard<'_, T> {
-    guard
+    super::record::Recorded::new(guard, which)
 }
 
 /// `d` rescaled into `to`, rounded up to a whole tick (KC-15, KC-24, RS-19).
@@ -314,24 +340,24 @@ pub(super) fn manifest_failure(fragment: Option<Ident>, reason: impl Into<String
 impl Shared {
     /// The admission lock (KC-24a), through the recording guard.
     pub(super) fn lock_admission(&self) -> Guard<'_, ()> {
-        recorded(lock(&self.admission.0), Which::Admission)
+        self.admission.lock()
     }
 
     /// The Run state machine's lock, through the recording guard.
     pub(super) fn lock_machine(&self) -> Guard<'_, RunStateMachine> {
-        recorded(lock(&self.machine.0), Which::Machine)
+        self.machine.lock()
     }
 
     /// The freeze gate (KC-24a), through the recording guard.
     pub(super) fn lock_freeze(&self) -> Guard<'_, ()> {
         #[cfg(feature = "testing")]
         super::start_probe::reach_freeze(self, super::start_probe::FreezePoint::Serialise);
-        recorded(lock(&self.freeze_gate.0), Which::Freeze)
+        self.freeze_gate.lock()
     }
 
     /// The freeze gate, or `None` when another performance holds it; a poisoned gate is taken like `try_slot`.
     pub(super) fn try_lock_freeze(&self) -> Option<Guard<'_, ()>> {
-        try_slot(&self.freeze_gate.0).map(|guard| recorded(guard, Which::Freeze))
+        self.freeze_gate.try_lock()
     }
 
     pub(super) fn now(&self) -> TimePoint {
@@ -357,7 +383,7 @@ impl Shared {
         let state = self.lock_machine().state().clone();
         match state {
             RunState::Stopping { .. } | RunState::CleanedUp { .. } => {
-                lock(&self.cleanup_failures).push(manifest_failure(None, reason));
+                self.cleanup_failures.lock().push(manifest_failure(None, reason));
             }
             _ => {
                 let stage = match state {

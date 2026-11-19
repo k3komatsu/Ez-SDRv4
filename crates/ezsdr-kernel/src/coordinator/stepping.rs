@@ -1,4 +1,4 @@
-use std::sync::{Mutex, MutexGuard};
+use std::sync::MutexGuard;
 
 use crate::event::{Action, Event, EventKind, EventSink};
 use crate::manifest::ArtifactRef;
@@ -10,18 +10,18 @@ use crate::policy::Reaction;
 use crate::run::{CleanupMode, CleanupStep, RunState, Stage, StopCause, Termination};
 use crate::time::TimePoint;
 
-use super::state::{Inst, Shared, Slot, contain, contain_all, lock, try_slot};
+use super::state::{Inst, Locked, Shared, Slot, contain, contain_all, lock, try_slot};
 use super::{DRAIN_WAKEUP_CAP, RunHandle};
 
 /// Every step failure of one round, in call order — which is stepping order, since
 /// `step_until_quiescent` steps in its fixed order and a failed instance is not
 /// stepped again that round (KD-1).
-struct Fault(Mutex<Vec<(Inst, ModuleError)>>);
+struct Fault(Locked<Vec<(Inst, ModuleError)>>);
 
 fn guard_step(inst: Inst, fault: &Fault, call: impl FnOnce() -> Result<StepOutcome, ModuleError>) -> Result<StepOutcome, ModuleError> {
     let result = contain(call);
     if let Err(error) = &result {
-        lock(&fault.0).push((inst, error.clone()));
+        fault.0.lock().push((inst, error.clone()));
     }
     result
 }
@@ -150,9 +150,9 @@ pub(super) fn round(shared: &Shared, at: TimePoint, cleaning: bool) {
         drain_and_react(shared);
         return;
     }
-    let fault = Fault(Mutex::new(Vec::new()));
+    let fault = Fault(Locked::new(Vec::new()));
     let restored = CleanupStep::RestoreBaseline as u8;
-    let is_done = |inst: Inst| cleaning && lock(&shared.done).contains(&(restored, inst));
+    let is_done = |inst: Inst| cleaning && shared.done.lock().contains(&(restored, inst));
     // A scope, so the guards and the watches borrowing them are released in reverse
     // declaration order before the fault is read: `step_until_quiescent` borrows the
     // instances, and no Module may still be locked when `drain_and_react` runs.
@@ -176,7 +176,9 @@ pub(super) fn round(shared: &Shared, at: TimePoint, cleaning: bool) {
         crate::module_api::step_until_quiescent(&mut instances, at, &**collector)
     };
     if result.is_err() {
-        apply_faults(shared, &std::mem::take(&mut *lock(&fault.0)));
+        // KC-24a: taken out first, so the fault vector's lock is released before a `DEVICE_LOST` stamp reads the Authority's `now()`.
+        let faults = std::mem::take(&mut *fault.0.lock());
+        apply_faults(shared, &faults);
     }
     drain_and_react(shared);
 }
@@ -211,13 +213,13 @@ pub(super) fn drain_and_react(shared: &Shared) -> (usize, bool) {
     // RS-35: the drain's own EVENTS_DROPPED is stamped now, read before the lock
     // because `now()` is a Module call that may request an end.
     let at = shared.now();
-    let mut delivered = lock(&shared.delivered);
+    let mut delivered = shared.delivered.lock();
     let mut ended = false;
     let events = collector.drain(at);
     for event in &events {
         let reaction = policy.reaction_for_event(&event.kind, event.severity);
         if reaction == Reaction::MarkArtifact {
-            lock(&shared.marks).push((event.kind.clone(), event.time));
+            shared.marks.lock().push((event.kind.clone(), event.time));
         }
         let mode = match reaction {
             Reaction::Continue | Reaction::MarkArtifact => continue,
@@ -263,7 +265,7 @@ pub(super) fn drain_cleanup(shared: &Shared) -> bool {
     if device_paced {
         super::paced::stop_data_thread(shared);
     }
-    let mode = lock(&shared.end).as_ref().map(|end| end.mode);
+    let mode = shared.end.lock().as_ref().map(|end| end.mode);
     if mode != Some(CleanupMode::Orderly) || shared.drained.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return false;
     }
@@ -275,7 +277,7 @@ pub(super) fn drain_cleanup(shared: &Shared) -> bool {
     }
     // Read on both sides of `next_wakeup()`, which is a Module call: a later abort or a
     // `closing` flag must break the drain even if it arrives while the Authority runs.
-    let interrupted = || lock(&shared.end).as_ref().is_some_and(|end| end.mode == CleanupMode::Abort) || shared.closing.load(std::sync::atomic::Ordering::Acquire);
+    let interrupted = || shared.end.lock().as_ref().is_some_and(|end| end.mode == CleanupMode::Abort) || shared.closing.load(std::sync::atomic::Ordering::Acquire);
     let mut last = None;
     let mut count = 0usize;
     for _ in 0..DRAIN_WAKEUP_CAP {
@@ -310,7 +312,7 @@ impl RunHandle {
     /// KC-20's loop until `until`, or until `stop` answers true after a round (KC-29b).
     pub(super) fn run_loop(&mut self, until: Option<TimePoint>, mut stop: Option<&mut dyn FnMut(&Shared) -> bool>) {
         loop {
-            if lock(&self.shared.end).is_some() || !matches!(self.state(), RunState::Running {}) {
+            if self.shared.end.lock().is_some() || !matches!(self.state(), RunState::Running {}) {
                 return;
             }
             let wakeup = match contain_all(|| self.shared.authority.next_wakeup()) {
@@ -333,7 +335,7 @@ impl RunHandle {
                 self.same_count = 0;
                 emit_livelock(&self.shared, at);
                 drain_and_react(&self.shared);
-                if lock(&self.shared.end).is_none()
+                if self.shared.end.lock().is_none()
                     && self.shared.policy.get().is_some_and(|p| {
                         !matches!(p.reaction_for_event(&EventKind::parse(EventKind::STEP_LIVELOCK).expect("Kernel event kind"), crate::event::Severity::Fatal,), Reaction::Stop | Reaction::Abort)
                     })
@@ -417,11 +419,11 @@ impl RunHandle {
         };
         #[cfg(feature = "testing")]
         super::start_probe::reach(&self.shared, super::start_probe::Point::Scheduled);
-        lock(&self.shared.scheduled).push(handle);
+        self.shared.scheduled.lock().push(handle);
         self.run_loop(Some(t), Some(stop));
         // Returned early at `stop`: the no-op at `t` is withdrawn, so no later round runs
         // at an instant an earlier wait's horizon chose (KC-29b; Phase 6 Review H, P1-3).
-        let live = lock(&self.shared.end).is_none() && matches!(self.state(), RunState::Running {});
+        let live = self.shared.end.lock().is_none() && matches!(self.state(), RunState::Running {});
         #[cfg(feature = "testing")]
         super::start_probe::reach(&self.shared, super::start_probe::Point::Withdrawal);
         if live && self.shared.now().try_cmp(t).is_ok_and(|o| o.is_lt()) {
@@ -430,7 +432,7 @@ impl RunHandle {
             super::start_probe::reach(&self.shared, super::start_probe::Point::BeforeWithdrawalGate);
             if let Some(_gate) = self.shared.try_lock_freeze() {
                 let removed = {
-                    let mut scheduled = lock(&self.shared.scheduled);
+                    let mut scheduled = self.shared.scheduled.lock();
                     let before = scheduled.len();
                     scheduled.retain(|pending| *pending != handle);
                     scheduled.len() < before
@@ -448,7 +450,7 @@ impl RunHandle {
 
     /// The events delivered so far from index `from` on (KC-29a).
     pub fn events(&self, from: usize) -> Vec<Event> {
-        lock(&self.shared.delivered).iter().skip(from).cloned().collect()
+        self.shared.delivered.lock().iter().skip(from).cloned().collect()
     }
 
     /// Advances until a delivered event at or after `from` has one of `kinds`, or to
@@ -458,7 +460,7 @@ impl RunHandle {
         // `Ended` even when a match was delivered earlier (Phase 6 Review H, P0-5).
         self.check_lease();
         self.ensure_live()?;
-        let first = |shared: &Shared| lock(&shared.delivered).iter().enumerate().skip(from).find(|(_, event)| kinds.contains(&event.kind)).map(|(index, _)| index);
+        let first = |shared: &Shared| shared.delivered.lock().iter().enumerate().skip(from).find(|(_, event)| kinds.contains(&event.kind)).map(|(index, _)| index);
         if let Some(index) = first(&self.shared) {
             return Ok(Some(index));
         }

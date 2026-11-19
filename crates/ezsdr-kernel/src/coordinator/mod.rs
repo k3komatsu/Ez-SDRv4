@@ -56,6 +56,18 @@ pub mod start_probe {
         pub end_requested: bool,
         /// Dispatch is frozen (RS-6 step 1).
         pub dispatch_frozen: bool,
+        /// How many links' `drops` step 6 has stored (0 until it completes).
+        pub link_drops_len: usize,
+        /// How many events the Run has delivered (KC-31).
+        pub delivered_len: usize,
+        /// How many wake handles the wake list holds (KC-46a).
+        pub wake_handles: usize,
+        /// The highest generation in the wake list; 0 for none.
+        pub wake_last_generation: u64,
+        /// The last wake generation issued.
+        pub wake_next: u64,
+        /// The cleanup's performance of RS-6 step 1 took the wake list and closed it.
+        pub wake_closed: bool,
     }
 
     /// Where a performance of RS-6 step 1 is (KC-24a).
@@ -67,8 +79,6 @@ pub mod start_probe {
         Serialised,
         /// `frozen` is set and the queues are cleared; the admission lock is still held.
         BeforeDrop,
-        /// The admission lock is dropped; the wake handle is about to be taken (the hook is inside the take).
-        BeforeWakeTake,
         /// Every handle is cancelled; the gate is still held.
         Done,
         /// The data thread's Provider stop of one fragment is about to start (KC-46b): after its performance of step 1, with the freeze gate held.
@@ -98,9 +108,16 @@ pub mod start_probe {
         pub fn read(&self) -> Option<Reading> {
             let shared = self.0.upgrade()?;
             let admission_held = shared.admission.is_held();
-            let end_requested = super::state::lock(&shared.end).is_some();
+            let end_requested = shared.end.lock().is_some();
             let dispatch_frozen = shared.frozen.load(Ordering::Acquire);
-            Some(Reading { admission_held, end_requested, dispatch_frozen })
+            let link_drops_len = shared.link_drops.lock().len();
+            let (wake_handles, wake_last_generation, wake_closed) = {
+                let list = shared.wake_list.lock();
+                (list.handles.len(), list.handles.iter().map(|wake| wake.generation).max().unwrap_or(0), list.closed)
+            };
+            let wake_next = shared.wake_next.load(Ordering::Acquire);
+            let delivered_len = shared.delivered.lock().len();
+            Some(Reading { admission_held, end_requested, dispatch_frozen, link_drops_len, delivered_len, wake_handles, wake_last_generation, wake_next, wake_closed })
         }
 
         /// Installs the hook every performance of RS-6 step 1 calls at each [`FreezePoint`], on whichever thread performs it (the data thread, a cleanup step thread). It may park its thread; the Run holds no lock of the hook's while it runs.
@@ -155,15 +172,11 @@ pub mod start_probe {
     }
 }
 
+mod record;
+
 #[cfg(feature = "testing")]
 pub mod lock_record {
-    //! Which of the coordinator's serialising locks the calling thread holds, kept by `Shared`'s lock helpers (KC-24a). A test double reads it at each supplied call. Compiled only with the `testing` feature.
-
-    use std::cell::Cell;
-    use std::ops::{Deref, DerefMut};
-    use std::sync::MutexGuard;
-
-    use super::state::Which;
+    //! Which of the coordinator's locks the calling thread holds, read from the record `Locked::lock` keeps (KC-24a). A test double reads it at each supplied call. Compiled only with the `testing` feature.
 
     /// Which locks the calling thread holds.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -174,60 +187,20 @@ pub mod lock_record {
         pub machine: bool,
         /// The freeze gate (RS-6 step 1's serialisation).
         pub freeze: bool,
-    }
-
-    thread_local! {
-        static COUNTS: Cell<[u32; 3]> = const { Cell::new([0; 3]) };
+        /// Any other lock of the coordinator's own (`Locked::new`).
+        pub state: bool,
     }
 
     /// The locks the calling thread holds now.
     pub fn held() -> Held {
-        let [admission, machine, freeze] = COUNTS.with(Cell::get);
-        Held { admission: admission > 0, machine: machine > 0, freeze: freeze > 0 }
-    }
-
-    /// A guard that counts itself in the acquiring thread's record until it drops. `MutexGuard` is not `Send`, so neither is this.
-    pub(super) struct Recorded<'a, T> {
-        guard: MutexGuard<'a, T>,
-        which: Which,
-    }
-
-    impl<'a, T> Recorded<'a, T> {
-        pub(super) fn new(guard: MutexGuard<'a, T>, which: Which) -> Recorded<'a, T> {
-            COUNTS.with(|counts| {
-                let mut n = counts.get();
-                n[which as usize] += 1;
-                counts.set(n);
-            });
-            Recorded { guard, which }
-        }
-    }
-
-    impl<T> Deref for Recorded<'_, T> {
-        type Target = T;
-        fn deref(&self) -> &T {
-            &self.guard
-        }
-    }
-
-    impl<T> DerefMut for Recorded<'_, T> {
-        fn deref_mut(&mut self) -> &mut T {
-            &mut self.guard
-        }
-    }
-
-    impl<T> Drop for Recorded<'_, T> {
-        fn drop(&mut self) {
-            COUNTS.with(|counts| {
-                let mut n = counts.get();
-                n[self.which as usize] -= 1;
-                counts.set(n);
-            });
-        }
+        let [admission, machine, freeze, state] = super::record::counts();
+        Held { admission: admission > 0, machine: machine > 0, freeze: freeze > 0, state: state > 0 }
     }
 
     #[cfg(test)]
     mod tests {
+        use super::super::record::Recorded;
+        use super::super::state::Which;
         use super::*;
 
         #[test]
@@ -242,6 +215,20 @@ pub mod lock_record {
             drop(machine);
             assert!(held().admission && !held().machine);
             drop(admission);
+            assert_eq!(held(), Held::default());
+        }
+
+        #[test]
+        fn held_records_a_locked_state_lock_and_only_that() {
+            use super::super::state::Locked;
+            let lock = Locked::new(0u8);
+            let raw = std::sync::Mutex::new(0u8);
+            let raw_guard = raw.lock().unwrap();
+            assert!(!held().state, "a raw Mutex guard is not recorded");
+            drop(raw_guard);
+            let guard = lock.lock();
+            assert!(held().state && !held().admission && !held().machine && !held().freeze);
+            drop(guard);
             assert_eq!(held(), Held::default());
         }
     }
@@ -469,7 +456,7 @@ impl RunHandle {
 
     /// The effective values recorded per fragment (SB-41).
     pub fn effective(&self) -> BTreeMap<Ident, BTreeMap<Key, Value>> {
-        state::lock(&self.shared.configuration).clone()
+        self.shared.configuration.lock().clone()
     }
 
     /// Sample clocks declared during prepare (TM-13d).
@@ -553,7 +540,7 @@ impl RunHandle {
             crate::run::LeaseMode::Detached { .. } => self.lease.expires_at_host,
             crate::run::LeaseMode::Attached {} => None,
         };
-        *state::lock(&self.shared.lease_deadline) = deadline;
+        *self.shared.lease_deadline.lock() = deadline;
     }
 }
 

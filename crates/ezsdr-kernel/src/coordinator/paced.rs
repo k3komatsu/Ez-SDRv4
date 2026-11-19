@@ -14,7 +14,7 @@ use crate::run::{CleanupFailure, CleanupMode, CleanupOps, CleanupStep, StopCause
 use crate::time::TimePoint;
 
 use super::DEFAULT_HOST_BUDGET_NS;
-use super::state::{Inst, Shared, contain, lock};
+use super::state::{Inst, PendingWake, Shared, contain, lock};
 
 /// How long the data thread parks after a pass in which nothing progressed (KC-46).
 const DATA_IDLE_PARK: Duration = Duration::from_micros(200);
@@ -35,7 +35,7 @@ pub(super) fn start_data_thread(shared: &Arc<Shared>) {
     let stop = Arc::new(AtomicBool::new(false));
     let (thread_shared, thread_stop) = (shared.clone(), stop.clone());
     match std::thread::Builder::new().name("ezsdr-data".to_owned()).spawn(move || run(thread_shared, thread_stop)) {
-        Ok(handle) => *lock(&shared.data) = Some(DataThread { stop, handle }),
+        Ok(handle) => *shared.data.lock() = Some(DataThread { stop, handle }),
         Err(error) => {
             super::ending::request(shared, Termination::Failed { stage: crate::run::Stage::Run, reason: format!("KC-46: the data thread could not start: {error}") }, CleanupMode::Abort);
         }
@@ -44,7 +44,7 @@ pub(super) fn start_data_thread(shared: &Arc<Shared>) {
 
 /// Stops and joins the data thread; it never joins itself (KA-12 step 3, KC-46c).
 pub(super) fn stop_data_thread(shared: &Shared) {
-    let Some(data) = lock(&shared.data).take() else {
+    let Some(data) = shared.data.lock().take() else {
         return;
     };
     if data.handle.thread().id() == std::thread::current().id() {
@@ -66,7 +66,7 @@ fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
             return;
         }
         let (progressed, mut requested, delivered) = pass(&shared, &mut failed);
-        let deadline = *lock(&shared.lease_deadline);
+        let deadline = *shared.lease_deadline.lock();
         if deadline.is_some_and(|at| shared.ctx.host_clock.monotonic_millis() >= at) {
             requested |= super::ending::request(&shared, Termination::Stopped { cause: StopCause::LeaseExpiry {} }, CleanupMode::Orderly);
         }
@@ -82,7 +82,7 @@ fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
 }
 
 fn end_mode(shared: &Shared) -> Option<CleanupMode> {
-    lock(&shared.end).as_ref().map(|end| end.mode)
+    shared.end.lock().as_ref().map(|end| end.mode)
 }
 
 /// One pass: every Executor and Sink stepped once at one instant, in MA-30's order,
@@ -100,7 +100,7 @@ fn pass(shared: &Shared, failed: &mut BTreeSet<Inst>) -> (bool, bool, usize) {
     let mut progressed = false;
     let mut faults = Vec::new();
     for (_, _, inst) in order {
-        if failed.contains(&inst) || lock(&shared.done).contains(&(restored, inst)) {
+        if failed.contains(&inst) || shared.done.lock().contains(&(restored, inst)) {
             continue;
         }
         match step(shared, inst, t) {
@@ -136,13 +136,13 @@ fn stop_early(shared: &Arc<Shared>) {
     let mode = end_mode(shared).unwrap_or(CleanupMode::Orderly);
     let record = |step: CleanupStep, fragment: Option<&crate::spec::Ident>, result: Result<(), crate::module_api::ModuleError>| {
         if let Err(error) = result {
-            lock(&shared.cleanup_failures).push(CleanupFailure { step, fragment: fragment.cloned(), reason: error.message, timed_out: false });
+            shared.cleanup_failures.lock().push(CleanupFailure { step, fragment: fragment.cloned(), reason: error.message, timed_out: false });
         }
     };
     // RS-6, KC-24a: the gate is held from the freeze through the last Provider stop, so no cancel another performance makes (the cleanup's freeze of a handle published after this freeze's drain, a withdrawal) is outstanding when a stop starts. A cleanup's freeze that already ran left nothing to drain, and this performance then only stops.
     let gate = shared.lock_freeze();
     if !shared.frozen.load(Ordering::Acquire) {
-        record(CleanupStep::FreezeDispatch, None, ops.freeze_held());
+        record(CleanupStep::FreezeDispatch, None, ops.freeze_held(false));
     }
     if let Some(routing) = shared.routing() {
         for fragment in &routing.reverse {
@@ -157,22 +157,46 @@ fn stop_early(shared: &Arc<Shared>) {
 
 /// Wakes a control loop waiting in `next_wakeup` with a no-op at the current instant,
 /// unless a wake is still pending; pending wakes are counted by generation (KC-46a).
+/// No lock is held across `schedule` (KC-24a): the handle it returns goes into the wake
+/// list afterwards. A wake whose handle arrives after the cleanup's performance of RS-6
+/// step 1 took the list is not held by the coordinator: it drops the handle and the wake
+/// stays scheduled as a no-op (KC-46a), so no cancel is made outside the freeze gate.
+/// A thread that holds a coordinator lock schedules nothing (KC-24a): it reached this
+/// through `disconnect_signal` from inside a supplied call; the end request it set is
+/// seen at the control loop's next end check, and a loop already waiting sees it only
+/// when something else wakes it (KC-24a, KC-46a).
 pub(super) fn wake(shared: &Shared, unconditional: bool) {
-    if !unconditional && shared.wake_pending.load(Ordering::Acquire) != 0 {
+    if super::record::any_held() {
+        return;
+    }
+    if shared.wake_list.lock().closed || (!unconditional && shared.wake_pending.load(Ordering::Acquire) != 0) {
         return;
     }
     let generation = shared.wake_next.fetch_add(1, Ordering::AcqRel) + 1;
     shared.wake_pending.store(generation, Ordering::Release);
     let pending = shared.wake_pending.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let fired_flag = fired.clone();
     let clear = move |_| {
+        fired_flag.store(true, Ordering::Release);
         let _ = pending.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
     };
     let at = shared.now();
-    // Held across `schedule`, so that a concurrent FreezeDispatch cancels this wake
-    // rather than miss it (RS-6 step 1; Review L, NONBLOCKING 1).
-    let mut slot = lock(&shared.wake_handle);
     match shared.schedule(at, Box::new(clear)) {
-        Ok(handle) => *slot = Some(handle),
+        Ok(handle) => {
+            let mut list = shared.wake_list.lock();
+            if list.closed {
+                drop(list);
+            } else {
+                list.handles.retain(|wake| !wake.fired.load(Ordering::Acquire));
+                list.handles.push(PendingWake {
+                    #[cfg(feature = "testing")]
+                    generation,
+                    handle,
+                    fired,
+                });
+            }
+        }
         Err(_) => {
             let _ = shared.wake_pending.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
         }
@@ -190,7 +214,7 @@ pub(super) fn wait_finished(shared: &Shared, dispatched: &[(Inst, u64)]) {
     let deadline = Instant::now() + host_budget();
     for (inst, target) in targets {
         loop {
-            if lock(&shared.end).is_some() || shared.frozen.load(Ordering::Acquire) {
+            if shared.end.lock().is_some() || shared.frozen.load(Ordering::Acquire) {
                 return;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());

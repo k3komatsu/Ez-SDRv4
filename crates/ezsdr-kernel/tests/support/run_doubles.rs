@@ -1379,12 +1379,27 @@ pub struct TestLinkModule {
     pub seed_drop: bool,
     /// Narrow `seed_drop` to the link whose consumer is this component (SC-20).
     pub seed_drop_into: Option<Ident>,
+    /// Log every `drops()` call with the locks its thread holds (KC-24a).
+    pub drops_log: Option<start_window::ClockLog>,
+    /// The `n`th created link's `drops()` records `link:drops:entered:<n>`, waits on the gate, then records `link:drops:returned:<n>` (RS-8a, KC-44).
+    pub wedge_drops: Option<(usize, Gate)>,
+    created: AtomicUsize,
 }
 
 impl TestLinkModule {
     /// Uses the fixture descriptor.
     pub fn new(probe: &Probe) -> TestLinkModule {
-        TestLinkModule { descriptor: test_link_descriptor(), probe: probe.clone(), panic_descriptor: false, panic_drops: false, seed_drop: false, seed_drop_into: None }
+        TestLinkModule {
+            descriptor: test_link_descriptor(),
+            probe: probe.clone(),
+            panic_descriptor: false,
+            panic_drops: false,
+            seed_drop: false,
+            seed_drop_into: None,
+            drops_log: None,
+            wedge_drops: None,
+            created: AtomicUsize::new(0),
+        }
     }
 
     /// Replaces the descriptor, for refusal tests.
@@ -1403,6 +1418,18 @@ impl TestLinkModule {
     pub fn panicking_drops(mut self) -> TestLinkModule {
         self.panic_drops = true;
         self
+    }
+
+    /// Logs each `drops()` call into `log` with the locks held (KC-24a).
+    pub fn logging_drops(mut self, log: &start_window::ClockLog) -> TestLinkModule {
+        self.drops_log = Some(log.clone());
+        self
+    }
+
+    /// Wedges the `drops()` of the `index`th created link on `gate`, and logs every `drops()` into `log`.
+    pub fn wedging_drops_of(mut self, index: usize, gate: &Gate, log: &start_window::ClockLog) -> TestLinkModule {
+        self.wedge_drops = Some((index, gate.clone()));
+        self.logging_drops(log)
     }
 
     /// Seeds one DropOldest eviction so the coordinator's Manifest path is exercised (KA-18).
@@ -1436,7 +1463,48 @@ impl Link for TestLinkModule {
             assert_eq!(link.publish(block(header(TimePoint::new(root, 0), 10, 1))), PublishOutcome::Accepted);
             assert_eq!(link.publish(block(header(TimePoint::new(root, 10), 10, 1))), PublishOutcome::DroppedOldest);
         }
-        if self.panic_drops { Ok(Arc::new(PanickingDropsLink(link))) } else { Ok(Arc::new(link)) }
+        let index = self.created.fetch_add(1, Ordering::SeqCst);
+        let link: Arc<dyn DataLink> = if self.panic_drops { Arc::new(PanickingDropsLink(link)) } else { Arc::new(link) };
+        match &self.drops_log {
+            None => Ok(link),
+            Some(log) => {
+                let wedge = self.wedge_drops.as_ref().filter(|(wedged, _)| *wedged == index).map(|(_, gate)| gate.clone());
+                Ok(Arc::new(WatchedDrops { inner: link, log: log.clone(), probe: self.probe.clone(), index, wedge }))
+            }
+        }
+    }
+}
+
+/// A DataLink that logs each `drops()` call at entry with the locks held, and may wait on a gate inside it.
+struct WatchedDrops {
+    inner: Arc<dyn DataLink>,
+    log: start_window::ClockLog,
+    probe: Probe,
+    index: usize,
+    wedge: Option<Gate>,
+}
+
+impl DataLink for WatchedDrops {
+    fn publish(&self, block: BlockRef) -> PublishOutcome {
+        self.inner.publish(block)
+    }
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+        self.inner.receive()
+    }
+    fn drops(&self) -> u64 {
+        self.log.push_call(start_window::Call { kind: start_window::CallKind::Drops, held: start_window::held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None });
+        if let Some(gate) = &self.wedge {
+            self.probe.record(format!("link:drops:entered:{}", self.index));
+            start_window::wait(gate);
+            self.probe.record(format!("link:drops:returned:{}", self.index));
+        }
+        self.inner.drops()
+    }
+    fn take_drop_carry(&self) -> DropCarry {
+        self.inner.take_drop_carry()
+    }
+    fn policy(&self) -> BackPressure {
+        self.inner.policy()
     }
 }
 

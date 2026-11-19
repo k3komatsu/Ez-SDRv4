@@ -253,6 +253,18 @@ pub enum CallKind {
     NextWakeup,
     /// `Authority::relations`.
     Relations,
+    /// `DataLink::drops`.
+    Drops,
+    /// `Authority::descriptor`.
+    Descriptor,
+    /// `Authority::time`.
+    Time,
+    /// `TimeAuthority::primary_root`.
+    PrimaryRoot,
+    /// `TimeAuthority::pacing`.
+    Pacing,
+    /// `TimeAuthority::governs`.
+    Governs,
 }
 
 /// One supplied call, recorded at entry; [`ClockLog::fill`] sets the result slots once
@@ -350,28 +362,36 @@ pub struct Phases {
     pub stopping: std::ops::Range<usize>,
 }
 
-/// KC-24a's rule over a whole Run made with the watched doubles (T11..T14): no supplied
-/// call was made with the admission or the machine lock held; every transition after
-/// Created has its `Now` sample immediately before its `Utc` sample on one thread; and
-/// the Armed, Running and Stopping windows are returned for the test's own requirements.
-/// When the Authority never advances, every `Now` sample is 0 and the sample equality is
-/// vacuous -- the pair's presence and thread are still checked.
+/// KC-24a's rule over a whole Run made with the watched doubles (T11..T14, T16): no
+/// supplied call (the Authority's methods, its time handle's, the HostClock's, a
+/// DataLink's) was made with a lock of the coordinator's own held -- the admission lock,
+/// the machine lock, any other recorded lock -- except `TimeAuthority::cancel` under the
+/// freeze gate, which RS-6 and KC-24a define; every transition after Created has its
+/// `Now` sample immediately before its `Utc` sample on one thread; every kind a Run's own
+/// path cites is present in the log (so a fixture that never reached a path cannot pass
+/// vacuously); and the Armed, Running and Stopping windows are returned for the test's own
+/// requirements. When the Authority never advances, every `Now` sample is 0 and the sample
+/// equality is vacuous -- the pair's presence and thread are still checked.
 ///
-/// What the sweep cannot see: locks other than `admission` and `machine` (`end`, `also`,
-/// `delivered`, `links`, the `wake_handle` held across `schedule`, slot locks); paths no
-/// Run drives; supplied objects other than the Authority's time handle and the
-/// HostClock; guards that bypass the recording helpers (T15 covers the text only); and
-/// the deadlock itself -- it checks the deadlock's precondition.
+/// What the sweep cannot see: slot locks (a Module's own, kept out of the record), a
+/// `DataLink`'s destructor, `Authority::pacing` and `governs` (the coordinator has no call
+/// site; the log keeps them so a future one is caught); paths no Run drives; supplied
+/// objects other than the Authority, its time handle, the HostClock and links; guards that
+/// bypass the recording helpers (the source scan covers `Shared`); and the deadlock itself
+/// -- it checks the deadlock's precondition.
 pub fn sweep(calls: &[Call], transitions: &[TransitionRecord], primary: ClockDomainId) -> Phases {
     for call in calls {
+        let exempt_freeze = call.kind == CallKind::Cancel;
         assert!(
-            !call.held.admission && !call.held.machine,
-            "KC-24a: {:?} on {:?} ran under a coordinator lock (admission {}, machine {}); calls: {calls:?}",
+            call.held == Held { freeze: call.held.freeze && exempt_freeze, ..Held::default() },
+            "KC-24a: {:?} on {:?} ran under a coordinator lock ({:?}); calls: {calls:?}",
             call.kind,
             call.thread,
-            call.held.admission,
-            call.held.machine
+            call.held
         );
+    }
+    for kind in [CallKind::Now, CallKind::Utc, CallKind::Schedule, CallKind::Descriptor, CallKind::Time, CallKind::PrimaryRoot] {
+        assert!(calls.iter().any(|call| call.kind == kind), "KC-24a: the Run made no {kind:?} call, so the sweep says nothing about it; calls: {calls:?}");
     }
     let utc: Vec<(usize, &Call)> = calls.iter().enumerate().filter(|(_, call)| call.kind == CallKind::Utc).collect();
     assert_eq!(utc.len(), transitions.len(), "KC-43: the UTC reads are not one per transition; calls: {calls:?}");
@@ -418,6 +438,8 @@ pub struct Hooks {
     pub on_now: Option<CallHook>,
     /// Runs at each `TimeAuthority::schedule` entry.
     pub on_schedule: Option<CallHook>,
+    /// Runs at each `TimeAuthority::schedule` after the inner call returned and its handle is filled into the log, so a test can park the caller between the Authority's acceptance and whatever the coordinator does with the handle.
+    pub on_schedule_return: Option<CallHook>,
     /// Runs at each `TimeAuthority::cancel` entry.
     pub on_cancel: Option<CallHook>,
     /// Runs at each `TimeAuthority::cancel` after the inner call returned and its result slot is filled.
@@ -478,10 +500,12 @@ impl WatchedAuthority {
 
 impl Authority for WatchedAuthority {
     fn descriptor(&self) -> &AuthorityDescriptor {
+        self.log.push_call(Call { kind: CallKind::Descriptor, held: held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None });
         self.inner.descriptor()
     }
 
     fn time(&self) -> Arc<dyn TimeAuthority> {
+        self.log.push_call(Call { kind: CallKind::Time, held: held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None });
         Arc::new(WatchedTime { inner: self.inner.time(), log: self.log.clone(), hooks: self.hooks.clone() })
     }
 
@@ -510,14 +534,17 @@ pub struct WatchedTime {
 
 impl TimeAuthority for WatchedTime {
     fn primary_root(&self) -> ClockDomainId {
+        self.log.push_call(Call { kind: CallKind::PrimaryRoot, held: held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None });
         self.inner.primary_root()
     }
 
     fn pacing(&self) -> Pacing {
+        self.log.push_call(Call { kind: CallKind::Pacing, held: held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None });
         self.inner.pacing()
     }
 
     fn governs(&self, domain: ClockDomainId) -> bool {
+        self.log.push_call(Call { kind: CallKind::Governs, held: held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None });
         self.inner.governs(domain)
     }
 
@@ -556,6 +583,9 @@ impl TimeAuthority for WatchedTime {
         let result = self.inner.schedule(t, f);
         if let Ok(handle) = &result {
             self.log.fill(index, |call| call.handle = Some(*handle));
+            if let Some(hook) = &self.hooks.on_schedule_return {
+                hook(&Call { handle: Some(*handle), ..call });
+            }
         }
         result
     }

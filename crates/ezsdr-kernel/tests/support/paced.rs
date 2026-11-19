@@ -115,7 +115,7 @@ impl TimeAuthority for WallTime {
             // instant already passed has run on a waiting `next_wakeup` (KC-46a): it
             // waits for that callback as long as a `next_wakeup` runs. The cap turns a
             // waiter that never comes into a failed assertion, not a hang (`wake` holds
-            // the Run's `wake_handle` across `schedule`).
+            // no lock across `schedule`, so a stuck waiter would block no one else).
             let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while !state.ran.contains(&seq) && state.waiting {
                 let left = until.saturating_duration_since(std::time::Instant::now());
@@ -391,6 +391,7 @@ pub struct ThreadedProvider {
     deaf: bool,
     drain_after_stop: Option<std::time::Duration>,
     record_stop_mode: bool,
+    stop_loses_device: bool,
     ctx: Option<Arc<ThreadedCtx>>,
     rx_clock: Option<SampleClockHandle>,
     next_index: Arc<AtomicU64>,
@@ -419,6 +420,7 @@ impl ThreadedProvider {
             deaf: false,
             drain_after_stop: None,
             record_stop_mode: false,
+            stop_loses_device: false,
             ctx: None,
             rx_clock: None,
             next_index: Arc::new(AtomicU64::new(0)),
@@ -516,6 +518,12 @@ impl ThreadedProvider {
     /// after the unchanged `<name>:stop` line, which existing tests compare exactly.
     pub fn recording_stop_mode(mut self) -> Self {
         self.record_stop_mode = true;
+        self
+    }
+
+    /// `stop` does its work, then fails with `DeviceLost` ("test: device lost in stop"); the coordinator stamps a `DEVICE_LOST` event for it (KC-24a).
+    pub fn losing_device_in_stop(mut self) -> Self {
+        self.stop_loses_device = true;
         self
     }
 
@@ -698,6 +706,9 @@ impl Provider for ThreadedProvider {
                 publish_block(&ctx, handle.id(), block_len, &self.next_index);
                 self.record("tail");
             }
+        }
+        if self.stop_loses_device {
+            return Err(ModuleError { kind: ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost, message: "test: device lost in stop".to_owned(), detail: serde_json::Value::Null });
         }
         Ok(())
     }

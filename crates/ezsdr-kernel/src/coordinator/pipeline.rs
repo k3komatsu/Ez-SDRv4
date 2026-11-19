@@ -14,7 +14,7 @@ use crate::session::{ControlOp, Outcome, SessionAction, SessionLog};
 use crate::spec::{ExperimentSpec, Ident, Namespace};
 use crate::time::{AbsoluteDeadline, ClockDomainKind, Duration, RelativeBudget, TimeAuthority, TimePoint};
 
-use super::state::{Context, ExecutorSlot, FailedTime, Inst, ProviderSlot, Queue, Routing, Serial, Shared, SinkSlot, TimeScheduleError, contain, contain_all, lock};
+use super::state::{Context, ExecutorSlot, FailedTime, Inst, Locked, ProviderSlot, Queue, Routing, Shared, SinkSlot, TimeScheduleError, WakeList, Which, contain, contain_all, lock};
 use super::{Assembly, DEFAULT_HOST_BUDGET_NS, EVENT_RING_DEPTH, RunHandle};
 
 pub(super) fn assemble(kind: RunKind, spec: ExperimentSpec, spec_section: SpecSection, profile: BindingProfile, binding_section: BindingSection, mut assembly: Assembly, lease: Lease) -> RunHandle {
@@ -151,36 +151,36 @@ pub(super) fn assemble(kind: RunKind, spec: ExperimentSpec, spec_section: SpecSe
         primary,
         last_now: std::sync::atomic::AtomicI64::new(0),
         routing: OnceLock::new(),
-        machine: Serial::new(machine),
+        machine: Locked::serial(Which::Machine, machine),
         collector: OnceLock::new(),
         policy: OnceLock::new(),
-        configuration: Mutex::new(BTreeMap::new()),
+        configuration: Locked::new(BTreeMap::new()),
         next_action: AtomicU64::new(1),
         frozen: AtomicBool::new(false),
-        delivered: Mutex::new(Vec::new()),
-        marks: Mutex::new(Vec::new()),
-        end: Mutex::new(None),
-        also: Mutex::new(Vec::new()),
-        undelivered: Mutex::new(Vec::new()),
-        artifacts: Mutex::new(BTreeMap::new()),
-        links: Mutex::new(Vec::new()),
-        link_drops: Mutex::new(Vec::new()),
-        counters: Mutex::new(None),
-        prepared: Mutex::new(BTreeSet::new()),
-        done: Mutex::new(BTreeSet::new()),
+        delivered: Locked::new(Vec::new()),
+        marks: Locked::new(Vec::new()),
+        end: Locked::new(None),
+        also: Locked::new(Vec::new()),
+        undelivered: Locked::new(Vec::new()),
+        artifacts: Locked::new(BTreeMap::new()),
+        links: Locked::new(Vec::new()),
+        link_drops: Locked::new(Vec::new()),
+        counters: Locked::new(None),
+        prepared: Locked::new(BTreeSet::new()),
+        done: Locked::new(BTreeSet::new()),
         drained: AtomicBool::new(false),
         closing: AtomicBool::new(false),
-        scheduled: Mutex::new(Vec::new()),
-        cleanup_failures: Mutex::new(Vec::new()),
+        scheduled: Locked::new(Vec::new()),
+        cleanup_failures: Locked::new(Vec::new()),
         store: Arc::new(Mutex::new(assembly.inputs.into_iter().map(|(hash, bytes)| (hash, Arc::from(bytes))).collect())),
-        admission: Serial::new(()),
-        data: Mutex::new(None),
+        admission: Locked::serial(Which::Admission, ()),
+        data: Locked::new(None),
         wake_pending: Arc::new(AtomicU64::new(0)),
         wake_next: AtomicU64::new(0),
-        wake_handle: Mutex::new(None),
-        lease_deadline: Mutex::new(None),
+        wake_list: Locked::new(WakeList::default()),
+        lease_deadline: Locked::new(None),
         stopped_early: AtomicBool::new(false),
-        freeze_gate: Serial::new(()),
+        freeze_gate: Locked::serial(Which::Freeze, ()),
         #[cfg(feature = "testing")]
         freeze_hook: Mutex::new(None),
     });
@@ -279,7 +279,7 @@ impl RunHandle {
         };
         let _ = self.shared.policy.set(policy);
         self.shared.move_to(RunState::Validated {});
-        if lock(&self.shared.end).is_some() {
+        if self.shared.end.lock().is_some() {
             return;
         }
 
@@ -306,29 +306,29 @@ impl RunHandle {
             return;
         }
         self.shared.move_to(RunState::Planned {});
-        if lock(&self.shared.end).is_some() {
+        if self.shared.end.lock().is_some() {
             return;
         }
 
         if !self.check_inputs() || !self.create_links() || !self.create_collector() {
             return;
         }
-        if !self.prepare_fragments() || lock(&self.shared.end).is_some() || !self.arm_instances() || lock(&self.shared.end).is_some() || !self.set_start_instant() || lock(&self.shared.end).is_some() {
+        if !self.prepare_fragments() || self.shared.end.lock().is_some() || !self.arm_instances() || self.shared.end.lock().is_some() || !self.set_start_instant() || self.shared.end.lock().is_some() {
             return;
         }
         let Some(batch) = self.resolve_schedule() else {
             return;
         };
-        if lock(&self.shared.end).is_some() {
+        if self.shared.end.lock().is_some() {
             return;
         }
         let Some(batch) = self.admit_schedule(batch) else {
             return;
         };
-        if lock(&self.shared.end).is_some() {
+        if self.shared.end.lock().is_some() {
             return;
         }
-        if !self.start_instances() || lock(&self.shared.end).is_some() {
+        if !self.start_instances() || self.shared.end.lock().is_some() {
             return;
         }
         let transition = self.shared.sample_transition();
@@ -337,7 +337,7 @@ impl RunHandle {
         #[cfg(feature = "testing")]
         super::start_probe::reach(&self.shared, super::start_probe::Point::BeforePublish);
         self.shared.publish(RunState::Running {}, transition);
-        if lock(&self.shared.end).is_some() {
+        if self.shared.end.lock().is_some() {
             return;
         }
         let device_paced = self.shared.device_paced();
@@ -449,10 +449,10 @@ impl RunHandle {
             };
             attached.entry(from_owner).or_default().push(AttachedPort { component: decl.from.component.clone(), port: decl.from.port.clone(), endpoint: Endpoint::StreamOut(link.clone()) });
             attached.entry(to_owner).or_default().push(AttachedPort { component: decl.to.component.clone(), port: decl.to.port.clone(), endpoint: Endpoint::StreamIn(link.clone()) });
-            lock(&self.shared.links).push((decl, link));
+            self.shared.links.lock().push((decl, link));
         }
         self.links_by_ref.clear();
-        if lock(&self.shared.end).is_some() {
+        if self.shared.end.lock().is_some() {
             return false;
         }
         self.attached_links = attached;
@@ -587,7 +587,7 @@ impl RunHandle {
                 components,
                 host_budget: budget,
             };
-            lock(&self.shared.prepared).insert(fragment.id.clone());
+            self.shared.prepared.lock().insert(fragment.id.clone());
             let slot = SlotRef::of(&self.shared, instance);
             let report = if self.shared.device_paced() {
                 // KC-12a: a call that does not return in time is abandoned holding its
@@ -608,7 +608,7 @@ impl RunHandle {
             if failed {
                 break;
             }
-            if lock(&self.shared.end).is_some() {
+            if self.shared.end.lock().is_some() {
                 return false;
             }
         }
@@ -629,7 +629,7 @@ impl RunHandle {
             Ok(Ok(reports)) => reports,
         };
         let configuration = reports.iter().map(|(fragment, r)| (fragment.clone(), r.effective.clone())).collect();
-        *lock(&self.shared.configuration) = configuration;
+        *self.shared.configuration.lock() = configuration;
         self.reports = Some(reports);
         self.shared.move_to(RunState::Prepared {});
         true
@@ -656,7 +656,7 @@ impl RunHandle {
                 self.fail(Stage::Arm, format!("KC-30: {first}: {}", error.message));
                 return false;
             }
-            if lock(&self.shared.end).is_some() {
+            if self.shared.end.lock().is_some() {
                 return false;
             }
         }
@@ -803,7 +803,7 @@ impl RunHandle {
                 };
                 self.agenda.push((instant, index, action));
                 match self.shared.schedule(TimePoint::new(self.shared.primary, instant), Box::new(|_| {})) {
-                    Ok(handle) => lock(&self.shared.scheduled).push(handle),
+                    Ok(handle) => self.shared.scheduled.lock().push(handle),
                     Err(TimeScheduleError::Refused(error)) => {
                         self.fail(Stage::Arm, format!("KC-17: entry {index}: {error}"));
                         return None;
@@ -819,7 +819,7 @@ impl RunHandle {
     }
 
     fn admit_schedule(&mut self, batch: Vec<(usize, Inst, Ident, crate::event::PendingAction)>) -> Option<Vec<super::admission::AdmittedAction>> {
-        let mut configuration = lock(&self.shared.configuration).clone();
+        let mut configuration = self.shared.configuration.lock().clone();
         let mut admitted = Vec::with_capacity(batch.len());
         for (index, _instance, _fragment, input) in batch {
             match super::admission::admit_with(&self.shared, input, super::state::Origin::Schedule, &[], &configuration, false) {
@@ -862,7 +862,7 @@ impl RunHandle {
                 self.fail(Stage::Arm, format!("KC-30: {first}: {}", error.message));
                 return false;
             }
-            if lock(&self.shared.end).is_some() {
+            if self.shared.end.lock().is_some() {
                 return false;
             }
         }
@@ -1012,7 +1012,7 @@ pub(super) fn submit(run: &mut RunHandle, action: SessionAction, waveform: Optio
     // KC-24a: from the first admission through the last dispatch.
     let admission_lock = run.shared.clone();
     let admission_guard = admission_lock.lock_admission();
-    let mut configuration = lock(&run.shared.configuration).clone();
+    let mut configuration = run.shared.configuration.lock().clone();
     let mut admitted = Vec::with_capacity(compiled.items.len());
     let mut violations = Vec::new();
     let mut all_coercions = compiled.coercions.clone();

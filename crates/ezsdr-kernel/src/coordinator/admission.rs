@@ -23,7 +23,7 @@ pub(super) struct AdmittedAction {
 }
 
 pub(super) fn admit(shared: &Shared, action: Action, origin: Origin) -> Result<AdmittedAction, Vec<Violation>> {
-    let configuration = lock(&shared.configuration).clone();
+    let configuration = shared.configuration.lock().clone();
     admit_with(shared, PendingAction::Action(action), origin, &[], &configuration, false)
 }
 
@@ -242,7 +242,7 @@ fn coerce_provider(
 pub(super) fn dispatch(shared: &Shared, admitted: AdmittedAction) -> (ActionId, (Inst, u64)) {
     let id = ActionId(shared.next_action.fetch_add(1, Ordering::SeqCst));
     if let Action::UpdateParameter { key, value, .. } = &admitted.action {
-        lock(&shared.configuration).entry(admitted.fragment).or_default().insert(key.clone(), value.clone());
+        shared.configuration.lock().entry(admitted.fragment).or_default().insert(key.clone(), value.clone());
     }
     let pushed = shared.queue(admitted.inst).push(crate::module_api::Dispatched { id, action: admitted.action, node: admitted.node, untimed: admitted.untimed });
     (id, (admitted.inst, pushed))

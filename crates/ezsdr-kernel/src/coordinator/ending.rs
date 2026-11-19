@@ -14,13 +14,13 @@ use super::state::{Inst, Shared, contain, contain_all, lock, manifest_failure, t
 
 impl RunHandle {
     pub(super) fn settle(&mut self) {
-        if lock(&self.shared.end).is_some() && !matches!(self.shared.lock_machine().state(), RunState::CleanedUp { .. }) {
+        if self.shared.end.lock().is_some() && !matches!(self.shared.lock_machine().state(), RunState::CleanedUp { .. }) {
             self.cleanup();
         }
     }
 
     pub(super) fn cleanup(&mut self) {
-        let Some(request) = lock(&self.shared.end).clone() else {
+        let Some(request) = self.shared.end.lock().clone() else {
             return;
         };
         let current = self.state();
@@ -31,17 +31,19 @@ impl RunHandle {
         self.shared.publish(RunState::Stopping { mode: request.mode }, transition);
         let order = self.shared.routing().map(|routing| routing.reverse.clone()).unwrap_or_default();
         let outcome = run_cleanup(Arc::new(Ops { shared: self.shared.clone() }), &order, request.mode, &|| {
-            lock(&self.shared.end).as_ref().is_some_and(|end| end.mode == CleanupMode::Abort).then_some(CleanupMode::Abort)
+            self.shared.end.lock().as_ref().is_some_and(|end| end.mode == CleanupMode::Abort).then_some(CleanupMode::Abort)
         });
         // Step 3 joined the data thread; a Run with no fragment never ran step 3.
         super::paced::stop_data_thread(&self.shared);
         self.shared.closing.store(true, Ordering::Release);
         self.lease.released = true;
-        let termination = lock(&self.shared.end).as_ref().map(|e| e.termination.clone()).unwrap_or(request.termination);
+        let termination = self.shared.end.lock().as_ref().map(|e| e.termination.clone()).unwrap_or(request.termination);
         let transition = self.shared.sample_transition();
         self.shared.publish(RunState::CleanedUp { termination: termination.clone() }, transition);
         self.manifest = Some(self.assemble_manifest(termination, outcome.failures));
-        lock(&self.shared.links).clear();
+        // The coordinator's last `Arc<dyn DataLink>` may drop here: supplied code, so after the guard (KC-24a).
+        let dropped = std::mem::take(&mut *self.shared.links.lock());
+        drop(dropped);
         self.links_by_ref.clear();
     }
 
@@ -114,14 +116,13 @@ impl RunHandle {
             }
         }
         let components: BTreeMap<Ident, ContentHash> = self.shared.ctx.spec.graph.components.iter().map(|(name, component)| (name.clone(), component.implementation.hash.clone())).collect();
-        let links = {
-            // `links` before `link_drops`, the order step 6 takes them in.
-            let links = lock(&self.shared.links);
-            let drops = lock(&self.shared.link_drops);
-            links.iter().enumerate().map(|(i, (decl, _))| LinkRecord { link: decl.id, drops: drops.get(i).copied() }).collect()
-        };
+        // SC-20: step 6's snapshot counts only when step 6 completed: after RS-8a abandoned it (or it failed) a late `drops()` return must not reach the Manifest.
+        let drops_known = !cleanup_failures.iter().any(|failure| failure.step == CleanupStep::FlushEvents);
+        let link_ids: Vec<_> = self.shared.links.lock().iter().map(|(decl, _)| decl.id).collect();
+        let link_drops = self.shared.link_drops.lock().clone();
+        let links = link_ids.into_iter().enumerate().map(|(i, link)| LinkRecord { link, drops: link_drops.get(i).copied().filter(|_| drops_known) }).collect();
         let relations = self.relations(&mut manifest_failures);
-        cleanup_failures.extend(lock(&self.shared.cleanup_failures).clone());
+        cleanup_failures.extend(self.shared.cleanup_failures.lock().clone());
         cleanup_failures.extend(manifest_failures);
         let termination_at = run.transitions.last().and_then(|t| t.at);
         let termination_host_utc = run.transitions.last().map_or(0, |t| t.host_utc_nanos);
@@ -141,8 +142,8 @@ impl RunHandle {
             clocks: ClocksSection { domains: self.shared.ctx.clocks.domains(), relations, sample_clocks: self.shared.ctx.clocks.sample_clock_records() },
             links,
             events: EventsSection {
-                counters: lock(&self.shared.counters).clone().or_else(|| self.shared.collector.get().map(|c| c.counters())).unwrap_or_default(),
-                delivered: lock(&self.shared.delivered).clone(),
+                counters: self.shared.counters.lock().clone().or_else(|| self.shared.collector.get().map(|c| c.counters())).unwrap_or_default(),
+                delivered: self.shared.delivered.lock().clone(),
             },
             lease: self.lease.record(),
             action_log: self.log.entries().to_vec(),
@@ -151,10 +152,10 @@ impl RunHandle {
                 at: termination_at,
                 host_utc_nanos: termination_host_utc,
                 cleanup_failures,
-                also: lock(&self.shared.also).clone(),
-                undelivered: lock(&self.shared.undelivered).clone(),
+                also: self.shared.also.lock().clone(),
+                undelivered: self.shared.undelivered.lock().clone(),
             },
-            artifacts: lock(&self.shared.artifacts).clone(),
+            artifacts: self.shared.artifacts.lock().clone(),
             sections: Vec::new(),
             hash: None,
         };
@@ -207,7 +208,7 @@ pub(super) fn finish(run: &mut RunHandle) {
 /// client, disconnect or expiry stop that does not escalate says nothing new and is
 /// dropped (RS-10).
 pub(super) fn request(shared: &Shared, termination: Termination, mode: CleanupMode) -> bool {
-    let mut end = lock(&shared.end);
+    let mut end = shared.end.lock();
     let Some(current) = end.as_mut() else {
         *end = Some(super::state::EndRequest { termination, mode });
         return true;
@@ -217,7 +218,7 @@ pub(super) fn request(shared: &Shared, termination: Termination, mode: CleanupMo
         current.mode = CleanupMode::Abort;
     }
     let overridden = matches!(termination, Termination::Failed { .. } | Termination::Stopped { cause: StopCause::Policy { .. } });
-    let mut also = lock(&shared.also);
+    let mut also = shared.also.lock();
     if (escalates || overridden) && current.termination != termination && !also.contains(&termination) {
         also.push(termination);
     }
@@ -241,14 +242,14 @@ impl Ops {
     /// ordering that matters.
     fn routed(&self, fragment: Option<&Ident>) -> Option<Inst> {
         let fragment = fragment?;
-        if !lock(&self.shared.prepared).contains(fragment) {
+        if !self.shared.prepared.lock().contains(fragment) {
             return None;
         }
         self.shared.routing().and_then(|routing| routing.fragment_of.get(fragment).copied())
     }
 
-    /// RS-6 step 1 with the freeze gate held by the caller: the cleanup's `FreezeDispatch` and the data thread's early stop, which keeps the gate for its Provider stops (KC-24a, KC-46b).
-    pub(super) fn freeze_held(&self) -> Result<(), crate::module_api::ModuleError> {
+    /// RS-6 step 1 with the freeze gate held by the caller: the cleanup's `FreezeDispatch` (`last`, which also closes the wake list) and the data thread's early stop, which keeps the gate for its Provider stops (KC-24a, KC-46a, KC-46b).
+    pub(super) fn freeze_held(&self, last: bool) -> Result<(), crate::module_api::ModuleError> {
         #[cfg(feature = "testing")]
         super::start_probe::reach_freeze(&self.shared, super::start_probe::FreezePoint::Serialised);
         // KC-24a: no Action admitted before the freeze is dispatched after it.
@@ -265,13 +266,18 @@ impl Ops {
             .flat_map(|queue| queue.clear())
             .collect();
         undelivered.sort();
-        lock(&self.shared.undelivered).extend(undelivered);
+        self.shared.undelivered.lock().extend(undelivered);
         #[cfg(feature = "testing")]
         super::start_probe::reach_freeze(&self.shared, super::start_probe::FreezePoint::BeforeDrop);
         // The admission lock is released before any Authority call: a `cancel` that waits for a lock a Module's thread holds while it submits must not meet it.
         drop(admission);
-        let wake = self.take_wake_handle();
-        let pending: Vec<_> = lock(&self.shared.scheduled).drain(..).chain(wake).collect();
+        // KC-46a: the cleanup's performance, the last, also closes the list, so a wake that schedules after it holds no handle and stays scheduled as a no-op.
+        let wake: Vec<ScheduleHandle> = {
+            let mut list = self.shared.wake_list.lock();
+            list.closed |= last;
+            std::mem::take(&mut list.handles).into_iter().map(|wake| wake.handle).collect()
+        };
+        let pending: Vec<_> = self.shared.scheduled.lock().drain(..).chain(wake).collect();
         // Every handle is tried: `scheduled` is already drained, so stopping at
         // one panic would leave the rest neither cancelled nor kept. The panics
         // are reported together (F25).
@@ -283,13 +289,6 @@ impl Ops {
             return Err(crate::module_api::ModuleError::rejected(format!("KC-30: a Module panicked during cleanup: Authority cancel(), {panicked} of {total} handles")));
         }
         Ok(())
-    }
-
-    /// The pending wake's handle (KC-46a), under the lock a wake holds across `schedule`. The `BeforeWakeTake` hook sits in front of this wait, so a test reads which locks the freeze holds when it may have to wait for a wake's `schedule`.
-    fn take_wake_handle(&self) -> Option<ScheduleHandle> {
-        #[cfg(feature = "testing")]
-        super::start_probe::reach_freeze(&self.shared, super::start_probe::FreezePoint::BeforeWakeTake);
-        lock(&self.shared.wake_handle).take()
     }
 }
 
@@ -305,8 +304,8 @@ impl CleanupOps for Ops {
                 // event emitted after the last round's drain or while the instances
                 // stopped — reaches the artifacts (RS-30; note 25, #66).
                 super::stepping::drain_and_react(&self.shared);
-                let marks = lock(&self.shared.marks).clone();
-                let mut artifacts = lock(&self.shared.artifacts);
+                let marks = self.shared.marks.lock().clone();
+                let mut artifacts = self.shared.artifacts.lock();
                 for artifact in artifacts.values_mut().flatten() {
                     let span = artifact.continuity.first().zip(artifact.continuity.last()).map(|(first, last)| {
                         let start = self.shared.ctx.clocks.convert(first.first, self.shared.primary).map(|point| point.floor());
@@ -335,13 +334,13 @@ impl CleanupOps for Ops {
             CleanupStep::FreezeDispatch => {
                 // KC-24a: the gate serialises this step with its other performances, with the data thread's stops and with the control loop's withdrawal; no Module's thread takes it.
                 let _gate = self.shared.lock_freeze();
-                self.freeze_held()
+                self.freeze_held(true)
             }
             CleanupStep::RestoreBaseline => {
                 let Some(instance) = self.routed(fragment) else {
                     return Ok(());
                 };
-                let mut done = lock(&self.shared.done);
+                let mut done = self.shared.done.lock();
                 if !done.insert((step as u8, instance)) {
                     return Ok(());
                 }
@@ -384,7 +383,7 @@ impl CleanupOps for Ops {
                 let Inst::Provider(i) = instance else {
                     return Ok(());
                 };
-                let mut done = lock(&self.shared.done);
+                let mut done = self.shared.done.lock();
                 if done.contains(&(CleanupStep::RestoreBaseline as u8, instance)) || done.contains(&(step as u8, instance)) {
                     return Ok(());
                 }
@@ -412,7 +411,7 @@ impl CleanupOps for Ops {
                     return Ok(());
                 }
                 let mode = current_stop_mode(&self.shared);
-                let mut done = lock(&self.shared.done);
+                let mut done = self.shared.done.lock();
                 if done.contains(&(CleanupStep::RestoreBaseline as u8, instance)) || done.contains(&(step as u8, instance)) {
                     return Ok(());
                 }
@@ -437,9 +436,12 @@ impl CleanupOps for Ops {
                 // on emits during step 5 is delivered, not only counted (RS-35).
                 super::stepping::drain_and_react(&self.shared);
                 if let Some(collector) = self.shared.collector.get() {
-                    *lock(&self.shared.counters) = Some(collector.counters());
+                    *self.shared.counters.lock() = Some(collector.counters());
                 }
-                *lock(&self.shared.link_drops) = lock(&self.shared.links).iter().map(|(_, link)| link.drops()).collect();
+                // KC-24a: `drops()` is supplied code, called with no lock held: the links are copied out first, and the snapshot is stored whole.
+                let links: Vec<_> = self.shared.links.lock().iter().map(|(_, link)| link.clone()).collect();
+                let drops: Vec<u64> = links.iter().map(|link| link.drops()).collect();
+                *self.shared.link_drops.lock() = drops;
                 Ok(())
             }
         }
@@ -450,13 +452,13 @@ impl CleanupOps for Ops {
 fn keep_artifacts(shared: &Shared, instance: Inst, artifacts: Vec<crate::manifest::ArtifactRef>) {
     if let Inst::Sink(i) = instance {
         if !artifacts.is_empty() {
-            lock(&shared.artifacts).entry(shared.sinks[i].output.clone()).or_default().extend(artifacts);
+            shared.artifacts.lock().entry(shared.sinks[i].output.clone()).or_default().extend(artifacts);
         }
     }
 }
 
 fn current_stop_mode(shared: &Shared) -> StopMode {
-    match lock(&shared.end).as_ref().map(|end| end.mode) {
+    match shared.end.lock().as_ref().map(|end| end.mode) {
         Some(CleanupMode::Abort) => StopMode::Abort,
         Some(CleanupMode::Orderly) | None => StopMode::Orderly,
     }
