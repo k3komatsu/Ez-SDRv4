@@ -1,0 +1,36 @@
+# Brief — withdraw SB-9a: the canonicaliser orders every key (RFC 8785), the door checks and `malformed` go
+
+**The owner's trial continues.** You, a Claude Sonnet subagent, own this step end to end: you turn the design into precise tasks, Go DeepSeek writes the code (you may write the production code's key parts into a task — say so in the report), you review each run adversarially (below) and send it back until it is right, then you report. Sol 6.2 reviews the code after you.
+
+Worktree `/home/komatsu/local_work/Ez-SDRv4-nsb9a`, branch `work/nsb9a` (base 7b676bce). Work only there; never touch `/home/komatsu/local_work/Ez-SDRv4` (another lane: a DeepSeek run may be active there — check `/proc/<PID>/cwd` before trusting a PID) or other worktrees. No commit, stash, push or branch switch (you and DeepSeek). Read `AGENTS.md` §2, §3, §6, §7, §9 first. Not a risky step (no test plan), but it withdraws a Kernel rule and removes an API error kind: the owner decided both.
+
+## What is decided (binding; all in `/home/komatsu/.cache/ezsdr-fixes/2026-11-19-admission-note/`)
+- `note.md` — the design (Opus draft): the inventory, alternative A (total canonicaliser, withdraw SB-9a), the sites, tests, rows and texts it names.
+- `decisions.md` — the owner's D1 (accept non-ASCII object keys everywhere; withdraw SB-9a with its 12 door checks, KC-24 step 4 and the seal-failure condition) and D2 (remove EA-5's `malformed` kind and `RunHandleError::Malformed`; `schemas/server/reply_frame.v1.json` changes structurally — regenerate schemas, keep `schema_freeze` green), and the dispositions of Fable 5.2's review (`fable-review.md`): m1 `pipeline.rs:~1103`'s non-panicking shape; m3 the prepare test's key (`test.zeta`); m4 retarget J256 and J237; m5 the omitted texts; the value-kind probe (a test first; fix with `check_value_kind` at those doors only if it fails, and say so); a test-side check that every sealed Manifest in the suites reads back through `Manifest::from_json`.
+- AGENTS §2 rule format: a withdrawn rule keeps a one-line stub, ids never reused; the Changes tables; `WITHDRAWN` in `tests/kernel_surface.rs` gains SB-9a with its literal assertion; OV-15's sentence and the Vision if it says ASCII keys (Vision edits keep reasons, add an index revision row).
+- Stage it as the note says: (a) the canonicaliser change and its RFC 8785 §3.2.3 test (the RFC's example order; ASCII keys hash as before — pin one existing golden hash unchanged), then (b) the withdrawal, D2, texts, rows. Each part leaves the tree green.
+- Nothing else: issue #112 (lone surrogate) is separate.
+
+## Driving DeepSeek
+- Write each task to `/home/komatsu/.cache/ezsdr-fixes/2026-11-19-admission-note/ds-<n>-task.md` first: files, exact behaviour, tests with names and expected values, rows (Rust token anchors, smallest uniquely matching text, killing test named), exit checks, what it must not do (mechanisms not asked for, files outside the task, `mutate.py` locally, a mutant in the tree, a commit, wall-clock tests). Its shell tool cuts commands at 120 s: long commands get a timeout of at least 1800 s. Scratch builds use `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review` with `CARGO_INCREMENTAL=0` (AGENTS §7), never their own target dirs.
+- Launch it detached: `cd /home/komatsu/local_work/Ez-SDRv4-nsb9a && setsid nohup opencode2 run --standalone -m "opencode-go/deepseek-v4.1-flash#max" --auto "$(cat <task file>)" > /home/komatsu/.cache/ezsdr-fixes/2026-11-19-admission-note/ds-<n>.log 2>&1 < /dev/null &`; take the real PID afterwards with `pgrep -n -f 'deepseek-v4.1-flash#max'` and check `/proc/<PID>/cwd` is this worktree. Wait with `timeout 590 tail --pid=<PID> -f /dev/null; kill -0 <PID> 2>/dev/null && echo running || echo done`, repeated until `done`. One run at a time; do not edit the tree while it runs. A hung run (log silent 15 min, check `~/.local/share/opencode/log/opencode.log`): `kill -- -<PID>`.
+- Send back at most twice; if still wrong, stop and report what is left.
+- **Run `remote_mutate.py` in the foreground, never detached.**
+
+## Your review of each DeepSeek run must be adversarial, not only a match against the plan (owner, 2026-11-18)
+After the plan check, for **every test the run added or changed**:
+1. Write down one smallest wrong change (to production code or to the fixture) that this test's assertions should catch, and check — by reading the old code, a scratch-copy run, or the test's mutation row — that the test really fails on it, and fails on the assertion its name claims (not on a timeout, a harness wait, or an earlier unrelated assertion).
+2. Check that the test actually reaches the state or interleaving its name says (the overflow fired, the cut is inside the gap, the lock is held at that point, the end was requested before the dispatch): name the assertion that proves it. If none does, it is a finding.
+3. For a test that uses threads, hooks or gates: for each thread, the worst place it can be descheduled (between a log line and the call it announces, between a marker and the payload, after a gate opens) and what the test then does; a test whose verdict changes with that schedule is a finding.
+Also apply 1–2 to production code you wrote into a DeepSeek task yourself. Record these per test in your report (one line each).
+
+## Exit checks (in the worktree)
+- `cargo fmt --all`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `schema_freeze` green after `EZSDR_UPDATE_SCHEMAS=1` regeneration (only the schemas the change touches move; list them); the Python suites (`PYTHONDONTWRITEBYTECODE=1`, venv `~/.cache/ezsdr-venv`, `EZSDR_SERVER` from this tree — handoff §5) — Python must not reference `malformed` any more.
+- `PYTHONDONTWRITEBYTECODE=1 python3 plan/maintenance/tools/rules.py --base 7b676bce` (with `--renames <file>` if you rename tests; write it to `/home/komatsu/.cache/ezsdr-fixes/2026-11-19-admission-note/renames.txt`).
+- Rows: retired rows deleted by id and counted; J256/J237 retargeted; the new rows; every row whose filter selects a changed test or whose anchor moved — through `REMOTE_SSH="ssh -o BatchMode=yes" ~/.cache/ezsdr-fixes/tools/simq python3 plan/maintenance/tools/remote/remote_mutate.py <lists> sim02:7,sim03:7 <ids>` in the foreground; log `/home/komatsu/.cache/ezsdr-fixes/2026-11-19-admission-note/rows.log`. Every new row killed.
+
+## Rules
+Mutation rows only through `remote_mutate.py`; never `mutate.py` locally; never a mutant in the tree. Kill by PID. Temp files on /tmp. No build output in the tree. `~/.cache/ezsdr-fixes/` (except this folder), `handoff.md`, `AGENTS.md`, plan notes: read only (`design/`, `KNOWN_LIMITATIONS.md`, `schemas/`, `python/`, the Vision and `plan/phase1/00-overview.md`'s OV-15 sentence may be edited as the texts require). No version bumps or SCHEMA_CHANGELOG entries. `cargo fmt --all` before reporting.
+
+## Report
+Writing report files is refused in this environment: your final message is the whole report — `git diff --stat`; each check's counts; the schemas regenerated; each row's outcome (retired / retargeted / new / re-run); the value-kind probe's result; the adversarial review one line per test; the trial's record (each DeepSeek run, each review round, send-backs, total time, what you wrote into tasks); deviations and anything INFERRED.

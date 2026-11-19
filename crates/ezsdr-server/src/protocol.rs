@@ -329,8 +329,6 @@ pub enum ErrorKind {
     UnsupportedProtocol,
     /// Documents refused before a Run exists.
     Refused,
-    /// A Session action the Run refused as malformed (RS-15).
-    Malformed,
     /// The Run has already been cleaned up.
     Ended,
     /// An instant the Authority's primary root cannot place (KC-29).

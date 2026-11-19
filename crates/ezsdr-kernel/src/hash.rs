@@ -22,13 +22,6 @@ pub enum HashError {
     /// A number was NaN or infinite. Non-finite numbers are rejected rather than
     /// written as `null` (OV-15).
     NonFiniteNumber,
-    /// An object key was not ASCII. All Ez-SDR keys are ASCII by the key-namespace
-    /// rule, where byte order and UTF-16 order coincide, and the canonicaliser
-    /// asserts that rather than implementing UTF-16 collation (OV-15).
-    NonAsciiKey {
-        /// The offending key.
-        key: String,
-    },
     /// The value could not be turned into JSON at all.
     NotSerialisable {
         /// What `serde_json` said.
@@ -42,7 +35,6 @@ impl fmt::Display for HashError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             HashError::NonFiniteNumber => f.write_str("a non-finite number cannot be canonicalised"),
-            HashError::NonAsciiKey { key } => write!(f, "object key {key:?} is not ASCII"),
             HashError::NotSerialisable { message } => write!(f, "not serialisable: {message}"),
             HashError::MalformedHash => f.write_str("a content hash is `sha256:` plus 64 lowercase hex digits"),
         }
@@ -164,12 +156,11 @@ fn write_value(v: &serde_json::Value, out: &mut String) -> Result<(), HashError>
         serde_json::Value::Object(map) => {
             // OV-15: sorted here rather than relied on from `serde_json::Map`, because
             // any crate in the workspace enabling `preserve_order` would switch that
-            // map to insertion order.
+            // map to insertion order. The order is by UTF-16 code units, RFC 8785
+            // §3.2.3, which differs from byte order and code point order for keys
+            // outside the Basic Multilingual Plane.
             let mut keys: Vec<&String> = map.keys().collect();
-            if let Some(bad) = keys.iter().find(|k| !k.is_ascii()) {
-                return Err(HashError::NonAsciiKey { key: (*bad).clone() });
-            }
-            keys.sort_unstable();
+            keys.sort_unstable_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
             out.push('{');
             for (i, k) in keys.iter().enumerate() {
                 if i > 0 {

@@ -123,21 +123,6 @@ pub struct LogEntry {
     pub outcome: Outcome,
 }
 
-impl SessionAction {
-    /// OV-15's ASCII keys, over every `Value` this Action carries. A `Value` reaches
-    /// the sealed Manifest through the action log and through an Action's `params`,
-    /// neither of which passes a `from_json`, so a document that fails this is not an
-    /// Action at all (SB-9a, RS-11, RS-15).
-    pub fn check_values(&self) -> Result<(), SpecError> {
-        let carried: Vec<(&Key, &Value)> = match self {
-            SessionAction::SetParameter { key, value, .. } => vec![(key, value)],
-            SessionAction::Vocabulary { params, .. } => params.iter().collect(),
-            _ => Vec::new(),
-        };
-        carried.into_iter().try_for_each(|(k, v)| v.check_ascii_keys(k.as_str()))
-    }
-}
-
 /// Every Action, admitted or not, in order (RS-15).
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct SessionLog {
@@ -150,27 +135,14 @@ impl SessionLog {
         SessionLog::default()
     }
 
-    /// Appends an entry with the next dense sequence number, refusing an Action that
-    /// is not a well-formed document (RS-15, SB-4, SB-9a).
+    /// Appends an entry with the next dense sequence number (RS-15).
     ///
     /// RS-15 logs every Action, admitted or not: a **rejected** Action still takes a
-    /// number. One whose value the canonicaliser cannot hash was never an Action —
-    /// and a log it cannot hash breaks RS-11 for the whole Run, which is worse than
-    /// refusing one entry. The check lives here rather than on the compile path
-    /// because this is the door: `compile` returns a `Compiled` and the wiring that
-    /// would log it is Phase 2's.
-    pub fn append(&mut self, time: TimePoint, action: SessionAction, outcome: Outcome) -> Result<u32, SpecError> {
-        self.check_entry(&action)?;
+    /// number.
+    pub fn append(&mut self, time: TimePoint, action: SessionAction, outcome: Outcome) -> u32 {
         let seq = self.entries.len() as u32;
         self.entries.push(LogEntry { seq, time, action, outcome });
-        Ok(seq)
-    }
-
-    /// What `append` refuses, checked without appending: an Action that is not a
-    /// well-formed document. The coordinator calls it before anything is compiled, so
-    /// that a refused Action takes no sequence number (RS-15, KC-28).
-    pub fn check_entry(&self, action: &SessionAction) -> Result<(), SpecError> {
-        action.check_values()
+        seq
     }
 
     /// Every entry, in order (RS-15).
@@ -245,19 +217,6 @@ impl Admitter<'_> {
         let violations = self.checks.run(self.environment, effective, proposed, stage);
         if !violations.is_empty() {
             return Err(violations);
-        }
-        // SB-9a, before the policy: a `CoerceReport`'s `applied` reaches the action log
-        // as `Outcome::Admitted`'s coercions (RS-16) and the sealed Manifest through
-        // it, with no `from_json` on that path. Left to hashing time, `seal()` refused
-        // the key at cleanup step 7, after the Run had transmitted (RS-11). The
-        // refusal never transcribes the key (KC-24).
-        if coercions.iter().any(|c| c.requested.check_ascii_keys("coercion").is_err() || c.applied.check_ascii_keys("coercion").is_err()) {
-            return Err(vec![Violation {
-                check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
-                key: None,
-                requested: None,
-                reason: "SB-9a: a coercion carries a map key that is not ASCII".to_owned(),
-            }]);
         }
         // 2. the coercion policy (SB-45, SB-46)
         let mut out = Admitted { coercions: coercions.to_vec(), warnings: Vec::new() };
@@ -340,10 +299,10 @@ pub(crate) enum ControlOp {
 /// action compiles as its registering Vocabulary declares. A verb whose namespace
 /// no loaded Vocabulary claims is rejected and logged.
 ///
-/// The compiler keeps its own refusals — the ASCII and nesting rules of SB-9a and
-/// SB-4, a verb no Vocabulary claims, a missing parameter value and a missing
-/// waveform — and leaves the update class to admission: an update class that is
-/// fixed or missing is refused there, never here (KC-24 step 5; pre-freeze item 3).
+/// The compiler keeps its own refusals — a verb no Vocabulary claims, a missing
+/// parameter value and a missing waveform — and leaves the update class to
+/// admission: an update class that is fixed or missing is refused there, never here
+/// (KC-24 step 5; pre-freeze item 3).
 /// It therefore needs no `ExperimentSpec`: the class it used to read from one is
 /// admission's own declaration reference.
 ///
@@ -355,13 +314,6 @@ pub(crate) enum ControlOp {
 pub(crate) fn compile(action: &SessionAction, registry: &ModuleRegistry, earliest: TimePoint, waveform: Option<crate::manifest::ArtifactRef>) -> Result<Compiled, Vec<Violation>> {
     let reject = |check: &str, reason: String| -> Vec<Violation> { vec![Violation { check: Namespace::parse(check).expect("a valid literal"), key: None, requested: None, reason }] };
     let mut out = Compiled::default();
-    // SB-9a: a `Value` reaches the sealed Manifest through the action log and through
-    // an Action's `params`, neither of which passes a `from_json`, so OV-15's ASCII
-    // key rule and SB-4's nesting rule are checked where the value enters. Left to
-    // hashing time, `seal()` failed at cleanup step 7 after the Run had transmitted.
-    if let Err(e) = action.check_values() {
-        return Err(reject("ezsdr.value", e.to_string()));
-    }
     match action {
         SessionAction::SetParameter { target, key, value } => {
             // RS-19 / finding OQ2: a bare `SetParameter` carries no time, so the
@@ -641,22 +593,6 @@ mod tests {
         spec.requirements.vocabularies = vec![crate::spec::VocabularyReq { id: ns("test"), major: 1 }];
         spec.resources.insert(id("radio"), ResourceReq { kind: ns("test.device"), requires: BTreeMap::new(), needs: BTreeMap::new(), extensions: BTreeMap::new() });
         spec
-    }
-
-    #[test]
-    fn rs_13a_a_session_value_with_a_non_ascii_key_is_refused_at_compile() {
-        // A `Value` reaches the sealed Manifest through the action log and an Action's
-        // `params`, neither of which passes a `from_json`, so the check belongs where
-        // the value enters the Kernel (SB-9a, RS-11). The Run-level carrier is
-        // `kc_28_a_malformed_action_takes_no_sequence_number`.
-        let reg = registry();
-        let bad: Value = serde_json::from_value(serde_json::json!({ "\u{3c1}": 1 })).expect("deserialises");
-        let action = SessionAction::SetParameter { target: target("radio"), key: key("test.flag"), value: bad.clone() };
-        let violations = compile(&action, &reg, t(0), None).expect_err("refused before it can be logged");
-        assert!(violations[0].reason.contains("non-ASCII"), "{:?}", violations[0]);
-        // And through a Vocabulary action's params.
-        let vocab = SessionAction::Vocabulary { ns: ns("test"), verb: id("capture"), target: target("radio"), at: Some(t(1)), params: [(key("test.capture"), bad)].into_iter().collect() };
-        assert!(compile(&vocab, &reg, t(0), None).is_err());
     }
 
     #[test]

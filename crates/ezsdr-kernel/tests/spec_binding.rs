@@ -4,6 +4,7 @@ mod support;
 
 use ezsdr_kernel::spec::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, BindingProfile, CheckStage, LinkPlacement, Placements, satisfies};
 use ezsdr_kernel::contract::{ContractRegistry, PortRef};
@@ -17,7 +18,7 @@ use ezsdr_kernel::spec::{
     CapabilityValue, CoercionPolicy, Constraint, ExperimentSpec, Ident, Key, KeyDecl, Namespace, OutputReq, ResourceReq, ScheduleEntry, SinkFeed, SpecError, SpecTime, SubResourceReq, Value, ValueKind,
 };
 use ezsdr_kernel::stream::{BackPressure, LatePolicy};
-use support::{FailAt, TestLimitsCheck, TestProvider, TestSink, id, key, mid, mref, ns, rid, some_hash, test_provider_descriptor, test_sink_descriptor, test_vocabulary};
+use support::{FailAt, ScalarOnlyCheck, TestLimitsCheck, TestProvider, TestSink, id, key, mid, mref, ns, rid, some_hash, test_provider_descriptor, test_sink_descriptor, test_vocabulary};
 
 fn registry() -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
@@ -2054,26 +2055,26 @@ fn ma_41_a_declared_time_class_that_disagrees_is_refused() {
 }
 
 #[test]
-fn ov_16_a_non_ascii_key_is_refused_at_ingestion() {
-    // OV-15's canonicaliser refuses a non-ASCII object key, and nothing refused one
-    // at ingestion: a Spec carrying one in an opaque section validated, planned,
-    // armed and transmitted, and `Manifest::seal()` then failed at cleanup step 7 —
-    // a Run that radiated and produced no Manifest, against RS-11.
+fn ov_16_a_non_ascii_key_is_accepted_at_ingestion() {
+    // OV-15 orders object keys by UTF-16 code units, so a key outside ASCII is no
+    // refusal at any document boundary.
     let doc = serde_json::json!({
         "version": 1,
         "extensions": { "vendor.thing": { "\u{3c1}": 1 } }
     });
-    let err = ExperimentSpec::from_json(&doc).expect_err("refused at ingestion");
-    assert!(matches!(&err, SpecError::UnknownField { path } if path.contains("OV-15")), "{err:?}");
+    let spec = ExperimentSpec::from_json(&doc).expect("parses");
+    assert!(ContentHash::of(&spec).is_ok());
+    let canonical = ezsdr_kernel::hash::canonical_json(&serde_json::to_value(&spec).expect("serialises")).expect("canonicalises");
+    assert!(canonical.contains('\u{3c1}'), "{canonical}");
 
-    // The same document with an ASCII key parses, and its canonical form exists —
-    // which is the property the refusal protects.
-    let ok = serde_json::json!({
+    let profile_doc = serde_json::json!({
         "version": 1,
-        "extensions": { "vendor.thing": { "rho": 1 } }
+        "bindings": { "radio": { "module": { "id": "ezsdr.test.provider", "version": { "major": 1, "minor": 0, "patch": 0 } } } },
+        "authority": "radio",
+        "environment": { "vendor.thing": { "\u{3c1}": 1 } }
     });
-    let spec = ExperimentSpec::from_json(&ok).expect("parses");
-    assert!(ezsdr_kernel::hash::ContentHash::of(&spec).is_ok());
+    let profile = BindingProfile::from_json(&profile_doc).expect("parses");
+    assert!(ContentHash::of(&profile).is_ok());
 }
 
 #[test]
@@ -2268,13 +2269,36 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
     // re-match deleted.
     assert!(v.iter().any(|x| x.reason.contains("MA-12 (re-match)")), "{v:?}");
 
-    // A list is no capability value at all: both halves refuse it, rather than reading
-    // its element (spec 26 §3).
+    // A list is no capability value at all, and SB-6's kind check (P1, P3) refuses it
+    // before MA-12's loop — the wrong-kind path returns without reaching it (F1).
     let listed = PrepareReport { effective: [(key("test.count"), Value::List(vec![Scalar::from(2)]))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
     let failed = collect_prepare(vec![(id("radio"), Ok(listed))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a list is refused");
     let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert!(v.iter().any(|x| x.key == Some(key("test.count")) && x.reason.starts_with("SB-6: ") && x.reason.contains("List")), "{v:?}");
+
+    // MA-12's own list branch is still reachable for a key with no `KeyDecl`: an
+    // `ext.` key (MA-34), which `reported_kind_error` skips, so SB-6's early return
+    // does not take the case with it. The node declares the key and the Spec asks
+    // for it, so it is both a capability and a request — each half of MA-12 judges
+    // the list, and neither violation is SB-6's.
+    let ext = key("ext.ezsdr.test.provider.thing");
+    let mut ext_req = resource("test.device", &[]);
+    ext_req.requires.insert(ext.clone(), Constraint::Eq { value: Scalar::from(1) });
+    let ext_spec = spec_with([(id("radio"), ext_req)].into_iter().collect());
+    let ext_profile = profile_binding(&["radio"]);
+    let ext_fx = Fixture::new();
+    let ext_p = TestProvider::new("radio", 2).with_capability("ext.ezsdr.test.provider.thing", 1);
+    let ext_providers = one_provider("radio", &ext_p);
+    let ext_admission = validate(&ext_spec, &ext_profile, &ext_fx.inputs(&ext_providers)).expect("an ext capability admits");
+    assert!(ext_admission.is_admitted(), "{ext_admission:?}");
+    let ext_listed = PrepareReport { effective: [(ext.clone(), Value::List(vec![Scalar::from(1)]))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
+    let failed = collect_prepare(vec![(id("radio"), Ok(ext_listed))], &ext_spec, &ext_profile, &ext_fx.inputs(&ext_providers), &ext_admission).expect_err("a list is refused by MA-12");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
     assert!(v.iter().any(|x| x.reason.contains("is a scalar")), "{v:?}");
     assert!(v.iter().any(|x| x.reason.contains("MA-12 (re-match)")), "{v:?}");
+    assert!(!v.iter().any(|x| x.reason.starts_with("SB-6:")), "{v:?}");
+    let ext_exact = PrepareReport { effective: [(ext, Value::from(1))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
+    assert!(collect_prepare(vec![(id("radio"), Ok(ext_exact))], &ext_spec, &ext_profile, &ext_fx.inputs(&ext_providers), &ext_admission).is_ok());
 
     // The declared value itself passes both.
     let exact = PrepareReport { effective: [(key("test.count"), Value::from(2))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
@@ -2312,6 +2336,158 @@ fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
     let failed = collect_prepare(vec![(id("a"), Ok(report(9))), (id("b"), Ok(report(4)))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a's report widens its own node");
     let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
     assert!(v.iter().any(|x| x.reason.contains("a's effective")), "{v:?}");
+}
+
+#[test]
+fn sb_6_a_coerce_applied_of_the_wrong_kind_is_refused_at_validate() {
+    // P2: `applied` decides whether a coercible key is satisfied and its `Coercion`
+    // becomes `coercions_preview`, which `prepare` compares a report to. A wrong-kind
+    // `applied` was recorded as a legitimate coercion, so `prepare` echoing it passed
+    // (SB-2, SB-6).
+    let mut req = resource("test.device", &[]);
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
+    let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
+    // `test.grid`'s Vocabulary default is `Reject`; `Accept` keeps SB-46's policy
+    // from refusing the coercion for its own reason (SB-45).
+    spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let wrong = Value::from("twenty");
+    let p = TestProvider::new("radio", 2).with_grid(20.0).with_wrong_grid(wrong.clone());
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validate ran");
+    let refused = admission.violations.iter().find(|v| v.check == ns("ezsdr.coercion") && v.key == Some(key("test.grid"))).unwrap_or_else(|| panic!("no ezsdr.coercion violation: {admission:?}"));
+    assert!(refused.reason.starts_with("SB-6: "), "{refused:?}");
+    assert!(refused.reason.contains("test.grid") && refused.reason.contains("Num") && refused.reason.contains("Str"), "{refused:?}");
+    // `test.grid` is in both `applied` and `coercions`; the key is named once.
+    assert_eq!(admission.violations.iter().filter(|v| v.check == ns("ezsdr.coercion") && v.key == Some(key("test.grid"))).count(), 1, "{:?}", admission.violations);
+    assert_eq!(refused.requested, Some(Value::num(19.5).unwrap()), "the Spec's request, not the reported value");
+    assert!(refused.reason.contains("twenty"), "{refused:?}");
+    assert!(!admission.is_admitted(), "the admission is refused");
+    assert!(admission.coercions_preview.is_empty(), "the wrong-kind coercion is not previewed: {:?}", admission.coercions_preview);
+}
+
+#[test]
+fn sb_6_a_coerce_applied_map_entry_of_the_wrong_kind_is_refused_at_validate() {
+    // The `applied` map and the `coercions` list are two reports of one coercion;
+    // the map entry alone must be kind-checked too (SB-2, SB-6).
+    let mut req = resource("test.device", &[]);
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
+    let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
+    spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let wrong = Value::from("twenty");
+    let p = TestProvider::new("radio", 2).with_grid(20.0).with_wrong_applied_grid(wrong);
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validate ran");
+    let refused: Vec<_> = admission.violations.iter().filter(|v| v.check == ns("ezsdr.coercion") && v.key == Some(key("test.grid"))).collect();
+    assert_eq!(refused.len(), 1, "{:?}", admission.violations);
+    assert!(refused[0].reason.starts_with("SB-6: "), "{refused:?}");
+    assert_eq!(refused[0].requested, Some(Value::num(19.5).unwrap()), "the Spec's request, not the reported value");
+    assert!(!admission.is_admitted());
+    assert!(admission.coercions_preview.is_empty(), "the wrong-kind coercion is not previewed: {:?}", admission.coercions_preview);
+}
+
+#[test]
+fn sb_6_a_coercion_applied_of_the_wrong_kind_is_refused_at_validate() {
+    // The `Coercion`'s own `applied` is what `coercions_preview` carries, so it is
+    // kind-checked even when the `applied` map entry is right (SB-2, SB-6).
+    let mut req = resource("test.device", &[]);
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
+    let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
+    spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let wrong = Value::from("twenty");
+    let p = TestProvider::new("radio", 2).with_grid(20.0).with_wrong_coercion_grid(wrong);
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validate ran");
+    let refused: Vec<_> = admission.violations.iter().filter(|v| v.check == ns("ezsdr.coercion") && v.key == Some(key("test.grid"))).collect();
+    assert_eq!(refused.len(), 1, "{:?}", admission.violations);
+    assert!(refused[0].reason.starts_with("SB-6: "), "{refused:?}");
+    assert_eq!(refused[0].requested, Some(Value::num(19.5).unwrap()), "the Spec's request, not the reported value");
+    assert!(!admission.is_admitted());
+    assert!(admission.coercions_preview.is_empty(), "the wrong-kind coercion is not previewed: {:?}", admission.coercions_preview);
+}
+
+#[test]
+fn sb_6_a_prepare_kind_refusal_records_the_specs_request_and_not_the_reported_value() {
+    // SB-6 at prepare: `requested` is what the Spec asked of the key, never the
+    // Module's reported value — the same rule `coordinator/admission.rs` follows.
+    let mut req = resource("test.device", &[]);
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(20.0).unwrap() });
+    let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
+    spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    // 20.0 is in the declared grid, so validate admits and nothing is previewed.
+    let p = TestProvider::new("radio", 2).with_grid(20.0);
+    let providers = one_provider("radio", &p);
+    let report = |effective: &[(&str, Value)], coercions: Vec<ezsdr_kernel::spec::Coercion>| PrepareReport {
+        effective: effective.iter().map(|(k, v)| (key(k), v.clone())).collect(),
+        coercions,
+        warnings: Vec::new(),
+    };
+    let failed = prepared(vec![(id("radio"), Ok(report(&[("test.grid", Value::from("twenty"))], Vec::new())))], &fx, &spec, &profile, &providers).expect_err("a wrong-kind effective is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 1, "{v:?}");
+    assert_eq!(v[0].check, ns("ezsdr.effective"));
+    assert_eq!(v[0].key, Some(key("test.grid")));
+    assert_eq!(v[0].requested, Some(Value::num(20.0).unwrap()), "the Spec's request, not the reported value");
+    assert!(v[0].reason.contains("twenty"), "{v:?}");
+
+    // A key the Spec does not name asks no one value.
+    let failed = prepared(vec![(id("radio"), Ok(report(&[("test.grid", Value::num(20.0).unwrap()), ("test.gain", Value::from("loud"))], Vec::new())))], &fx, &spec, &profile, &providers)
+        .expect_err("an undeclared key's wrong-kind value is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    let gain = v.iter().find(|x| x.key == Some(key("test.gain"))).unwrap_or_else(|| panic!("no test.gain violation: {v:?}"));
+    assert_eq!(gain.requested, None);
+    assert!(gain.reason.contains("loud"), "{gain:?}");
+
+    // The report's own `requested` (7.0) is itself a Module report, so it is not the
+    // Spec's request either.
+    let coercion = ezsdr_kernel::spec::Coercion { key: key("test.grid"), requested: Value::num(7.0).unwrap(), applied: Value::from("twenty"), reason: "snapped".to_owned() };
+    let failed =
+        prepared(vec![(id("radio"), Ok(report(&[("test.grid", Value::num(20.0).unwrap())], vec![coercion])))], &fx, &spec, &profile, &providers).expect_err("a wrong-kind coercion applied is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 1, "{v:?}");
+    assert_eq!(v[0].check, ns("ezsdr.coercion"));
+    assert_eq!(v[0].key, Some(key("test.grid")));
+    assert_eq!(v[0].requested, Some(Value::num(20.0).unwrap()), "the Spec's request, not the report's 7.0");
+    assert!(v[0].reason.contains("twenty"), "{v:?}");
+}
+
+#[test]
+fn sb_6_a_prepare_kind_refusal_is_returned_before_a_registered_check_runs() {
+    // F1: the SB-6 violation was recorded but the rejected configuration still
+    // reached `checks.run`, so a check that reads the key as its declared kind
+    // panicked. The refusal returns before any registered check reads it.
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let mut checks = AdmissionCheckRegistry::new();
+    checks.register(std::sync::Arc::new(ScalarOnlyCheck::new(calls.clone())));
+    let mut fx = Fixture::new();
+    fx.checks = checks;
+    let mut profile = profile_binding(&["radio"]);
+    profile.environment.insert(ns("test.scalar"), serde_json::json!(1));
+    let spec = minimal_spec();
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let refused =
+        PrepareReport { effective: [(key("test.gain"), Value::Map([("\u{e9}".to_owned(), Scalar::Int(1))].into_iter().collect()))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
+    let failed = prepared(vec![(id("radio"), Ok(refused))], &fx, &spec, &profile, &providers).expect_err("the wrong-kind report is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 1, "{v:?}");
+    assert_eq!(v[0].check, ns("ezsdr.effective"));
+    assert_eq!(v[0].key, Some(key("test.gain")));
+    assert!(v[0].reason.starts_with("SB-6: "), "{v:?}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "the refused report never reaches the check");
+
+    // Control: the same check runs once on a value of the declared kind, so the
+    // counter is shown to observe calls.
+    let valid = PrepareReport { effective: [(key("test.gain"), Value::num(2.5).unwrap())].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
+    prepared(vec![(id("radio"), Ok(valid))], &fx, &spec, &profile, &providers).expect("a value of the declared kind passes");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the check runs, so the counter observes calls");
 }
 
 #[test]
@@ -2359,19 +2535,6 @@ fn sb_02_an_ext_key_needs_a_registered_owner() {
     let providers = one_provider("radio", &p);
     let err = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect_err("no registered Module owns it");
     assert!(matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("MA-34")), "{err:?}");
-}
-
-#[test]
-fn ov_15_a_non_ascii_key_inside_a_value_map_is_refused() {
-    // `check_ascii_keys` guards the three document boundaries. A `Value::Map` reaches
-    // the sealed Manifest through paths that pass none of them — a Session
-    // `SetParameter`, an Action's `params` or `metadata` — so the check belongs where
-    // every map is walked (RS-11, OV-15).
-    let ascii = Value::Map(BTreeMap::from([("rho".to_owned(), Scalar::from(1))]));
-    assert!(ascii.check_ascii_keys("x").is_ok(), "an ASCII key is fine");
-    let from_json: Value = serde_json::from_value(serde_json::json!({ "\u{3c1}": 1 })).expect("deserialises");
-    let err = from_json.check_ascii_keys("params").expect_err("refused");
-    assert!(matches!(&err, SpecError::KeyShape { found, .. } if found.contains("non-ASCII")), "{err:?}");
 }
 
 #[test]
@@ -3025,53 +3188,6 @@ fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_validate() {
 }
 
 #[test]
-fn sb_9a_a_coercion_preview_carrying_a_map_key_that_is_not_ascii_is_refused_at_validate() {
-    // SB-9a: a `Value` map carrying a non-ASCII key is refused where it enters. A
-    // `CoerceReport`'s coercions enter `coercions_preview`, which reaches the Manifest
-    // through `AdmissionResult` (SB-38) and passes no `from_json`; left unchecked, the
-    // Run armed and transmitted and `Manifest::seal()` refused the key at cleanup step
-    // 7 (RS-11). `validate` refuses it, before anything arms, without transcribing the
-    // key (KC-24) and without recording the coercion.
-    let spec = minimal_spec();
-    let mut with_grid = spec.clone();
-    with_grid.resources.get_mut(&id("radio")).expect("the fixture's resource").requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
-    let profile = profile_binding(&["radio"]);
-    let fx = Fixture::new();
-    let p = TestProvider::new("radio", 2).with_grid(20.0).with_non_ascii_coercion();
-    let providers = one_provider("radio", &p);
-    let admission = validate(&with_grid, &profile, &fx.inputs(&providers)).expect("runs");
-    assert!(!admission.is_admitted(), "a coercion carrying a non-ASCII map key is refused");
-    assert!(admission.violations.iter().any(|v| v.check == ns("ezsdr.coercion") && v.reason.starts_with("SB-9a:")), "{:?}", admission.violations);
-    assert!(admission.violations.iter().all(|v| !format!("{v:?}").contains('ü')), "the offending key is never transcribed: {:?}", admission.violations);
-    assert!(admission.coercions_preview.is_empty(), "the refused coercion is not recorded: {:?}", admission.coercions_preview);
-}
-
-#[test]
-fn sb_9a_a_stray_coercion_carrying_a_map_key_that_is_not_ascii_is_refused_without_transcribing_it() {
-    // SB-9a: the check runs over **every** coercion the report returns, before SB-44's
-    // partition. Checked after it, a stray's `requested` was copied into its SB-44
-    // violation unchecked, and that violation reaches the Manifest through
-    // `AdmissionResult` (SB-38) with no `from_json` on the path: the refused Run's
-    // Manifest was unsealable. It is refused as SB-9a's violation instead, and neither
-    // the reason nor any `requested` carries the key (KC-24).
-    let spec = minimal_spec();
-    let profile = profile_binding(&["radio"]);
-    let fx = Fixture::new();
-    let p = TestProvider::new("radio", 2).with_non_ascii_stray_coercion();
-    let providers = one_provider("radio", &p);
-    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("runs");
-    assert!(!admission.is_admitted(), "a stray coercion carrying a non-ASCII map key is refused");
-    assert_eq!(admission.violations.len(), 1, "it is SB-9a's refusal alone, not SB-44's: {:?}", admission.violations);
-    let violation = &admission.violations[0];
-    assert_eq!(violation.check, ns("ezsdr.coercion"));
-    assert!(violation.reason.starts_with("SB-9a:"), "{violation:?}");
-    assert_eq!(violation.key, None);
-    assert_eq!(violation.requested, None, "the offending value is never recorded: {violation:?}");
-    assert!(!format!("{violation:?}").contains('ü'), "the offending key is never transcribed: {violation:?}");
-    assert!(admission.coercions_preview.is_empty(), "the refused coercion is not recorded: {:?}", admission.coercions_preview);
-}
-
-#[test]
 fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_prepare() {
     // The refusal above is `validate`'s; D42's is a **second implementation** at
     // `prepare`, and `prepare` is the point whose reports the Manifest records. A
@@ -3097,33 +3213,6 @@ fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_prepare() {
     let err = collect_prepare(vec![(id("radio"), Ok(stray))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a coercion of a key the request does not name");
     let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
     assert!(v.iter().any(|x| x.check == ns("ezsdr.coercion") && x.reason.contains("SB-44") && x.reason.contains("test.flag") && x.reason.contains("does not name")), "{v:?}");
-}
-
-#[test]
-fn sb_9a_a_report_coercion_carrying_a_map_key_that_is_not_ascii_is_refused_at_prepare() {
-    // The report is filed into the Manifest whole (RS-38), so its `coercions` carry
-    // `Value`s into the Manifest beside `effective`, and no `from_json` runs there
-    // (SB-9a). MA-12's "equal to what `coerce` returned" is a producer obligation, and
-    // SB-44 already refuses a report whose coercions are malformed, so this is the
-    // same door on the same path.
-    let spec = minimal_spec();
-    let profile = profile_binding(&["radio"]);
-    let fx = Fixture::new();
-    let p = TestProvider::new("radio", 2);
-    let providers = one_provider("radio", &p);
-    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("runs");
-    assert!(admission.is_admitted(), "{admission:?}");
-    let coercion = ezsdr_kernel::spec::Coercion {
-        key: key("test.grid"),
-        requested: Value::num(19.5).unwrap(),
-        applied: Value::Map([("radio.ü".to_owned(), Scalar::Int(1))].into_iter().collect()),
-        reason: "a map key that is not ASCII".to_owned(),
-    };
-    let report = PrepareReport { effective: BTreeMap::new(), coercions: vec![coercion], warnings: Vec::new() };
-    let err = collect_prepare(vec![(id("radio"), Ok(report))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a report coercion carrying a non-ASCII map key");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
-    assert!(v.iter().any(|x| x.check == ns("ezsdr.effective") && x.reason.starts_with("SB-9a:")), "{v:?}");
-    assert!(v.iter().all(|x| !format!("{x:?}").contains('ü')), "the offending key is never transcribed: {v:?}");
 }
 
 #[test]
@@ -4620,14 +4709,15 @@ fn sb_02a_a_numbered_key_resolves_its_policy_by_the_concrete_key() {
     // SB-2a: `policies.coercion` keeps its exact key, so a policy for `test.item0`
     // governs that key's coercion and a policy for another index does not — the
     // declaration they share is not the map's key.
-    let p = TestProvider::new("radio", 2).coercing("test.item0", 2.0).coercing("test.item1", 2.0);
+    let p = TestProvider::new("radio", 2).coercing("test.item0", 2).coercing("test.item1", 2);
     let providers = one_provider("radio", &p);
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let asked = |name: &str| {
         let mut spec = minimal_spec();
         // No capability is declared for either key, so the coercible declaration sends
-        // the request to `coerce` (SB-7), which reports a coercion to a `Num`.
+        // the request to `coerce` (SB-7), which reports a coercion to another `Int`
+        // (SB-6 keeps the applied value's kind).
         spec.resources.get_mut(&id("radio")).unwrap().requires.insert(key(name), Constraint::Eq { value: Scalar::from(3) });
         spec
     };

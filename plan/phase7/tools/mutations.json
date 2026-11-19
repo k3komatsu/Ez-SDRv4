@@ -266,8 +266,8 @@
   "id": "G28",
   "name": "KG-12's check removed",
   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
-  "old": "    if run.shared.device_paced() {\n        return Some(",
-  "new": "    if false {\n        return Some(",
+  "old": "    if run.shared.device_paced() {\n        return Err(",
+  "new": "    if false {\n        return Err(",
   "crate": "ezsdr-kernel",
   "test_bin": "device_paced",
   "filter": "kg_12_run_child_is_refused_in_a_device_paced_session"

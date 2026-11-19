@@ -198,7 +198,7 @@ pub enum Value {
     Scalar(Scalar),
     /// A list of scalars.
     List(Vec<Scalar>),
-    /// A map of scalars; its keys are ASCII (SB-9a).
+    /// A map of scalars. A key is any string: the Kernel imposes no grammar on it (SB-4).
     Map(BTreeMap<String, Scalar>),
 }
 
@@ -263,20 +263,6 @@ impl Value {
     /// A float value, unless `x` is NaN or an infinity (SB-4).
     pub fn num(x: f64) -> Option<Value> {
         Finite::new(x).map(|x| Value::Scalar(Scalar::Num(x)))
-    }
-
-    /// Refuses a map key that is not ASCII (SB-9a): a `Value` reaches the sealed
-    /// Manifest through paths that pass no `from_json` — a Session `SetParameter`, an
-    /// Action's `params` or `metadata` — and OV-15's canonicaliser refuses such a key,
-    /// at cleanup step 7, after the Run had transmitted (RS-11).
-    pub fn check_ascii_keys(&self, path: &str) -> Result<(), SpecError> {
-        match self {
-            Value::Map(items) => match items.keys().find(|k| !k.is_ascii()) {
-                Some(bad) => Err(SpecError::KeyShape { key: format!("{path}.{bad}"), expected: "an ASCII key, which OV-15 canonicalises".into(), found: "a non-ASCII key".into() }),
-                None => Ok(()),
-            },
-            _ => Ok(()),
-        }
     }
 }
 
@@ -970,32 +956,6 @@ impl fmt::Display for SpecError {
 
 impl std::error::Error for SpecError {}
 
-/// Refuses a non-ASCII object key anywhere in a document.
-///
-/// OV-15's canonicaliser refuses one, because RFC 8785 orders keys by their UTF-16
-/// code units and this profile does not implement that ordering. Nothing refused it
-/// at **ingestion**, so a Spec carrying `{"ρ": 1}` in an opaque section validated,
-/// planned, armed and transmitted, and `Manifest::seal()` then failed at cleanup
-/// step 7 — a Run that radiated and produced no Manifest, against RS-11. Refusing it
-/// here is what keeps that impossible.
-///
-/// Rule: OV-15, OV-16, RS-11, SB-9.
-pub(crate) fn check_ascii_keys(doc: &serde_json::Value) -> Result<(), SpecError> {
-    match doc {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                if !k.is_ascii() {
-                    return Err(SpecError::UnknownField { path: format!("{k}: OV-15 canonicalises only ASCII object keys") });
-                }
-                check_ascii_keys(v)?;
-            }
-            Ok(())
-        }
-        serde_json::Value::Array(items) => items.iter().try_for_each(check_ascii_keys),
-        _ => Ok(()),
-    }
-}
-
 /// Checks a document's `version` against [`SUPPORTED_VERSIONS`] (SB-10, SB-47).
 pub fn check_version(doc: &serde_json::Value) -> Result<u32, SpecError> {
     let found = doc.get("version").and_then(|v| v.as_u64()).ok_or_else(|| SpecError::UnknownField { path: "version".to_owned() })?;
@@ -1062,7 +1022,6 @@ impl ExperimentSpec {
         check_version(doc)?;
         check_top_level(doc, SPEC_TOP_LEVEL)?;
         check_no_placement(doc)?;
-        check_ascii_keys(doc)?;
         serde_json::from_value(doc.clone()).map_err(|e| SpecError::Structural { reason: format!("SB-9: {e}") })
     }
 

@@ -493,7 +493,6 @@ fn run_error(error: RunHandleError) -> Handled {
         RunHandleError::Ended { termination } => {
             Handled::error(ProtocolError { termination: Some(termination.clone()), ..ProtocolError::new(ErrorKind::Ended, format!("the Run has ended: {termination:?}")) })
         }
-        RunHandleError::Malformed { error } => fail(ErrorKind::Malformed, error.to_string()),
         RunHandleError::NotOnPrimaryRoot { t } => fail(ErrorKind::NotOnPrimaryRoot, format!("{t} is not on the Authority's primary root")),
         RunHandleError::NotSession => fail(ErrorKind::Protocol, "the request is available only on a Session"),
     }

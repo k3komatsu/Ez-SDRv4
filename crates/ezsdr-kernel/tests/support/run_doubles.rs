@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use ezsdr_kernel::binding::{AdmissionCheckRegistry, Violation};
+use ezsdr_kernel::binding::AdmissionCheckRegistry;
 use ezsdr_kernel::event::{Action, Event, EventHandle, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, IslandId, MemoryDomainId, ModuleId, ResourceId};
@@ -17,7 +17,7 @@ use ezsdr_kernel::module_api::{
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::run::StopCause;
-use ezsdr_kernel::spec::Ident;
+use ezsdr_kernel::spec::{Coercion, Ident, Key, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockRef, ContinuityMap, DataLink, DataLinkDecl, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{ClockDomain, EpochRef, ManualTimeAuthority, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimeError, TimePoint};
 
@@ -1092,9 +1092,9 @@ pub struct ProbeExecutor {
     view_checks: bool,
     /// The handle the previous fragment's view minted, for the cross-view check.
     prev_handle: Option<EventHandle>,
-    /// Where a test reads the `Violation`s the Run returned to this Executor's
-    /// submissions, so it can assert fields the probe's line form drops (KC-24).
-    pub refusals: Option<Arc<Mutex<Vec<Violation>>>>,
+    /// The effective configuration and coercions its report carries (SB-6, SB-41).
+    effective: BTreeMap<Key, Value>,
+    coercions: Vec<Coercion>,
 }
 
 impl ProbeExecutor {
@@ -1122,8 +1122,21 @@ impl ProbeExecutor {
             deaf: false,
             view_checks: false,
             prev_handle: None,
-            refusals: None,
+            effective: BTreeMap::new(),
+            coercions: Vec::new(),
         }
+    }
+
+    /// Adds a value to the effective configuration its report carries (SB-6, SB-41).
+    pub fn with_effective(mut self, key_name: &str, value: Value) -> ProbeExecutor {
+        self.effective.insert(Key::parse(key_name).expect("a well-formed Key literal"), value);
+        self
+    }
+
+    /// Adds a coercion to its report, so a wrong-kind `applied` reaches `prepare` (SB-6).
+    pub fn with_coercion(mut self, key_name: &str, requested: Value, applied: Value) -> ProbeExecutor {
+        self.coercions.push(Coercion { key: Key::parse(key_name).expect("a well-formed Key literal"), requested, applied, reason: "test: reported at prepare".to_owned() });
+        self
     }
 
     /// Never calls `recv()`, so whatever is dispatched to it stays queued.
@@ -1137,14 +1150,6 @@ impl ProbeExecutor {
     /// (item 3; [`check_event_view`]).
     pub fn checking_event_views(mut self) -> ProbeExecutor {
         self.view_checks = true;
-        self
-    }
-
-    /// Keeps every `Violation` the Run returned to this Executor's submissions, for a
-    /// test that asserts fields the probe's line form drops (KC-24's `requested` and
-    /// `key`).
-    pub fn capturing_refusals(mut self, into: Arc<Mutex<Vec<Violation>>>) -> ProbeExecutor {
-        self.refusals = Some(into);
         self
     }
 
@@ -1243,7 +1248,7 @@ impl Executor for ProbeExecutor {
             self.prev_handle = handle;
         }
         self.events = Some(ctx.events.clone());
-        Ok(PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() })
+        Ok(PrepareReport { effective: self.effective.clone(), coercions: self.coercions.clone(), warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -1323,9 +1328,6 @@ impl Executor for ProbeExecutor {
                 match out.submit(action) {
                     Ok(id) => self.record(format!("submit:ok:{}", id.0)),
                     Err(violations) => {
-                        if let Some(into) = &self.refusals {
-                            into.lock().unwrap_or_else(|e| e.into_inner()).extend(violations.iter().cloned());
-                        }
                         if let Some(first) = violations.first() {
                             self.record(format!("submit:err:{}:{}", first.check, first.reason));
                         } else {

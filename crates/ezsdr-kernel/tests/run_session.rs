@@ -14,7 +14,7 @@ use ezsdr_kernel::module_api::{CoercionFidelity, EnvelopeFidelity, ExecutionClas
 use ezsdr_kernel::policy::{EventKindRegistry, Policy, Reaction};
 use ezsdr_kernel::run::{CleanupMode, CleanupStep, HostClock, Lease, LeaseMode, RunError, RunState, RunStateMachine, Stage, StopCause, Termination, run_cleanup};
 use ezsdr_kernel::session::{Admitter, Outcome, SessionAction, SessionLog, implicit_spec};
-use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, Namespace, Scalar, Value};
+use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BlockFlags, ContinuityBuilder, DropCarry, LatePolicy};
 use ezsdr_kernel::time::{AbsoluteDeadline, TimePoint};
 use support::{FakeHostClock, RecordingCleanup, TestLimitsCheck, TestProvider, TestSink, id, key, mref, ns, some_hash, test_provider_descriptor, test_sink_descriptor, test_vocabulary};
@@ -666,8 +666,7 @@ fn rs_33_an_unforeseen_pair_inside_the_root_uses_the_fallback_row() {
 fn rs_32_a_control_event_from_outside_the_root_is_refused() {
     // MA-5, MA-9a (item 3): `emit_control` is root-bound like `resolve` — a Provider's
     // control event carries its node or a node below it, a Sink's exactly its output —
-    // and the refusal comes before the collector counts or delivers it. The ASCII
-    // check stays the collector's (item 4).
+    // and the refusal comes before the collector counts or delivers it.
     let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
     let node = support::node_source("radio");
     let output = EventSource::Output { output: Ident::parse("rec").expect("an output") };
@@ -686,26 +685,6 @@ fn rs_32_a_control_event_from_outside_the_root_is_refused() {
     assert_eq!(sink.emit_control(event(&other)), Err(RunError::EventSourceOutsideRoot { root: output.clone(), source: other.clone() }));
     assert_eq!(collector.counters().iter().map(|row| row.count).sum::<u64>(), 3, "only the in-root control events were counted");
     assert_eq!(collector.drain(t(9)).len(), 3, "and only they were delivered");
-}
-
-#[test]
-fn rs_32_a_control_event_with_a_non_ascii_key_is_refused() {
-    // SB-9a (item 3): `emit_control` checks every map key in the payload, nested keys
-    // included, before the event is counted or delivered; the refusal names the
-    // position only, never the offending key, which OV-15 cannot canonicalise. A
-    // non-ASCII **value** is not a key and stays allowed.
-    let policy = kinds().compile(&BTreeMap::new()).expect("compiles");
-    let source = support::node_source("radio");
-    let kind = EventKind::parse("test.custom").expect("parses");
-    let collector = Arc::new(collector(8, &policy, &[(source.clone(), kind.clone())]));
-    let view = collector.view(source.clone());
-    let event = |payload: serde_json::Value| Event { source: source.clone(), time: t(0), severity: Severity::Info, kind: kind.clone(), payload };
-    let error = view.emit_control(event(serde_json::json!({ "fine": 1, "nested": [{ "\u{3c1}": 2 }] }))).expect_err("a non-ASCII key anywhere in the payload is refused");
-    assert_eq!(error, RunError::PayloadKeyNotAscii { position: "payload".to_owned() });
-    assert!(!format!("{error} {error:?}").contains('\u{3c1}'), "the refusal never transcribes the offending key: {error}");
-    view.emit_control(event(serde_json::json!({ "name": "\u{65e5}\u{672c}\u{8a9e}" }))).expect("a non-ASCII value is not a key (SB-9a)");
-    assert_eq!(collector.counters().iter().map(|row| row.count).sum::<u64>(), 1, "the refused event was not counted");
-    assert_eq!(collector.drain(t(9)).len(), 1, "and it was not delivered");
 }
 
 #[test]
@@ -960,7 +939,7 @@ fn rs_15_log_sequence_is_dense() {
     let mut log = SessionLog::new();
     for i in 0..5 {
         let outcome = if i == 1 || i == 3 { Outcome::Rejected { violations: Vec::new() } } else { Outcome::Admitted { coercions: Vec::new(), warnings: Vec::new(), dispatched: Vec::new() } };
-        log.append(t(i), SessionAction::Renew {}, outcome).expect("well-formed");
+        log.append(t(i), SessionAction::Renew {}, outcome);
     }
     let seqs: Vec<u32> = log.entries().iter().map(|e| e.seq).collect();
     assert_eq!(seqs, vec![0, 1, 2, 3, 4], "a rejected Action occupies a number too");
@@ -993,27 +972,8 @@ fn rs_16_rejected_action_not_dispatched() {
     // 2's, and RS-16's Phase 1 carrier is the refusal plus the log entry below.
 
     let mut log = SessionLog::new();
-    log.append(t(0), SessionAction::SetParameter { target: support::target("radio"), key: key("test.grid"), value: Value::num(40.0).unwrap() }, Outcome::Rejected { violations }).expect("well-formed");
+    log.append(t(0), SessionAction::SetParameter { target: support::target("radio"), key: key("test.grid"), value: Value::num(40.0).unwrap() }, Outcome::Rejected { violations });
     assert!(matches!(log.entries()[0].outcome, Outcome::Rejected { .. }));
-}
-
-#[test]
-fn sb_9a_a_coerced_value_carrying_a_map_key_that_is_not_ascii_is_refused_at_admission() {
-    // SB-9a: a `Value` map key is refused where it enters. A `CoerceReport`'s
-    // `applied` comes back through `Admitter::admit` and is recorded in the action log
-    // as `Outcome::Admitted`'s coercions (RS-16) — the Manifest's copy of it, and
-    // `from_json` never runs on that path. Unchecked, `Manifest::seal()` refused the
-    // key at cleanup step 7, after the Run had transmitted (RS-11).
-    let checks = AdmissionCheckRegistry::new();
-    let environment: BTreeMap<Namespace, serde_json::Value> = BTreeMap::new();
-    let reg = registry();
-    let spec_coercion = BTreeMap::new();
-    let admitter = Admitter { checks: &checks, environment: &environment, spec_coercion: &spec_coercion, registry: &reg, is_session: true };
-    let non_ascii = Value::Map([("radio.ü".to_owned(), Scalar::Int(1))].into_iter().collect());
-    let coercion = ezsdr_kernel::spec::Coercion { key: key("test.flag"), requested: Value::from(false), applied: non_ascii, reason: "a map key that is not ASCII".to_owned() };
-    let violations = admitter.admit(&BTreeMap::new(), &BTreeMap::new(), &[coercion], CheckStage::Runtime).expect_err("a coercion carrying a non-ASCII map key is refused");
-    assert!(violations.iter().any(|v| v.check == ns("ezsdr.coercion") && v.reason.starts_with("SB-9a:")), "{violations:?}");
-    assert!(violations.iter().all(|v| !format!("{v:?}").contains('ü')), "the offending key is never transcribed: {violations:?}");
 }
 
 #[test]
@@ -1025,7 +985,7 @@ fn rs_18_action_before_running_rejected() {
     }
     assert_eq!(run.check_running(), Err(RunError::RunNotRunning));
     let mut log = SessionLog::new();
-    log.append(t(0), SessionAction::Renew {}, Outcome::Rejected { violations: Vec::new() }).expect("a rejected Action is still logged (RS-15)");
+    log.append(t(0), SessionAction::Renew {}, Outcome::Rejected { violations: Vec::new() });
     assert_eq!(log.entries().len(), 1, "it is rejected and logged");
     run.move_to(RunState::Running {}, None, &clock).expect("forward");
     assert!(run.check_running().is_ok());
@@ -1242,19 +1202,14 @@ fn rs_32_another_run_s_event_handle_is_refused() {
 }
 
 #[test]
-fn rs_39_a_module_section_with_a_non_ascii_key_is_refused() {
-    // `sections` is the path RS-39 and RS-43 design for untrusted Module content and
-    // it passes no `from_json`, so OV-15's ASCII key rule was never applied to it:
-    // `seal()` then failed at cleanup step 7, after the Run had transmitted (SB-9a,
-    // RS-11).
+fn rs_39_a_module_section_with_a_non_ascii_key_is_recorded_and_the_manifest_reads_back() {
     let mut m = manifest_fixture(Termination::Completed {});
-    assert!(matches!(
-        m.write_section(&ns("test"), support::node_source("radio"), ns("test.envelope"), serde_json::json!({ "\u{3c1}": 1 })),
-        Err(ezsdr_kernel::run::RunError::SectionKeyNotAscii { .. })
-    ));
-    // An ASCII key is written, and the Manifest still seals.
-    m.write_section(&ns("test"), support::node_source("radio"), ns("test.envelope"), serde_json::json!({ "rho": 1 })).expect("writes");
+    m.write_section(&ns("test"), support::node_source("radio"), ns("test.envelope"), serde_json::json!({ "\u{3c1}": 1 })).expect("writes");
     assert!(m.seal().is_ok());
+    let section = m.section(&support::node_source("radio"), "test.envelope").expect("the section is recorded");
+    assert_eq!(section["\u{3c1}"], serde_json::json!(1), "{section}");
+    let back = Manifest::from_json(&serde_json::to_value(&m).expect("serialises")).expect("a sealed Manifest reads back");
+    assert_eq!(back, m);
 }
 
 #[test]

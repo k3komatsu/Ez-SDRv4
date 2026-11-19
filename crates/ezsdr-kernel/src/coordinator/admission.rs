@@ -44,9 +44,8 @@ pub(super) fn admit_with(
         return Err(vec![violation("ezsdr.run_state", "RS-18: the Run is not Running")]);
     }
     // 3. the target resolves in its own role (KC-23), and a Module's `Stop { target:
-    // None }` is refused here. Before the payload is read, so a refusal can never
-    // transcribe a payload this step never looked at. A class-pending request states
-    // its own target, so it is resolved exactly like a finished Action's.
+    // None }` is refused here. A class-pending request states its own target, so it is
+    // resolved exactly like a finished Action's.
     if origin == Origin::Module && matches!(input, PendingAction::Action(Action::Stop { target: None })) {
         return Err(vec![violation("ezsdr.target", "KC-24: a Module ends a Run only with Abort")]);
     }
@@ -59,53 +58,7 @@ pub(super) fn admit_with(
         }
         None => (None, None, None),
     };
-    // 4. SB-9a: every origin crosses this boundary before coercion or dispatch. The
-    // refusal carries `requested: None` and a reason naming only the position and the
-    // violation: a Map key that is not ASCII must never enter a rejection record the
-    // log and the sealed Manifest will hold, and the offending key's own spelling is
-    // exactly what must not be transcribed (KC-24; SB-9a). The `key` field is the
-    // update's own key where there is one — never the offending map key, which need
-    // not even parse as a `Key`; a `TxBurst`/`Command`/`Emit` payload sits under no key.
-    let ascii = |key: Option<&Key>, position: &str| {
-        vec![Violation {
-            check: crate::spec::Namespace::parse("ezsdr.value").expect("valid admission check"),
-            key: key.cloned(),
-            requested: None,
-            reason: format!("SB-9a: a map key under {position} is not ASCII"),
-        }]
-    };
-    match &input {
-        PendingAction::Update(pending) => {
-            if pending.value.check_ascii_keys(pending.key.as_str()).is_err() {
-                return Err(ascii(Some(&pending.key), pending.key.as_str()));
-            }
-        }
-        PendingAction::Action(Action::UpdateParameter { key, value, .. }) => {
-            if value.check_ascii_keys(key.as_str()).is_err() {
-                return Err(ascii(Some(key), key.as_str()));
-            }
-        }
-        PendingAction::Action(Action::TxBurst { metadata: values, .. }) => {
-            if values.iter().any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err()) {
-                return Err(ascii(None, "metadata"));
-            }
-        }
-        PendingAction::Action(Action::Command { params: values, .. }) => {
-            if values.iter().any(|(key, value)| value.check_ascii_keys(key.as_str()).is_err()) {
-                return Err(ascii(None, "params"));
-            }
-        }
-        // Item 3: an `Emit`'s payload is a `Value` tree, so the check is recursive.
-        // The refusal is still admission's, before dispatch: the Action still reaches
-        // its target Module (which may not support it), and no collector receives it
-        // directly.
-        PendingAction::Action(Action::Emit { event, .. }) => {
-            if crate::spec::check_ascii_keys(&event.payload).is_err() {
-                return Err(ascii(None, "payload"));
-            }
-        }
-        PendingAction::Action(_) => {}
-    }
+    // 4. (withdrawn: SB-9a; the number stays so that SB-6's citations of steps 5-13 hold)
     // 5. the declaration's update class, and for a Module's finished Action the
     // class it states (RS-52, SB-2, MA-35). A class-pending request is completed
     // here, from the Spec's declaration, and a fixed or missing one is refused with
@@ -294,9 +247,7 @@ fn violation(check: &str, reason: impl Into<String>) -> Violation {
     Violation { check: crate::spec::Namespace::parse(check).expect("valid admission check"), key: None, requested: None, reason: reason.into() }
 }
 
-/// A refusal that names the key and transcribes the requested value. KC-24 places
-/// every such refusal at or after step 4, so that a payload whose Map key is not
-/// ASCII is never transcribed into a rejection record.
+/// A refusal that names the key and transcribes the requested value.
 fn violation_with(check: &str, key: &Key, requested: &Value, reason: impl Into<String>) -> Violation {
     Violation { check: crate::spec::Namespace::parse(check).expect("valid admission check"), key: Some(key.clone()), requested: Some(requested.clone()), reason: reason.into() }
 }

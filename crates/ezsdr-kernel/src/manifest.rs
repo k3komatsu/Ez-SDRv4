@@ -379,7 +379,6 @@ impl Manifest {
     /// Rule: RS-38, SB-47.
     pub fn from_json(doc: &serde_json::Value) -> Result<Manifest, crate::spec::SpecError> {
         crate::spec::check_version(doc)?;
-        crate::spec::check_ascii_keys(doc)?;
         serde_json::from_value(doc.clone()).map_err(|e| crate::spec::SpecError::Structural { reason: format!("RS-38: {e}") })
     }
 
@@ -413,11 +412,6 @@ impl Manifest {
         if !section.is_under(owner) {
             return Err(crate::run::RunError::SectionNamespaceForbidden { ns: owner.to_string() });
         }
-        // `sections` is the path RS-39 and RS-43 design for untrusted Module content
-        // and it passes no `from_json`, so OV-15's ASCII key rule is checked here.
-        // Left to hashing time, `seal()` failed at cleanup step 7 — a Run that had
-        // already transmitted and produced no Manifest, against RS-11 (SB-9a).
-        crate::spec::check_ascii_keys(&content).map_err(|e| crate::run::RunError::SectionKeyNotAscii { key: e.to_string() })?;
         self.sections.push(ModuleSection { source, name: section, content });
         Ok(())
     }

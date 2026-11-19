@@ -191,3 +191,22 @@ impl Default for RetryingProducer {
         RetryingProducer::new()
     }
 }
+
+/// Checks that a Manifest reads back through `Manifest::from_json` unchanged: what a Run writes, its own reader accepts (#104).
+pub fn assert_reads_back(manifest: &ezsdr_kernel::manifest::Manifest) {
+    let back = ezsdr_kernel::manifest::Manifest::from_json(&serde_json::to_value(manifest).expect("a Manifest serialises")).expect("a sealed Manifest reads back");
+    assert_eq!(back, *manifest);
+}
+
+/// Ends a Run and checks that the Manifest it sealed reads back through `Manifest::from_json` unchanged: what a Run writes, its own reader accepts (#104).
+pub trait FinishChecked {
+    fn finish_checked(self) -> ezsdr_kernel::manifest::Manifest;
+}
+
+impl FinishChecked for ezsdr_kernel::coordinator::RunHandle {
+    fn finish_checked(self) -> ezsdr_kernel::manifest::Manifest {
+        let m = self.finish();
+        assert_reads_back(&m);
+        m
+    }
+}

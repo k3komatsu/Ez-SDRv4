@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::binding::{AdmissionResult, BindingProfile, CheckStage, Violation, satisfies};
 use crate::module_api::ModuleError;
-use crate::spec::{CapabilityValue, Constraint, ExperimentSpec, Ident, Namespace, Scalar, Value};
+use crate::spec::{CapabilityValue, Constraint, ExperimentSpec, Ident, Key, Namespace, Scalar, Value};
 
 use super::{CompileInputs, PrepareError, PrepareReport};
 
@@ -59,20 +59,6 @@ pub(super) fn collect_prepare(
     for (fragment, r) in reports {
         match r {
             Ok(report) => {
-                // SB-9a: a `Value` map key is refused where it enters. The whole report
-                // is filed into the Manifest's prepare section (RS-38) and hashed at
-                // cleanup step 7, and no `from_json` runs on this path, so a key the
-                // canonicaliser refuses was refused only after the Run transmitted. The
-                // reason names the fragment and never the offending key (KC-24).
-                let carried = report.effective.values().chain(report.coercions.iter().flat_map(|coercion| [&coercion.requested, &coercion.applied]));
-                if carried.into_iter().any(|value| value.check_ascii_keys("effective").is_err()) {
-                    return Err(PrepareError::Violations(vec![Violation {
-                        check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
-                        key: None,
-                        requested: None,
-                        reason: format!("SB-9a: {fragment}'s prepare report carries a map key that is not ASCII"),
-                    }]));
-                }
                 ok.insert(fragment, report);
             }
             Err(error) => return Err(PrepareError::Fragment { fragment, error }),
@@ -109,7 +95,31 @@ pub(super) fn collect_prepare(
     // every key on the Session path (SB-45) — recorded the coercion and warned about
     // nothing. The warning goes on the fragment's own report, which already carries a
     // `warnings` field and is already in the schema.
+    let mut kind_refused = false;
     for (fragment, r) in &mut ok {
+        // SB-2 and SB-6: a value a Module *reports* is a value a key carries, so a
+        // declared key must have its declaration's kind. MA-12's loop below judges
+        // only the keys the bound node declares and the request names, so an
+        // Executor's or Sink's report, or a Provider's key that is neither, was
+        // unchecked (P1, P3).
+        let request = spec.resources.get(fragment);
+        let mut report_kind = |check: &str, key: &Key, value: &Value| {
+            if let Some(error) = super::coercion::reported_kind_error(registry, key, value) {
+                kind_refused = true;
+                violations.push(Violation {
+                    check: Namespace::parse(check).expect("a valid literal"),
+                    key: Some(key.clone()),
+                    requested: super::coercion::exact_request(request, key),
+                    reason: format!("SB-6: {fragment}'s report has {error}: {value:?}"),
+                });
+            }
+        };
+        for (key, value) in &r.effective {
+            report_kind("ezsdr.effective", key, value);
+        }
+        for c in &r.coercions {
+            report_kind("ezsdr.coercion", &c.key, &c.applied);
+        }
         // SB-44: a `Coercion` whose key the fragment never requested is a **malformed
         // report** — nothing was requested, so nothing was coerced, and a Provider
         // choosing its own default is MA-12's narrowing case, which belongs in
@@ -141,6 +151,10 @@ pub(super) fn collect_prepare(
             }
         }
         r.warnings.extend(warned);
+    }
+    // SB-6: a report whose value is not of its key's kind is refused before a registered check reads it, which may take the value for the kind the declaration gives.
+    if kind_refused {
+        return Err(PrepareError::Violations(violations));
     }
     // SB-30's second point, per fragment (KA-4): each report's own `effective`.
     let per_fragment: BTreeMap<Ident, BTreeMap<crate::spec::Key, Value>> = ok.iter().map(|(fragment, r)| (fragment.clone(), r.effective.clone())).collect();

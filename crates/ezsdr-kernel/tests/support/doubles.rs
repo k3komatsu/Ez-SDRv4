@@ -5,7 +5,7 @@
 
 use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ezsdr_kernel::binding::{AdmissionCheck, CheckStage, Violation};
@@ -167,7 +167,7 @@ impl TestLimitsCheck {
     }
 
     /// Makes each violation's `requested` a `Value` map whose key is not ASCII, so a
-    /// registered check's violation can carry one into the admission result (SB-9a).
+    /// registered check's violation can carry one into the sealed Manifest (SB-29).
     pub fn with_non_ascii_requested(mut self) -> TestLimitsCheck {
         self.non_ascii_requested = true;
         self
@@ -215,6 +215,42 @@ impl AdmissionCheck for TestLimitsCheck {
     }
 }
 
+/// A Prepare-stage check that reads every fragment's `test.gain` as a scalar (SB-6,
+/// F1): a value of another kind panics, so a refused report reaching a registered
+/// check is observable as a panic rather than as the SB-6 violation.
+pub struct ScalarOnlyCheck {
+    section: Namespace,
+    stages: Vec<CheckStage>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl ScalarOnlyCheck {
+    /// A check that counts its own calls (SB-30).
+    pub fn new(calls: Arc<AtomicUsize>) -> ScalarOnlyCheck {
+        ScalarOnlyCheck { section: ns("test.scalar"), stages: vec![CheckStage::Prepare], calls }
+    }
+}
+
+impl AdmissionCheck for ScalarOnlyCheck {
+    fn section(&self) -> &Namespace {
+        &self.section
+    }
+
+    fn stages(&self) -> &[CheckStage] {
+        &self.stages
+    }
+
+    fn check(&self, _section: &serde_json::Value, effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, _proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, _stage: CheckStage) -> Vec<Violation> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        for values in effective.values() {
+            if let Some(value) = values.get(&key("test.gain")) {
+                value.as_scalar().expect("a scalar");
+            }
+        }
+        Vec::new()
+    }
+}
+
 // ---------------------------------------------------------------- the Provider double
 
 /// Which lifecycle phase the double should fail at (MA-44).
@@ -242,9 +278,6 @@ pub struct TestProvider {
     pub grid: Option<f64>,
     /// Whether `coerce` reports a coercion of a key the request does not name (SB-44).
     pub stray_coercion: bool,
-    /// Makes the stray coercion's `requested` a `Value` map whose key is not ASCII
-    /// (SB-9a).
-    pub non_ascii_stray: bool,
     /// Which phase to fail at (MA-44).
     pub fail_at: FailAt,
     /// The recorded call log (MA-44).
@@ -271,13 +304,15 @@ pub struct TestProvider {
     pub panic_in_cleanup: bool,
     /// Removes this key from `coerce`'s applied map without rejecting it (KC-26).
     pub omit_applied: Option<Key>,
-    /// Keys whose `Eq` value `coerce` snaps to a multiple of the given step, as
-    /// `grid` does for `test.grid` (SB-7, SB-44).
-    pub snaps: Vec<(Key, f64)>,
+    /// Keys whose `Eq` value `coerce` snaps to a multiple of the given step, keeping
+    /// the value an `Int` (SB-7, SB-44): SB-6 fixes the applied kind.
+    pub snaps: Vec<(Key, i64)>,
     /// Additional values inserted into `prepare`'s effective report (KC-27).
     pub effective: BTreeMap<Key, Value>,
-    /// Makes every coercion carry a `Value` map whose key is not ASCII (SB-9a).
-    pub non_ascii_coercion: bool,
+    /// A wrong-kind value `coerce` reports for `test.grid`'s entry in `applied` (SB-6).
+    pub wrong_applied_grid: Option<Value>,
+    /// A wrong-kind value `coerce` reports for `test.grid`'s coercion in `coercions` (SB-6).
+    pub wrong_coercion_grid: Option<Value>,
 }
 
 impl TestProvider {
@@ -338,7 +373,6 @@ impl TestProvider {
             },
             grid: None,
             stray_coercion: false,
-            non_ascii_stray: false,
             fail_at: FailAt::Never,
             log: Mutex::new(Vec::new()),
             coerce_calls: Arc::new(AtomicU64::new(0)),
@@ -352,7 +386,8 @@ impl TestProvider {
             omit_applied: None,
             snaps: Vec::new(),
             effective: BTreeMap::new(),
-            non_ascii_coercion: false,
+            wrong_applied_grid: None,
+            wrong_coercion_grid: None,
         }
     }
 
@@ -401,10 +436,10 @@ impl TestProvider {
         self
     }
 
-    /// Makes `coerce` report a coercion of `key_name`, snapping an `Int` to the same
-    /// number as a `Num` (SB-7, SB-44): another kind is another value (SB-6). The
+    /// Makes `coerce` report a coercion of `key_name`, snapping an `Int` to another
+    /// `Int` (SB-7, SB-44): the applied value keeps its declared kind (SB-6). The
     /// reason names the step, so a test can tell two coercions apart.
-    pub fn coercing(mut self, key_name: &str, step: f64) -> TestProvider {
+    pub fn coercing(mut self, key_name: &str, step: i64) -> TestProvider {
         self.snaps.push((key(key_name), step));
         self
     }
@@ -459,18 +494,25 @@ impl TestProvider {
         self
     }
 
-    /// Makes every `coerce`d value a `Value` map whose key is not ASCII, so a coercion
-    /// preview entering `validate`'s admission result carries one (SB-9a).
-    pub fn with_non_ascii_coercion(mut self) -> TestProvider {
-        self.non_ascii_coercion = true;
+    /// Makes `coerce` report `test.grid`'s applied value, and the coercion that
+    /// snapped it, as `value`: a report carrying the wrong kind (SB-6).
+    pub fn with_wrong_grid(mut self, value: Value) -> TestProvider {
+        self.wrong_applied_grid = Some(value.clone());
+        self.wrong_coercion_grid = Some(value);
         self
     }
 
-    /// Makes the stray coercion's `requested` a `Value` map whose key is not ASCII, so
-    /// a report can carry one on the branch SB-44 refuses (SB-9a).
-    pub fn with_non_ascii_stray_coercion(mut self) -> TestProvider {
-        self.stray_coercion = true;
-        self.non_ascii_stray = true;
+    /// Makes `coerce` report `test.grid`'s entry in `applied` as `value`, leaving
+    /// the coercion's own `applied` as it was (SB-6).
+    pub fn with_wrong_applied_grid(mut self, value: Value) -> TestProvider {
+        self.wrong_applied_grid = Some(value);
+        self
+    }
+
+    /// Makes `coerce` report the `applied` of `test.grid`'s coercion as `value`,
+    /// leaving the `applied` map entry as it was (SB-6).
+    pub fn with_wrong_coercion_grid(mut self, value: Value) -> TestProvider {
+        self.wrong_coercion_grid = Some(value);
         self
     }
 
@@ -596,31 +638,43 @@ impl Provider for TestProvider {
         }
         let mut report = CoerceReport::default();
         if self.stray_coercion {
-            let requested = if self.non_ascii_stray { Value::Map([("radio.ü".to_owned(), Scalar::Int(1))].into_iter().collect()) } else { Value::from(false) };
-            report.coercions.push(Coercion { key: key("test.flag"), requested, applied: Value::from(true), reason: "a key the request does not name".to_owned() });
+            report.coercions.push(Coercion { key: key("test.flag"), requested: Value::from(false), applied: Value::from(true), reason: "a key the request does not name".to_owned() });
         }
         for (k, c) in &request.constraints {
             let Constraint::Eq { value: v } = c else {
                 continue;
             };
-            let step = if k.as_str() == "test.grid" { self.grid } else { self.snaps.iter().find(|(name, _)| name == k).map(|(_, step)| *step) };
-            if let Some(step) = step {
-                // An `Int` snaps as the `Num` that names the same number, which the
-                // double records as a coercion: another kind is another value (SB-6).
-                let (x, kind_only) = match v {
-                    Scalar::Num(x) => (x.get(), false),
-                    Scalar::Int(i) => (*i as f64, true),
-                    _ => {
-                        report.applied.insert(k.clone(), v.clone().into());
-                        continue;
+            if k.as_str() == "test.grid" {
+                if let Some(step) = self.grid {
+                    // An `Int` snaps as the `Num` that names the same number, which the
+                    // double records as a coercion: another kind is another value (SB-6).
+                    let (x, kind_only) = match v {
+                        Scalar::Num(x) => (x.get(), false),
+                        Scalar::Int(i) => (*i as f64, true),
+                        _ => {
+                            report.applied.insert(k.clone(), v.clone().into());
+                            continue;
+                        }
+                    };
+                    let snapped = (x / step).round() * step;
+                    report.applied.insert(k.clone(), Value::num(snapped).unwrap());
+                    if kind_only || (snapped - x).abs() > f64::EPSILON {
+                        report.coercions.push(Coercion { key: k.clone(), requested: v.clone().into(), applied: Value::num(snapped).unwrap(), reason: format!("snapped to a multiple of {step}") });
                     }
-                };
-                let snapped = (x / step).round() * step;
-                report.applied.insert(k.clone(), Value::num(snapped).unwrap());
-                if kind_only || (snapped - x).abs() > f64::EPSILON {
-                    report.coercions.push(Coercion { key: k.clone(), requested: v.clone().into(), applied: Value::num(snapped).unwrap(), reason: format!("snapped to a multiple of {step}") });
+                    continue;
                 }
-                continue;
+            }
+            if let Some(step) = self.snaps.iter().find(|(name, _)| name == k).map(|(_, step)| *step) {
+                // A key declared `Int` stays an `Int` (SB-6), so the coercion is a new
+                // number of the same kind.
+                if let Scalar::Int(i) = v {
+                    let snapped = (i + step / 2).div_euclid(step) * step;
+                    report.applied.insert(k.clone(), Value::from(snapped));
+                    if snapped != *i {
+                        report.coercions.push(Coercion { key: k.clone(), requested: v.clone().into(), applied: Value::from(snapped), reason: format!("snapped to a multiple of {step}") });
+                    }
+                    continue;
+                }
             }
             report.applied.insert(k.clone(), v.clone().into());
         }
@@ -643,9 +697,12 @@ impl Provider for TestProvider {
         if let Some(key) = &self.omit_applied {
             report.applied.remove(key);
         }
-        if self.non_ascii_coercion {
-            for coercion in &mut report.coercions {
-                coercion.applied = Value::Map([("radio.ü".to_owned(), Scalar::Int(1))].into_iter().collect());
+        if let Some(value) = &self.wrong_applied_grid {
+            report.applied.insert(key("test.grid"), value.clone());
+        }
+        if let Some(value) = &self.wrong_coercion_grid {
+            for c in report.coercions.iter_mut().filter(|c| c.key == key("test.grid")) {
+                c.applied = value.clone();
             }
         }
         Ok(report)

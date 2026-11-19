@@ -71,12 +71,20 @@ pub fn finish_at(mut run: RunHandle, root: ClockDomainId, tick: i64) -> Manifest
         Ok(()) | Err(RunHandleError::Ended { .. }) => {}
         Err(error) => panic!("advance Spec Run: {error}"),
     }
-    run.finish()
+    finish_checked(run)
 }
 
 pub fn end_session(mut run: RunHandle, root: ClockDomainId, tick: i64) -> Manifest {
     run.advance_to(ezsdr_kernel::time::TimePoint::new(root, tick)).expect("advance Session");
-    run.finish()
+    finish_checked(run)
+}
+
+/// Ends a Run and checks that the Manifest it sealed reads back through `Manifest::from_json` unchanged (#104).
+pub fn finish_checked(run: RunHandle) -> Manifest {
+    let m = run.finish();
+    let back = Manifest::from_json(&serde_json::to_value(&m).expect("a Manifest serialises")).expect("a sealed Manifest reads back");
+    assert_eq!(back, m);
+    m
 }
 
 /// The section `name` the instance whose node is `node` wrote (RS-39).

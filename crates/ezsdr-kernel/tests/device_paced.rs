@@ -25,7 +25,8 @@ use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::{ClockRegistry, Duration, TimePoint};
 use support::start_window::{OpenOnDrop, StartTrace, gate, infra, open, seen_for, start_on_worker, wait_end_requested, wait_or_panicked, with_seen};
 use support::{
-    Probe, RecordingSink, SimAuthority, SteppedProvider, TestLinkModule, TestProvider, ThreadedProvider, WallAuthority, WallPark, mref, ns, release, release_one, run_checks, run_kinds, run_registry,
+    FinishChecked, Probe, RecordingSink, SimAuthority, SteppedProvider, TestLinkModule, TestProvider, ThreadedProvider, WallAuthority, WallPark, mref, ns, release, release_one, run_checks, run_kinds,
+    run_registry,
 };
 
 // ---------------------------------------------------------------- fixtures
@@ -136,7 +137,7 @@ fn session_sink_profile() -> serde_json::Value {
 }
 
 fn manifest_of(run: RunHandle) -> Manifest {
-    run.finish()
+    run.finish_checked()
 }
 
 /// The reason of a Run that ended `Failed` (KC-7), or nothing.
@@ -687,7 +688,7 @@ fn kc_36_a_disconnect_signal_during_finish_s_cleanup_does_not_change_its_end() {
     let signal = run.disconnect_signal();
     let (done, returned) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = done.send(run.finish());
+        let _ = done.send(run.finish_checked());
     });
     let stopping = probe.wait_for("radio:stop", Wall::from_secs(10));
     signal();
@@ -1602,7 +1603,7 @@ fn kc_24a_start_a_worker_submission_across_the_transition_is_admitted_after_the_
         assert_eq!(seen_for(&log, &Value::num(2.0).unwrap()), vec![Some(Value::num(1.0).unwrap())], "{simulation}: {:?}", lines);
         assert_eq!(effective_gain(&run), Value::num(2.0).unwrap(), "{simulation}");
         assert!(matches!(run.state(), RunState::Running {}), "{simulation}: {:?}", run.state());
-        let manifest = run.finish();
+        let manifest = run.finish_checked();
         assert!(manifest.termination.cleanup_failures.is_empty(), "{simulation}: {:?}", manifest.termination.cleanup_failures);
     }
 }
@@ -1658,7 +1659,7 @@ fn data_thread_submission(release: Point) {
     let stepped_after_submit = |l: &[String]| l.iter().position(|x| x.starts_with("x:submit:")).is_some_and(|at| l[at..].iter().any(|x| x.starts_with("x:step:")));
     assert!(probe.wait_until(stepped_after_submit, Wall::from_secs(10)), "{}", infra(format!("{release:?}: the data thread did not step after the submit; {:?}", lines)));
     trace.assert_extent(&[Point::Entered, Point::BeforePublish, Point::BeforeDispatch, Point::Dispatching { next: 0 }, Point::Dispatching { next: 1 }]);
-    let manifest = run.finish();
+    let manifest = run.finish_checked();
     assert!(manifest.termination.cleanup_failures.is_empty(), "{release:?}: {:?}", manifest.termination.cleanup_failures);
 }
 
@@ -1721,7 +1722,7 @@ fn kc_24a_start_an_end_in_the_window_records_the_batch_as_undelivered() {
     assert!(after.end_requested, "the end the loss requested was not requested");
     assert!(!after.dispatch_frozen, "KC-24a: the dispatch froze before the batch's dispatch");
     trace.assert_extent(&[Point::Entered, Point::BeforePublish, Point::BeforeDispatch, Point::Dispatching { next: 0 }]);
-    let manifest = run.finish();
+    let manifest = run.finish_checked();
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
     assert_eq!(manifest.termination.undelivered, vec![ezsdr_kernel::event::ActionId(1)]);
     assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
@@ -1775,6 +1776,6 @@ fn kc_24a_start_the_lock_is_free_at_the_wait() {
     assert!(lines.iter().any(|line| line == "x:submit:ok:2"), "{:?}", lines);
     assert_eq!(effective_gain(&run), Value::num(2.0).unwrap(), "{:?}", lines);
     trace.assert_extent(&[Point::Entered, Point::BeforePublish, Point::BeforeDispatch, Point::Dispatching { next: 0 }, Point::Released]);
-    let manifest = run.finish();
+    let manifest = run.finish_checked();
     assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
 }

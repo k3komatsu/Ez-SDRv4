@@ -170,13 +170,6 @@ pub enum RunError {
         /// The kind named.
         kind: String,
     },
-    /// A Module's section carries a key the canonicaliser cannot order, so the
-    /// Manifest could not be written after the Run had already transmitted (RS-39,
-    /// RS-11, SB-9a, OV-15).
-    SectionKeyNotAscii {
-        /// The offending key.
-        key: String,
-    },
     /// A Module named an event source outside the source root its instance was given
     /// (KC-8, MA-5), or the Kernel's own source or RS-33's fallback from a Module,
     /// which no Module emits (RS-32, RS-33; pre-freeze item 3).
@@ -189,13 +182,6 @@ pub enum RunError {
     /// A hot-path handle was not minted by this sink: another Run's or another view's
     /// handle, refused rather than counted (RS-32, MA-9; pre-freeze item 3).
     ForeignEventHandle,
-    /// A control event's payload carries a map key that is not ASCII (SB-9a; pre-freeze
-    /// item 3). The refusal names only the position: the offending key, which OV-15
-    /// cannot canonicalise, is never transcribed into a record.
-    PayloadKeyNotAscii {
-        /// The map position, for example `payload`.
-        position: String,
-    },
     /// A Module wrote under another Module's namespace (RS-39).
     SectionNamespaceForbidden {
         /// The namespace it may write under.
@@ -233,16 +219,10 @@ impl fmt::Display for RunError {
             RunError::EventKindAlreadyRegistered { kind } => {
                 write!(f, "event kind {kind:?} is already registered")
             }
-            RunError::SectionKeyNotAscii { key } => {
-                write!(f, "section key {key:?} is not ASCII, which OV-15 cannot canonicalise")
-            }
             RunError::EventSourceOutsideRoot { root, source } => {
                 write!(f, "event source {source} is outside this instance's root {root}")
             }
             RunError::ForeignEventHandle => f.write_str("the event handle was minted by another Run or another event sink"),
-            RunError::PayloadKeyNotAscii { position } => {
-                write!(f, "SB-9a: a map key under {position} is not ASCII")
-            }
             RunError::SectionNamespaceForbidden { ns } => {
                 write!(f, "a Module may write only under {ns:?}")
             }

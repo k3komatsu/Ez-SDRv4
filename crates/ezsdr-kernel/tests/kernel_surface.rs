@@ -109,7 +109,7 @@ fn ov_01_citing_a_withdrawn_rule_satisfies_nothing() {
     }
     // Written out, not read from `WITHDRAWN`: a loop over the list proves only that its
     // members are rejected, never that the list is complete (Sol review, #105 item 2).
-    for id in ["SC-31a", "SB-22h", "SB-48", "SB-49", "KA-14"] {
+    for id in ["SC-31a", "SB-22h", "SB-48", "SB-49", "KA-14", "SB-9a"] {
         assert!(!cites_a_rule(&format!("Rule: {id}.")), "OV-23: {id} is withdrawn and fails the citation check");
     }
 }
@@ -117,7 +117,7 @@ fn ov_01_citing_a_withdrawn_rule_satisfies_nothing() {
 /// The rules withdrawn so far. OV-1 keeps their numbers, and nothing may cite one as
 /// the rule it implements. Only the Kernel's own prefixes count (`RULE_PREFIXES`): a
 /// withdrawn `RM-`, `MR-`, `UR-` or `SE-` rule is no Kernel item's concern.
-const WITHDRAWN: [&str; 12] = ["SC-31a", "SB-22h", "SB-25a", "SB-28", "SB-32", "SB-48", "SB-49", "RS-32a", "RS-37", "MA-4", "MA-43", "KA-14"];
+const WITHDRAWN: [&str; 13] = ["SC-31a", "SB-22h", "SB-25a", "SB-28", "SB-32", "SB-48", "SB-49", "RS-32a", "RS-37", "MA-4", "MA-43", "KA-14", "SB-9a"];
 
 /// The allow-list key for an item: `<module>::<name>`.
 ///

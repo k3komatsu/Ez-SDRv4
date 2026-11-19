@@ -301,9 +301,7 @@ pub trait EventSink: Send + Sync {
     /// `PayloadTooLarge`, and a handle this sink did not mint is refused
     /// (RS-32, RS-33, RS-34; item 3).
     fn emit(&self, handle: EventHandle, time: TimePoint, severity: Severity, payload: &[u8]) -> Result<(), RunError>;
-    /// Emits a full-bodied event on the control path (RS-32). A map key that is not
-    /// ASCII anywhere in the payload is refused, before the event is counted or
-    /// delivered (SB-9a; item 3).
+    /// Emits a full-bodied event on the control path (RS-32).
     fn emit_control(&self, event: Event) -> Result<(), RunError>;
 }
 
@@ -607,15 +605,6 @@ impl EventCollector {
         Ok(())
     }
 
-    /// Refuses a non-ASCII map key anywhere in a control event's payload (SB-9a;
-    /// item 3): the event is neither counted nor delivered. The refusal names the
-    /// position only, never the offending key, exactly as KC-24 step 4 refuses one,
-    /// so a key that OV-15 cannot canonicalise cannot reach the log or the sealed
-    /// Manifest through this path.
-    fn check_payload_keys(payload: &serde_json::Value) -> Result<(), RunError> {
-        crate::spec::check_ascii_keys(payload).map_err(|_| RunError::PayloadKeyNotAscii { position: "payload".to_owned() })
-    }
-
     /// A root-bound view for one Module's `prepare` (RS-32, RS-33, MA-6; item 3):
     /// the counters, ring and queues stay here, and the view adds this instance's
     /// source root and one scope id of its own.
@@ -649,7 +638,7 @@ impl EventSink for SinkView {
     fn emit_control(&self, event: Event) -> Result<(), RunError> {
         // Root-bound like `resolve` (MA-5, MA-9a): a Module's control event carries its
         // own root or, for a Provider, a node below it; `kernel` and `unforeseen` are
-        // no Module's to name. The ASCII check stays the collector's (item 4).
+        // no Module's to name.
         if !self.root.covers(&event.source) {
             return Err(RunError::EventSourceOutsideRoot { root: self.root.clone(), source: event.source.clone() });
         }
@@ -669,7 +658,6 @@ impl EventSink for EventCollector {
     }
 
     fn emit_control(&self, event: Event) -> Result<(), RunError> {
-        Self::check_payload_keys(&event.payload)?;
         let handle = self.mint(self.scope, &event.source, &event.kind);
         let row = self.check_handle(self.scope, handle)?;
         row.fetch_add(1, Ordering::Relaxed);

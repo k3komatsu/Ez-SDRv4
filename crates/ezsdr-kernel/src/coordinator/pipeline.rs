@@ -944,14 +944,13 @@ impl SlotRef {
 /// Records one refused Session Action and hands back its log entry, which is the
 /// whole of `submit`'s answer to a refusal: the Action takes a sequence number and
 /// the caller learns why (RS-15, RS-18).
-fn rejected(run: &mut RunHandle, at: TimePoint, action: SessionAction, violations: Vec<Violation>) -> Result<crate::session::LogEntry, super::RunHandleError> {
-    run.log.append(at, action, Outcome::Rejected { violations }).map_err(|error| super::RunHandleError::Malformed { error })?;
-    Ok(run.log.entries().last().expect("entry appended").clone())
+fn rejected(run: &mut RunHandle, at: TimePoint, action: SessionAction, violations: Vec<Violation>) -> crate::session::LogEntry {
+    run.log.append(at, action, Outcome::Rejected { violations });
+    run.log.entries().last().expect("entry appended").clone()
 }
 
 pub(super) fn submit(run: &mut RunHandle, action: SessionAction, waveform: Option<&[u8]>) -> Result<crate::session::LogEntry, super::RunHandleError> {
     let now = run.shared.now();
-    run.log.check_entry(&action).map_err(|error| super::RunHandleError::Malformed { error })?;
     let log_action = action.clone();
 
     let waveform = if let Some(bytes) = waveform {
@@ -972,15 +971,15 @@ pub(super) fn submit(run: &mut RunHandle, action: SessionAction, waveform: Optio
 
     let earliest = match session_earliest(&run.shared, &action, now) {
         Ok(earliest) => earliest,
-        Err(violation) => return rejected(run, now, action, vec![violation]),
+        Err(violation) => return Ok(rejected(run, now, action, vec![violation])),
     };
     let mut compiled = match crate::session::compile(&action, &run.shared.ctx.registry, earliest, waveform) {
         Ok(compiled) => compiled,
-        Err(violations) => return rejected(run, now, action, violations),
+        Err(violations) => return Ok(rejected(run, now, action, violations)),
     };
 
     if matches!(compiled.control.as_ref(), Some(ControlOp::RunChild { .. })) {
-        return rejected(run, now, action, vec![violation("ezsdr.run_child", "RS-25a: a child Run is created with `run_child`, which carries its documents and Modules")]);
+        return Ok(rejected(run, now, action, vec![violation("ezsdr.run_child", "RS-25a: a child Run is created with `run_child`, which carries its documents and Modules")]));
     }
 
     let mut end_after_admission = None;
@@ -994,12 +993,12 @@ pub(super) fn submit(run: &mut RunHandle, action: SessionAction, waveform: Optio
         }
         Some(ControlOp::Adopt { token }) => {
             if let Err(error) = run.lease.adopt(&token, "client") {
-                return rejected(run, now, action, vec![violation("ezsdr.lease", format!("RS-24: {error}"))]);
+                return Ok(rejected(run, now, action, vec![violation("ezsdr.lease", format!("RS-24: {error}"))]));
             }
         }
         Some(ControlOp::Renew) => {
             if let Err(error) = run.lease.renew(&*run.shared.ctx.host_clock) {
-                return rejected(run, now, action, vec![violation("ezsdr.lease", format!("RS-24: {error}"))]);
+                return Ok(rejected(run, now, action, vec![violation("ezsdr.lease", format!("RS-24: {error}"))]));
             }
         }
         Some(ControlOp::RunChild { .. }) => unreachable!("refused above"),
@@ -1042,7 +1041,7 @@ pub(super) fn submit(run: &mut RunHandle, action: SessionAction, waveform: Optio
 
     if !violations.is_empty() {
         drop(admission_guard);
-        return rejected(run, now, log_action, violations);
+        return Ok(rejected(run, now, log_action, violations));
     }
 
     let (dispatched, targets): (Vec<_>, Vec<_>) = admitted.into_iter().map(|action| super::admission::dispatch(&run.shared, action)).unzip();
@@ -1050,7 +1049,7 @@ pub(super) fn submit(run: &mut RunHandle, action: SessionAction, waveform: Optio
     if run.shared.device_paced() {
         super::paced::wait_finished(&run.shared, &targets);
     }
-    run.log.append(now, action.clone(), Outcome::Admitted { coercions: all_coercions, warnings: all_warnings, dispatched }).map_err(|error| super::RunHandleError::Malformed { error })?;
+    run.log.append(now, action.clone(), Outcome::Admitted { coercions: all_coercions, warnings: all_warnings, dispatched });
     let entry = run.log.entries().last().expect("entry appended").clone();
 
     if let Some((termination, mode)) = end_after_admission {
@@ -1072,86 +1071,100 @@ pub(super) fn run_child(
     drive: &mut dyn FnMut(&mut RunHandle),
 ) -> Result<(crate::session::LogEntry, Option<crate::manifest::Manifest>), super::RunHandleError> {
     let now = run.shared.now();
-    let malformed = |error: crate::hash::HashError| super::RunHandleError::Malformed { error: crate::spec::SpecError::Structural { reason: format!("KC-37a: {error}") } };
-    // A document is hashed as parsed (RS-45), so the entry names the child's
-    // Manifest hashes; one that does not parse is hashed as sent, and refused below.
-    let action = SessionAction::RunChild {
-        spec_hash: match ExperimentSpec::from_json(spec_doc) {
+    match child_refusal(run, spec_doc, profile_doc, &assembly) {
+        Ok((spec, profile, sections)) => {
+            // An admitted child's documents were parsed and hashed once, by
+            // `child_refusal`, so the entry names the child's Manifest hashes (RS-45).
+            let action = SessionAction::RunChild { spec_hash: sections.0.hash.clone(), binding_hash: sections.1.hash.clone() };
+            run.log.append(now, action, Outcome::Admitted { coercions: Vec::new(), warnings: Vec::new(), dispatched: Vec::new() });
+            let entry = run.log.entries().last().expect("entry appended").clone();
+            // The child reads its Lease copy on the parent's host clock and is judged by the
+            // parent's checks, whatever the caller's Assembly holds (Phase 6 Review H, P1-2).
+            assembly.host_clock = run.shared.ctx.host_clock.clone();
+            assembly.checks = run.shared.ctx.checks.clone();
+            let mut child = super::start_parsed(spec, profile, sections, assembly, run.lease.clone(), Some(run.shared.ctx.id.clone()));
+            drive(&mut child);
+            let manifest = child.finish();
+            run.children.push(crate::manifest::ChildRecord { seq: entry.seq, run: manifest.run.id.clone(), manifest: manifest.hash.clone() });
+            run.check_lease();
+            run.settle();
+            Ok((entry, Some(manifest)))
+        }
+        Err(reason) => {
+            let action = child_action_as_sent(spec_doc, profile_doc);
+            let entry = rejected(run, now, action, vec![violation("ezsdr.run_child", reason)]);
+            Ok((entry, None))
+        }
+    }
+}
+
+/// The `RunChild` entry of a refused child, as its documents were sent: one that parses is
+/// hashed as parsed (RS-45), one that does not as sent. It runs only on the refusal path,
+/// so an admitted child is parsed and hashed once.
+fn child_action_as_sent(spec_doc: &serde_json::Value, profile_doc: &serde_json::Value) -> SessionAction {
+    let hash = |result: Result<ContentHash, crate::hash::HashError>| result.expect("KC-37a: a parsed JSON document or a typed Spec/profile has no non-finite number and no non-string map key");
+    SessionAction::RunChild {
+        spec_hash: hash(match ExperimentSpec::from_json(spec_doc) {
             Ok(spec) => ContentHash::of(&spec),
             Err(_) => ContentHash::of_value(spec_doc),
-        }
-        .map_err(malformed)?,
-        binding_hash: match BindingProfile::from_json(profile_doc) {
+        }),
+        binding_hash: hash(match BindingProfile::from_json(profile_doc) {
             Ok(profile) => ContentHash::of(&profile),
             Err(_) => ContentHash::of_value(profile_doc),
-        }
-        .map_err(malformed)?,
-    };
-    run.log.check_entry(&action).map_err(|error| super::RunHandleError::Malformed { error })?;
-    if let Some(reason) = child_refusal(run, spec_doc, profile_doc, &assembly) {
-        let entry = rejected(run, now, action, vec![violation("ezsdr.run_child", reason)])?;
-        return Ok((entry, None));
+        }),
     }
-    run.log.append(now, action, Outcome::Admitted { coercions: Vec::new(), warnings: Vec::new(), dispatched: Vec::new() }).map_err(|error| super::RunHandleError::Malformed { error })?;
-    let entry = run.log.entries().last().expect("entry appended").clone();
-    // The child reads its Lease copy on the parent's host clock and is judged by the
-    // parent's checks, whatever the caller's Assembly holds (Phase 6 Review H, P1-2).
-    assembly.host_clock = run.shared.ctx.host_clock.clone();
-    assembly.checks = run.shared.ctx.checks.clone();
-    // The documents parsed in `child_refusal`, so a refusal here is a hash failure of
-    // a document that parsed; it cannot happen for a document that hashed above.
-    let mut child = super::start_spec(spec_doc, profile_doc, assembly, run.lease.clone(), Some(run.shared.ctx.id.clone())).map_err(|error| super::RunHandleError::Malformed { error })?;
-    drive(&mut child);
-    let manifest = child.finish();
-    run.children.push(crate::manifest::ChildRecord { seq: entry.seq, run: manifest.run.id.clone(), manifest: manifest.hash.clone() });
-    run.check_lease();
-    run.settle();
-    Ok((entry, Some(manifest)))
 }
 
 /// KC-37a step 2: why the child is refused, if it is.
-fn child_refusal(run: &RunHandle, spec_doc: &serde_json::Value, profile_doc: &serde_json::Value, assembly: &Assembly) -> Option<String> {
+fn child_refusal(
+    run: &RunHandle,
+    spec_doc: &serde_json::Value,
+    profile_doc: &serde_json::Value,
+    assembly: &Assembly,
+) -> Result<(ExperimentSpec, BindingProfile, (crate::manifest::SpecSection, crate::manifest::BindingSection)), String> {
     if !matches!(run.state(), RunState::Running {}) {
-        return Some("RS-18: the Run is not Running".to_owned());
+        return Err("RS-18: the Run is not Running".to_owned());
     }
     if run.shared.device_paced() {
-        return Some("KC-37a: a device-paced Session runs no child Run: its devices are the parent's, and a child would open them again (Phase 7, KG-12)".to_owned());
+        return Err("KC-37a: a device-paced Session runs no child Run: its devices are the parent's, and a child would open them again (Phase 7, KG-12)".to_owned());
     }
-    if let Err(error) = ExperimentSpec::from_json(spec_doc) {
-        return Some(format!("RS-25a: the child's Spec: {error}"));
-    }
+    let spec = match ExperimentSpec::from_json(spec_doc) {
+        Ok(spec) => spec,
+        Err(error) => return Err(format!("RS-25a: the child's Spec: {error}")),
+    };
     let child = match BindingProfile::from_json(profile_doc) {
         Ok(child) => child,
-        Err(error) => return Some(format!("RS-25a: the child's profile: {error}")),
+        Err(error) => return Err(format!("RS-25a: the child's profile: {error}")),
     };
     let parent = &run.shared.ctx.profile;
     let described = |profile: &BindingProfile, name: &Ident| profile.bindings.get(name).map(crate::plan::binding_description).transpose();
     let held: Result<BTreeSet<_>, _> = parent.bindings.values().map(crate::plan::binding_description).collect();
     let held = match held {
         Ok(held) => held,
-        Err(error) => return Some(format!("RS-25a: the parent's profile: {error}")),
+        Err(error) => return Err(format!("RS-25a: the parent's profile: {error}")),
     };
     for name in assembly.providers.keys() {
         let binds_held = match described(&child, name) {
             Ok(description) => description.is_some_and(|description| held.contains(&description)),
-            Err(error) => return Some(format!("RS-25a: the child's profile: {error}")),
+            Err(error) => return Err(format!("RS-25a: the child's profile: {error}")),
         };
         if !binds_held {
-            return Some(format!("RS-25a: {name} binds an instance its parent does not"));
+            return Err(format!("RS-25a: {name} binds an instance its parent does not"));
         }
     }
     let authority = |profile: &BindingProfile| described(profile, &profile.authority).ok().flatten();
     if authority(&child).is_none() || authority(&child) != authority(parent) {
-        return Some("RS-25a: the Authority is not bound as its parent's is".to_owned());
+        return Err("RS-25a: the Authority is not bound as its parent's is".to_owned());
     }
     for section in run.shared.ctx.checks.runtime_sections() {
         if let Some(value) = parent.environment.get(section) {
             if child.environment.get(section) != Some(value) {
-                return Some(format!("RS-25a: section {section} is not its parent's, which a runtime check reads"));
+                return Err(format!("RS-25a: section {section} is not its parent's, which a runtime check reads"));
             }
         }
     }
-    None
+    let sections = super::sections(&spec, &child, assembly.spec_source.clone()).map_err(|error| format!("RS-25a: the child's documents: {error}"))?;
+    Ok((spec, child, sections))
 }
 
 fn session_earliest(shared: &Shared, action: &SessionAction, now: TimePoint) -> Result<TimePoint, Violation> {

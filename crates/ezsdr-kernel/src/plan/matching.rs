@@ -1,11 +1,11 @@
 //! Matches resource requests against bound Provider capabilities (SB-6, SB-34, SB-36).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::binding::{AdmissionResult, PreviewedCoercion, Violation, satisfies};
 use crate::id::ResourceId;
 use crate::module_api::{Provider, Requested, Resource};
-use crate::spec::{Ident, Key, Namespace, RejectedConstraint, ResourceReq, SpecError, SubResourceReq};
+use crate::spec::{Ident, Key, Namespace, RejectedConstraint, ResourceReq, SpecError, SubResourceReq, Value};
 
 use super::CompileInputs;
 
@@ -46,6 +46,23 @@ pub(super) fn pick_node<'a>(tree: &'a Resource, name: &Ident, req: &ResourceReq,
 
 pub(super) fn need_satisfied(need: &SubResourceReq, node: &Resource) -> bool {
     need.requires.iter().all(|(k, c)| node.capabilities.get(k).is_some_and(|cap| satisfies(c, cap).unwrap_or(false)))
+}
+
+/// SB-2 and SB-6: a value the Provider reports is a value a key carries, so a
+/// declared key must have its declaration's kind. `applied` decides whether a
+/// coercible key is satisfied and a `Coercion` becomes `coercions_preview`, which
+/// `prepare` trusts; unchecked, a wrong-kind value reached both (P2).
+fn refuse_wrong_kind(name: &Ident, req: &ResourceReq, key: &Key, value: &Value, registry: &crate::module_api::ModuleRegistry, out: &mut AdmissionResult) -> bool {
+    if let Some(error) = super::coercion::reported_kind_error(registry, key, value) {
+        out.violations.push(Violation {
+            check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
+            key: Some(key.clone()),
+            requested: super::coercion::exact_request(Some(req), key),
+            reason: format!("SB-6: {name}'s Provider applied {error}: {value:?}"),
+        });
+        return true;
+    }
+    false
 }
 
 /// Matches a resource's constraints against the bound node's capabilities, offering
@@ -103,6 +120,23 @@ pub(super) fn match_constraints(name: &Ident, req: &ResourceReq, node: &Resource
         return Ok(());
     }
     let report = provider.coerce(&Requested { resource: node.id.clone(), constraints: req.requires.clone() }).map_err(|e| SpecError::Structural { reason: e.message })?;
+    // SB-2 and SB-6: see `refuse_wrong_kind`. The wrong-kind coercion is refused and
+    // **not previewed**: `prepare` compares a report's `effective` to that preview.
+    let mut wrong_kind: BTreeSet<Key> = BTreeSet::new();
+    for (key, value) in &report.applied {
+        if refuse_wrong_kind(name, req, key, value, inputs.registry, out) {
+            wrong_kind.insert(key.clone());
+        }
+    }
+    for c in &report.coercions {
+        // One violation per key: a key in both lists was already refused above.
+        if wrong_kind.contains(&c.key) {
+            continue;
+        }
+        if refuse_wrong_kind(name, req, &c.key, &c.applied, inputs.registry, out) {
+            wrong_kind.insert(c.key.clone());
+        }
+    }
     for key in to_coerce {
         if report.applied.contains_key(&key) {
             continue;
@@ -124,23 +158,13 @@ pub(super) fn match_constraints(name: &Ident, req: &ResourceReq, node: &Resource
         out.rejected.retain(|r| !(r.resource == *name && r.key == refused.key));
         out.rejected.push(RejectedConstraint { resource: name.clone(), key: refused.key.clone(), constraint: req.requires[&refused.key].clone(), reason: refused.reason.clone() });
     }
-    // SB-9a, before SB-44's partition: the preview's `requested` and `applied` are
-    // `Value`s no `from_json` passes, and a map key the canonicaliser refuses would be
-    // refused at cleanup step 7, after the Run transmitted (RS-11). The check covers
-    // **every** coercion the report returns, because SB-44 copies a stray's unchecked
-    // `requested` into its violation and that violation reaches the Manifest too. A
-    // coercion carrying one is refused here, at `validate`, and is neither a stray's
-    // violation nor recorded. The reason names the resource and never the offending
-    // key (KC-24).
-    let (clean, non_ascii): (Vec<_>, Vec<_>) =
-        report.coercions.into_iter().partition(|coercion| coercion.requested.check_ascii_keys("coercion").is_ok() && coercion.applied.check_ascii_keys("coercion").is_ok());
     // SB-44: a `Coercion` for a key the request does not name is a malformed report at
     // this stage for the same reason D42 made it one at `prepare` — nothing was
     // requested, so nothing was coerced. D42 guarded `prepare` only, and the same
     // report reaching `validate` entered `coercions_preview` unchecked: the SB-45/46
     // policy loop then fired that key's default for a key nobody asked about, and the
     // Manifest recorded a substitution of a value nobody requested.
-    let (strays, previewed): (Vec<_>, Vec<_>) = clean.into_iter().partition(|c| !req.requires.contains_key(&c.key));
+    let (strays, previewed): (Vec<_>, Vec<_>) = report.coercions.into_iter().partition(|c| !req.requires.contains_key(&c.key));
     for stray in &strays {
         out.violations.push(Violation {
             check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
@@ -153,19 +177,11 @@ pub(super) fn match_constraints(name: &Ident, req: &ResourceReq, node: &Resource
             ),
         });
     }
-    for _ in non_ascii {
-        out.violations.push(Violation {
-            check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
-            key: None,
-            requested: None,
-            reason: format!("SB-9a: {name}'s Provider reports a coercion carrying a map key that is not ASCII"),
-        });
-    }
     // A stray is refused above and **not recorded**: `coercions_preview` reaches the
     // Manifest through `AdmissionResult` (SB-38), and leaving it there both recorded a
     // substitution of a value nobody requested and fired that key's own policy default
     // — the two harms the refusal exists to prevent.
-    out.coercions_preview.extend(previewed.into_iter().map(|coercion| PreviewedCoercion { resource: name.clone(), coercion }));
+    out.coercions_preview.extend(previewed.into_iter().filter(|coercion| !wrong_kind.contains(&coercion.key)).map(|coercion| PreviewedCoercion { resource: name.clone(), coercion }));
     out.warnings.extend(report.warnings);
     Ok(())
 }

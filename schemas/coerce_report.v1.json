@@ -239,7 +239,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/Scalar"
           },
-          "description": "A map of scalars; its keys are ASCII (SB-9a).",
+          "description": "A map of scalars. A key is any string: the Kernel imposes no grammar on it (SB-4).",
           "type": "object"
         }
       ],

@@ -95,9 +95,36 @@ fn ov_15_keys_are_sorted_and_whitespace_is_gone() {
 }
 
 #[test]
-fn ov_15_non_ascii_key_is_refused() {
-    let v = json!({ "kéy": 1 });
-    assert!(matches!(canonical_json(&v), Err(HashError::NonAsciiKey { .. })));
+fn ov_15_object_keys_are_ordered_by_utf_16_code_units() {
+    // RFC 8785 §3.2.3's own example: UTF-16 order puts the control character first,
+    // then the digit, then U+0080, U+00F6 and U+20AC; U+1F600 (D83D DE00) precedes
+    // U+FB33, where byte order and code point order put U+FB33 before U+1F600.
+    let v = json!({
+        "\u{20ac}": "Euro Sign",
+        "\r": "Carriage Return",
+        "\u{fb33}": "Hebrew Letter Dalet With Dagesh",
+        "1": "One",
+        "\u{1f600}": "Emoji: Grinning Face",
+        "\u{80}": "Control",
+        "\u{f6}": "Latin Small Letter O With Diaeresis",
+    });
+    assert_eq!(
+        canon(v),
+        "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u{80}\":\"Control\",\"\u{f6}\":\"Latin Small Letter O With Diaeresis\",\"\u{20ac}\":\"Euro Sign\",\"\u{1f600}\":\"Emoji: Grinning Face\",\"\u{fb33}\":\"Hebrew Letter Dalet With Dagesh\"}"
+    );
+    // U+10000 is the surrogate pair D800 DC00, so it sorts before U+FFFF (byte order
+    // puts them the other way round); a prefix sorts before the key it extends, and
+    // the empty key comes first.
+    let v = json!({ "\u{10000}": 1, "\u{ffff}": 2, "aa": 3, "a": 4, "": 5 });
+    assert_eq!(canon(v), "{\"\":5,\"a\":4,\"aa\":3,\"\u{10000}\":1,\"\u{ffff}\":2}");
+}
+
+#[test]
+fn ov_15_ascii_keys_hash_as_before() {
+    // SHA-256 of `{"a":2,"b":1,"c":{"y":2,"z":1}}`, the byte-order "before" value;
+    // for ASCII, byte order and UTF-16 code unit order are the same.
+    let a = json!({ "b": 1, "a": 2, "c": { "z": 1, "y": 2 } });
+    assert_eq!(ContentHash::of(&a).expect("hashes").as_str(), "sha256:c0f8bd0ab5119fda84f6a24ed2eff88949e145d20f0a1eddbb51e14ef1eae3cb");
 }
 
 #[test]

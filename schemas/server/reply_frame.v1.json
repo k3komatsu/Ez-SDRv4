@@ -1012,11 +1012,6 @@
           "type": "string"
         },
         {
-          "const": "malformed",
-          "description": "A Session action the Run refused as malformed (RS-15).",
-          "type": "string"
-        },
-        {
           "const": "ended",
           "description": "The Run has already been cleaned up.",
           "type": "string"
@@ -3674,7 +3669,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/Scalar"
           },
-          "description": "A map of scalars; its keys are ASCII (SB-9a).",
+          "description": "A map of scalars. A key is any string: the Kernel imposes no grammar on it (SB-4).",
           "type": "object"
         }
       ],

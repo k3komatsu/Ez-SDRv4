@@ -238,8 +238,7 @@ impl ResourceId {
     pub const MAX_DEPTH: usize = 16;
 
     /// Parses a slash-separated path. Segments are non-empty and drawn from
-    /// `[A-Za-z0-9_.-]`, which keeps ids ASCII so that canonical-JSON key order is
-    /// byte order (`00-overview.md` §7).
+    /// `[A-Za-z0-9_.-]` (`00-overview.md` §7).
     ///
     /// Rule: SB-34.
     pub fn parse(path: &str) -> Result<ResourceId, ResourceIdError> {

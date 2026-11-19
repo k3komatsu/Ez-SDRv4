@@ -188,11 +188,6 @@ pub enum RunHandleError {
     },
     /// `submit` was called on a Spec Run.
     NotSession,
-    /// The submitted Session Action was malformed and takes no sequence number (RS-15).
-    Malformed {
-        /// Why the submitted Action is not valid.
-        error: SpecError,
-    },
     /// The requested instant cannot be placed on the Authority's primary root (KC-29).
     NotOnPrimaryRoot {
         /// The time that could not be placed.
@@ -205,7 +200,6 @@ impl fmt::Display for RunHandleError {
         match self {
             Self::Ended { termination } => write!(f, "the Run has ended: {termination:?}"),
             Self::NotSession => f.write_str("submit is available only on a Session"),
-            Self::Malformed { error } => write!(f, "the Session Action is malformed: {error}"),
             Self::NotOnPrimaryRoot { t } => write!(f, "{t} is not on the Authority's primary root"),
         }
     }
@@ -243,11 +237,24 @@ fn start_spec(spec_doc: &serde_json::Value, profile_doc: &serde_json::Value, ass
     let spec = ExperimentSpec::from_json(spec_doc)?;
     let profile = BindingProfile::from_json(profile_doc)?;
     let (spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;
+    Ok(start_parsed(spec, profile, (spec_section, binding_section), assembly, lease, parent))
+}
+
+/// Starts a parsed Spec Run from its documents' sections (KC-1, KC-37a).
+fn start_parsed(
+    spec: ExperimentSpec,
+    profile: BindingProfile,
+    sections: (crate::manifest::SpecSection, crate::manifest::BindingSection),
+    assembly: Assembly,
+    lease: Lease,
+    parent: Option<RunId>,
+) -> RunHandle {
+    let (spec_section, binding_section) = sections;
     let mut run = pipeline::assemble(RunKind::Spec, spec, spec_section, profile, binding_section, assembly, lease);
     run.parent = parent;
     run.pipeline();
     run.settle();
-    Ok(run)
+    run
 }
 
 /// Derives and starts an implicit Session Spec after validating the Lease (KC-1, KC-35);
@@ -268,7 +275,7 @@ pub fn connect(profile_doc: &serde_json::Value, initial: &crate::session::Initia
 }
 
 /// The Manifest's `spec` and `binding` sections of the parsed documents (KC-45, RS-45).
-fn sections(spec: &ExperimentSpec, profile: &BindingProfile, source: Option<ContentHash>) -> Result<(crate::manifest::SpecSection, crate::manifest::BindingSection), SpecError> {
+pub(super) fn sections(spec: &ExperimentSpec, profile: &BindingProfile, source: Option<ContentHash>) -> Result<(crate::manifest::SpecSection, crate::manifest::BindingSection), SpecError> {
     let structural = |e: crate::hash::HashError| SpecError::Structural { reason: format!("KC-1: {e}") };
     Ok((crate::manifest::SpecSection::of(spec, source).map_err(structural)?, crate::manifest::BindingSection::of(profile).map_err(structural)?))
 }

@@ -134,7 +134,7 @@
   "id": "F14",
   "name": "KC-37a a rejected child is not appended to the log",
   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
-  "old": "        let entry = rejected(run, now, action, vec![violation(\"ezsdr.run_child\", reason)])?;",
+  "old": "        let entry = rejected(run, now, action, vec![violation(\"ezsdr.run_child\", reason)]);",
   "new": "        let entry = crate::session::LogEntry { seq: 0, time: now, action, outcome: Outcome::Rejected { violations: vec![violation(\"ezsdr.run_child\", reason)] } };",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",

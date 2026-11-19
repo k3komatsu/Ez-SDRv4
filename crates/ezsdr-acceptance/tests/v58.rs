@@ -11,7 +11,7 @@ use ezsdr_kernel::spec::{Ident, Key, Namespace, Scalar, Value};
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 use serde_json::json;
-use support::{T0, artifact, asking, end_session, finish_at, loopback_run, output, resource, root, section, session_run, source, spec_run};
+use support::{T0, artifact, asking, end_session, finish_at, finish_checked, loopback_run, output, resource, root, section, session_run, source, spec_run};
 
 fn complete(spec: &serde_json::Value, profile_name: &str, selector: serde_json::Value, environment: serde_json::Value, test: &str, horizon: i64) -> Manifest {
     let temp = rig::TempDir::new(test);
@@ -48,7 +48,7 @@ fn v58_02_ten_virtual_seconds_run_faster_than_wall_clock() {
     run.run_until_end(ezsdr_kernel::time::TimePoint::new(clock, T0 + 10_000_000_000)).unwrap();
     assert!(began.elapsed().as_secs() < 10);
     assert!(run.now().ticks_in(run.now().domain()).unwrap() >= T0 + 10_000_000_000);
-    let manifest = run.finish();
+    let manifest = finish_checked(run);
     let stats = section(&manifest, "mock", "ezsdr.radio.mock.stats");
     let samples = stats["rx_samples"].as_u64().unwrap();
     assert!((10_000_000..=10_010_000).contains(&samples));
@@ -111,12 +111,12 @@ fn v58_03_same_seed_same_manifest_projection() {
     let mut first = spec_run(&temp, &spec, &first_profile, BTreeMap::new());
     let clock = root(&first);
     first.advance_to(TimePoint::new(clock, T0 + 25_000_000)).unwrap();
-    let first = first.finish();
+    let first = finish_checked(first);
     let second_profile = rig::spec_profile("x3xx", selector, &temp.0, json!({ "sim.seed": 7 }));
     let mut second = spec_run(&temp, &spec, &second_profile, BTreeMap::new());
     let clock = root(&second);
     second.advance_to(TimePoint::new(clock, T0 + 25_000_000)).unwrap();
-    let second = second.finish();
+    let second = finish_checked(second);
     assert_eq!(rig::determinism_projection(&first), rig::determinism_projection(&second));
 }
 
@@ -130,7 +130,7 @@ fn v58_03_the_seed_changes_block_boundaries_not_data() {
         let mut run = spec_run(&temp, &spec, &profile, BTreeMap::new());
         let clock = root(&run);
         run.advance_to(TimePoint::new(clock, T0 + 25_000_000)).unwrap();
-        run.finish()
+        finish_checked(run)
     };
     let seven = run_seed(7);
     let eight = run_seed(8);
@@ -366,7 +366,7 @@ fn v58_11_19_5_msps_is_coerced_to_20() {
 
     let refused_spec = experiments::receive(1, 19.5e6, 1.0e9, Some(1_000));
     let run = spec_run(&temp, &refused_spec, &profile, BTreeMap::new());
-    let refused = run.finish();
+    let refused = finish_checked(run);
     assert!(matches!(refused.termination.reason, Termination::Failed { stage: Stage::Validate, .. }));
 }
 
@@ -376,7 +376,7 @@ fn v58_11_beyond_the_performance_envelope_is_rejected_at_validate() {
     let temp = rig::TempDir::new("v58-11-envelope");
     let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let run = spec_run(&temp, &spec, &profile, BTreeMap::new());
-    let manifest = run.finish();
+    let manifest = finish_checked(run);
     assert!(matches!(manifest.termination.reason, Termination::Failed { stage: Stage::Validate, .. }));
     let rejected = manifest.admission.rejected.iter().find(|item| item.key.as_str() == "radio.rx.s0.sample_rate_hz").unwrap();
     assert!(rejected.reason.starts_with("RM-32"));
@@ -648,7 +648,7 @@ fn v58_16_a_rate_beyond_the_envelope_is_refused_at_connect_and_a_runtime_change_
     // The envelope is checked on the initial value, at validation (RM-32).
     let coerced = ezsdr_kernel::coordinator::connect(&profile, &initial, assembly, ezsdr_kernel::run::Lease::attached()).expect("connects");
     assert!(matches!(&coerced.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, reason } } if reason.contains("RM-32")), "{:?}", coerced.state());
-    let _ = coerced.finish();
+    let _ = finish_checked(coerced);
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
@@ -1079,7 +1079,7 @@ fn v58_connect_refuses_what_the_layout_cannot_carry_at_validate() {
         let profile = rig::session_profile("x3xx", selector, &temp.0, json!({}));
         let assembly = rig::assemble(&profile, BTreeMap::new());
         let run = support::session_run_with(&temp, &profile, assembly, &support::asking("radio", requests));
-        run.finish()
+        finish_checked(run)
     };
     use ezsdr_kernel::spec::{Finite, Scalar};
     let num = |x: f64| Scalar::Num(Finite::new(x).unwrap());
@@ -1146,7 +1146,7 @@ fn mr_34_a_scheduled_radio_value_update_is_refused_at_validate() {
     let assembly = rig::assemble(&profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
     let run = ezsdr_kernel::coordinator::start_spec_run(&control, &profile, assembly).expect("the control Spec starts");
     assert!(!matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, .. } }), "{:?}", run.state());
-    let _ = run.finish();
+    let _ = finish_checked(run);
 }
 
 #[test]

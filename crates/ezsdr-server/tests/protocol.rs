@@ -278,15 +278,13 @@ fn ea_05_errors() {
     let (mut server, now) = connected(&temp.0);
     let unrelated = TimePoint::new(ezsdr_kernel::id::ClockDomainId::local(999), now.ticks_in(now.domain()).unwrap() + 10);
     assert_eq!(err(handle(&mut server, Request::Advance { to: Some(unrelated), by: None }, Vec::new())).kind, ErrorKind::NotOnPrimaryRoot);
-    let non_ascii = set("radio.tx.c0.gain_db", Value::Map(std::collections::BTreeMap::from([("é".to_owned(), Scalar::from(1))])));
-    assert_eq!(err(handle(&mut server, Request::Submit { action: non_ascii }, Vec::new())).kind, ErrorKind::Malformed);
     let stop = submit(&mut server, SessionAction::Stop { target: None }, Vec::new());
     assert!(matches!(stop.outcome, Outcome::Admitted { .. }));
     let ended = err(handle(&mut server, Request::Submit { action: set("radio.tx.c0.stream", Value::Scalar(Scalar::Int(0))) }, Vec::new()));
     assert_eq!(ended.kind, ErrorKind::Ended);
     assert_eq!(ended.termination, Some(Termination::Stopped { cause: StopCause::Client {} }));
     let (manifest, _) = finish(&mut server);
-    assert_eq!(manifest.action_log.len(), 1, "the malformed action took no sequence number");
+    assert_eq!(manifest.action_log.len(), 1, "the Stop is the only logged action");
 }
 
 #[test]
