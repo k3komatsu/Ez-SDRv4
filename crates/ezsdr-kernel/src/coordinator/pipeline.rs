@@ -162,6 +162,7 @@ pub(super) fn assemble(kind: RunKind, spec: ExperimentSpec, spec_section: SpecSe
         end: Locked::new(None),
         also: Locked::new(Vec::new()),
         undelivered: Locked::new(Vec::new()),
+        start_batch: Locked::new(Vec::new()),
         artifacts: Locked::new(BTreeMap::new()),
         links: Locked::new(Vec::new()),
         link_drops: Locked::new(Vec::new()),
@@ -325,6 +326,8 @@ impl RunHandle {
         let Some(batch) = self.admit_schedule(batch) else {
             return;
         };
+        #[cfg(feature = "testing")]
+        super::start_probe::reach(&self.shared, super::start_probe::Point::Admitted);
         if self.shared.end.lock().is_some() {
             return;
         }
@@ -347,10 +350,13 @@ impl RunHandle {
         #[cfg(feature = "testing")]
         super::start_probe::reach(&self.shared, super::start_probe::Point::BeforeDispatch);
         let mut dispatched = Vec::with_capacity(batch.len());
-        for admitted in batch {
+        // The admission lock, held from the publication of `Running` to the last push, means the freeze finds each id either in `start_batch` or already dispatched.
+        let ids = std::mem::take(&mut *self.shared.start_batch.lock());
+        debug_assert_eq!(ids.len(), batch.len(), "KC-24a: the batch's ids are taken whole and the freeze cannot run before this take");
+        for (admitted, id) in batch.into_iter().zip(ids) {
             #[cfg(feature = "testing")]
             super::start_probe::reach(&self.shared, super::start_probe::Point::Dispatching { next: dispatched.len() });
-            dispatched.push(super::admission::dispatch(&self.shared, admitted).1);
+            dispatched.push(super::admission::dispatch_with(&self.shared, admitted, id).1);
         }
         drop(admission);
         #[cfg(feature = "testing")]
@@ -835,6 +841,8 @@ impl RunHandle {
                 }
             }
         }
+        // KC-17, KC-24: the batch takes its ids together, once every entry is admitted; an end before its dispatch leaves them to RS-6 step 1.
+        *self.shared.start_batch.lock() = self.shared.take_action_ids(admitted.len());
         Some(admitted)
     }
 

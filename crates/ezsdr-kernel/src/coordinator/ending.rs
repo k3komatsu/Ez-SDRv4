@@ -265,6 +265,8 @@ impl Ops {
             .chain(self.shared.executors.iter().map(|slot| &slot.queue))
             .flat_map(|queue| queue.clear())
             .collect();
+        // RS-16: the start's batch an end came before dispatching was admitted and never delivered.
+        undelivered.extend(std::mem::take(&mut *self.shared.start_batch.lock()));
         undelivered.sort();
         self.shared.undelivered.lock().extend(undelivered);
         #[cfg(feature = "testing")]

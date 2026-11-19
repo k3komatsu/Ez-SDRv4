@@ -116,7 +116,7 @@ PrepareContext    { run: RunId, source: EventSource, class: ExecutionClass,
                   `PrepareContext::testing` (feature `testing`)
 ActionReceiver    recv() -> optional Dispatched
 Dispatched        { id: ActionId, action: Action, node: optional ResourceId, untimed: bool }: the id KC-24 gave the
-                  Action at dispatch, the Action with its authored target, and the node KC-23 resolved
+                  Action, the Action with its authored target, and the node KC-23 resolved
                   a `{resource}` target to, which a Provider matches on; non-exhaustive, built in a
                   Module's tests with `Dispatched::new` or `Dispatched::new_untimed` (feature `testing`); `untimed` is `true` only for an Action whose instant the Kernel chose (RS-19)
 ActionSubmitter   submits a proposed Action into admit() (RS-16), never to a Module directly
@@ -451,3 +451,4 @@ The Peripheral and Endpoint vocabularies. The WASM and GPU execution ABIs, which
 | 2026-11-15 | MA-3, MA-25, MA-29, MA-34, MA-42, MA-46 | rule text aligned with what the Kernel does (Kernel rule sweep); no change of behaviour | [plan 32](../plan/maintenance/32-test-line-sweep.md) |
 | 2026-11-18 | MA-10 | stage 4a: the lead from receipt is UC-6's; a lateness rule's device lead is its Vocabulary's (RM-14 uses the delivery allowance a profile emulates, so MockRadio, stepped, places at 2 ms although its allowance here is zero) | [stage 4a](../plan/phase8/reviews/s4a-dispositions.md) |
 | 2026-11-19 | MA-12 | the narrowing and re-match violations record the Spec's `Eq` value (or none) as `requested` and the reported value in the reason, as SB-6's refusals do; before, `requested` held the reported value | the orchestrator, follow-up of the [admission-per-origin note](../plan/phase8/reviews/sb9a-note.md) |
+| 2026-11-20 | MA-14, the `Dispatched` row | the id is the one KC-24 gave the Action (the start's batch takes its ids at admission, before its dispatch) | issue #110 |

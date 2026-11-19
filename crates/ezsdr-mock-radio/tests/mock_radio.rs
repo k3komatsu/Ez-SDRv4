@@ -3723,6 +3723,41 @@ fn mr_25_a_transmit_clock_ends_at_its_origin_on_a_stop_at_arm() {
 }
 
 #[test]
+fn mr_25_a_receive_segment_cut_before_its_origin_ends_its_row_at_the_origin() {
+    // RM-25 (M1-M3): a segment cut at or before its origin ends at its origin, empty,
+    // with or without a registered clock; its `segments` row always does (MR-27).
+    // Cell 1: an orderly stop at the arm instant 0, before the 2 s origin (no block, so
+    // no clock). Cell 2: an untimed Stop pushed at arm and stepped at 1 s, still before
+    // the origin. Cell 3: an abort at the arm instant.
+    let check = |harness: &Harness| {
+        assert!(
+            harness.clocks.sample_clock_records().iter().all(|record| record.stream != rid("mock/rx/s0")),
+            "a segment cut before its origin registered no clock: {:?}",
+            harness.clocks.sample_clock_records()
+        );
+        let rows = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.segments").unwrap()];
+        let row = rows.as_array().unwrap().iter().rev().find(|row| row["direction"] == "rx" && row["stream"] == 0).expect("the segment's row");
+        assert_eq!(row["ended_at"]["ticks"], row["origin"]["ticks"], "MR-25: the segment's row does not end at its origin: {row}");
+    };
+
+    let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    check(&harness);
+
+    let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.step(1_000_000_000).unwrap();
+    check(&harness);
+
+    let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.mock.stop(StopMode::Abort).unwrap();
+    check(&harness);
+}
+
+#[test]
 fn mr_25_rx_stop_leaves_transmit_running_and_stop_records_an_unstarted_burst() {
     let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
     let mut harness = Harness::new("x3xx", &constraints, &[], &[], Some((BackPressure::DropOldest, 16)));

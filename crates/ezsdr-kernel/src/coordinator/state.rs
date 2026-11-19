@@ -231,8 +231,10 @@ pub(super) struct Shared {
     pub(super) marks: Locked<Vec<(EventKind, TimePoint)>>,
     pub(super) end: Locked<Option<EndRequest>>,
     pub(super) also: Locked<Vec<Termination>>,
-    /// The ids RS-6 step 1 discarded from the queues (RS-16).
+    /// The ids RS-6 step 1 discarded (RS-16).
     pub(super) undelivered: Locked<Vec<ActionId>>,
+    /// The ids of the start's batch (KC-17) from its admission until the dispatch empties it; what the freeze finds here an end kept from being dispatched (RS-16).
+    pub(super) start_batch: Locked<Vec<ActionId>>,
     /// Each Sink's artifacts, under its output (RS-38).
     pub(super) artifacts: Locked<BTreeMap<Ident, Vec<ArtifactRef>>>,
     pub(super) links: Locked<Vec<(DataLinkDecl, Arc<dyn crate::stream::DataLink>)>>,
@@ -338,6 +340,12 @@ pub(super) fn manifest_failure(fragment: Option<Ident>, reason: impl Into<String
 }
 
 impl Shared {
+    /// `count` consecutive ids from the Run's counter (KC-24): nothing draws between them.
+    pub(super) fn take_action_ids(&self, count: usize) -> Vec<ActionId> {
+        let first = self.next_action.fetch_add(count as u64, std::sync::atomic::Ordering::SeqCst);
+        (first..first + count as u64).map(ActionId).collect()
+    }
+
     /// The admission lock (KC-24a), through the recording guard.
     pub(super) fn lock_admission(&self) -> Guard<'_, ()> {
         self.admission.lock()

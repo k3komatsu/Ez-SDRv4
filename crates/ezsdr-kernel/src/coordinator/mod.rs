@@ -21,6 +21,8 @@ pub mod start_probe {
     pub enum Point {
         /// First line of the pipeline.
         Entered,
+        /// The schedule's batch is admitted (and its ids taken); `start_instances` has not run and the end is not yet checked.
+        Admitted,
         /// The lock is taken, the Run is still `Armed`.
         BeforePublish,
         /// `Running` is published and the data thread (device-paced) started; nothing dispatched yet.

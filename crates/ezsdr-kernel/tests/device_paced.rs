@@ -1734,6 +1734,65 @@ fn kc_24a_start_an_end_in_the_window_records_the_batch_as_undelivered() {
 }
 
 #[test]
+fn kc_24a_start_an_end_between_two_pushes_records_both_ids() {
+    // #110 (S9, N110-7): an end requested after entry 0's push does not stop the dispatch
+    // loop; entry 1 is pushed too (its gain is the Run's effective one), and the freeze --
+    // which reached `Serialised` while the loop still held the admission lock -- then
+    // records both ids as undelivered, since the deaf Provider took neither.
+    let probe = Probe::new();
+    let mut spec = spec_one();
+    spec["schedule"] = serde_json::json!([gain_entry(0, 1.0), gain_entry(0, 2.0)]);
+    let loss = gate();
+    let _release = OpenOnDrop(loss.clone());
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)).deaf().losing_device_on(loss.clone()));
+    let trace = StartTrace::default();
+    let recorded = trace.clone();
+    let freezes: Arc<Mutex<Vec<FreezePoint>>> = Arc::new(Mutex::new(Vec::new()));
+    let hook_freezes = freezes.clone();
+    let first: Arc<Mutex<Option<Reading>>> = Arc::new(Mutex::new(None));
+    let hook_first = first.clone();
+    let hook_loss = loss.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, p| {
+            let r = p.read().expect("the Run is alive");
+            recorded.push(point, r);
+            if point == Point::Entered {
+                let recorded = hook_freezes.clone();
+                p.on_freeze(move |point, _reading| recorded.lock().unwrap_or_else(|e| e.into_inner()).push(point));
+            }
+            if point == (Point::Dispatching { next: 1 }) {
+                *hook_first.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                open(&hook_loss);
+                let begun = Instant::now();
+                loop {
+                    if hook_freezes.lock().unwrap_or_else(|e| e.into_inner()).contains(&FreezePoint::Serialised) {
+                        break;
+                    }
+                    assert!(begun.elapsed() < Wall::from_secs(10), "{}", infra("the data thread's freeze never reached Serialised within 10 s"));
+                    std::thread::yield_now();
+                }
+            }
+        },
+        move || start_spec_run(&spec, &profile_one(), assembly),
+    );
+    let run = started.finish();
+    let reading = first.lock().unwrap_or_else(|e| e.into_inner()).expect("the hook ran at Dispatching { next: 1 }");
+    assert!(reading.admission_held, "KC-24a: the dispatch does not hold the admission lock between the two pushes");
+    assert_eq!(effective_gain(&run), Value::num(2.0).unwrap(), "KC-24a: the second entry was not pushed after the end request; the freeze took its id from start_batch");
+    let manifest = run.finish_checked();
+    trace.assert_extent(&[Point::Entered, Point::BeforePublish, Point::BeforeDispatch, Point::Dispatching { next: 0 }, Point::Dispatching { next: 1 }]);
+    assert_eq!(
+        manifest.termination.undelivered,
+        vec![ezsdr_kernel::event::ActionId(1), ezsdr_kernel::event::ActionId(2)],
+        "KC-18, RS-16: the batch's second entry is in neither the queue nor the Manifest"
+    );
+    assert!(!probe.lines().iter().any(|line| line.starts_with("radio:took:")), "the deaf Provider took an Action: {:?}", probe.lines());
+    assert!(manifest.termination.cleanup_failures.is_empty(), "{:?}", manifest.termination.cleanup_failures);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
+}
+
+#[test]
 fn kc_24a_start_the_lock_is_free_at_the_wait() {
     // #103: the lock is free at `Released`, so the Executor's submission is admitted
     // while the start waits for the Provider that holds the batch's Action; the start is

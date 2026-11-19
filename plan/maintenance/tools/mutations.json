@@ -29435,5 +29435,125 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "overflow_headers_form_the_capture_map_and_a_complete_trial"
+ },
+ {
+  "id": "N110-1",
+  "name": "RS-16, KC-24a: the freeze does not move the start's batch into undelivered, so an end before its dispatch drops it unrecorded",
+  "file": "crates/ezsdr-kernel/src/coordinator/ending.rs",
+  "old": "undelivered.extend(std::mem::take(&mut *self.shared.start_batch.lock()));",
+  "new": "drop(std::mem::take(&mut *self.shared.start_batch.lock()));",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_an_end_after_admission_records_the_batch_as_undelivered"
+ },
+ {
+  "id": "N110-2",
+  "name": "KC-24a: the dispatch leaves the batch's ids in start_batch, so a delivered batch is also recorded as undelivered",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "let ids = std::mem::take(&mut *self.shared.start_batch.lock());",
+  "new": "let ids = self.shared.start_batch.lock().clone();",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_a_delivered_batch_is_not_undelivered"
+ },
+ {
+  "id": "N110-3",
+  "name": "KC-17, KC-24: the batch's ids are taken as each entry is admitted, so a refused entry leaves the earlier entries' ids recorded",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "admitted.push(action);\n                }\n                Err(violations) => {\n                    self.fail(Stage::Arm,",
+  "new": "admitted.push(action);\n                    *self.shared.start_batch.lock() = self.shared.take_action_ids(admitted.len());\n                }\n                Err(violations) => {\n                    self.fail(Stage::Arm,",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_17_a_refused_entry_leaves_no_batch_ids"
+ },
+ {
+  "id": "N110-4",
+  "name": "KC-24: the batch's dispatch draws a fresh id instead of using the one taken at admission",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "pub(super) fn dispatch_with(shared: &Shared, admitted: AdmittedAction, id: ActionId) -> (ActionId, (Inst, u64)) {",
+  "new": "pub(super) fn dispatch_with(shared: &Shared, admitted: AdmittedAction, id: ActionId) -> (ActionId, (Inst, u64)) {\n    let _ = id;\n    let id = ActionId(shared.next_action.fetch_add(1, Ordering::SeqCst));",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_an_end_after_admission_records_every_entry_in_admission_order"
+ },
+ {
+  "id": "N110-5",
+  "name": "KC-17, KC-24: the batch's ids are assigned in reverse admission order",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "*self.shared.start_batch.lock() = self.shared.take_action_ids(admitted.len());",
+  "new": "*self.shared.start_batch.lock() = { let mut ids = self.shared.take_action_ids(admitted.len()); ids.reverse(); ids };",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_an_end_after_admission_records_every_entry_in_admission_order"
+ },
+ {
+  "id": "N110-6",
+  "name": "KC-24a: the start's dispatch stops at an end requested after a push, so the rest of the batch is neither delivered nor recorded",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "dispatched.push(super::admission::dispatch_with(&self.shared, admitted, id).1);",
+  "new": "if self.shared.end.lock().is_some() { break; }\n            dispatched.push(super::admission::dispatch_with(&self.shared, admitted, id).1);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_24a_start_an_end_between_two_pushes_records_both_ids"
+ },
+ {
+  "id": "N110-7",
+  "name": "KC-24: take_action_ids hands out one id more than asked, so an empty batch holds a phantom id",
+  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
+  "old": "(first..first + count as u64).map(ActionId).collect()",
+  "new": "(first..=first + count as u64).map(ActionId).collect()",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_an_end_after_admission_of_an_empty_batch_records_nothing"
+ },
+ {
+  "id": "N110-8",
+  "name": "KC-24: take_action_ids starts one id late, so the batch is not 1..n",
+  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
+  "old": "(first..first + count as u64).map(ActionId).collect()",
+  "new": "(first + 1..first + 1 + count as u64).map(ActionId).collect()",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_an_end_after_admission_records_the_batch_as_undelivered"
+ },
+ {
+  "id": "N113-1",
+  "name": "RM-25, MR-25: a receive segment cut before its origin ends its row at the instant of the cut, not at its origin",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "self.end_layout_segment(Direction::Rx, k, origin, by, origin);",
+  "new": "self.end_layout_segment(Direction::Rx, k, origin, by, t);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_25_a_receive_segment_cut_before_its_origin_ends_its_row_at_the_origin"
+ },
+ {
+  "id": "N110-9",
+  "name": "KC-24: take_action_ids hands out one id fewer than asked, so the dispatch zip silently drops the last admitted Action",
+  "file": "crates/ezsdr-kernel/src/coordinator/state.rs",
+  "old": "(first..first + count as u64).map(ActionId).collect()",
+  "new": "(first..first + count as u64 - 1).map(ActionId).collect()",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_an_end_after_admission_records_every_entry_in_admission_order"
+ },
+ {
+  "id": "N110-10",
+  "name": "KC-17, KC-24: admit_schedule stores no ids for the batch, so an end before the dispatch drops it unrecorded and a dispatch delivers nothing",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "*self.shared.start_batch.lock() = self.shared.take_action_ids(admitted.len());",
+  "new": "*self.shared.start_batch.lock() = { self.shared.take_action_ids(admitted.len()); Vec::new() };",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24a_start_an_end_after_admission_records_the_batch_as_undelivered"
+ },
+ {
+  "id": "N110-11",
+  "name": "KC-24a: the start's dispatch stops after a push once an end is requested and leaves the rest of the batch's ids in start_batch, so the freeze records an Action that was never pushed",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "dispatched.push(super::admission::dispatch_with(&self.shared, admitted, id).1);",
+  "new": "if self.shared.end.lock().is_some() { self.shared.start_batch.lock().push(id); continue; }\n            dispatched.push(super::admission::dispatch_with(&self.shared, admitted, id).1);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "device_paced",
+  "filter": "kc_24a_start_an_end_between_two_pushes_records_both_ids"
  }
 ]

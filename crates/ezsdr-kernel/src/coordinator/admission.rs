@@ -241,6 +241,11 @@ fn coerce_provider(
 /// count KC-21a waits for. The caller holds the admission lock (KC-24a).
 pub(super) fn dispatch(shared: &Shared, admitted: AdmittedAction) -> (ActionId, (Inst, u64)) {
     let id = ActionId(shared.next_action.fetch_add(1, Ordering::SeqCst));
+    dispatch_with(shared, admitted, id)
+}
+
+/// `dispatch` with the id already taken: the start's batch takes its ids at admission (KC-24).
+pub(super) fn dispatch_with(shared: &Shared, admitted: AdmittedAction, id: ActionId) -> (ActionId, (Inst, u64)) {
     if let Action::UpdateParameter { key, value, .. } = &admitted.action {
         shared.configuration.lock().entry(admitted.fragment).or_default().insert(key.clone(), value.clone());
     }

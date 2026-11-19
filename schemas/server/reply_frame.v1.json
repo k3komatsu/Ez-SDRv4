@@ -1,7 +1,7 @@
 {
   "$defs": {
     "ActionId": {
-      "description": "Identifies one dispatched Action inside a Run (RS-15).",
+      "description": "Identifies one Action of the Run, issued by the Run's counter (KC-24): an admitted Action, or a Module's `Abort` (RS-15, RS-16).",
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
@@ -3543,7 +3543,7 @@
         },
         "undelivered": {
           "default": [],
-          "description": "The Actions admitted and dispatched to a queue that RS-6 step 1 emptied before\ntheir Module took them, by id (RS-16).",
+          "description": "The admitted Actions RS-6 step 1 discarded before their Module took them, by id\n(RS-16): a queued one, or one of the start's batch the end came before dispatching.",
           "items": {
             "$ref": "#/$defs/ActionId"
           },

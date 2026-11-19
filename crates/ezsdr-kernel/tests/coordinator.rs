@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use ezsdr_kernel::binding::BindingProfile;
 use ezsdr_kernel::coordinator::{Assembly, connect, start_probe, start_spec_run};
-use ezsdr_kernel::event::{Action, EventSource, Target};
+use ezsdr_kernel::event::{Action, ActionId, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::RunKind;
@@ -555,7 +555,8 @@ fn kc_14_an_arm_failure_is_failed_arm() {
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2).failing_at(support::FailAt::Arm), &probe)));
     let run = start_spec_run(&spec_one(), &profile_one(), assembly).expect("entry creates a Run");
     assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }));
-    let _ = run.finish_checked();
+    let manifest = run.finish_checked();
+    assert!(manifest.termination.undelivered.is_empty(), "RS-16: a Run that failed at arm admitted no batch; {:?}", manifest.termination.undelivered);
     assert!(probe.lines().iter().any(|line| line == "p:stop:Abort"));
     assert!(probe.lines().iter().any(|line| line == "p:cleanup"));
 }
@@ -590,6 +591,7 @@ fn kc_18_a_start_failure_is_failed_arm() {
     let manifest = run.finish_checked();
     assert!(failure(&manifest).starts_with("KC-30: radio: "), "{}", failure(&manifest));
     assert!(!manifest.run.transitions.iter().any(|row| matches!(row.state, RunState::Running {})));
+    assert_eq!(manifest.termination.undelivered, vec![ActionId(1)], "KC-18, RS-16: the admitted batch is not recorded as undelivered");
 }
 
 #[test]
@@ -607,6 +609,7 @@ fn ma_05a_a_module_keeps_its_handles_after_prepare() {
     assert!(
         manifest.events.delivered.iter().any(|event| { event.kind == ezsdr_kernel::event::EventKind::parse("test.custom").unwrap() && event.time == ezsdr_kernel::time::TimePoint::new(root, 50) })
     );
+    assert!(manifest.termination.undelivered.is_empty(), "RS-16: a Run with no schedule lists nothing; {:?}", manifest.termination.undelivered);
     assert!(probe.lines().iter().any(|line| line == "p:step:50"));
     assert!(probe.lines().iter().any(|line| line == "p:now:50"));
 }
@@ -5065,6 +5068,80 @@ fn kc_24a_start_a_submission_from_start_is_refused_not_blocked() {
 }
 
 #[test]
+fn kc_24a_start_an_end_after_admission_records_the_batch_as_undelivered() {
+    // #110 (S1): the batch's ids are taken when the whole schedule is admitted; an end
+    // that arrives before the dispatch (here an Abort from the hook right after
+    // admission) leaves the batch undelivered, named by those ids.
+    let (mut spec, profile) = executor_docs();
+    add_schedule(
+        &mut spec,
+        "radio",
+        0,
+        serde_json::json!({
+            "kind": "update_parameter",
+            "target": serde_json::to_value(support::target("radio")).unwrap(),
+            "key": "test.gain",
+            "value": 7.0
+        }),
+    );
+    spec["schedule"].as_array_mut().expect("the fixture schedule is an array").push(serde_json::json!({
+        "at": { "clock": "radio", "offset_ticks": 1_000_000_000_000i64 },
+        "action": { "kind": "stop", "target": null }
+    }));
+
+    let probe = Probe::new();
+    let mut rig = rig(Pacing::FreeRunning);
+    let (authority, root) = SimAuthority::new(&rig.clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+    rig.root = root;
+    rig.manual = authority.manual();
+    let log = ClockLog::default();
+    let clock = WatchedClock::new(rig.host.clone(), log.clone());
+    rig.assembly.authority = Box::new(WatchedAuthority::new(Box::new(authority), log.clone()));
+    rig.assembly.host_clock = Arc::new(clock);
+    rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 10, 1)));
+    let slot: Arc<Mutex<Option<Arc<dyn ActionSubmitter>>>> = Arc::new(Mutex::new(None));
+    rig.assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe).sharing_submitter(slot.clone())));
+    let trace = StartTrace::default();
+    let recorded = trace.clone();
+    let hook_slot = slot.clone();
+    let abort_id: Arc<Mutex<Option<ActionId>>> = Arc::new(Mutex::new(None));
+    let hook_id = abort_id.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, probe| {
+            let reading = probe.read().expect("the Run is alive");
+            recorded.push(point, reading);
+            if point == start_probe::Point::Admitted {
+                let submitter = hook_slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
+                let id = submitter.submit(Action::Abort { cause: StopCause::Abort { message: "test".to_owned() } });
+                *hook_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.expect("KC-24: an Abort is accepted"));
+            }
+        },
+        move || start_spec_run(&spec, &profile, rig.assembly),
+    );
+    let run = started.finish();
+    let start = run.start_instant().expect("the Run was armed").ticks_in(rig.root).expect("the start is on the primary root");
+    let manifest = run.finish_checked();
+    assert_eq!(manifest.termination.undelivered, vec![ActionId(1)], "KC-18, RS-16: the admitted batch is not recorded as undelivered");
+    assert_eq!(abort_id.lock().unwrap_or_else(|e| e.into_inner()).take(), Some(ActionId(2)), "KC-24: the Abort did not draw the id after the batch's, so the batch took none at admission");
+    let lines = probe.lines();
+    assert!(!lines.iter().any(|line| line.starts_with("p:action:") || line.starts_with("p:update:") || line.starts_with("p:start:")), "nothing of the batch reached the Provider; lines: {lines:?}");
+    trace.assert_extent(&[start_probe::Point::Entered, start_probe::Point::Admitted]);
+    assert!(!trace.points().iter().any(|(point, _)| *point == start_probe::Point::BeforePublish), "the Run published Running after the end; trace: {:?}", trace.points());
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Abort { message: "test".to_owned() } }, "RS-10: the Abort's cause is not the reason");
+    let calls = log.calls();
+    let (handle, _) = far_future_stop(&calls, start);
+    let cancels: Vec<&Call> = calls.iter().filter(|call| call.kind == CallKind::Cancel && call.handle == Some(handle)).collect();
+    assert_eq!(cancels.len(), 1, "RS-6 step 1: H is cancelled exactly once; calls: {calls:?}");
+    assert_eq!(cancels[0].returned, Some(true), "RS-6 step 1: the cancel did not return; calls: {calls:?}");
+    assert!(cancels[0].held.freeze, "KC-24a: the cancel ran outside the freeze gate; calls: {calls:?}");
+    assert!(
+        !cancels[0].held.admission && !cancels[0].held.machine && !cancels[0].held.state,
+        "KC-24a: the cancel ran under the admission, machine or a state lock (start_batch among them); calls: {calls:?}"
+    );
+}
+
+#[test]
 fn kc_24a_start_an_end_before_the_check_dispatches_nothing() {
     // #103: the end check after the publication returns before the batch's dispatch.
     let (mut spec, profile) = executor_docs();
@@ -5087,6 +5164,8 @@ fn kc_24a_start_an_end_before_the_check_dispatches_nothing() {
     let trace = StartTrace::default();
     let recorded = trace.clone();
     let hook_slot = slot.clone();
+    let abort_id: Arc<Mutex<Option<ActionId>>> = Arc::new(Mutex::new(None));
+    let hook_id = abort_id.clone();
     let started = start_on_worker(
         &probe,
         move |point, probe| {
@@ -5095,7 +5174,7 @@ fn kc_24a_start_an_end_before_the_check_dispatches_nothing() {
             if point == start_probe::Point::BeforePublish {
                 let submitter = hook_slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
                 let id = submitter.submit(Action::Abort { cause: StopCause::Abort { message: "test".to_owned() } });
-                assert!(id.is_ok(), "{id:?}");
+                *hook_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.expect("KC-24: an Abort is accepted"));
             }
         },
         move || start_spec_run(&spec, &profile, assembly),
@@ -5103,9 +5182,204 @@ fn kc_24a_start_an_end_before_the_check_dispatches_nothing() {
     let run = started.finish();
     assert!(!run.effective()[&Ident::parse("radio").unwrap()].contains_key(&Key::parse("test.gain").unwrap()));
     assert_eq!(run.state(), RunState::CleanedUp { termination: Termination::Stopped { cause: StopCause::Abort { message: "test".to_owned() } } });
-    assert!(run.finish_checked().termination.undelivered.is_empty());
+    assert_eq!(run.finish_checked().termination.undelivered, vec![ActionId(1)], "KC-18, RS-16: the admitted batch is not recorded as undelivered");
+    assert_eq!(abort_id.lock().unwrap_or_else(|e| e.into_inner()).take(), Some(ActionId(2)), "KC-24: the Abort did not draw the id after the batch's, so the batch took none at admission");
     trace.assert_extent(&[start_probe::Point::Entered, start_probe::Point::BeforePublish]);
     assert!(!trace.points().iter().any(|(point, _)| *point == start_probe::Point::BeforeDispatch), "{:?}", trace.points());
+}
+
+#[test]
+fn kc_24a_start_an_end_after_admission_of_an_empty_batch_records_nothing() {
+    // #110 (S8): a schedule with no timed entry admits an empty batch, takes no id, and an end before the dispatch has nothing to record.
+    let (spec, profile) = executor_docs();
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 1, 1)));
+    let slot: Arc<Mutex<Option<Arc<dyn ActionSubmitter>>>> = Arc::new(Mutex::new(None));
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe).sharing_submitter(slot.clone())));
+    let abort_id: Arc<Mutex<Option<ActionId>>> = Arc::new(Mutex::new(None));
+    let hook_id = abort_id.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, _probe| {
+            if point == start_probe::Point::Admitted {
+                let submitter = slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
+                *hook_id.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(submitter.submit(Action::Abort { cause: StopCause::Abort { message: "test".to_owned() } }).expect("KC-24: an Abort is accepted"));
+            }
+        },
+        move || start_spec_run(&spec, &profile, assembly),
+    );
+    let manifest = started.finish().finish_checked();
+    assert_eq!(abort_id.lock().unwrap_or_else(|e| e.into_inner()).take(), Some(ActionId(1)), "an empty batch takes no id");
+    assert!(manifest.termination.undelivered.is_empty(), "RS-16: an empty batch lists nothing; {:?}", manifest.termination.undelivered);
+}
+
+#[test]
+fn kc_24a_start_an_end_during_start_records_the_batch_as_undelivered() {
+    // #110 (S2b): `start_instances` sees the Abort an Executor's `start` submits, before
+    // the admission lock; the batch was already admitted, so this end leaves it
+    // undelivered and the Abort draws the id after it.
+    let (mut spec, profile) = executor_docs();
+    add_schedule(
+        &mut spec,
+        "radio",
+        0,
+        serde_json::json!({
+            "kind": "update_parameter",
+            "target": serde_json::to_value(support::target("radio")).unwrap(),
+            "key": "test.gain",
+            "value": 7.0
+        }),
+    );
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 1, 1)));
+    let slot: Arc<Mutex<Option<start_probe::Probe>>> = Arc::new(Mutex::new(None));
+    assembly
+        .executors
+        .insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe).submitting_from_start(Action::Abort { cause: StopCause::Abort { message: "test".to_owned() } }, slot.clone())));
+    let trace = StartTrace::default();
+    let recorded = trace.clone();
+    let hook_slot = slot.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, probe| {
+            let reading = probe.read().expect("the Run is alive");
+            recorded.push(point, reading);
+            if point == start_probe::Point::Entered {
+                *hook_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe.clone());
+            }
+        },
+        move || start_spec_run(&spec, &profile, assembly),
+    );
+    let run = started.finish();
+    let manifest = run.finish_checked();
+    assert_eq!(manifest.termination.undelivered, vec![ActionId(1)], "KC-18, RS-16: the admitted batch is not recorded as undelivered");
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line == "x:start:ok:2"), "KC-24: the Abort from `start` did not draw the id after the batch's; lines: {lines:?}");
+    assert!(!manifest.run.transitions.iter().any(|row| matches!(row.state, RunState::Running {})), "the Run recorded Running after the end; {:?}", manifest.run.transitions);
+}
+
+#[test]
+fn kc_24a_start_an_end_after_admission_records_every_entry_in_admission_order() {
+    // #110 (S4): the batch's ids are taken together in KC-17 order once every entry is
+    // admitted, so the entry at offset 1000 (schedule index 1) holds id 1 even though
+    // the schedule lists it second. The first Run ends at admission (both undelivered);
+    // the second dispatches both, and their ids travel to the Provider.
+    let (mut spec, profile) = executor_docs();
+    let radio = serde_json::to_value(support::target("radio")).unwrap();
+    spec["schedule"] = serde_json::json!([
+        { "at": { "clock": "radio", "offset_ticks": 2000 }, "action": { "kind": "update_parameter", "target": radio.clone(), "key": "test.gain", "value": 7.0 } },
+        { "at": { "clock": "radio", "offset_ticks": 1000 }, "action": { "kind": "update_parameter", "target": radio, "key": "test.gain", "value": 9.0 } }
+    ]);
+
+    let probe = Probe::new();
+    let mut watched = rig(Pacing::FreeRunning);
+    let (authority, root) = SimAuthority::new(&watched.clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+    watched.root = root;
+    watched.manual = authority.manual();
+    watched.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 1, 1)));
+    let slot: Arc<Mutex<Option<Arc<dyn ActionSubmitter>>>> = Arc::new(Mutex::new(None));
+    watched.assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe).sharing_submitter(slot.clone())));
+    let hook_slot = slot.clone();
+    let (ended_spec, ended_profile) = (spec.clone(), profile.clone());
+    let started = start_on_worker(
+        &probe,
+        move |point, _probe| {
+            if point == start_probe::Point::Admitted {
+                let submitter = hook_slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
+                submitter.submit(Action::Abort { cause: StopCause::Abort { message: "test".to_owned() } }).expect("KC-24: an Abort is accepted");
+            }
+        },
+        move || start_spec_run(&ended_spec, &ended_profile, watched.assembly),
+    );
+    let manifest = started.finish().finish_checked();
+    assert_eq!(manifest.termination.undelivered, vec![ActionId(1), ActionId(2)], "KC-18, RS-16: both admitted entries are not recorded as undelivered");
+
+    // The second Run dispatches the same two entries; the ids are the batch's, in
+    // admission order, not the schedule's.
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 1, 1)));
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe)));
+    let run = start_spec_run(&spec, &profile, assembly).expect("the fixture Run starts");
+    assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line == "id:p:1:update:test.gain=9.0"), "the entry at offset 1000 does not carry id 1; lines: {lines:?}");
+    assert!(lines.iter().any(|line| line == "id:p:2:update:test.gain=7.0"), "the entry at offset 2000 does not carry id 2; lines: {lines:?}");
+    let manifest = run.finish_checked();
+    assert!(manifest.termination.undelivered.is_empty(), "RS-16: a dispatched batch is not undelivered; {:?}", manifest.termination.undelivered);
+}
+
+#[test]
+fn kc_24a_start_a_delivered_batch_is_not_undelivered() {
+    // #110 (S5): the dispatch empties the batch's record, so an Action the Provider took
+    // is not listed as undelivered, and its id travels with it.
+    let (mut spec, profile) = executor_docs();
+    add_schedule(
+        &mut spec,
+        "radio",
+        0,
+        serde_json::json!({
+            "kind": "update_parameter",
+            "target": serde_json::to_value(support::target("radio")).unwrap(),
+            "key": "test.gain",
+            "value": 7.0
+        }),
+    );
+    let probe = Probe::new();
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 1, 1)));
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe)));
+    let run = start_spec_run(&spec, &profile, assembly).expect("the fixture Run starts");
+    assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line == "id:p:1:update:test.gain=7.0"), "the delivered Action does not carry the batch's id 1; lines: {lines:?}");
+    let manifest = run.finish_checked();
+    assert!(manifest.termination.undelivered.is_empty(), "KC-18, RS-16: a delivered batch is not undelivered; {:?}", manifest.termination.undelivered);
+}
+
+#[test]
+fn kc_17_a_refused_entry_leaves_no_batch_ids() {
+    // #110 (S7, N110-3): entry 1 is refused at admission under the `reject` policy
+    // (`test.grid` has no value 19.5), so the Run fails at `arm` and takes no id for the
+    // batch; the Abort the test submits from the freeze's cancel -- after the failure,
+    // through the Executor's shared submitter -- draws the first id.
+    let (mut spec, profile) = executor_docs();
+    let radio = serde_json::to_value(support::target("radio")).unwrap();
+    spec["schedule"] = serde_json::json!([
+        { "at": { "clock": "radio", "offset_ticks": 0 }, "action": { "kind": "update_parameter", "target": radio.clone(), "key": "test.gain", "value": 7.0 } },
+        { "at": { "clock": "radio", "offset_ticks": 0 }, "action": { "kind": "update_parameter", "target": radio, "key": "test.grid", "value": 19.5 } },
+        { "at": { "clock": "radio", "offset_ticks": 1_000_000_000_000i64 }, "action": { "kind": "stop", "target": null } }
+    ]);
+    let probe = Probe::new();
+    let mut rig = rig(Pacing::FreeRunning);
+    rig.assembly.registry = run_registry_classed();
+    let (authority, root) = SimAuthority::new(&rig.clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+    rig.root = root;
+    rig.manual = authority.manual();
+    rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2).with_grid(20.0), &probe).declaring("radio/rx", 1, 1)));
+    let slot: Arc<Mutex<Option<Arc<dyn ActionSubmitter>>>> = Arc::new(Mutex::new(None));
+    rig.assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe).sharing_submitter(slot.clone())));
+    let ids: Arc<Mutex<Vec<ActionId>>> = Arc::new(Mutex::new(Vec::new()));
+    let hook_ids = ids.clone();
+    let hook_slot = slot.clone();
+    let on_cancel: Arc<dyn Fn(&Call) + Send + Sync> = Arc::new(move |_call: &Call| {
+        let submitter = hook_slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
+        let id = submitter.submit(Action::Abort { cause: StopCause::Abort { message: "refused".to_owned() } }).expect("KC-24: an Abort is accepted");
+        hook_ids.lock().unwrap_or_else(|e| e.into_inner()).push(id);
+    });
+    rig.assembly.authority = Box::new(WatchedAuthority::new(Box::new(authority), ClockLog::default()).with_hooks(Hooks { on_cancel: Some(on_cancel), ..Hooks::default() }));
+    let run = start_spec_run(&spec, &profile, rig.assembly).expect("entry creates a Run");
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }), "{:?}", run.state());
+    let manifest = run.finish_checked();
+    let reason = failure(&manifest);
+    assert!(reason.contains("entry 1") && reason.contains("SB-46"), "the arm failure is not entry 1's coercion refusal: {reason}");
+    assert!(manifest.termination.undelivered.is_empty(), "RS-16: a refused batch consumes no id and lists nothing; {:?}", manifest.termination.undelivered);
+    let lines = probe.lines();
+    assert!(!lines.iter().any(|line| line.starts_with("p:action:") || line.starts_with("p:update:")), "nothing was dispatched; lines: {lines:?}");
+    assert_eq!(ids.lock().unwrap_or_else(|e| e.into_inner()).clone(), vec![ActionId(1)], "F4: the refused batch took ids of its own");
 }
 
 #[test]

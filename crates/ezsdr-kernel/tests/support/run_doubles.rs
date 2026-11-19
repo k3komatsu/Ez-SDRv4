@@ -553,7 +553,7 @@ impl SteppedProvider {
             }
         }
         let progressed = !pending.is_empty();
-        for Dispatched { action, node, untimed, .. } in pending {
+        for Dispatched { id, action, node, untimed, .. } in pending {
             // A Provider's resolved node, else the authored target (KC-23).
             let target = match (&node, action.target()) {
                 (Some(node), _) => node.path().to_owned(),
@@ -570,10 +570,15 @@ impl SteppedProvider {
                 Action::Abort { .. } => "Abort",
             };
             self.record(format!("action:{variant}:{target}@{}", until.ticks_in(until.domain()).unwrap()));
+            // `id:<name>:<n>:...`, outside the `<name>:` lines exact sequences read.
+            if !matches!(&action, Action::UpdateParameter { .. }) {
+                self.probe.record(format!("id:{}:{}:{variant}", self.name, id.0));
+            }
             match action {
                 Action::UpdateParameter { key, value, .. } => {
                     let value = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
                     self.record(format!("update:{key}={value}"));
+                    self.probe.record(format!("id:{}:{}:update:{key}={value}", self.name, id.0));
                 }
                 Action::TxBurst { at, waveform, requested_at, .. } => {
                     let t = at.time_point;

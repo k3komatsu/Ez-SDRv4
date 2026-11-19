@@ -1294,7 +1294,7 @@ impl MockRadio {
         let Some(line) = self.lines.line(Self::rx_key(k)) else { return Ok(()) };
         match line.made(origin, config, t, u64::MAX).map_err(rm25)? {
             None => {
-                // RM-25: a segment cut at its origin has no clock, except one whose refused first block registered it (MR-19): that clock ends at the origin, and so does the segment's row.
+                // RM-25: a segment cut at or before its origin ends at its origin, whatever instant `t` the cut is settled at: it has no clock, except one whose refused first block registered it (MR-19), which ends there too.
                 let registered = self.rx[k].running.as_ref().and_then(|rx| rx.domain);
                 if let Some(domain) = registered {
                     self.clocks
@@ -1303,7 +1303,7 @@ impl MockRadio {
                         .end(domain, TimePoint::new(self.root.expect("prepared root"), origin))
                         .map_err(|error| ModuleError::rejected(format!("MR-12: {error}")))?;
                 }
-                self.end_layout_segment(Direction::Rx, k, origin, by, if registered.is_some() { origin } else { t });
+                self.end_layout_segment(Direction::Rx, k, origin, by, origin);
                 self.rx[k].running = None;
                 self.rx[k].from = origin;
             }

@@ -223,8 +223,8 @@ pub struct TerminationSection {
     /// reaction, in request order, beside the first (RS-10, KC-32).
     #[serde(default)]
     pub also: Vec<Termination>,
-    /// The Actions admitted and dispatched to a queue that RS-6 step 1 emptied before
-    /// their Module took them, by id (RS-16).
+    /// The admitted Actions RS-6 step 1 discarded before their Module took them, by id
+    /// (RS-16): a queued one, or one of the start's batch the end came before dispatching.
     #[serde(default)]
     pub undelivered: Vec<ActionId>,
 }

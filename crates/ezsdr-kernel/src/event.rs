@@ -669,7 +669,7 @@ impl EventSink for EventCollector {
 
 // ---------------------------------------------------------------- the Kernel Action set
 
-/// Identifies one dispatched Action inside a Run (RS-15).
+/// Identifies one Action of the Run, issued by the Run's counter (KC-24): an admitted Action, or a Module's `Abort` (RS-15, RS-16).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct ActionId(pub u64);

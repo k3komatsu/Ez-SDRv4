@@ -265,7 +265,7 @@
       ]
     },
     "ActionId": {
-      "description": "Identifies one dispatched Action inside a Run (RS-15).",
+      "description": "Identifies one Action of the Run, issued by the Run's counter (KC-24): an admitted Action, or a Module's `Abort` (RS-15, RS-16).",
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
