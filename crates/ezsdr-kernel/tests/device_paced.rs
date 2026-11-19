@@ -497,12 +497,34 @@ fn kg_02_a_detached_lease_expires_while_no_call_runs() {
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::LeaseExpiry {} });
 }
 
-fn detached_session(probe: &Probe, ttl_ms: u64) -> RunHandle {
-    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", probe));
-    let lease = Lease::detached(ttl_ms, true, "token", &SystemHostClock::new()).unwrap();
+/// A manual host clock (RS-22) and the probe of the data thread's passes: a test moves the clock and then waits until that thread has run on, so the TTL tests judge no wall interval.
+struct ManualHost {
+    clock: Arc<FakeHostClock>,
+    park: WallPark,
+}
+
+impl ManualHost {
+    /// Moves the clock, then waits until the data thread has read the time for three more passes: the second read the new host time, and the third began after that pass had requested the end it found. The expiry is a failure, 10 s, not an oracle.
+    fn advance_seen(&self, millis: u64) {
+        self.clock.advance(millis);
+        let target = self.park.data_thread_reads() + 3;
+        let begun = Instant::now();
+        while self.park.data_thread_reads() < target {
+            assert!(begun.elapsed() < Wall::from_secs(10), "the data thread did not run on");
+            std::thread::yield_now();
+        }
+    }
+}
+
+fn detached_session(probe: &Probe, ttl_ms: u64) -> (RunHandle, ManualHost) {
+    let (rig, park) = paced_parked(|a| a);
+    let host = ManualHost { clock: Arc::new(FakeHostClock::new()), park };
+    let mut assembly = provider(rig.assembly, "radio", ThreadedProvider::new("radio", "radio", probe));
+    assembly.host_clock = host.clock.clone();
+    let lease = Lease::detached(ttl_ms, true, "token", &*host.clock).unwrap();
     let run = connect(&profile_one(), &Default::default(), assembly, lease).unwrap();
     running(&run);
-    run
+    (run, host)
 }
 
 fn provider_stopped(probe: &Probe) -> bool {
@@ -511,19 +533,19 @@ fn provider_stopped(probe: &Probe) -> bool {
 
 #[test]
 fn kc_36_renew_moves_the_deadline_the_data_thread_checks() {
-    // The exit review's KC-36 clause, for `Renew`: renewed every 50 ms for 600 ms, a
+    // The exit review's KC-36 clause, for `Renew`: renewed every 50 ms of host time for 600 ms, a
     // 200 ms Lease outlives its first deadline, and then expires with no call running.
     let probe = Probe::new();
-    let mut run = detached_session(&probe, 200);
+    let (mut run, host) = detached_session(&probe, 200);
     run.disconnect();
-    let begun = Instant::now();
-    while begun.elapsed() < Wall::from_millis(600) {
-        std::thread::sleep(Wall::from_millis(50));
+    for _ in 0..12 {
+        host.advance_seen(50);
         let entry = run.submit(SessionAction::Renew {}, None).unwrap();
         assert!(admitted(&entry), "{entry:?}");
     }
     assert!(!provider_stopped(&probe), "{:?}", probe.lines());
     running(&run);
+    host.advance_seen(200);
     assert!(probe.wait_for("radio:stop", Wall::from_secs(10)));
     assert_eq!(manifest_of(run).termination.reason, Termination::Stopped { cause: StopCause::LeaseExpiry {} });
 }
@@ -531,13 +553,13 @@ fn kc_36_renew_moves_the_deadline_the_data_thread_checks() {
 #[test]
 fn kc_36_adopt_clears_the_deadline_the_data_thread_checks() {
     // The exit review's KC-36 clause, for `Adopt`: adopted at once, a 100 ms Lease
-    // whose TTL the disconnect started does not expire in the next 300 ms.
+    // whose TTL the disconnect started does not expire in the next 300 ms of host time.
     let probe = Probe::new();
-    let mut run = detached_session(&probe, 100);
+    let (mut run, host) = detached_session(&probe, 100);
     run.disconnect();
     let entry = run.submit(SessionAction::Adopt { token: "token".to_owned() }, None).unwrap();
     assert!(admitted(&entry), "{entry:?}");
-    std::thread::sleep(Wall::from_millis(300));
+    host.advance_seen(300);
     assert!(!provider_stopped(&probe), "{:?}", probe.lines());
     running(&run);
     assert_eq!(manifest_of(run).termination.reason, Termination::Stopped { cause: StopCause::Client {} });
@@ -643,7 +665,7 @@ fn kc_36_a_disconnect_signal_ends_a_simulated_advance() {
 #[test]
 fn kc_36_a_disconnect_signal_does_nothing_for_a_detached_lease_or_an_ended_run() {
     let probe = Probe::new();
-    let mut run = detached_session(&probe, 60_000);
+    let (mut run, _host) = detached_session(&probe, 60_000);
     let signal = run.disconnect_signal();
     signal();
     signal();

@@ -1034,19 +1034,3 @@ fn e3b_c3c_a_loss_found_while_the_open_burst_ends() {
     assert_eq!(dev_line(&tx), "burst false first None next None tail false front Some(5000) recovery false");
     assert!(sends(&device).is_empty(), "a lost device is sent no close");
 }
-
-#[test]
-fn e3b_c4c_the_stat_reads_the_front_the_close_leaves() {
-    // The owner's close with no held tail fronts at the cursor + 2 + 3, one past the record's front for a chain that ends there (held-tail close:
-    // `end + 4`); the stat compares the device front the close left, not the one before it (E3b-4: `end_open` returns it from its last section).
-    let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
-    txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
-    device_at(&core, &time, &device, core.ticks(12_000_000));
-    txp_drain(&mut tx);
-    device_at(&core, &time, &device, core.ticks(15_500_000));
-    tx.chain().continue_device_burst(20_040, None);
-    assert_eq!(dev_front(&tx), None, "no device front before the close");
-    assert!(tx.close_unjoined(clock, 20_040));
-    assert_eq!(dev_front(&tx), Some(20_045));
-    assert_eq!(lock(&core.rec).stats.get("tx_close_past_record_front").copied(), Some(1), "the close's front 20 045 is past the record's 20 044");
-}

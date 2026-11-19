@@ -359,5 +359,4 @@ fn e1_q14_a_continuation_accepted_after_the_unread_check_keeps_the_burst_open() 
     assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{events:?}");
     assert_eq!(sends(&device).iter().filter(|send| send.1).count(), 1, "one device burst: {:?}", device.calls());
     assert_eq!(device.transmitted(clock.instant(20_000), 50), [played(20_000, 40), played(20_040, 10)].concat());
-    assert_eq!(past_front(&core), 0);
 }

@@ -711,10 +711,9 @@ const KERNEL_FILE: &str = "crates/ezsdr-kernel/tests/device_paced.rs";
 
 const NEGATIVE: &str = "negative: a slow host only weakens it";
 const LOWER_BOUND: &str = "lower bound: cannot false-kill";
-const TTL: &str = "TTL is the subject";
 
 /// `(fn, call, exact count, reason)`: `call` is the occurrence's own tokens, joined without spaces and spelt as the code spells it.
-const KERNEL_WALL_ALLOWED: [(&str, &str, usize, &str); 11] = [
+const KERNEL_WALL_ALLOWED: [(&str, &str, usize, &str); 8] = [
     ("kg_02_a_failed_sink_is_not_stepped_again", "std::thread::sleep(Wall::from_millis(100))", 1, NEGATIVE),
     ("kc_29_an_end_the_data_thread_requested_is_cleaned_up_at_the_next_call", "std::thread::sleep(Wall::from_millis(50))", 1, NEGATIVE),
     ("kg_03_an_abort_stops_the_data_thread", "std::thread::sleep(Wall::from_millis(50))", 1, NEGATIVE),
@@ -724,9 +723,6 @@ const KERNEL_WALL_ALLOWED: [(&str, &str, usize, &str); 11] = [
     ("check", "wait_for(,Wall::from_millis(200))", 1, NEGATIVE),
     ("tm_16c_a_paced_callback_sees_now_at_or_after_its_instant", "std::thread::sleep(Wall::from_millis(2))", 1, LOWER_BOUND),
     ("tm_16c_a_paced_authority_accepts_an_instant_already_passed", "std::thread::sleep(Wall::from_millis(6))", 1, LOWER_BOUND),
-    ("kc_36_renew_moves_the_deadline_the_data_thread_checks", "std::thread::sleep(Wall::from_millis(50))", 1, TTL),
-    ("kc_36_renew_moves_the_deadline_the_data_thread_checks", "<Wall::from_millis(600)", 1, TTL),
-    ("kc_36_adopt_clears_the_deadline_the_data_thread_checks", "std::thread::sleep(Wall::from_millis(300))", 1, TTL),
 ];
 
 const WALL_CALLS: [&str; 8] = ["wait_for", "wait_for_count", "wait_until", "wait_parked_until", "wait_timeout", "park_timeout", "recv_timeout", "recv_deadline"];

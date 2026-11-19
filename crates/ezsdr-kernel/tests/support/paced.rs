@@ -45,6 +45,8 @@ pub struct WallTime {
     state: Mutex<WallState>,
     changed: Condvar,
     fire_first: AtomicBool,
+    /// The reads of `now` made by the coordinator's data thread, one or more per pass, for [`WallPark::data_thread_reads`].
+    data_reads: AtomicU64,
 }
 
 impl WallTime {
@@ -79,6 +81,9 @@ impl TimeAuthority for WallTime {
         domain == self.root || domain == ClockDomainId::HOST_MONOTONIC || self.registry.get(domain).is_ok_and(|d| d.root_id() == self.root)
     }
     fn now(&self, domain: ClockDomainId) -> Result<TimePoint, TimeError> {
+        if std::thread::current().name() == Some("ezsdr-data") {
+            self.data_reads.fetch_add(1, Ordering::SeqCst);
+        }
         let now = self.elapsed();
         if domain == self.root || domain == ClockDomainId::HOST_MONOTONIC {
             return Ok(TimePoint::new(domain, now));
@@ -157,6 +162,7 @@ impl WallAuthority {
             state: Mutex::new(WallState::default()),
             changed: Condvar::new(),
             fire_first: AtomicBool::new(false),
+            data_reads: AtomicU64::new(0),
         });
         let utc = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("after 1970").as_nanos() as i64;
         let before = utc();
@@ -228,6 +234,11 @@ impl WallPark {
             state = self.0.changed.wait_timeout(state, left).unwrap_or_else(|e| e.into_inner()).0;
         }
         true
+    }
+
+    /// How many times the data thread has read the time: it reads it at the start of every pass (KC-46).
+    pub fn data_thread_reads(&self) -> u64 {
+        self.0.data_reads.load(Ordering::SeqCst)
     }
 
     /// How many calls of `schedule` returned after their own callback had run on a waiting `next_wakeup`.

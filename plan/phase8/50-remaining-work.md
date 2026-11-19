@@ -56,9 +56,13 @@
 
 | 段 | 中身 |
 |---|---|
-| 締めの振り返り | コードとテストの組み立て，mutation の道具の選び方，feature `uhd` の mutation，持ち越し（handoff §2 の 2）．Opus の設計メモ → owner と決める |
+| 締めの振り返り（**済** 2026-11-20，[52](52-phase8-end-review.md)：owner が D1〜D7 を決定．kc_36 の TTL の 2 本を手動の時計に，stat `tx_close_past_record_front` を削除） | コードとテストの組み立て，mutation の道具の選び方，feature `uhd` の mutation，持ち越し（handoff §2 の 2）．Opus の設計メモ → owner と決める |
 | 出口の棚卸し | [00-overview](00-overview.md) §7 の出口条件 4：H1〜H5 と #56 は 10 月と 11-13 の bench に記録があるが，#56 と handoff §3 の行が開いたまま．記録を確かめて閉じる |
 | **Gate X** | 出口条件の確認．owner に諮る：**条件 5 の BP4b（混在構成）と BP4c（XG）を Phase 8 に含めるか**（§3 の B は汎用性の点検へ回すことを推奨．XG は FPGA image の書き換えが要る） |
+
+### bench までの空いた時間（owner 2026-11-20）
+
+bench は 2026-11-27（丸 1 日）．それまでの順（orchestrator）：#118（流れ 2）→ #117（流れ 1，bt2 と D13 の後）→ #73・#97 の設計（step 0，Opus の下書きから）→ mutation の image を `ezsdr-v4-dev:uhd4.10` に（[52](52-phase8-end-review.md) D2）と生成器の試し（D1．どちらも道具だけなので Gate X の前に）→ 8b の最初の掃除（52 §2d の 12・30・32）→ 8b の step 0 の設計（④ から）．
 
 ### owner の判断（出てくる順）
 
@@ -100,7 +104,7 @@
 | ~~#77（Mock と oracle の故障の順）~~ | 済（2026-11-14，記録 `reviews/n77-*`） |
 | #73・#74（ファイルなしの capture，`sc16`） | 予定どおり Phase 8 の後・8b の前 |
 | #97（EA-13 の `read` が成果物を丸ごとメモリに読む） | #73 と一緒に（owner 2026-11-12）．**注意**：#73 で capture の既定はディスクに書かない（メモリ）に傾けると決めてある（owner 2026-10-30）ので，「ファイルのパスから直接読む」回避は既定では使えない．pipe で返す量の上限か少しずつ流す形を，#73 の設計で一緒に決める |
-| ④ Module の形の設計メモ（49 §5.13） | Phase 8 の締めの振り返りに含める |
+| ④ Module の形の設計メモ（49 §5.13） | 8b の step 0 の最初の問い（[52](52-phase8-end-review.md) §2e，owner 2026-11-20） |
 | 文書監査の D10，spec 22 の手順 5，Test 行の C（82 件） | 凍結の前の全規則の確認 |
 | 混在構成（BP4b），XG（BP4c）の実機 | 汎用性の点検（Phase 8 の後）．要確認：Phase 8 の parity にこれらの board が要るか |
 

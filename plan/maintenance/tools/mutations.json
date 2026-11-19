@@ -14265,8 +14265,8 @@
     "id": "N47S5-56",
     "name": "5b-2b: the owner's close deadline is the device lead deadline instead of J(e) (UR-23, M1, R4-m2)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "|k| self.core.join_by(clock, k)) else {",
-    "new": "|k| clock.instant(k) - self.core.ticks(DEVICE_LEAD_NS)) else {",
+    "old": "|k| self.core.join_by(clock, k)).is_none() {",
+    "new": "|k| clock.instant(k) - self.core.ticks(DEVICE_LEAD_NS)).is_none() {",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_m1_148us_booked_early_at_the_chain_front_plays_on_time"
@@ -14290,16 +14290,6 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_m1_receipt_at_the_deadline_is_decided_by_the_record"
-  },
-  {
-    "id": "N47S5-60",
-    "name": "5b-2b: an owner close past the record's front is not counted (Q-6)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.core.stat(\"tx_close_past_record_front\", 1);",
-    "new": "let _ = 1;",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_21_stat_counts_owner_closes_past_the_record_front"
   },
   {
     "id": "N47S5-61",
@@ -18987,26 +18977,6 @@
   "old": "Reopen::Reopened { front: flush_front }",
   "new": "Reopen::Reopened { front: None }",
   "filter": "e3b_c1_the_front_after_each_close"
- },
- {
-  "id": "E3B-43",
-  "name": "E3b-4: the stat reads no device front after the close",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "old": "let device_front = self.end_open(true);",
-  "new": "let device_front = self.end_open(true).filter(|_| false);",
-  "filter": "e3b_c4c_the_stat_reads_the_front_the_close_leaves"
- },
- {
-  "id": "E3B-44",
-  "name": "E3b-4: the stat reads the device front before the close",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "old": "let front = self.with_book(|book| { book.end_open(end); book.device.front() });",
-  "new": "let front = self.with_book(|book| { let front = book.device.front(); book.end_open(end); front });",
-  "filter": "e3b_c4c_the_stat_reads_the_front_the_close_leaves"
  },
  {
   "id": "E3B-45",
@@ -25180,8 +25150,8 @@
   "id": "MT3D-66",
   "name": "a halt in the gap with a switch as the open booking leaves the repeat's record open (UR-22, V15)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let front = self.with_book(|book| { book.end_open(end); book.device.front() });",
-  "new": "let (ended, front) = self.with_book(|book| (book.end_open(end), book.device.front())); let Some(_) = ended else { return front };",
+  "old": "end = self.close_device_burst(tail, cursor, clock, CLOSE_GAP); } } self.with_book(|book| book.end_open(end));",
+  "new": "end = self.close_device_burst(tail, cursor, clock, CLOSE_GAP); } } let ended = self.with_book(|book| book.end_open(end)); let Some(_) = ended else { return };",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "mt3d_a_halt_in_the_gap_after_a_switch_replaced_the_repeat_sends_nothing_and_cancels_the_switch"
@@ -26350,8 +26320,8 @@
   "id": "N106-28",
   "name": "a Stop's closing record is bounded as an intermediate part (UR-30, #106)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": ".bursts.push(burst_key(false), serde_json::to_value(record).expect(\"a record\")); } front",
-  "new": ".bursts.push(burst_key(true), serde_json::to_value(record).expect(\"a record\")); } front",
+  "old": ".bursts.push(burst_key(false), serde_json::to_value(record).expect(\"a record\")); } }",
+  "new": ".bursts.push(burst_key(true), serde_json::to_value(record).expect(\"a record\")); } }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "mt3d_the_bound_keeps_the_booked_record_the_first_intermediate_part_and_the_closing_record"

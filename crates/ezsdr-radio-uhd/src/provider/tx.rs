@@ -537,14 +537,11 @@ impl Tx {
     /// booking received after the close is refused at receipt. False while a booking can still join.
     fn close_unjoined(&mut self, clock: Clock, e: i64) -> bool {
         let mut streams = lock(&self.core.streams);
-        let Some(record_front) = streams.stream_mut(stream_key(Dir::Tx, self.k)).book.close_unjoined(e, self.core.now(), |k| self.core.join_by(clock, k)) else {
+        if streams.stream_mut(stream_key(Dir::Tx, self.k)).book.close_unjoined(e, self.core.now(), |k| self.core.join_by(clock, k)).is_none() {
             return false;
-        };
-        drop(streams);
-        let device_front = self.end_open(true);
-        if record_front.is_some_and(|front| device_front.is_some_and(|(domain, device)| domain == clock.domain && device > front)) {
-            self.core.stat("tx_close_past_record_front", 1);
         }
+        drop(streams);
+        self.end_open(true);
         true
     }
 
@@ -851,13 +848,13 @@ impl Tx {
     }
 
     /// Ends the open burst without recalling what was handed over (RM-16), and with
-    /// `device_eob` the device burst too, also one a held burst was to continue (§11 F3). Returns the device chain's front once it is ended.
-    fn end_open(&mut self, device_eob: bool) -> Option<(ClockDomainId, i64)> {
+    /// `device_eob` the device burst too, also one a held burst was to continue (§11 F3).
+    fn end_open(&mut self, device_eob: bool) {
         self.end_open_at(device_eob, None)
     }
 
     /// [`Tx::end_open`], where a held burst at `join` continues the device burst the open one leaves open (`device_eob` false).
-    fn end_open_at(&mut self, device_eob: bool, join: Option<i64>) -> Option<(ClockDomainId, i64)> {
+    fn end_open_at(&mut self, device_eob: bool, join: Option<i64>) {
         let (continuing, tail, open_next) = self.with_book(|book| (book.device.next(), book.device.tail(), book.open.as_ref().map(|open| open.next)));
         let device_open = continuing.is_some();
         let mut end = match (device_eob, join) {
@@ -873,15 +870,11 @@ impl Tx {
                 end = self.close_device_burst(tail, cursor, clock, CLOSE_GAP);
             }
         }
-        let front = self.with_book(|book| {
-            book.end_open(end);
-            book.device.front()
-        });
+        self.with_book(|book| book.end_open(end));
         // A switch that replaced a paused repeat is cancelled by a halt with nothing of it sent (UR-22): the repeat's record is the tracker's open one.
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
             lock(&self.core.rec).bursts.push(burst_key(false), serde_json::to_value(record).expect("a record"));
         }
-        front
     }
 
     /// Closes with exactly two samples and their first SampleClock instant: held tail + zero,
@@ -1577,10 +1570,6 @@ mod tests {
 
         pub(super) fn open_device_burst(&self, first: i64, next: i64, tail: Option<Tail>) {
             self.with(|device| device.open_device_burst(first, next, tail));
-        }
-
-        pub(super) fn continue_device_burst(&self, next: i64, tail: Option<Tail>) {
-            self.with(|device| device.continue_device_burst(next, tail));
         }
 
         pub(super) fn advance_front(&self, domain: ClockDomainId, sample: i64) {
@@ -3297,7 +3286,6 @@ mod tests {
         assert_eq!(sends(&device).iter().filter(|send| send.2).count(), 2, "{:?}", device.calls());
         assert_eq!(device.transmitted(clock.instant(20_000), 50), [played(20_000, 40), played(20_040, 10)].concat());
         assert_eq!(device.transmitted(clock.instant(20_100), 10), played(20_100, 10));
-        assert_eq!(past_front(&core), 0, "no owner close past the record's front");
     }
 
     /// S4b at the deadline (UR-21, RM-15): B(10) joins A at `s + 40` and is received exactly at `J(s + 40)`, so the record
@@ -3318,7 +3306,6 @@ mod tests {
         assert_eq!(sends(&device).iter().filter(|send| send.1).count(), 1, "A and B are one burst: {:?}", device.calls());
         assert_eq!(sends(&device).iter().filter(|send| send.2).count(), 1, "no end-of-burst at s + 40: {:?}", device.calls());
         assert_eq!(device.transmitted(clock.instant(20_000), 50), [played(20_000, 40), played(20_040, 10)].concat(), "{:?}", device.calls());
-        assert_eq!(past_front(&core), 0);
     }
 
     /// M1 (R4-m2, row 56): A(40) is handed and C(40) is booked early at `s + 42`, which A's record front allows. The owner
@@ -3339,7 +3326,6 @@ mod tests {
         let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
         assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{events:?}");
         assert_eq!(device.transmitted(clock.instant(20_044), 40), played(20_044, 40));
-        assert_eq!(past_front(&core), 0, "A's close is at its record front");
     }
 
     /// M1 (R4-m2, row 57; S1): B(10) joins A at `s + 40` and C(10) joins B at `s + 50`; both are booked (record and list in one receipt)
@@ -3359,7 +3345,6 @@ mod tests {
         assert_eq!(sends(&device).iter().filter(|send| send.1).count(), 1, "B and C continue A: {:?}", device.calls());
         assert_eq!(sends(&device).iter().filter(|send| send.2).count(), 1, "{:?}", device.calls());
         assert_eq!(device.transmitted(clock.instant(20_000), 60), [played(20_000, 40), played(20_040, 10), played(20_050, 10)].concat());
-        assert_eq!(past_front(&core), 0);
     }
 
     /// M1 (c, R4-m2, row 58): a join received at `J(s + 40)` is accepted, and one received a tick later is refused. The
@@ -3449,28 +3434,6 @@ mod tests {
         assert_eq!(drained[2].payload["outcome"], "drop", "D is inside B's front, so late at dispatch: {:?}", device.calls());
         assert_eq!(device.transmitted(clock.instant(40_040), 10), vec![Some([0.25, 0.0]); 10], "B plays as a standalone closed short head: {:?}", device.calls());
         assert_eq!(device.transmitted(clock.instant(40_050), 14), vec![None; 14], "C and D are not sent: {:?}", device.calls());
-    }
-
-    /// Q-6 (§1.4, row 60): an owner close whose device front is past the record's front is counted once. A close at the
-    /// record's front, as in S4b, is not.
-    #[test]
-    fn ur_21_stat_counts_owner_closes_past_the_record_front() {
-        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
-        txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
-        device_at(&core, &time, &device, core.ticks(12_000_000));
-        txp_drain(&mut tx);
-        device_at(&core, &time, &device, core.ticks(15_500_000));
-        txp_drain(&mut tx);
-        assert_eq!(past_front(&core), 0, "the owner closed at the record's front");
-
-        let (core, device, time, _events, clock, mut tx, _guard) = txp_rig(None, 2_000);
-        txp_book(&mut tx, &core, clock, txp_burst(&clock, 20_000, 40, false, LatePolicy::DropAndFlag));
-        device_at(&core, &time, &device, core.ticks(12_000_000));
-        txp_drain(&mut tx);
-        device_at(&core, &time, &device, core.ticks(15_500_000));
-        tx.chain().advance_front(clock.domain, 20_100);
-        assert!(tx.close_unjoined(clock, 20_040));
-        assert_eq!(past_front(&core), 1, "a device front past the record's front is counted");
     }
 
     #[test]
@@ -5128,11 +5091,6 @@ mod tests {
         txp_give(tx, burst);
     }
 
-    /// The owner's count of closes past the record's front (Q-6, §1.4).
-    fn past_front(core: &Core) -> i64 {
-        lock(&core.rec).stats.get("tx_close_past_record_front").copied().unwrap_or(0)
-    }
-
     /// Steps until the owner has nothing to do, failing instead of looping if it never stops: a wait that reports itself as work
     /// would otherwise hang the test (design note 37).
     fn txp_drain(tx: &mut Tx) {
@@ -5597,7 +5555,6 @@ mod tests {
                 let front = start + len.max(4) as i64 + gap;
                 assert_eq!(sends(&device), [(len.max(4), true, true)], "{rate} S/s, len {len}: {:?} {:?}", device.calls(), lock(&core.rec).rejected);
                 assert_eq!(tx.chain().front(), Some((clock.domain, front)), "{rate} S/s, len {len}: the owner's front");
-                assert_eq!(past_front(&core), 0, "{rate} S/s, len {len}");
                 let mut streams = lock(&core.streams);
                 let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).book.record;
                 let horizon = ezsdr_radio::staging::handover_horizon(core.now(), core.tx_in_flight(), |t| clock.at_or_after(t));
@@ -5647,7 +5604,6 @@ mod tests {
                 assert_eq!(sends(&device), [(32, true, false), (2, false, true)], "{rate} S/s, stop {stop}: {:?}", device.calls());
                 let front = start + 33 + 4;
                 assert_eq!(tx.chain().front(), Some((clock.domain, front)), "{rate} S/s, stop {stop}: the owner's front");
-                assert_eq!(past_front(&core), 0, "{rate} S/s, stop {stop}");
                 let mut streams = lock(&core.streams);
                 let busy = &mut streams.stream_mut(stream_key(Dir::Tx, 0)).book.record;
                 let horizon = ezsdr_radio::staging::handover_horizon(core.now(), core.tx_in_flight(), |t| clock.at_or_after(t));
@@ -5704,7 +5660,6 @@ mod tests {
         txp_drain(&mut tx);
         assert_eq!(sends(&device), [(32, true, false), (8, false, true)], "{:?}", device.calls());
         assert_eq!(tx.chain().front(), Some((clock.domain, 5_043)), "the continuation's close fronts three samples past its padded end");
-        assert_eq!(past_front(&core), 0);
     }
 
     #[test]
