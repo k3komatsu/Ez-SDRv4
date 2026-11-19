@@ -501,6 +501,56 @@ pub fn s5_rx_start_lead(device: &Arc<dyn Device>, plan: &MeasurementPlan) -> Lea
     lead_pass(&label, D4_LEAD_NS, planned, plan, "provider_rx_start_lead", measurement::measure_rx_start_lead(device.clone(), plan))
 }
 
+/// Widens the receive map to both slots when the earlier passes left UHD's receive map at slot A alone (UHD's channel count is its subdev spec's,
+/// UR-5); the Module sets its own map at every open, so nothing restores it afterwards.
+fn widen_rx_map(device: &dyn Device) -> Result<(), String> {
+    if device.channels(ezsdr_radio_uhd::Dir::Rx) >= 2 {
+        return Ok(());
+    }
+    device.set_subdev_spec(ezsdr_radio_uhd::Dir::Rx, "A:0 B:0").map_err(|error| format!("widening the receive map to \"A:0 B:0\" failed: {error}"))
+}
+
+/// The layout the S5 two-channel receive pass runs on: the device's own first two receive front ends, receive on both slots and transmit on slot A only.
+pub fn s5_two_channel_selector(device: &dyn Device) -> Result<Json, String> {
+    let channels = device.channels(ezsdr_radio_uhd::Dir::Rx);
+    if channels < 2 {
+        return Err(format!("the device has {channels} receive channel(s)"));
+    }
+    let board = |ch: usize| -> Result<ezsdr_radio::x3xx::Board, String> {
+        let name = device.front_end(ezsdr_radio_uhd::Dir::Rx, ch).map_err(|error| format!("receive channel {ch} is {error}, not a known board"))?;
+        ezsdr_radio::x3xx::Board::of_front_end(&name).ok_or_else(|| format!("receive channel {ch} is {name:?}, not a known board"))
+    };
+    let (first, second) = (board(0)?, board(1)?);
+    Ok(json!({
+        "rx": [format!("0:A:{}:0", first.name()), format!("0:B:{}:0", second.name())],
+        "tx": [format!("0:A:{}:0", first.name())],
+    }))
+}
+
+/// S5's two-channel receive start-lead pass: on the device's own two receive front ends, or INCONCLUSIVE when the device has no such layout.
+pub fn s5_two_channel_receive_lead(device: &Arc<dyn Device>, plan: &MeasurementPlan) -> LeadLines {
+    match widen_rx_map(&**device).and_then(|()| s5_two_channel_selector(&**device)) {
+        Err(reason) => (vec![format!("S5 decision rx-start-lead-2ch: INCONCLUSIVE: not runnable: {reason}")], None),
+        Ok(selector) => super::with_selector(selector, || s5_rx_start_lead(device, &MeasurementPlan { rx_start_channels: 2, ..plan.clone() })),
+    }
+}
+
+/// S5's three passes in order, each line emitted as its pass returns; a later pass runs only when the earlier ones ended without an error.
+pub fn s5_passes(device: &Arc<dyn Device>, plan: &MeasurementPlan, emit: &mut dyn FnMut(&str)) -> Option<String> {
+    let mut stopped = None;
+    let mut pass = |lead: &dyn Fn() -> LeadLines, stopped: &mut Option<String>| {
+        if stopped.is_none() {
+            let (lines, error) = lead();
+            lines.iter().for_each(|line| emit(line));
+            *stopped = error;
+        }
+    };
+    pass(&|| s5_command_lead(device, plan), &mut stopped);
+    pass(&|| s5_rx_start_lead(device, &MeasurementPlan { rx_start_channels: 1, ..plan.clone() }), &mut stopped);
+    pass(&|| s5_two_channel_receive_lead(device, plan), &mut stopped);
+    stopped
+}
+
 // ---------------------------------------------------------------- S4: overflow gap
 
 /// The reader stall each rate's cell uses (the record's own inference from the 50 MB receive socket buffer: a stall longer than the buffer's fill time).

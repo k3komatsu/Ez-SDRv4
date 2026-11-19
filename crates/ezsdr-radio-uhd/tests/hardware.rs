@@ -4160,9 +4160,9 @@ fn hw_t200_record_stage() {
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_s5_lead_rungs() {
     // S5 (stage 4, D3 and D4): the record's command-lead group at TX 1, 10 and 100 MS/s with rungs 3.5/4/4.5/5 ms, and its receive start-lead group at 10 and 100 MS/s
-    // (`restart-same`, `restart-retune`) with rungs 3/4/5/7.5/10 ms, 100 trials a rung, then the receive group again on two channels when the layout has two UBX/OBX channels
-    // (receive only). Every value is the plan's: `EZSDR_MEASURE_*` names override them (`s4bench::s5_plan`). Transmits on slot A at 1 GHz only in the command-lead pass
-    // (attenuator in the loopback; owner's confirmation first); the two-channel pass transmits nothing.
+    // (`restart-same`, `restart-retune`) with rungs 3/4/5/7.5/10 ms, 100 trials a rung, then the receive group again on two channels: receive on slot A and slot B from the
+    // device's own front ends, transmit on slot A only, nothing transmitted. Every value is the plan's: `EZSDR_MEASURE_*` names override them (`s4bench::s5_plan`). Transmits
+    // on slot A at 1 GHz only in the command-lead pass (attenuator in the loopback; owner's confirmation first); the two-channel pass transmits nothing.
     let env = env_values(&measurement::MeasurementPlan::ENV_NAMES);
     let plan = common::s4bench::s5_plan(&env).expect("the S5 plan's values are valid before opening the USRP");
     let limit = common::s4bench::s5_planned_seconds(&plan) + 900;
@@ -4172,20 +4172,7 @@ fn hw_s5_lead_rungs() {
     );
     bounded(Wall::from_secs(limit), "hw_s5_lead_rungs", move || {
         let (guard, device) = slot_a_guarded();
-        let mut stopped = None;
-        // A pass runs only when the ones before it ended without an error: a wedged device is not driven further.
-        let mut pass = |run: &dyn Fn() -> common::s4bench::LeadLines| {
-            if stopped.is_none() {
-                let (lines, error) = run();
-                lines.iter().for_each(|line| println!("{line}"));
-                stopped = error;
-            }
-        };
-        pass(&|| common::s4bench::s5_command_lead(&device, &plan));
-        pass(&|| common::s4bench::s5_rx_start_lead(&device, &measurement::MeasurementPlan { rx_start_channels: 1, ..plan.clone() }));
-        // The two-channel pass needs the layout's second receive channel: slot A alone is lifted, and nothing is transmitted.
-        set_selector_override(None);
-        pass(&|| common::s4bench::s5_rx_start_lead(&device, &measurement::MeasurementPlan { rx_start_channels: 2, ..plan.clone() }));
+        let stopped = common::s4bench::s5_passes(&device, &plan, &mut |line| println!("{line}"));
         let latched = guard.latched();
         drop(device);
         drop(guard);
@@ -4222,7 +4209,7 @@ fn hw_s4_overflow_gap() {
     // INFERRED high-side estimate) and a decision line per cell against the owner's stability criterion, then D5's bound and the stall figures. Receive only: no attenuator.
     // `EZSDR_S4_BLOCK_LEN` (absent: the Module's default) sets the receive block length of every Run; 65 536 at a low rate is the cell KL-15 names (all rate cells then run at
     // that block length, so read the 1 and 10 MS/s ones).
-    // A Run's capture is a file of the receive samples in /tmp: the container's tmpfs must hold it (about 1 GB at 100 MS/s).
+    // At most `OVERFLOW_CAPTURE_SAMPLES` = 1 sample is written; the gap is read from the published headers.
     let env = env_values(&[&["EZSDR_S4_TRIALS", "EZSDR_S4_STALL_RATE_HZ", "EZSDR_S4_STALLS_MS", "EZSDR_S4_BLOCK_LEN"][..], &measurement::MeasurementPlan::ENV_NAMES[..]].concat());
     let plan = measurement::MeasurementPlan::from_env(&env).expect("the measurement plan's values are valid before opening the USRP");
     let stalls = measurement::env_list(&env, "EZSDR_S4_STALLS_MS", &common::s4bench::S4_STALL_SWEEP_MS).unwrap_or_else(|error| panic!("{error}"));

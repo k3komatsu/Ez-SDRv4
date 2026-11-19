@@ -10428,7 +10428,8 @@ fn s4bench_t200_runs_the_record_stage_alone_and_reads_a_scripted_underflow() {
 #[test]
 fn s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels() {
     use common::s4bench::*;
-    let (fake_device, _, _) = raw_group_fixture(FakeConfig { front_ends: vec!["OBX", "OBX"], ..FakeConfig::default() });
+    // The bench's real shape: an OBX in slot A and a UBX in slot B, which `layout_of` lays out as slot A alone.
+    let (fake_device, _, _) = raw_group_fixture(FakeConfig { front_ends: vec!["OBX", "UBX"], ..FakeConfig::default() });
     let device: Arc<dyn Device> = fake_device.clone();
     let plan = measurement::MeasurementPlan {
         timed_command_leads_ns: vec![D3_LEAD_NS],
@@ -10460,7 +10461,7 @@ fn s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels() {
     assert_eq!(lines.iter().filter(|line| line.starts_with("S5 rx-start-lead-1ch trial ")).count(), 2 * 2 * 2, "one rung, both conditions, two rates, two trials");
     let two = measurement::MeasurementPlan { rx_start_channels: 2, rx_start_rates_hz: vec![2_000_000], ..plan.clone() };
     let before = fake_device.calls().len();
-    let (lines, error) = s5_rx_start_lead(&device, &two);
+    let (lines, error) = s5_two_channel_receive_lead(&device, &two);
     let calls = calls_since(before);
     let applies = |channel: usize| -> Vec<String> { calls.iter().filter_map(|call| call.strip_prefix(&format!("apply rx {channel} ")).map(str::to_owned)).collect() };
     assert!(calls.contains(&"rx_open 0 [0, 1]".to_owned()), "{calls:?}");
@@ -10472,12 +10473,121 @@ fn s4bench_s5_lead_passes_run_the_records_groups_at_other_rates_and_channels() {
     assert_eq!(error, None);
     let decision = lines.last().unwrap();
     assert!(decision.starts_with("S5 decision rx-start-lead-2ch: ") && decision.contains("restart-retune-rx-2msps-2ch") && !decision.contains("not runnable"), "{decision}");
+    // An empty slot B is UHD's unknown board: the two-channel pass reports it and runs nothing.
+    let (empty, _, _) = raw_group_fixture(one_obx());
+    let empty_device = empty.clone();
+    let empty: Arc<dyn Device> = empty;
+    let saved = common::selector_override();
+    let (lines, error) = s5_two_channel_receive_lead(&empty, &two);
+    assert_eq!((error, lines.len()), (None, 1), "{lines:?}");
+    assert!(lines[0].starts_with("S5 decision rx-start-lead-2ch: INCONCLUSIVE: not runnable: ") && lines[0].contains("not a known board"), "{lines:?}");
+    assert!(!empty_device.calls().iter().any(|call| call.starts_with("apply rx 1")), "{:?}", empty_device.calls());
+    assert_eq!(common::selector_override(), saved, "the saved override is restored");
     // A CBX in slot B cannot carry the 1 GHz retune: the two-channel pass reports it and runs nothing.
     let (cbx, _, _) = raw_group_fixture(obx_and_cbx());
     let cbx: Arc<dyn Device> = cbx;
-    let (lines, error) = with_selector(two_channel_selector(), || s5_rx_start_lead(&cbx, &two));
+    let (lines, error) = s5_two_channel_receive_lead(&cbx, &two);
     assert_eq!((error, lines.len()), (None, 1));
     assert!(lines[0].contains("INCONCLUSIVE: not runnable") && lines[0].contains("0:B:cbx:0"), "{lines:?}");
+}
+
+#[test]
+fn s5_passes_run_all_three_passes_on_a_mixed_obx_ubx_fake_and_restore_the_slot_a_pin() {
+    use common::s4bench::*;
+    // The bench's #1: an OBX in slot A and a UBX in slot B, which `layout_of` lays out as slot A alone and `pin_to_slot_a` pins.
+    let (fake_device, _, _) = raw_group_fixture(FakeConfig { front_ends: vec!["OBX", "UBX"], ..FakeConfig::default() });
+    let device: Arc<dyn Device> = fake_device.clone();
+    assert_eq!((device.channels(Dir::Rx), device.channels(Dir::Tx)), (2, 2));
+    assert_eq!(
+        s5_two_channel_selector(&*device).unwrap(),
+        json!({ "rx": ["0:A:obx:0", "0:B:ubx:0"], "tx": ["0:A:obx:0"] }),
+        "receive on both slots from the device's own front ends, transmit on slot A only"
+    );
+    common::iii::pin_to_slot_a(&*device).unwrap();
+    let saved = common::selector_override();
+    assert_eq!(saved, Some(json!({ "rx": ["0:A:obx:0"], "tx": ["0:A:obx:0"] })), "the pin is slot A alone");
+    let plan = measurement::MeasurementPlan {
+        timed_command_leads_ns: vec![D3_LEAD_NS],
+        timed_command_tx_rates_hz: vec![1_000_000],
+        rx_start_leads_ns: vec![D4_LEAD_NS],
+        rx_start_rates_hz: vec![2_000_000],
+        step_trials: 2,
+        ..measurement::MeasurementPlan::rehearsal()
+    };
+    let before = fake_device.calls().len();
+    let mut lines = Vec::new();
+    let stopped = s5_passes(&device, &plan, &mut |line| lines.push(line.to_owned()));
+    assert_eq!(stopped, None, "{lines:?}");
+    let calls = fake_device.calls().into_iter().skip(before).collect::<Vec<_>>();
+    for label in ["command-lead", "rx-start-lead-1ch", "rx-start-lead-2ch"] {
+        assert!(lines.iter().any(|line| line.starts_with(&format!("S5 decision {label}: "))), "no {label} decision in {lines:?}");
+    }
+    let two = lines.iter().find(|line| line.starts_with("S5 decision rx-start-lead-2ch: ")).unwrap();
+    assert!(!two.contains("not runnable") && two.contains("restart-retune-rx-2msps-2ch"), "{two}");
+    let third = calls.iter().position(|call| call == "rx_open 0 [0, 1]").unwrap_or_else(|| panic!("the two-channel pass opens both receive channels: {calls:?}"));
+    let widening = calls[..third]
+        .iter()
+        .position(|call| call == "set_subdev_spec rx A:0 B:0")
+        .unwrap_or_else(|| panic!("the earlier passes leave slot A alone, so the two-channel pass widens the receive map: {calls:?}"));
+    assert!(calls[..widening].iter().any(|call| call == "set_subdev_spec rx A:0"), "the map the widening starts from is the earlier passes' slot A alone: {calls:?}");
+    assert!(
+        calls[third..].iter().all(|call| !call.starts_with("apply tx 1") && !(call.starts_with("tx_open") && call.ends_with("1]"))),
+        "the third pass transmits nothing and has no slot B transmit channel: {calls:?}"
+    );
+    assert_eq!(common::selector_override(), saved, "the slot-A pin is restored after the two-channel pass");
+    // An earlier group error stops the later passes: a plan every group refuses at its first validation.
+    let invalid = measurement::MeasurementPlan { frequency_points: 3, ..plan.clone() };
+    let before = fake_device.calls().len();
+    let mut stopped_lines = Vec::new();
+    let stopped = s5_passes(&device, &invalid, &mut |line| stopped_lines.push(line.to_owned()));
+    assert!(stopped.as_ref().is_some_and(|reason| reason.starts_with("command-lead: ")), "{stopped:?}");
+    assert_eq!(stopped_lines.len(), 1, "no pass runs after the command-lead group's error: {stopped_lines:?}");
+    assert!(stopped_lines[0].starts_with("S5 decision command-lead: INCONCLUSIVE: the group returned an error: "), "{stopped_lines:?}");
+    assert_eq!(fake_device.calls().len(), before, "no later pass touches the device");
+    assert_eq!(common::selector_override(), saved, "the pin stays installed");
+}
+
+#[test]
+fn s5_two_channel_receive_lead_widens_a_one_channel_map_before_it_reads_the_slots() {
+    use common::s4bench::*;
+    // The bench's #2: a UBX in slot A and slot B empty, and the earlier passes leave UHD's receive map at slot A alone (UHD's channel count is
+    // its subdev spec's, UR-5). The two-channel pass widens the map to both slots before it reads the front ends. This fake has no B:0 entry, so
+    // its `set_subdev_spec` refuses, which ends the pass in one INCONCLUSIVE line: UHD 4.10's own answer for a UBX in A and an empty B is
+    // INFERRED (accepted with slot B on its unknown board, or refused), and either must give one INCONCLUSIVE line, never a pass.
+    let fake_device = fake(FakeConfig { front_ends: vec!["UBX"], ..FakeConfig::default() });
+    let device: Arc<dyn Device> = fake_device.clone();
+    device.set_subdev_spec(Dir::Rx, "A:0").unwrap();
+    assert_eq!(device.channels(Dir::Rx), 1, "the map the earlier passes leave: slot A alone");
+    let saved = common::selector_override();
+    let before = fake_device.calls().len();
+    let (lines, error) = s5_two_channel_receive_lead(&device, &measurement::MeasurementPlan::rehearsal());
+    let calls = fake_device.calls().into_iter().skip(before).collect::<Vec<_>>();
+    assert_eq!(error, None);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("S5 decision rx-start-lead-2ch: INCONCLUSIVE: not runnable: "), "{lines:?}");
+    assert!(calls.iter().any(|call| call == "set_subdev_spec rx A:0 B:0"), "the pass widens the receive map: {calls:?}");
+    assert!(!calls.iter().any(|call| call.starts_with("rx_open")), "a refused widening opens nothing: {calls:?}");
+    assert_eq!(device.channels(Dir::Rx), 1, "the fake refused B:0");
+    assert!(lines[0].contains("widening the receive map to \"A:0 B:0\" failed"), "the decision line names the failed widening: {lines:?}");
+    assert_eq!(common::selector_override(), saved, "the saved override is unchanged");
+}
+
+#[test]
+fn s5_two_channel_receive_lead_puts_a_failed_widening_on_the_decision_line() {
+    use common::s4bench::*;
+    // The device is gone before the pass (a control call that timed out latches the guard, as on the bench): the widening's own error, not the
+    // channel count it left behind, is what the decision line says. One UBX in slot A is the one-channel map the earlier passes leave.
+    let fake_device = fake(FakeConfig { front_ends: vec!["UBX"], faults: vec![FakeFault::Lost(Wall::ZERO)], ..FakeConfig::default() });
+    let device: Arc<dyn Device> = fake_device.clone();
+    assert_eq!(device.channels(Dir::Rx), 1, "the map is slot A alone");
+    let saved = common::selector_override();
+    let (lines, error) = s5_two_channel_receive_lead(&device, &measurement::MeasurementPlan::rehearsal());
+    assert_eq!(error, None);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("S5 decision rx-start-lead-2ch: INCONCLUSIVE: not runnable: "), "{lines:?}");
+    assert!(lines[0].contains("widening the receive map to \"A:0 B:0\" failed"), "{lines:?}");
+    assert!(!fake_device.calls().iter().any(|call| call.starts_with("rx_open")), "{:?}", fake_device.calls());
+    assert_eq!(common::selector_override(), saved, "the saved override is unchanged");
 }
 
 #[test]
@@ -10532,13 +10642,41 @@ fn s4_overflow_trial_with_a_65536_block_reaches_a_complete_trial_on_the_fake() {
     let device: Arc<dyn Device> = probe.clone();
     let cells = vec![S4Cell { rate_hz: 1_000_000, stall_ms: 300, trials: 1, sweep: false }];
     // A 65 536-sample block at 1 MS/s is 65.536 ms, and the stall begins 200 ms after the first block: the first block is read well before
-    // the stall. The Run's capture is after + stall + 250 = 750 ms, and the stall's 300 ms of loss is well inside it.
+    // the stall. The Run's Sink writes one sample; its evidence is the gap in the published headers, which the stall's 300 ms of loss closes.
     let run = common::with_selector(with_block_len(common::selector_override(), 65_536), || s4_run(&device, &cells, 200, || None));
     assert_eq!(run.stopped, None, "the trial ran to its end: {run:?}");
     assert_eq!(run.cells.iter().map(|(_, trials)| trials.len()).collect::<Vec<_>>(), [1], "one cell with one trial: {run:?}");
     assert!(run.cells[0].1[0].complete(), "the trial reached a complete restart-after-resume estimate at the KL-15 cell's block length: {:?}", run.cells[0].1[0]);
     let requests: Vec<u64> = probe.rows().iter().filter(|row| row["call"] == "rx_recv").filter_map(|row| row["request_samples"].as_u64()).collect();
     assert!(!requests.is_empty() && requests.iter().all(|samples| *samples == 65_536), "the Run's receive calls asked for its 65 536-sample blocks: {requests:?}");
+}
+
+/// S4's evidence from the published headers through the real path: the map carries the stall's one `overflow_restart` gap and the
+/// trial is complete, the Spec's capture is one cf32 sample, and a stall that does not overflow is Incomplete.
+#[test]
+fn s4_overflow_manifest_reads_the_gap_from_the_headers_and_captures_one_sample() {
+    let device: Arc<dyn Device> = fake(one_obx());
+    let (manifest, rejection, artifacts) = measurement::overflow_manifest(device.clone(), 1_000_000, 200, 300, false).unwrap();
+    assert_eq!(rejection, None, "the Run was admitted");
+    let maps = artifacts["rec"][0]["continuity"].as_array().unwrap_or_else(|| panic!("the headers form one capture-shaped map: {artifacts}"));
+    assert_eq!(maps.len(), 1, "{artifacts}");
+    let gaps = maps[0]["gaps"].as_array().unwrap();
+    assert_eq!(gaps.len(), 1, "exactly the stall's gap: {artifacts}");
+    assert_eq!(gaps[0]["cause"]["kind"], "overflow_restart", "{artifacts}");
+    assert!(gaps[0]["len"].as_u64().is_some_and(|len| len > 0), "{artifacts}");
+    assert_eq!(gaps[0]["lost"].as_u64(), gaps[0]["len"].as_u64(), "{artifacts}");
+    let (evidence, rejection) = measurement::overflow_trial(&device, 1_000_000, 300, 200).unwrap();
+    assert_eq!(rejection, None);
+    assert_eq!(evidence.class, measurement::TrialClass::Success, "{evidence:?}");
+    assert!(evidence.restart_after_resume.nanoseconds.is_some(), "{evidence:?}");
+    let rec = manifest.artifacts.get(&Ident::parse("rec").unwrap()).unwrap_or_else(|| panic!("one capture artifact: {:?}", manifest.artifacts.keys().collect::<Vec<_>>()));
+    assert_eq!(rec.len(), 1, "one capture artifact: {:?}", manifest.artifacts.keys().collect::<Vec<_>>());
+    assert_eq!(rec[0].size_bytes, 8, "one cf32 sample, not a long capture");
+    // The other side of the boundary: a stall shorter than the fake's 100 ms behind threshold publishes no overflow, so the trial is Incomplete.
+    let (_, _, artifacts) = measurement::overflow_manifest(device.clone(), 1_000_000, 200, 0, false).unwrap();
+    assert!(artifacts["rec"][0]["continuity"][0]["gaps"].as_array().is_some_and(Vec::is_empty), "a stall that does not overflow publishes no gap: {artifacts}");
+    let (evidence, _) = measurement::overflow_trial(&device, 1_000_000, 0, 200).unwrap();
+    assert_eq!(evidence.class, measurement::TrialClass::Incomplete);
 }
 
 /// `EZSDR_S4_BLOCK_LEN`'s path into an S4 Run: the thread's selector override (the slot A pin plus the block length) is laid over the

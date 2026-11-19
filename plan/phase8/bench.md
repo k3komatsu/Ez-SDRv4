@@ -1434,7 +1434,7 @@ hw() { # $1 = 試験名．EZSDR_UHD_ARGS と BOARD（36 か 37）と EZSDR_BENCH
 }
 ```
 
-- 前の節の `hw` に足したもの：試験が読む環境変数（上の `-e`．**設定していない変数は渡らない**），`--tmpfs` の大きさ（既定 4 GB．**S4 の Run は受信 sample の file を /tmp に作る**：100 MS/s の stall 0.5 s の Run で約 1 GB，200 MS/s では約 2 GB，100 MS/s の stall 2 s の Run で約 2.2 GB の見込み（INFERRED：sink の capture の長さ `after + stall + 250 ms` × rate × 8 byte．Run ごとに消える）．S4 は `EZSDR_BENCH_TMPFS=12g` を付けて流す），`--cpuset-cpus`（H2 だけ）．
+- 前の節の `hw` に足したもの：試験が読む環境変数（上の `-e`．**設定していない変数は渡らない**），`--tmpfs` の大きさ（既定 4 GB．S4 の証拠は capture の file ではなく，test 専用の記録 link を通した公表済み block header から読む gap（S9 と同じ形．Sink と同じ `ContinuityBuilder` で，Run 中に公表された header 全部を畳む．Sink の map と違い Run の終わりまで続き，link の drop は入らない）．Sink が書くのは 1 sample だけなので，どの rate でも大きい file は書かれず，既定の 4 GB は遥かに足りる．`EZSDR_BENCH_TMPFS=12g` は要らない），`--cpuset-cpus`（H2 だけ）．
 - host の確認と NIC の export は「note 47 段階 5 の後」の (a) と同じ（#2 `addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0`，#1 `addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1`）．
 - 追加の環境変数（`MeasurementPlan::ENV_NAMES`，既定は record suite の値のまま．record suite を流すときは使わない）：
 
@@ -1465,7 +1465,7 @@ export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 &&
 
 ### 2. S5 `hw_s5_lead_rungs`（D3・D4．TX あり：command lead の pass だけ．約 10〜15 分 / 台，estimate．期限は計画 + 15 分）
 
-問い：D3（`min_timed_command_lead_ns` = 5 ms）は TX 1・10・100 MS/s で 100/100 か，D4（`rx_start_lead_ns` = 10 ms）は 10・100 MS/s と 2 channel で 100/100 か．record suite と同じ group（`measure_min_timed_command_lead`，`measure_rx_start_lead`）を，rung と rate を変えて 3 つの pass で流す：(1) command lead：rung 3.5/4/4.5/5 ms × TX 1・10・100 MS/s × 100 trial（1 channel，slot A）；(2) 受信 start lead：`restart-same`・`restart-retune`（1 GHz をまたぐ）× rate 10・100 MS/s × rung 3/4/5/7.5/10 ms × 100 trial（1 channel）；(3) (2) を 2 channel で（receive のみ，layout の最初の 2 つの受信 channel が UBX か OBX のときだけ．CBX だと `not runnable` の行を出して何も流さない：任意）．
+問い：D3（`min_timed_command_lead_ns` = 5 ms）は TX 1・10・100 MS/s で 100/100 か，D4（`rx_start_lead_ns` = 10 ms）は 10・100 MS/s と 2 channel で 100/100 か．record suite と同じ group（`measure_min_timed_command_lead`，`measure_rx_start_lead`）を，rung と rate を変えて 3 つの pass で流す：(1) command lead：rung 3.5/4/4.5/5 ms × TX 1・10・100 MS/s × 100 trial（1 channel，slot A）；(2) 受信 start lead：`restart-same`・`restart-retune`（1 GHz をまたぐ）× rate 10・100 MS/s × rung 3/4/5/7.5/10 ms × 100 trial（1 channel）；(3) (2) を 2 channel で（receive のみ，任意）：device 自身の受信 channel 0・1 の front end から selector を作り（受信は slot A と slot B，送信は slot A だけ．何も送らない），2026-11-16 の bench では slot A だけの layout を開いて `not runnable` になったのを直した．slot B が空・未知の board・CBX のときは `S5 decision rx-start-lead-2ch: INCONCLUSIVE: not runnable: …` の行を 1 本出して何も流さない（CBX は 1 GHz の retune を運べない）．
 
 ```sh
 # --- owner が att を確かめた．次の 1 本だけ ---
@@ -1502,13 +1502,16 @@ grep -h 'S2 trial' ~/.cache/ezsdr-bench/$(date +%F)/hw_s2_throughput_repeats.$BO
 問い：overflow からの再開後の時間（restart-after-resume：record の INFERRED の高め側の推定）は rate 1/10/25/50/100/200 MS/s で安定か（owner の基準 (max − min)/max ≤ 0.5），最大は D5 の 140 ms を超えるか，stall の長さ（0.1/0.5/2 s，100 MS/s）に依存するか．各 cell は 20 trial．stall は record と同じ（1 MS/s 20 s，10 MS/s 2 s，25 MS/s 1 s，50・100・200 MS/s 0.5 s）．
 
 ```sh
-EZSDR_BENCH_TMPFS=12g hw hw_s4_overflow_gap
+hw hw_s4_overflow_gap
 grep -h 'S4 decision\|S4 stop\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_s4_overflow_gap.$BOARD.log
 grep -h 'S4 trial' ~/.cache/ezsdr-bench/$(date +%F)/hw_s4_overflow_gap.$BOARD.log                            # trial ごと
 ```
 
 - trial の行：rate，stall，outcome，overflow の数，gap（`gap_ns`：stall 中の損失も含む全体），`restart_after_resume_ns`（無ければ理由）．
 - 決定の行：cell ごとに min・median・max と (max − min)/max と基準を満たしたか；`D5 bound`（rate の cell 全体の最大，整数 ms への切り上げ，140 ms 以下か超えるか）；`D5 bound (sweep cells)`（stall の掃引の cell 全体の最大，同じ判定：140 ms 以下か超えるか，掃引の cell が incomplete なら `INCONCLUSIVE`）；`stall length at <sweep の rate> MS/s`（既定は 100 MS/s，`EZSDR_S4_STALL_RATE_HZ` で変えるとその rate．その rate の cell ごとの stall の median・max）．計画した 20 trial が complete（overflow がちょうど 1 回，gap が全部読めた，restart の時間がある）でない cell は `INCONCLUSIVE`．**100 MS/s の 0.1 s の stall は socket buffer（INFERRED で 50 MB）の fill 時間（約 125 ms）より短く，overflow しない（Incomplete → INCONCLUSIVE）かもしれない**：それ自体が結果で，stall の長さの行にそう出る．
+- 証拠の読み方：S4 の gap は capture の file からではなく，test 専用の記録 link を通して公表済み block header から読む（S9 と同じ形．Sink と同じ kernel の `ContinuityBuilder` で，Run 中に公表された header 全部を畳む．Sink の map と違い，1 sample の capture が終わった後も Run の終わりまで続き，link の drop は入らない：Provider が公表したものを測るため）．Spec の Sink が書くのは 1 sample（`OVERFLOW_CAPTURE_SAMPLES`）だけなので，どの rate でも大きい file は書かれず，既定の 4 GB の `--tmpfs` は遥かに足りる（`EZSDR_BENCH_TMPFS=12g` は要らない）．
+- trial が Incomplete（cell の決定の行は `INCONCLUSIVE`．failed の Run ではない）になるのは，Run の期限までに `overflow_restart` の gap が 1 つも公表されなかったとき，overrun の報告がちょうど 1 つでないとき，または gap と報告が一致しないとき．`restart_after_resume_reason` に理由が出るのは restart-after-resume の推定そのものが作れなかったときだけで，それ以外は trial の `class`，`overflow_count`，`gaps` を読む．
+- どの rate でも `EZSDR-INFRA: ... RS-8a` が出たら止める：盤の電源を入れ直し owner へ．2026-11-16 と 2026-11-18 の run では，2 回の RS-8a の timeout のあと process が SIGSEGV で終わった（観測）．kernel log は fault を libuhd の `multi_usrp_rfnoc.cpp` の 1 つの ip に置く（INFERRED：abandoned の step の後の UHD の exit 時の teardown の crash で，Sink や Module の欠陥ではない）．
 - 条件を超えて一般化しない：1 channel，1 GHz，受信のみ，host は H0．**restart-after-resume は stall の始まりを推定で置く高め側の値で，RM-17 の定義（overrun の instant `f` から）ではない**．140 ms は profile の `overflow_restart_gap_ns` で，4b の後の bench まで provisional（KL-15）：owner Q4 により，140 ms を超えた cell は owner へ戻し，値を上げるか KL を書く．
 
 ### 5. T200：200 MS/s の送信，bare UHD と Module（D2・KL-5．TX あり．約 50 分 / 設定 / 台，estimate）
@@ -1578,7 +1581,7 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 | cell | 形 | 測ること | 道具 | TX |
 |---|---|---|---|---|
 | C1 | raw UHD．Module の chunk の形（`segment::send_cap`：1 MS/s で 2 500，10 MS/s で 20 000 sample）の時刻つき send × 8（最初に SOB，最後に EOB，各 send に最初の sample の時刻）．**前に on-time の control の burst**（同じ形，聞く）．late burst は最初の sample の時刻を host の基準の時刻の 1 ms 前にし，host はその基準の時刻以後に最初の chunk を送る（最初の send は少なくとも 1 ms 遅れる．最後の chunk が自分の時刻の 1 ms 以上前に渡されたことを判定が確かめる）．1・10 MS/s × 10 trial | chunk の形でも device burst ごと捨てられるか | `hw_mt3_c1_chunked_late_burst`（書いてある） | あり |
-| C2 | C1 の trial を 100・200 MS/s の送信で（**受信は 10 MS/s**，tone の窓と閾値は C1 のまま），late burst は 20 ms．#2 でも（200 MS/s では packet + 2 clock の間隔が残るか） | rate と board | `hw_mt3_c2_chunked_late_burst_high_rates` | あり |
+| C2 | C1 の trial を 100・200 MS/s の送信で（**受信は 10 MS/s**，tone の窓と閾値は C1 のまま），late burst は 20 ms．#2 でも（200 MS/s では packet + 2 clock の間隔が残るか）．**100・200 MS/s の cell は bt2 へ延期（owner 2026-11-19：この rate では道具の前提を満たせない：`bench/2026-11-18-mt3/README.md`）：流さない**．1・10 MS/s は C1 で測定済み（2026-11-18） | rate と board | `hw_mt3_c2_chunked_late_burst_high_rates`（100・200 MS/s は延期：流さない） | あり |
 | C3 | C1 の late burst の最初の send を 32 sample に（UR-22 の最小の最初の send），あとは Module の chunk で 20 ms．1・10 MS/s | DUC の出力 packet が短く始まるときの overhead（pad の `2 × packets`） | `hw_mt3_c3_short_first_send` | あり |
 | C4 | cascade：A（C1 の late burst の形，20 ms，1 ms 遅れ）の最初の TimeError の tick を t0 とし，B（時刻つき，1 chunk，SOB+EOB）を `t0 + S × per + δ` に置く．δ は固定の格子（粗：−20・−10・50・100 µs，細：0〜30 µs を 1 µs 刻み，fake の limit とその +20 µs），各 δ 10 trial．1・10 MS/s | drain の終わりの境界，fake の pad が覆うか（UR-33，M3） | `hw_mt3_c4_cascade_boundary` | あり |
 | C5 | 2 channel（slot A と B の 1 つの 2 channel streamer，受信も両方）で，開始が host の基準の時刻の ±数百 µs の burst | 片方の channel だけ鳴ることがあるか（RM-11 の「何も送られなかった」） | `hw_mt3_c5_two_channel_late_start`．**slot B にも送信する**：slot B の board と att を owner が確かめ，`EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1` を付けた 1 本だけ（11-15 の (4) と同じ規則．配線が無ければ `NOT RUNNABLE` で送信しない） | あり（slot A と B） |
@@ -1616,13 +1619,17 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 - 期限は device の一生全体で **15 分**（`bounded`．過ぎると `EZSDR-INFRA:` の行を書いて abort する：hang の印で，電源を入れ直して owner へ）．**INCONCLUSIVE でも test は失敗する**（`hw` の exit 0 は全 cell が PASS のとき）．
 - C1 より後の cell の late burst は **どの rate でも 20 ms**（C1 の 8 chunk は 10 MS/s で 16 ms）：100・200 MS/s の host が実時間の 1.5 倍程度でしか送れなくても，最後の chunk が自分の時刻より前に渡されるようにするため（INFERRED：10 GbE で 200 MS/s は実時間の約 1.5 倍）．判定は C1 と同じく「最後の chunk が自分の時刻の 1 ms 以上前に渡された」ことを確かめ，足りなければ INCONCLUSIVE．
 - `MT3 rates: transmit [...] receive [...] S/s (requested …)`：`apply` が返した実際の rate．要求と違えば trial は INCONCLUSIVE．
-- `hw` は **「`<DATE>` の手順（note 47 段階 5 の後）」の「共通の準備」の定義**（`-e EZSDR_SLOT_B_ATTENUATOR_CONFIRMED` と `-e EZSDR_OFS_TWO_CHANNEL_WAIVED` を container に渡す．C5 に要る）．「2026-11-15 の手順（stage 4 の値のための計測…）」の「共通の準備」の `hw` はこの変数を渡さないので，**C5 を流す shell では後者を定義し直さない**（同じ shell に両方を貼ると後から貼った方が残る）．C2〜C4・C6 はどちらの定義でも流れる．
+- `hw` は **「`<DATE>` の手順（note 47 段階 5 の後）」の「共通の準備」の定義**（`-e EZSDR_SLOT_B_ATTENUATOR_CONFIRMED` と `-e EZSDR_OFS_TWO_CHANNEL_WAIVED` を container に渡す．C5 に要る）．「2026-11-15 の手順（stage 4 の値のための計測…）」の「共通の準備」の `hw` はこの変数を渡さないので，**C5 を流す shell では後者を定義し直さない**（同じ shell に両方を貼ると後から貼った方が残る）．C3・C4・C6 はどちらの定義でも流れる．
 
 ### C2 の流し方：C1 を 100・200 MS/s で（約 3 分 / 台，estimate．期限 15 分）
+
+- **100・200 MS/s の cell は bt2 へ延期（owner 2026-11-19）：この rate では道具の前提（最後の chunk が自分の時刻の 1 ms 以上前に渡されること）を満たせない（`bench/2026-11-18-mt3/README.md`：20/20 INCONCLUSIVE）．流さない**．以下は履歴として残す．1・10 MS/s は C1 で測定済み（2026-11-18）．
 
 - 送信 100・200 MS/s，**受信 10 MS/s**（`Device::apply` で別に設定する．tone の窓と閾値は C1 のまま：INFERRED．evidence は受信の間隔を送信と別に持つ）．late burst は 20 ms（100 MS/s で 2 000 000 sample = Module の chunk 20 000 × 100 send，200 MS/s で 4 000 000 sample × 200 send）．1 cell 10 trial．
 - **観測（判定の項ではない）**：late の TimeError の tick を全部，順に，隣との差，最頻の差，最頻の整数倍の差（欠けた report：FPGA の error FIFO は 32 entry で report を落としうる，R7）を出す：`MT3 C2 gaps <rate> MS/s trial <i>: …`．packet 長は UHD の streamer の値を Device が出さないので **INFERRED（最頻の差）**と明記される．late の report は burst の後にまとめて読むので，数千の report のうち古い tick が欠ける可能性がある（UHD 4.10 の送信の async queue は `boost::lockfree::queue` を 1 000 で作る：`rfnoc_tx_streamer.cpp:18,28`．容量は初期の node の数で，満杯で捨てるとは読めない：boost の仕様からの INFERRED）．判定には影響しない（新しい report だけを使う）．読むこと：200 MS/s でも差が packet + 2 clock のままか（Fable §2.1）．
 - VERDICT：C1 と同じ（`VERDICT mt3 c2 <rate> MS/s trial <i>`，`MT3 C2 cell <rate> MS/s`）：FAIL＝late burst の最初の sample 以後の BurstAck，または loopback の delay を引いた聞こえた区間が late の区間と重なる；INCONCLUSIVE＝呼び出しの失敗（rate が要求と違う場合を含む），受信の穴，control が聞こえない，tick の無い report，最後の send が 1 ms 前に渡されていない，late の TimeError が無い；PASS＝すべて揃い無音・ACK なし・TimeError あり．
+
+  **次の bench では流さない**（上の延期）．履歴としての command：
 
   ```sh
   # --- owner が att を確かめた（#1 OBX）．次の 1 本だけ ---
@@ -1701,7 +1708,7 @@ Module の水準で repeat の再開に m の掃引を入れる cell．productio
 ### 流した後・記録
 
 - stop：`EZSDR-INFRA`，`Control operation timed out`，`Reference Clock PLL failed to lock`，装置が応答しない → 電源を入れ直して owner へ．
-- orchestrator に返すもの：commit，各 log の path，`MT3 C1 cell` と `VERDICT mt3 c1` の行（2 台分），`MT3 C1 trace` の dump（`head`），C2〜C6 は各項の grep の行（C2・C3 は `MT3 C* gaps` を全部，C4 は `MT3 C4 cell`・`MT3 C4 boundary`・`VERDICT mt3 c4`，C5 は `MT3 C5 reading` と marginal の行，C6 は `MT3 C6 trace`），電源の入れ直しの有無，att の型番（owner の確認）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．C2〜C6 は下の各項（C7 は bt2 の後）．
+- orchestrator に返すもの：commit，各 log の path，`MT3 C1 cell` と `VERDICT mt3 c1` の行（2 台分），`MT3 C1 trace` の dump（`head`），C3〜C6 は各項の grep の行（C3 は `MT3 C* gaps` を全部，C4 は `MT3 C4 cell`・`MT3 C4 boundary`・`VERDICT mt3 c4`，C5 は `MT3 C5 reading` と marginal の行，C6 は `MT3 C6 trace`），電源の入れ直しの有無，att の型番（owner の確認）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．C3〜C6 は下の各項（C2・C7 は bt2 の後）．
 
 ## 受信 start lead だけの再測定（stage 4a の D：`hw_s5_rx_start_lead`．**送信なし・att 不要**．約 10〜15 分 / 台，estimate）
 

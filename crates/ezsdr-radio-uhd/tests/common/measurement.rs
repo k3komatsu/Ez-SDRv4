@@ -14,10 +14,11 @@ use ezsdr_kernel::binding::{Binding, BindingProfile};
 use ezsdr_kernel::event::EventSource;
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
+use ezsdr_kernel::module_api::{Link, LinkDescriptor, ModuleError};
 use ezsdr_kernel::run::{Lease, RunState};
 use ezsdr_kernel::session::SessionAction;
 use ezsdr_kernel::spec::{Ident, Key};
-use ezsdr_kernel::stream::{BurstEnd, Direction};
+use ezsdr_kernel::stream::{BackPressure, BlockHeader, BlockRef, BurstEnd, ContinuityBuilder, ContinuityMap, DataLink, DataLinkDecl, Direction, DropCarry, PublishOutcome, StreamError};
 use ezsdr_kernel::time::{SampleClockRecord, TimePoint};
 use ezsdr_radio::channels;
 use ezsdr_radio::device::Grid;
@@ -2801,16 +2802,133 @@ pub fn overflow_wait_ms(after_ms: u64, stall_ms: u64) -> Result<u64, String> {
     2_000u64.checked_add(after_ms).and_then(|ms| ms.checked_add(stall_recovery_ms)).and_then(|ms| ms.checked_add(500)).ok_or_else(|| "overflow Run horizon overflow".to_owned())
 }
 
-/// The Run's Manifest and its termination if validate or prepare refused it (it then never ran); `companion` adds a
-/// transmit stream repeating at `COMPANION_RATE_HZ`.
-fn overflow_manifest(device: Arc<dyn Device>, rate_hz: u64, after_ms: u64, stall_ms: u64, companion: bool) -> Result<(Manifest, Option<String>), String> {
-    let capture_ms = after_ms.checked_add(stall_ms).and_then(|ms| ms.checked_add(250)).ok_or("overflow capture duration overflow")?;
-    let samples = (u128::from(rate_hz) * u128::from(capture_ms)).div_ceil(1_000);
-    let samples = i64::try_from(samples).map_err(|_| "overflow capture sample count exceeds i64".to_owned())?;
+/// The one Sink output S4's Spec asks for: one sample. A Spec needs a Sink output, but S4 reads its gap from the published
+/// headers, never from the file, so nothing large is written at any rate.
+pub const OVERFLOW_CAPTURE_SAMPLES: i64 = 1;
+
+/// The receive Spec of one S4 overflow Run: one channel at `rate_hz`, tuned to `frequency`, and a capture of
+/// [`OVERFLOW_CAPTURE_SAMPLES`] samples.
+pub fn overflow_receive_spec(rate_hz: u64, frequency: f64) -> Json {
+    super::receive_spec(1, rate_hz as f64, frequency, Some(OVERFLOW_CAPTURE_SAMPLES))
+}
+
+/// The continuity maps the published block headers form, plus whether a push was refused: S4's evidence, derived by the same
+/// kernel [`ContinuityBuilder`] the capture Sink uses (`ezsdr-sink-capture`'s `push_continuity`).
+#[derive(Default)]
+pub struct HeaderMapsState {
+    current: Option<ContinuityBuilder>,
+    maps: Vec<ContinuityMap>,
+    blocks: u64,
+    failed: bool,
+}
+
+impl HeaderMapsState {
+    /// Folds one published block's header in. A domain or channel change closes the map and starts a new one with that header,
+    /// as the capture Sink does; any other refusal marks the evidence unusable.
+    fn push(&mut self, header: &BlockHeader) {
+        if self.current.is_none() {
+            self.current = Some(ContinuityBuilder::new(header.first_sample_time.domain(), header.channels, false));
+        }
+        let builder = self.current.as_mut().expect("a continuity builder was created");
+        match builder.push(header, DropCarry::default()) {
+            Ok(()) => self.blocks += 1,
+            Err(StreamError::DomainChanged { .. } | StreamError::ChannelsChanged { .. }) => {
+                // SC-30c: the rejected push left its carry with the outgoing builder.
+                let previous = self.current.take().expect("a continuity builder exists");
+                self.maps.push(previous.finish(DropCarry::default()));
+                let mut next = ContinuityBuilder::new(header.first_sample_time.domain(), header.channels, false);
+                if next.push(header, DropCarry::default()).is_ok() {
+                    self.blocks += 1;
+                } else {
+                    self.failed = true;
+                }
+                self.current = Some(next);
+            }
+            Err(_) => self.failed = true,
+        }
+    }
+
+    /// Closes the open map and returns every map when at least one block was recorded and no push was refused.
+    fn finish(&mut self) -> Option<Vec<ContinuityMap>> {
+        if let Some(builder) = self.current.take() {
+            self.maps.push(builder.finish(DropCarry::default()));
+        }
+        (self.blocks > 0 && !self.failed).then(|| std::mem::take(&mut self.maps))
+    }
+}
+
+/// The header recorder's shared state: written by the link's `publish`, read once after the Run by [`overflow_artifacts`].
+pub type HeaderMaps = Arc<Mutex<HeaderMapsState>>;
+
+/// The published headers as the capture's `ArtifactRef` shape, so that `extract_overflow_trial` reads it unchanged: the headers'
+/// map has the shape the capture's ArtifactRef had; `partial: false` because the recorder saw every published block. `{}` when
+/// nothing was recorded or a push was refused.
+pub fn overflow_artifacts(maps: &HeaderMaps) -> Json {
+    match maps.lock().unwrap().finish() {
+        Some(continuity) => json!({ "rec": [{ "partial": false, "continuity": continuity }] }),
+        None => json!({}),
+    }
+}
+
+/// `ezsdr_link_host::HostLinkModule` that records every published block's header into a [`ContinuityBuilder`] before queuing it
+/// (the S9 `FirstBlockLink` pattern; D1: no production surface).
+pub struct HeaderMapLink {
+    inner: ezsdr_link_host::HostLinkModule,
+    maps: HeaderMaps,
+}
+
+impl HeaderMapLink {
+    pub fn new(maps: HeaderMaps) -> HeaderMapLink {
+        HeaderMapLink { inner: ezsdr_link_host::HostLinkModule::new(), maps }
+    }
+}
+
+impl Link for HeaderMapLink {
+    fn descriptor(&self) -> &LinkDescriptor {
+        self.inner.descriptor()
+    }
+
+    fn create(&self, decl: &DataLinkDecl) -> Result<Arc<dyn DataLink>, ModuleError> {
+        Ok(Arc::new(HeaderRecording { inner: self.inner.create(decl)?, maps: self.maps.clone() }))
+    }
+}
+
+/// The link itself, recording each published block's header before it is queued; every other method delegates.
+struct HeaderRecording {
+    inner: Arc<dyn DataLink>,
+    maps: HeaderMaps,
+}
+
+impl DataLink for HeaderRecording {
+    fn publish(&self, block: BlockRef) -> PublishOutcome {
+        self.maps.lock().unwrap().push(block.header());
+        self.inner.publish(block)
+    }
+
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+        self.inner.receive()
+    }
+
+    fn drops(&self) -> u64 {
+        self.inner.drops()
+    }
+
+    fn take_drop_carry(&self) -> DropCarry {
+        self.inner.take_drop_carry()
+    }
+
+    fn policy(&self) -> BackPressure {
+        self.inner.policy()
+    }
+}
+
+/// The Run's Manifest, its termination if validate or prepare refused it (it then never ran), and the published headers as the
+/// capture's artifact shape; `companion` adds a transmit stream repeating at `COMPANION_RATE_HZ`.
+pub fn overflow_manifest(device: Arc<dyn Device>, rate_hz: u64, after_ms: u64, stall_ms: u64, companion: bool) -> Result<(Manifest, Option<String>, Json), String> {
     let dir = super::TempDir::new();
     let environment = if companion { super::bench_envelope(&*device) } else { Json::Object(Default::default()) };
     let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), environment, false);
-    let mut spec = super::receive_spec(1, rate_hz as f64, super::bench_hz(&*device), Some(samples));
+    let mut spec = overflow_receive_spec(rate_hz, super::bench_hz(&*device));
     let mut inputs = BTreeMap::new();
     if companion {
         let (bytes, waveform) = super::transmit_waveform(1_000);
@@ -2818,17 +2936,24 @@ fn overflow_manifest(device: Arc<dyn Device>, rate_hz: u64, after_ms: u64, stall
         inputs.insert(waveform.hash.clone(), bytes);
     }
     let declared = Declared { end: Some(Expect::Refused), ..Default::default() };
-    let mut run = Run::start_spec(&spec, &doc, super::assembly(&doc, device.clone(), inputs, |radio| radio.with_rx_stall(Wall::from_millis(after_ms), Wall::from_millis(stall_ms))), declared)
-        .map_err(|error| error.to_string())?;
+    let mut assembly = super::assembly(&doc, device.clone(), inputs, |radio| radio.with_rx_stall(Wall::from_millis(after_ms), Wall::from_millis(stall_ms)));
+    // D1: the links a test creates through the Assembly are the objects the Kernel attaches to the Provider's ports, so a recording
+    // wrapper around the host Link sees each published block without new production surface.
+    let maps: HeaderMaps = Default::default();
+    for link in assembly.links.values_mut() {
+        *link = Box::new(HeaderMapLink::new(maps.clone()));
+    }
+    let mut run = Run::start_spec(&spec, &doc, assembly, declared).map_err(|error| error.to_string())?;
     if let Some(reason) = rejected_run_reason(&run) {
-        return Ok((run.finish(), Some(reason)));
+        return Ok((run.finish(), Some(reason), json!({})));
     }
     let wait_ms = overflow_wait_ms(after_ms, stall_ms)?;
     let wait_ns = wait_ms.checked_mul(1_000_000).ok_or("overflow Run horizon overflow")?;
     let (root, now) = root_now(&run)?;
     let horizon = now.checked_add(ticks_for_ns(wait_ns, device.master_clock_rate())?).ok_or("overflow Run horizon overflow")?;
     advance_root(&mut run, root, horizon)?;
-    Ok((run.finish(), None))
+    let manifest = run.finish();
+    Ok((manifest, None, overflow_artifacts(&maps)))
 }
 
 /// The overflow gap at the highest rate with a transmit stream repeating at `COMPANION_RATE_HZ`: its own group, an observation
@@ -2843,9 +2968,8 @@ pub fn measure_overflow_restart_gap_with_tx(device: Arc<dyn Device>, plan: &Meas
     let condition = format!("{}-with-tx", rate_condition(rate_hz));
     let mut trials = Vec::new();
     for _ in 0..plan.overflow_trials {
-        let (manifest, rejection) = overflow_manifest(device.clone(), rate_hz, plan.overflow_after_ms, stall_ms, true)?;
+        let (manifest, rejection, artifacts) = overflow_manifest(device.clone(), rate_hz, plan.overflow_after_ms, stall_ms, true)?;
         let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
-        let artifacts = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
         let mut evidence = extract_overflow_trial(&events, &artifacts, &manifest.clocks.sample_clocks, rate_hz, plan.overflow_after_ms, stall_ms);
         evidence.class = if rejection.is_some() { TrialClass::AdmissionRejection } else { evidence.class };
         trials.push((evidence, rejection, companion_observation(&manifest, Direction::Tx, COMPANION_RATE_HZ)));
@@ -2875,9 +2999,8 @@ pub fn measure_overflow_restart_gap_with_tx(device: Arc<dyn Device>, plan: &Meas
 /// One overflow Run at `rate_hz` with the reader stalled for `stall_ms` from `after_ms` after the first block: its evidence, and the reason
 /// validate or prepare refused it (then it never ran, and its class is `AdmissionRejection`).
 pub fn overflow_trial(device: &Arc<dyn Device>, rate_hz: u64, stall_ms: u64, after_ms: u64) -> Result<(OverflowTrialEvidence, Option<String>), String> {
-    let (manifest, rejection) = overflow_manifest(device.clone(), rate_hz, after_ms, stall_ms, false)?;
+    let (manifest, rejection, artifacts) = overflow_manifest(device.clone(), rate_hz, after_ms, stall_ms, false)?;
     let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
-    let artifacts = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
     let mut evidence = extract_overflow_trial(&events, &artifacts, &manifest.clocks.sample_clocks, rate_hz, after_ms, stall_ms);
     if rejection.is_some() {
         evidence.class = TrialClass::AdmissionRejection;
@@ -3800,6 +3923,9 @@ fn numeric_value(key: &str, summary: &CandidateSummary, candidates: &BTreeMap<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ezsdr_kernel::contract::{DataContractId, PortRef};
+    use ezsdr_kernel::id::DataLinkId;
+    use ezsdr_kernel::stream::{BlockFlags, ChannelMask, SampleBlock};
 
     #[test]
     fn every_environment_name_the_plan_reads_is_listed_and_lists_are_checked() {
@@ -4292,6 +4418,100 @@ mod tests {
     fn overflow_wait_horizon_allows_capture_to_finish_after_the_stall() {
         assert_eq!(overflow_wait_ms(500, 20_000).unwrap(), 43_000, "the horizon includes the TX/RX start lead, pre-stall interval, stall, one stall-length drain allowance, and margin");
         assert!(overflow_wait_ms(500, u64::MAX).is_err(), "horizon arithmetic must reject overflow");
+    }
+
+    /// One receive block as `rx.rs` builds it: one channel, cf32 host bytes.
+    fn header_block(domain: u32, first: i64, len: u32, flags: BlockFlags, lost: Option<u64>) -> BlockRef {
+        let header = BlockHeader {
+            first_sample_time: TimePoint::new(ClockDomainId::local(domain), first),
+            len,
+            channels: 1,
+            direction: Direction::Rx,
+            valid: ChannelMask::full(1),
+            flags,
+            lost,
+            contract: DataContractId::parse("ezsdr.stream.cf32").unwrap(),
+        };
+        Arc::new(SampleBlock::new_host(header, ezsdr_hostmem::HOST_MEMORY, Arc::from(vec![0u8; len as usize * 8]), 8).unwrap())
+    }
+
+    /// A declared host link, as `s9bench.rs` builds one.
+    fn header_data_link_decl() -> DataLinkDecl {
+        DataLinkDecl {
+            id: DataLinkId::local(0),
+            from: PortRef { component: Ident::parse("radio").unwrap(), port: Ident::parse("rx0").unwrap() },
+            to: PortRef { component: Ident::parse("rec").unwrap(), port: Ident::parse("in").unwrap() },
+            contract: DataContractId::parse("ezsdr.stream.cf32").unwrap(),
+            policy: BackPressure::DropOldest,
+            capacity: 8,
+        }
+    }
+
+    #[test]
+    fn overflow_headers_form_the_capture_map_and_a_complete_trial() {
+        let domain = ClockDomainId::local(21);
+        let mut clock = synthetic_clock(domain, "usrp/rx/s0", 0, None);
+        clock.nominal_rate = ezsdr_kernel::time::Rational::new(1_000_000, 1).unwrap();
+        let maps: HeaderMaps = Default::default();
+        let link = HeaderMapLink::new(maps.clone()).create(&header_data_link_decl()).unwrap();
+        let blocks = [
+            header_block(21, 0, 100, BlockFlags::NONE, None),
+            header_block(21, 100, 100, BlockFlags::NONE, None),
+            header_block(21, 250, 100, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50)),
+        ];
+        for block in &blocks {
+            assert_eq!(link.publish(block.clone()), PublishOutcome::Accepted);
+        }
+        // The recorder forwards every block it recorded, in order and unchanged.
+        let received: Vec<TimePoint> = (0..3).map(|_| link.receive().expect("a queued block").0.header().first_sample_time).collect();
+        assert_eq!(received, [TimePoint::new(domain, 0), TimePoint::new(domain, 100), TimePoint::new(domain, 250)]);
+        let artifacts = overflow_artifacts(&maps);
+        let maps_json = artifacts["rec"][0]["continuity"].as_array().expect("one capture-shaped map list");
+        assert_eq!((artifacts["rec"][0]["partial"].clone(), maps_json.len()), (json!(false), 1));
+        assert_eq!(maps_json[0]["first"], json!(TimePoint::new(domain, 0)));
+        let gaps = maps_json[0]["gaps"].as_array().unwrap();
+        assert_eq!(gaps.len(), 1, "{artifacts}");
+        assert_eq!(
+            (gaps[0]["start"].clone(), gaps[0]["len"].as_u64(), gaps[0]["lost"].as_u64(), gaps[0]["cause"]["kind"].as_str()),
+            (json!(TimePoint::new(domain, 200)), Some(50), Some(50), Some("overflow_restart")),
+            "{artifacts}"
+        );
+        let event = json!([{
+            "source": { "kind": "node", "node": { "node": 0, "path": "usrp/rx/s0" } },
+            "time": TimePoint::new(domain, 200),
+            "kind": "radio.RX_OVERFLOW",
+            "payload": { "cause": "overrun", "lost": 50 },
+        }]);
+        let evidence = extract_overflow_trial(&event, &artifacts, &[clock.clone()], 1_000_000, 0, 0);
+        assert_eq!(evidence.class, TrialClass::Success, "{evidence:?}");
+        assert!(evidence.restart_after_resume.nanoseconds.is_some(), "{evidence:?}");
+
+        // A domain change closes the map, so the trial cannot read one capture map (Incomplete).
+        let changed: HeaderMaps = Default::default();
+        let link = HeaderMapLink::new(changed.clone()).create(&header_data_link_decl()).unwrap();
+        for block in [header_block(21, 0, 100, BlockFlags::NONE, None), header_block(22, 0, 100, BlockFlags::NONE, None)] {
+            let _ = link.publish(block);
+        }
+        let artifacts = overflow_artifacts(&changed);
+        assert_eq!(artifacts["rec"][0]["continuity"].as_array().map(Vec::len), Some(2), "{artifacts}");
+        assert_eq!(extract_overflow_trial(&json!([]), &artifacts, &[clock], 1_000_000, 0, 0).class, TrialClass::Incomplete);
+
+        // Nothing published, or a refused push: no evidence.
+        let empty: HeaderMaps = Default::default();
+        assert_eq!(overflow_artifacts(&empty), json!({}));
+        let refused: HeaderMaps = Default::default();
+        let link = HeaderMapLink::new(refused.clone()).create(&header_data_link_decl()).unwrap();
+        for block in [header_block(21, 0, 100, BlockFlags::NONE, None), header_block(21, 50, 100, BlockFlags::NONE, None)] {
+            let _ = link.publish(block);
+        }
+        assert_eq!(overflow_artifacts(&refused), json!({}));
+    }
+
+    #[test]
+    fn overflow_receive_spec_asks_for_one_sample() {
+        assert_eq!(OVERFLOW_CAPTURE_SAMPLES, 1, "S4 reads its gap from the headers; the Sink only needs an output");
+        let spec = overflow_receive_spec(1_000_000, 1e9);
+        assert_eq!(spec["outputs"][0]["params"]["sink.capture_samples"], json!(OVERFLOW_CAPTURE_SAMPLES));
     }
 
     #[test]

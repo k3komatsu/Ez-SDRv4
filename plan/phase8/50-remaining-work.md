@@ -27,7 +27,7 @@
 | 順 | 段 | 中身 | 難しさ | 分類・レビュー |
 |---|---|---|---|---|
 | 1 | **4b**（**済** 2026-11-19，`reviews/4b-*`） | overflow の後の再開の gap（`overflow_restart_gap_ns`，今は推定 140 ms，RM-17）と #108（overflow の直後に予約した受信の再開が遅れる：uhd-rx が gap の間 `rx_recv` に止まる） | 高：Vocabulary の規則，両 Provider，受信のスレッドの並行性 | step 0 の設計 → owner の判断 → 危険な段（試験計画と Sol のレビュー，コードの Sol のレビュー） |
-| 2 | 道具の修正 | S4 の 200 MS/s が RS-8a の 5 s に収まらない（capture の後片付け），S5 の 2 channel の pass が走らない（slot A だけの device を開く），C2 の前提（100・200 MS/s では host が遅れを取り戻せず，最後の chunk を期限前に渡せない） | 中：bench の道具だけ | 危険な段の実装役（手作業は規則の決まった段の実装役に出してよい），Opus の小段レビュー．測定の道具なので試験計画は省く |
+| 2 | 道具の修正（**済** 2026-11-19，`reviews/tools-*`：S4 は公表された header から gap を読み capture は 1 sample，S5 は受信の map を広げてから slot A・B を読む，C2 の 100・200 MS/s は bt2 まで外す） | S4 の 200 MS/s が RS-8a の 5 s に収まらない（capture の後片付け），S5 の 2 channel の pass が走らない（slot A だけの device を開く），C2 の前提（100・200 MS/s では host が遅れを取り戻せず，最後の chunk を期限前に渡せない） | 中：bench の道具だけ | 危険な段の実装役（手作業は規則の決まった段の実装役に出してよい），Opus の小段レビュー．測定の道具なので試験計画は省く |
 | 3 | bt2 | C7 の道具：Module の水準で repeat の再開と m の掃引．production に hook が要る．#106 の実機の確認を兼ねる | 中〜高 | 危険な段，Sol |
 | 4 | D13 の変換 | record suite の記録を `crates/ezsdr-radio/measurements/` の形に（`observations: []`，実際の `selector.args`） | 低 | 規則の決まった小さな段 |
 | 5 | **bench（1 回）** | 4b の値の掃引，両盤の record suite を段階 4 を閉じる commit で（D13），C7，作り直した C2，TXP の B3 | — | 実機．送信の前に owner が att を確かめる |

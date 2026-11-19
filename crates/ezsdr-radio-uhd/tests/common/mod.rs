@@ -157,17 +157,41 @@ pub fn set_selector_override(selector: Option<Json>) {
     SELECTOR_OVERRIDE.with(|cell| *cell.borrow_mut() = selector);
 }
 
-/// Runs `body` with `selector` installed, and removes it again, also on a panic.
+/// Runs `body` with `selector` installed, and restores the override installed before it when it ends, also on a panic.
 pub fn with_selector<T>(selector: Json, body: impl FnOnce() -> T) -> T {
-    struct Remove;
-    impl Drop for Remove {
+    struct Restore {
+        previous: Option<Json>,
+    }
+    impl Drop for Restore {
         fn drop(&mut self) {
-            set_selector_override(None);
+            set_selector_override(self.previous.take());
         }
     }
+    let restore = Restore { previous: selector_override() };
     set_selector_override(Some(selector));
-    let _remove = Remove;
+    let _restore = restore;
     body()
+}
+
+#[cfg(test)]
+mod selector_tests {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn with_selector_restores_the_previous_override_on_a_return_and_after_a_panic() {
+        // The override is the thread's: the test installs, nests and unwinds on its own thread.
+        let tail = json!({ "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] });
+        set_selector_override(Some(tail.clone()));
+        with_selector(json!({ "rx": ["0:A:obx:0"], "tx": ["0:A:obx:0"] }), || ());
+        assert_eq!(selector_override(), Some(tail.clone()), "the override installed before the group is restored");
+        let panicked = catch_unwind(AssertUnwindSafe(|| with_selector(json!({}), || panic!("a group that panics"))));
+        assert!(panicked.is_err(), "the panic reaches the caller");
+        assert_eq!(selector_override(), Some(tail), "a panic restores the previous override too");
+        set_selector_override(None);
+        with_selector(json!({}), || ());
+        assert_eq!(selector_override(), None, "no previous override leaves none");
+    }
 }
 
 /// The layout elements the bench profile names: the installed selector's `rx` and `tx` where it has them, else the device's.

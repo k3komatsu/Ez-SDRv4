@@ -29305,5 +29305,135 @@
   "crate": "ezsdr-radio",
   "test_bin": "radio_model",
   "filter": "rm_19_a_prepare_violation_records_no_requested_and_names_the_reported_value"
+ },
+ {
+  "id": "TOOLS-01",
+  "name": "S5 two-channel: the second receive element is built from slot A",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "format!(\"0:B:{}:0\", second.name())",
+  "new": "format!(\"0:A:{}:0\", second.name())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_passes_run_all_three_passes_on_a_mixed_obx_ubx_fake_and_restore_the_slot_a_pin"
+ },
+ {
+  "id": "TOOLS-02",
+  "name": "S5 two-channel: both receive elements are also put in tx (slot B transmits too)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "\"tx\": [format!(\"0:A:{}:0\", first.name())],",
+  "new": "\"tx\": [format!(\"0:A:{}:0\", first.name()), format!(\"0:B:{}:0\", second.name())],",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_passes_run_all_three_passes_on_a_mixed_obx_ubx_fake_and_restore_the_slot_a_pin"
+ },
+ {
+  "id": "TOOLS-03",
+  "name": "S5 two-channel: the selector override installed before the group is not restored",
+  "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+  "old": "set_selector_override(self.previous.take());",
+  "new": "set_selector_override(None);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "with_selector_restores_the_previous_override_on_a_return_and_after_a_panic"
+ },
+ {
+  "id": "TOOLS-04",
+  "name": "S5 passes: a later pass runs after an earlier group error",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "if stopped.is_none() {",
+  "new": "if true {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_passes_run_all_three_passes_on_a_mixed_obx_ubx_fake_and_restore_the_slot_a_pin"
+ },
+ {
+  "id": "TOOLS-05",
+  "name": "S5 two-channel: the subdev spec is not widened to both slots when the earlier passes left slot A alone",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "device.set_subdev_spec(ezsdr_radio_uhd::Dir::Rx, \"A:0 B:0\")",
+  "new": "Ok::<(), ezsdr_radio_uhd::DeviceError>(())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_passes_run_all_three_passes_on_a_mixed_obx_ubx_fake_and_restore_the_slot_a_pin"
+ },
+ {
+  "id": "TOOLS-31",
+  "name": "S5 two-channel: a failed widening of the receive map is taken as done",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": ".map_err(|error| format!(\"widening the receive map to \\\"A:0 B:0\\\" failed: {error}\"))",
+  "new": ".or_else(|_| Ok::<(), String>(()))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_two_channel_receive_lead_puts_a_failed_widening_on_the_decision_line"
+ },
+ {
+  "id": "TOOLS-32",
+  "name": "S5 two-channel: the pass does not widen the receive map first",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "match widen_rx_map(&**device).and_then(|()| s5_two_channel_selector(&**device)) {",
+  "new": "match s5_two_channel_selector(&**device) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s5_two_channel_receive_lead_widens_a_one_channel_map_before_it_reads_the_slots"
+ },
+ {
+  "id": "TOOLS-21",
+  "name": "S4 headers: the recorder does not fold the published header in",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "match builder.push(header, DropCarry::default()) {",
+  "new": "match Ok::<(), StreamError>(()) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_overflow_manifest_reads_the_gap_from_the_headers_and_captures_one_sample"
+ },
+ {
+  "id": "TOOLS-22",
+  "name": "S4 headers: the recording link is not installed",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "*link = Box::new(HeaderMapLink::new(maps.clone()));",
+  "new": "*link = Box::new(ezsdr_link_host::HostLinkModule::new());",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_overflow_manifest_reads_the_gap_from_the_headers_and_captures_one_sample"
+ },
+ {
+  "id": "TOOLS-23",
+  "name": "S4 headers: the Spec asks for a long capture",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "pub const OVERFLOW_CAPTURE_SAMPLES: i64 = 1;",
+  "new": "pub const OVERFLOW_CAPTURE_SAMPLES: i64 = 1_000_000;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_overflow_manifest_reads_the_gap_from_the_headers_and_captures_one_sample"
+ },
+ {
+  "id": "TOOLS-24",
+  "name": "S4 headers: the Spec is built without the one-sample capture",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "let mut spec = overflow_receive_spec(rate_hz, super::bench_hz(&*device));",
+  "new": "let mut spec = super::receive_spec(1, rate_hz as f64, super::bench_hz(&*device), None);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_overflow_manifest_reads_the_gap_from_the_headers_and_captures_one_sample"
+ },
+ {
+  "id": "TOOLS-25",
+  "name": "S4 headers: the recording link does not forward the block",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "self.inner.publish(block)",
+  "new": "PublishOutcome::Accepted",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_overflow_manifest_reads_the_gap_from_the_headers_and_captures_one_sample"
+ },
+ {
+  "id": "TOOLS-26",
+  "name": "S4 headers: a domain change does not start a new map",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "Err(StreamError::DomainChanged { .. } | StreamError::ChannelsChanged { .. }) => {",
+  "new": "Err(StreamError::DomainChanged { .. } | StreamError::ChannelsChanged { .. }) if false => {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "overflow_headers_form_the_capture_map_and_a_complete_trial"
  }
 ]
