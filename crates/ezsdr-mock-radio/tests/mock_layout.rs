@@ -40,6 +40,11 @@ fn module_ref() -> ModuleRef {
 fn rid(name: &str) -> ResourceId {
     ResourceId::parse(name).unwrap()
 }
+
+/// MR-17's overflow restart gap from the x3xx profile, at the tests' 1 MS/s on a 1 GHz root.
+fn gap_samples() -> i64 {
+    ezsdr_radio::x3xx::timing().overflow_restart_gap_ns / 1_000
+}
 fn key(name: &str) -> Key {
     Key::parse(name).unwrap()
 }
@@ -760,12 +765,12 @@ fn mr_21_a_fault_cuts_the_lowest_running_receive_stream() {
     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
     let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: two(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0", "rx1"] });
     harness.arm_start(T0).unwrap();
-    harness.step(T0 + 52_999_001).unwrap();
+    harness.step(T0 + (1_000 + gap_samples() + 1_999) * 1_000 + 1).unwrap();
     let faults = harness.section("faults");
     assert_eq!(faults.len(), 1);
-    assert_eq!((faults[0]["applied"].clone(), faults[0]["lost"].clone()), (serde_json::json!(true), serde_json::json!(50_000)));
+    assert_eq!((faults[0]["applied"].clone(), faults[0]["lost"].clone()), (serde_json::json!(true), serde_json::json!(gap_samples())));
     let fast = harness.headers("rx0");
-    let restarted = fast.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 51_000).expect("the restarted block");
+    let restarted = fast.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 1_000 + gap_samples()).expect("the restarted block");
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
     let overflows: Vec<_> = harness
         .events()
@@ -773,7 +778,7 @@ fn mr_21_a_fault_cuts_the_lowest_running_receive_stream() {
         .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW)
         .map(|event| (event.source.clone(), RxOverflowPayload::from_payload(&event.payload).unwrap().lost))
         .collect();
-    assert_eq!(overflows, [(node_src("mock/rx/s0"), 50_000)]);
+    assert_eq!(overflows, [(node_src("mock/rx/s0"), gap_samples() as u64)]);
     assert!(harness.headers("rx1").iter().all(|header| !header.flags.contains(BlockFlags::GAP_BEFORE)));
     // The lowest stream is not running there: the fault cuts the one that is.
     let mut alone =
@@ -794,11 +799,11 @@ fn mr_21_a_fault_cuts_the_lowest_running_receive_stream() {
     assert!(!after.flags.contains(BlockFlags::RESTARTED));
     assert!(lost.headers("rx1").iter().all(|header| !header.flags.contains(BlockFlags::SEQ_DISCONTINUITY | BlockFlags::GAP_BEFORE)));
     alone.arm_start(T0).unwrap();
-    alone.step(T0 + 52_999_001).unwrap();
+    alone.step(T0 + (1_000 + gap_samples() + 1_999) * 1_000 + 1).unwrap();
     let faults = alone.section("faults");
-    assert_eq!((faults[0]["applied"].clone(), faults[0]["lost"].clone()), (serde_json::json!(true), serde_json::json!(50_000)));
+    assert_eq!((faults[0]["applied"].clone(), faults[0]["lost"].clone()), (serde_json::json!(true), serde_json::json!(gap_samples())));
     let slow = alone.headers("rx1");
-    let restarted = slow.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 51_000).expect("the restarted block");
+    let restarted = slow.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 1_000 + gap_samples()).expect("the restarted block");
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
     // The overflow travels on the handle of the stream the fault cut (MR-37, MR-28).
     let overflows: Vec<_> = alone.events().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).map(|event| event.source.clone()).collect();

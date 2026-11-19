@@ -1423,7 +1423,8 @@ hw() { # $1 = 試験名．EZSDR_UHD_ARGS と BOARD（36 か 37）と EZSDR_BENCH
     -v "$PWD:/work" -v ezsdr-v4-cargo-target:/cargo-target -w /work \
     -e CARGO_HOME=/cargo-target/.cargo-home -e EZSDR_UHD_ARGS -e EZSDR_BENCH_NIC \
     -e EZSDR_S2_TRIALS -e EZSDR_S2_DUPLEX_TRIALS -e EZSDR_S2_SECONDS -e EZSDR_S2_CELLS -e EZSDR_T200_RUNS \
-    -e EZSDR_S4_TRIALS -e EZSDR_S4_STALL_RATE_HZ -e EZSDR_S4_STALLS_MS -e EZSDR_TX_WAVEFORM_SAMPLES -e EZSDR_TX200_LENGTHS -e EZSDR_TX200_SECONDS \
+    -e EZSDR_S4_TRIALS -e EZSDR_S4_STALL_RATE_HZ -e EZSDR_S4_STALLS_MS -e EZSDR_S4_BLOCK_LEN -e EZSDR_TX_WAVEFORM_SAMPLES -e EZSDR_TX200_LENGTHS -e EZSDR_TX200_SECONDS \
+    -e EZSDR_S9_TRIALS -e EZSDR_S9_AFTER_MS \
     -e EZSDR_MEASURE_THROUGHPUT_SECS -e EZSDR_MEASURE_STEP_TRIALS -e EZSDR_MEASURE_TIMED_LEADS_NS -e EZSDR_MEASURE_TIMED_LEAD_TX_RATES_HZ \
     -e EZSDR_MEASURE_RX_START_LEADS_NS -e EZSDR_MEASURE_RX_START_RATES_HZ -e EZSDR_MEASURE_RX_START_CHANNELS -e EZSDR_MEASURE_OVERFLOW_AFTER_MS \
     ezsdr-v4-dev:uhd4.10 cargo test -q --release -p ezsdr-radio-uhd --features uhd --test hardware "$1" -- --exact --ignored --nocapture --test-threads=1 \
@@ -1450,6 +1451,8 @@ hw() { # $1 = 試験名．EZSDR_UHD_ARGS と BOARD（36 か 37）と EZSDR_BENCH
 | `EZSDR_S2_TRIALS`，`EZSDR_S2_DUPLEX_TRIALS`，`EZSDR_S2_SECONDS`，`EZSDR_S2_CELLS` | S2 の回数（10），duplex の回数（5），1 Run の秒（60），流す cell の id（コンマ区切り） | 左の括弧 |
 | `EZSDR_T200_RUNS` | T200 の record の形の回数 | 3 |
 | `EZSDR_S4_TRIALS`，`EZSDR_S4_STALL_RATE_HZ`，`EZSDR_S4_STALLS_MS` | S4 の trial（20），stall の掃引の rate（100 MS/s）と stall（100,500,2000 ms） | 左の括弧 |
+| `EZSDR_S4_BLOCK_LEN` | S4 の receive の block 長（UR-5 の `block_len`；Module が 1…65 536 以外を Session の open で拒否する） | Module の既定（2 000） |
+| `EZSDR_S9_TRIALS`，`EZSDR_S9_AFTER_MS` | S9 の trial（20）と最初の block から stall までの ms（100） | 左の括弧 |
 
 ### 1. #67 の CloseThenStop の cell（受信のみ，#67 の step で追加．この step では足さない）
 
@@ -1505,8 +1508,8 @@ grep -h 'S4 trial' ~/.cache/ezsdr-bench/$(date +%F)/hw_s4_overflow_gap.$BOARD.lo
 ```
 
 - trial の行：rate，stall，outcome，overflow の数，gap（`gap_ns`：stall 中の損失も含む全体），`restart_after_resume_ns`（無ければ理由）．
-- 決定の行：cell ごとに min・median・max と (max − min)/max と基準を満たしたか；`D5 bound`（rate の cell 全体の最大，整数 ms への切り上げ，140 ms 以下か超えるか）；`stall length at <sweep の rate> MS/s`（既定は 100 MS/s，`EZSDR_S4_STALL_RATE_HZ` で変えるとその rate．その rate の cell ごとの stall の median・max）．計画した 20 trial が complete（overflow がちょうど 1 回，gap が全部読めた，restart の時間がある）でない cell は `INCONCLUSIVE`．**100 MS/s の 0.1 s の stall は socket buffer（INFERRED で 50 MB）の fill 時間（約 125 ms）より短く，overflow しない（Incomplete → INCONCLUSIVE）かもしれない**：それ自体が結果で，stall の長さの行にそう出る．
-- 条件を超えて一般化しない：1 channel，1 GHz，受信のみ，host は H0．**restart-after-resume は stall の始まりを推定で置く高め側の値で，RM-17 の定義（overrun の instant `f` から）ではない**：RM-17 の書き直し（4b）の入力で，値を決める前に design の step が先．
+- 決定の行：cell ごとに min・median・max と (max − min)/max と基準を満たしたか；`D5 bound`（rate の cell 全体の最大，整数 ms への切り上げ，140 ms 以下か超えるか）；`D5 bound (sweep cells)`（stall の掃引の cell 全体の最大，同じ判定：140 ms 以下か超えるか，掃引の cell が incomplete なら `INCONCLUSIVE`）；`stall length at <sweep の rate> MS/s`（既定は 100 MS/s，`EZSDR_S4_STALL_RATE_HZ` で変えるとその rate．その rate の cell ごとの stall の median・max）．計画した 20 trial が complete（overflow がちょうど 1 回，gap が全部読めた，restart の時間がある）でない cell は `INCONCLUSIVE`．**100 MS/s の 0.1 s の stall は socket buffer（INFERRED で 50 MB）の fill 時間（約 125 ms）より短く，overflow しない（Incomplete → INCONCLUSIVE）かもしれない**：それ自体が結果で，stall の長さの行にそう出る．
+- 条件を超えて一般化しない：1 channel，1 GHz，受信のみ，host は H0．**restart-after-resume は stall の始まりを推定で置く高め側の値で，RM-17 の定義（overrun の instant `f` から）ではない**．140 ms は profile の `overflow_restart_gap_ns` で，4b の後の bench まで provisional（KL-15）：owner Q4 により，140 ms を超えた cell は owner へ戻し，値を上げるか KL を書く．
 
 ### 5. T200：200 MS/s の送信，bare UHD と Module（D2・KL-5．TX あり．約 50 分 / 設定 / 台，estimate）
 
@@ -1729,3 +1732,48 @@ PY
 - 流すもの：`hw_s5_lead_rungs` の (2) だけ（1 channel，`restart-same`・`restart-retune` × rate 10・100 MS/s × rung 3/4/5/7.5/10 ms × 100 trial）．値と env の名前（`EZSDR_MEASURE_RX_START_*`，`EZSDR_MEASURE_STEP_TRIALS`）は S5 と同じ．2 channel の pass は流さない．
 - 読み方：決定の行 `S5 decision rx-start-lead-1ch`（10 ms が全 condition で 100 %）．trial の行は全部 `started:true`（probe が行を捨てると test が error で止まる．捨てずに始まらなかった trial は `Incomplete` で，決定の行と stage の行に出る）．`lead_left_ns` が 1 rung の 100 trial で下がり続けない（最初の 10 trial と最後の 10 trial の中央値を比べる）．下がり続けるなら probe の lock ではなく Module 側の原因（別の欠陥として起票）．
 - 条件を超えて一般化しない：1 GHz，slot A，board ごと，この rate と rung．
+
+## 4b の後の手順（#108 の S9：overflow の後に積んだ Stop と start．**送信なし・att 不要**）
+
+前提：「2026-11-15 の手順」の「共通の準備（送信しない）」の `cd`・`mkdir`・`hw()` の定義（`BOARD` と `EZSDR_UHD_ARGS` と `EZSDR_BENCH_NIC` は board ごとに export する）．S4 の節と同じ 2 台で，H0 のあと H4 でも流す．
+
+### 問い
+
+overflow の後に積んだ receive の Stop + start は origin で始まるか．owner の M1：始まる．ただし Module が overflow の前に buffer された sample をまだ読んでいる間に積んだものは，報告される missed start（`LATE_COMMAND`．`START_LEAD_SHORT` の start は origin を保つ：RM-25）．INFERRED の確認：USRP で retune を含む restart が gap の中で 0〜2.5 ms の余裕で始まる，stop が UHD の restart の後に来る順は時間だけで成り立つ（フォールバック：cut の時点で stop する）．
+
+### 試験 `hw_s9_restart_booked_after_an_overflow`
+
+`crates/ezsdr-radio-uhd/tests/hardware.rs`．判定・分類は `tests/common/s9bench.rs`，非 device の部分の unit test と FakeDevice の rehearsal は default の suite．cell は rate × stall = 10 MS/s・2 s と 100 MS/s・0.5 s（S4 の rate cell と同じ stall）× 同じ値と retune（Session は 1 GHz から始まり，retune の先は 999.5 MHz：UBX・OBX とも 1 GHz の帯の境の下，帯が替わる）× 目標 A（overflow の結果を読んだ後に積む）・B（stall の後に Module が backlog を返している間に積む）．各 cell 20 trial．H0 のあと H4．環境変数は `EZSDR_S9_TRIALS`（20）・`EZSDR_S9_AFTER_MS`（100）．trial の行は結果の行の stamp（`result_before_ns`，`result_after_ns`）と `window_ns` も出す．
+
+```sh
+hw hw_s9_restart_booked_after_an_overflow
+grep -h 'S9 decision\|S9 trial\|S9 stop\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_s9_restart_booked_after_an_overflow.$BOARD.log
+```
+
+### 分類（trace から事後に）
+
+probe の trace の `rx_recv` の行だけを見る．stall の長さ以上の隙間の直後の行が reader の再開，その後の最初の（`out_of_sequence` でない）overflow の行が結果．まず INCONCLUSIVE を決める：probe が行を落とした（`rows_complete()` が偽），host の stamp の無い `rx_recv` の行がある，`out_of_sequence` でない overflow の行が trace に 2 つ以上ある（stall 自身の overflow と負荷によるものを区別できない：S4 の規則．H4 の 100 MS/s でも起きる，`bench-results.md` の `h4` の行），stall の長さ以上の隙間が無い，その後の overflow の結果が無い——のどれかなら INCONCLUSIVE．A = Stop の submit の直前の時刻（pre-stamp）が結果の行の `host_after_ns` より厳密に後で，結果の後の `samples` の行で `host_before_ns` が `min(max(post-stamp, 物理的な stop の対の終わり), successor の rx_start の呼び出しの host_before_ns)` より前に始まるものが無い（積み終わる前に始まった call は restart の data を返したかもしれない．successor の `rx_start` 以降の行は successor 自身のもので，数えない：4b-3 fix round）．さらに，積むのが結果の呼び出しの窓の中で終わること：`post-stamp < 結果の host_before_ns + 窓`．窓 = UHD の restart の遅れ 50 ms（UHD 4.10 `radio_control_impl.cpp:48, 105-125`：restart は overflow を reader に返す時に積まれ，結果を返した `rx_recv` の呼び出しの開始から少なくとも 50 ms 後）− Module の受信の待ち 1 回（block 1 つ + 3 ms）− 2 ms（uhd-rx の受信の待ちは最低 1 ms で UHD が ms に切り捨てるので，結果を返した待ちは span を最大 1 ms 超える．残りの 1 ms は `rx_stop` の対と `get_time_now()` の遅れ）（100 MS/s・既定の block で約 44.98 ms）．これを超えると，cut で Module が stop するのが UHD 自身の restart の START の後になるかもしれず，その trial は INCONCLUSIVE（`booked within a receive wait of the device's own restart`）．A の前提はさらに物理的な stop の対そのもの（4b の Sol 修正）：pre-stamp 以後（successor の `rx_start` があればその前）に始まった `rx_stop` の行のうち最後のものの `host_after_ns` が，結果の `host_before_ns` + restart の遅れ 50 ms − 2 ms より前であること．そうでなければ INCONCLUSIVE（同じ理由：制御の lock や scheduling の遅れで UHD の restart が stop の対より先に走り，古い stream の packet が successor に届いたかもしれない）．その行が無い，または stamp が無ければ INCONCLUSIVE（`no rx_stop row with host stamps after the booking`）．対の行のどれかの `result` が null でなければ（stop が効いていない），その trial は INCONCLUSIVE（`a stop of the booking's pair failed`）：対の最後の行だけでなく全部の行を見る（先に失敗した stop の後の Ok も前提にしない）．pre-stamp より前に始まった行や successor の `rx_start` 以後の行は対ではないので数えない．B = start の submit の直後の時刻（post-stamp）が overflow の行の `host_before_ns` より厳密に前，かつ再開の後の `samples` の行で `host_after_ns` が Stop の直前の時刻より前のものがある（積んだ時に backlog を読んでいた）．それ以外（reader が眠っている間，stall の始まる直前，stamp が結果をまたぐ）は INCONCLUSIVE．
+
+### 判定（trial ごと）
+
+A：successor の最初の block が，Module が link に公表した header のとおり index 0 で `GAP_BEFORE` も `SEQ_DISCONTINUITY` も無い（trial の Assembly の link を test 専用の記録 link で包み，successor の SampleClock ごとに最初に公表された block の header を読む．probe の最初の生の tick からの導出ではない），期待した tail がちょうど 1 つ（`RX_OVERFLOW` の overrun．古い clock A = Manifest の最初の SampleClock の上にあり，A の最初の未配送の sample = probe の結果の前の最後の `samples` の行の終わりの tick にあり，`lost` = A の終わりの sample − その sample，A の終わりは最初の `rx_stop` の `applied` の cut に等しく，かつその cut は予約した Stop の Manifest の `action_log` の時刻（RS-15）以上であること：Provider は自分の `now` で Stop を予約するので下限だけを見て，遅い cut は cell A の窓の外では見ない．`applied` の行か booked の時刻が無ければ cut は未検証で INCONCLUSIVE（`the old clock's cut cannot be verified against the applied stop and the booked Stop`），検査を飛ばして PASS にしない．どれかが違えば FAIL，`S9 trial` の行の `tail_fault` にその理由が出る；event の時刻から clock を選ばない：successor の clock の上の tail を通さないため），`LATE_COMMAND` が無い（出たら FAIL：cut の時点で stop するフォールバックの根拠），`START_LEAD_SHORT` は数えて報告する．B：successor の最初の block が index 0 なら PASS（`START_LEAD_SHORT` は数えて報告する）；index > 0 なら `LATE_COMMAND` が要る（`START_LEAD_SHORT` だけで origin がずれていれば FAIL：RM-25 では `START_LEAD_SHORT` の start は origin を保つ）；tail，successor の sample（probe の行），link が見た successor の最初の published block は両方の cell で必須（link が successor の clock の block を 1 つも見なかった trial は INCONCLUSIVE（`the successor's first published block was not observed`）：見ていない検査を飛ばして PASS にしない）；第 3 の判定（cascade の race：successor の最初の block が `GAP_BEFORE | SEQ_DISCONTINUITY` を持つ＝sequence の `RX_OVERFLOW`——数えるのは successor の SampleClock の tick 0（その最初の block）の sequence の `RX_OVERFLOW` だけで，古い segment の clock（stall の前または backlog）の sequence の `RX_OVERFLOW` や successor の後の block のものは，Module が正しく報告した host の drop であって race ではない——，または `rx_before_origin` > 0＝古い stream の sample が successor の origin より前に届いた）は A でも B でも FAIL．`S9 trial` の行は `sequence_events`（Run の全部）と `sequence_overflows`（race の数）を持つので，bench は host が packet を落としたかも記録する．tail が 2 つ以上は今も FAIL だが，Run の中の 2 つ目の overflow は分類が先に INCONCLUSIVE にするので，この FAIL に出るのは 1 つの overflow からの 2 つの event だけ．P6 の第 2 の residual（A の単独の stop の後に届いた overrun が B の origin の前に来て B に回され，UHD が積んだ restart が stop を生き残る：INFERRED，UHD の source）はこの第 3 の判定に出る．
+
+### 決定の行
+
+`S9 decision <cell>`：trial 数，目標の cell に入った数（`target B reached n of 20`：B は reader と競争するので 20 に届かなくてよい．それは bench の発見であり失敗ではない），A・B・INCONCLUSIVE の数，PASS・FAIL・inconclusive の数，最初の FAIL の理由．`S9 trial` の行は結果の行の stamp（`result_before_ns`，`result_after_ns`）と `window_ns` を持つので，A・B・INCONCLUSIVE の分類を人がその行から確かめられる．`hw` の exit 0 は PASS ではない．
+
+### FakeDevice の rehearsal
+
+`s9_rehearses_on_the_fake_cell_a_and_the_inconclusive_path` が示すのは cell A（restart の gap の中に積む：積む前に stream が再開した，または UHD 自身の restart の近くまで積み終わらなかった trial は分類が INCONCLUSIVE になり，rehearsal は最大 3 回やり直す）と，probe の trace が不完全な trial が INCONCLUSIVE の verdict に届く経路だけ．`s9_run_rehearses_the_runner_the_decision_lines_and_the_target_b_exit_on_the_fake` は `s9_run`・決定の行・latch の stop の接尾辞と，FakeDevice には backlog が無いので目標 B の booking state に届かず `INCONCLUSIVE（the booking state was not reached）` で終わる経路を示す．reader が眠っている間・stall の直前に積む分類は，pure な unit test の分類の cell が示す．**cell B は FakeDevice では示せない**（backlog は USRP の device 側の drain：FakeDevice は overflow をすぐ報告する）．Module の B への応答は unit test `ur_17_a_restart_booked_while_the_backlog_is_read_is_a_reported_missed_start`．`s9_a_host_drop_before_the_stall_is_reported_and_is_not_the_cascade_race_on_the_fake` は，stall の前に Module が報告した sequence error が `sequence_events` に数えられても FAIL にならないことを示す（fake は `FakeFault::SequenceError` で script する）．
+
+### 条件を超えて一般化しない
+
+1 channel，受信のみ，host は H0・H4，rate は 10・100 MS/s，block 長は既定（2 000），`after_ms` 100．probe の行の上限（65 536）は 100 MS/s で 1 trial あたり約 3 万行（INFERRED）：行が落ちた trial は INCONCLUSIVE．stall 以外の overflow のある trial は分類が INCONCLUSIVE にするので，H4 の 100 MS/s では `target A reached` が 20 未満になりうる．
+
+### 同じ bench で S4 の残りの cell
+
+KL-15 の表の「次の bench」：200 MS/s と，100 MS/s の stall 0.1/0.5/2 s は `hw_s4_overflow_gap` の既定の cell に入っている；H4 の 1/10/25/50 MS/s × 20 trial は `hw_s4_overflow_gap` の既定（`EZSDR_S4_TRIALS` の既定が 20，rate の cell は固定）を H4 の host で流して読む；65 536 sample の block の cell は `EZSDR_S4_BLOCK_LEN=65536 hw hw_s4_overflow_gap` で流せる（全 rate の cell がその block 長で走る．1・10 MS/s の cell を読み，Module の既定の block 長の値と比べる．65 536 の block の `overflow_trial` を実機で流すのは初めて：INFERRED（FakeDevice では `s4_overflow_trial_with_a_65536_block_reaches_a_complete_trial_on_the_fake` が 1 trial を complete まで通す．実機は初めて））；2 channel の cell は `hw_s4_overflow_gap` が channel 数を取らないので今の tool では流せない（4b では作らない）．140 ms を超えた cell は owner へ．
+
+### stop と記録
+
+S4 の節と同じ（`EZSDR-INFRA`，`S9 stop`，電源の入れ直し→owner）．orchestrator に返すもの：commit，各 log の path，`S9 decision` の行（cell ごと，2 台分，H0/H4），最初の FAIL の理由と該当の `S9 trial` の行，電源の入れ直しの有無．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．

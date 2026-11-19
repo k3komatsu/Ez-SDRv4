@@ -22,16 +22,17 @@ use ezsdr_kernel::event::EventKind;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
-use ezsdr_kernel::run::Lease;
+use ezsdr_kernel::run::{Lease, StopCause, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::BurstRecord;
 use ezsdr_kernel::time::TimePoint;
-use ezsdr_radio_uhd::{Device, FakeConfig, FakeDevice};
+use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
+use ezsdr_radio_uhd::{Device, FakeConfig, FakeDevice, FakeFault};
 use run::{Declared, Expect, Run};
 use serde_json::{Value as Json, json};
-use support::{T0, artifact, finish_at, modules, output, resource, root, section, spec_run};
-use watchdog::infra::{creation_limit, infra, rig_delay};
+use support::{T0, artifact, finish_at, modules, output, resource, root, section, source, spec_run};
+use watchdog::infra::{creation_limit, infra, rig_delay, timing};
 
 /// Root ticks per millisecond: the X310's 200 MHz master clock (UR-7).
 const MS: i64 = 200_000;
@@ -79,6 +80,67 @@ fn finish_after(mut run: Run, ms: i64) -> Manifest {
     let t0 = run.start_instant().expect("a start instant");
     let _ = run.run_until_end(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms * MS));
     run.finish()
+}
+
+/// A Mock Spec Run of `spec` under the `x3xx` profile with `environment`, advanced to
+/// `horizon_ms` after T0 (the acceptance Mock root is 1 GHz, so a millisecond is 1 000 000
+/// ticks). `advance_to` schedules its horizon as a wakeup: `run_until_end` would run the round at
+/// the Mock's next own wakeup — past a 140 ms gap — before it compares the horizon.
+fn mock_spec_manifest(temp: &rig::TempDir, spec: &Json, environment: Json, horizon_ms: i64) -> Manifest {
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, environment);
+    let mut run = spec_run(temp, spec, &profile, BTreeMap::new());
+    let clock = root(&run);
+    // `Ended` is the expected answer for a Run the Policy stopped before its horizon.
+    let _ = run.advance_to(TimePoint::new(clock, T0 + horizon_ms * 1_000_000));
+    run.finish()
+}
+
+/// A UHD Spec Run on `device`, its binding asking for `block_len` samples a receive call (the
+/// one input a test reads a device's prefix from: a scripted fault fires at the next call).
+fn uhd_spec_run_on(temp: &rig::TempDir, spec: &Json, block_len: i64, device: Arc<dyn Device>, declared: Declared) -> Run {
+    let mut profile = rig::uhd_profile(&temp.0, false, envelope());
+    profile["bindings"]["radio"]["selector"]["block_len"] = json!(block_len);
+    let assembly = rig::assemble_on(&profile, BTreeMap::new(), device);
+    Run::start_spec(spec, &profile, assembly, declared).expect("Spec Run starts")
+}
+
+/// The UHD Spec Run's T0 in device ticks, read from a throwaway Run of the same Spec on a fresh
+/// fake: a scripted fault is the fake's device time since its zero, and T0 is known only after a
+/// Run has armed. The manual clock runs at real time while its participants are idle (host.rs
+/// M5), so two builds of one Run differ by their construction time; a caller places a fault far
+/// enough from a call boundary that the difference cannot move it, and asserts the difference is
+/// inside that margin.
+fn spec_t0(spec: &Json) -> i64 {
+    let temp = rig::TempDir::new("uhd-59-t0");
+    let run = uhd_spec_run(&temp, spec, BTreeMap::new());
+    let t0 = run.start_instant().expect("a start instant");
+    let ticks = t0.ticks_in(t0.domain()).unwrap();
+    let _ = finish_after(run, 1);
+    ticks
+}
+
+/// The fake's device time `ticks` after its zero, as a scripted fault takes it: `FakeDevice::ticks_of`
+/// turns it into master-clock ticks (5 ns a tick at 200 MHz), so the nanosecond value is exact.
+fn device_ns(ticks: i64) -> std::time::Duration {
+    std::time::Duration::from_nanos((i128::from(ticks) * 1_000_000_000 / (MS as i128 * 1_000)) as u64)
+}
+
+/// A manual-clock fake with scripted faults.
+fn fake_with_faults(faults: Vec<FakeFault>) -> Arc<dyn Device> {
+    watchdog::watch();
+    Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, faults, ..FakeConfig::default() }))
+}
+
+/// Asserts a Run's T0 is within `margin` of the probe's: the fault a test placed from the probe's
+/// T0 stays where it was derived.
+fn started_within(run: &Run, t0: i64, margin: i64) {
+    let started = run.start_instant().expect("a start instant");
+    let ticks = started.ticks_in(started.domain()).unwrap();
+    // A drift past the margin is a missed timing precondition (the manual clock runs at real time while its participants idle), not a verdict on the code under test: the runners re-run the test alone.
+    if (ticks - t0).abs() >= margin {
+        timing(&format!("the UHD Run's T0 drifted {} ticks from the probe's (margin {margin})", ticks - t0));
+    }
+    assert!((ticks - t0).abs() < margin, "the UHD Run's T0 drifted {} ticks from the probe's (margin {margin})", ticks - t0);
 }
 
 fn written() -> EventKind {
@@ -521,4 +583,147 @@ fn ea_16_untimed_repeat_after_stop_starts_at_the_stop_region_end() {
     assert!(gap >= 9_900, "the repeat starts past the Stop region, {gap} samples after the Stop: {rows:?}");
     assert!(rows[1]["late_by"].is_null(), "an untimed repeat reports no lateness: {rows:?}");
     assert!(manifest.events.delivered.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR && event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED));
+}
+
+// ---------------------------------------------------------------- 4b-2b: the tail reaches the Manifest (S2c, S7)
+
+/// The x3xx profile's receive restart gap in nanoseconds (MR-17).
+fn gap_ns() -> i64 {
+    ezsdr_radio::x3xx::timing().overflow_restart_gap_ns
+}
+
+/// One Provider's Manifest as S2c reads it: the capture holds exactly the delivered prefix
+/// `[0, kf)` and is partial, one nine-byte `RX_OVERFLOW` sits at sample `kf` of the segment's
+/// SampleClock with `lost` the distance to the clock's end, the capture carries no mark, and the
+/// counter row for the stream's node counts one. `horizon` is the sample the Run's end cuts at;
+/// `exact` pins it where the Provider's own clock is stepped (the Mock), while a device-paced
+/// Provider's end follows the horizon by the coordinator's own work in real time, which the
+/// manual clock counts (host.rs M5), so it is read from the record with only its lower bound
+/// asserted. That the cut is inside the gap and not at the restart is pinned without wall time:
+/// the capture holds exactly `[0, kf)` and no mark, and the one tail's `lost` is the positive
+/// distance from `kf` to the recorded end.
+fn assert_cut_overflow(manifest: &Manifest, node: &str, kf: i64, horizon: i64, exact: bool, what: &str) {
+    let capture = artifact(manifest, "rec", 0);
+    assert!(capture.partial, "{what}: the Run ended while the capture was open");
+    // The capture holds the delivered prefix and nothing after it: `kf * 8` bytes of cf32.
+    assert_eq!(capture.size_bytes, kf as u64 * 8, "{what}: the capture holds [0, {kf})");
+    let map = &capture.continuity[0];
+    assert_eq!((map.first.ticks_in(map.first.domain()).unwrap(), map.end.ticks_in(map.end.domain()).unwrap()), (0, kf), "{what}: one run, [0, {kf})");
+    assert_eq!(capture.continuity.len(), 1, "{what}: the prefix is contiguous");
+    assert!(capture.marks.is_empty(), "{what}: the tail is stamped at the capture's exclusive end (RS-30): {:?}", capture.marks);
+    let overflows: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+    assert_eq!(overflows.len(), 1, "{what}: one tail: {:?}", manifest.events.delivered);
+    let event = overflows[0];
+    assert_eq!(event.source, source(node), "{what}: the stream's own node");
+    assert_eq!(event.payload.as_array().map(Vec::len), Some(9), "{what}: RM-24's nine bytes: {}", event.payload);
+    let payload = RxOverflowPayload::from_payload(&event.payload).unwrap();
+    assert_eq!(payload.cause, RxOverflowCause::Overrun, "{what}");
+    let clock = manifest.clocks.sample_clocks.iter().find(|record| record.stream.path() == node).unwrap_or_else(|| panic!("{what}: no receive clock"));
+    assert_eq!(event.time.domain(), clock.domain, "{what}: the tail is stamped in the segment's SampleClock");
+    assert_eq!(event.time.ticks_in(clock.domain).unwrap(), kf, "{what}: at the first sample not delivered");
+    let origin = clock.origin.ticks_in(clock.origin.domain()).unwrap();
+    let at = clock.ended_at.unwrap_or_else(|| panic!("{what}: the Run's end ends the clock")).ticks_in(clock.root).unwrap();
+    let sample = (at - origin) / clock.root_ticks_per_tick.num() as i64;
+    if exact {
+        assert_eq!(sample, horizon, "{what}: the Run's end at the horizon");
+    } else {
+        assert!(sample >= horizon, "{what}: the Run's end is at the {horizon}-sample horizon, not before it: {sample}");
+    }
+    assert!(payload.lost > 0, "{what}: the report was spent by the cut, not carried by a block");
+    assert_eq!(payload.lost as i64, sample - kf, "{what}: `lost` is the cut's distance from the first sample not delivered");
+    let counter = manifest.events.counters.iter().find(|row| row.source == source(node) && row.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap_or_else(|| panic!("{what}: no counter row"));
+    assert_eq!(counter.count, 1, "{what}");
+}
+
+/// The same Provider's control: the Run ran past the restart, so the block after it carried the
+/// report inside the capture, and exactly one mark is recorded (RS-30).
+fn assert_one_mark(manifest: &Manifest, what: &str) {
+    let capture = artifact(manifest, "rec", 0);
+    assert!(!capture.partial, "{what}: the 100 000-sample capture completed");
+    assert_eq!(capture.size_bytes, 800_000, "{what}: 100 000 cf32 samples");
+    assert_eq!(capture.marks.len(), 1, "{what}: the block-carried event is inside the capture: {:?}", capture.marks);
+    assert_eq!(capture.marks[0].kind.as_str(), ezsdr_radio::kinds::RX_OVERFLOW, "{what}");
+}
+
+#[test]
+fn uhd_59_a_cut_overflow_reaches_the_manifest_and_marks_no_capture_alike() {
+    // S2c: one Spec with a capture, an overrun early in the first segment, and the Run ended
+    // inside the 140 ms gap, so the segment is cut with the report unspent. On both Providers the
+    // report reaches the Manifest as one nine-byte `RX_OVERFLOW` at the first sample not
+    // delivered (`kf`), the capture holds the prefix `[0, kf)`, and the tail's stamp is the
+    // capture's exclusive end: no mark (RS-30). A fault is the fake's device time since its
+    // zero, so its placement comes from a throwaway Run's T0 — and the fake reports it only at a
+    // receive call's start, so that call's size is the window the placement may drift in:
+    // 20 000 samples = 20 ms at 1 MS/s, with the fault at its middle, survives 10 ms of the
+    // manual clock's real-time construction difference (host.rs M5; `started_within` asserts the
+    // margin). The Mock's own clock is stepped, so its fault at exactly 1 ms needs no margin.
+    let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
+    let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }] });
+    // The Mock's block at 2 000 samples is cut at the fault's instant (MR-20), so its prefix is
+    // [0, 1 000) and kf = 1 000 = 1 ms at 1 MS/s; its end at 20 ms makes `lost` 19 000.
+    let temp = rig::TempDir::new("uhd-59-cut-mock");
+    let mock = mock_spec_manifest(&temp, &spec, faults.clone(), 20);
+    let mock_control = mock_spec_manifest(&temp, &spec, faults, (gap_ns() + 1_000_000 + 100_000_000 + 60_000_000) / 1_000_000);
+    // The UHD: the first call delivers [0, 20 000) — 20 ms — and the second, whose next sample
+    // is at 20 ms, reports the overrun, so kf = 20 000. The Run ends 40 ms after T0, inside the
+    // gap: `lost` is the distance from kf to the end the Manifest records.
+    let t0 = spec_t0(&spec);
+    let uhd_temp = rig::TempDir::new("uhd-59-cut-uhd");
+    let run = uhd_spec_run_on(&uhd_temp, &spec, 20_000, fake_with_faults(vec![FakeFault::Overflow(device_ns(t0 + 10 * MS))]), Declared::default());
+    started_within(&run, t0, 10 * MS);
+    let uhd = finish_after(run, 40);
+    let run = uhd_spec_run_on(&uhd_temp, &spec, 20_000, fake_with_faults(vec![FakeFault::Overflow(device_ns(t0 + 10 * MS))]), Declared::default());
+    started_within(&run, t0, 10 * MS);
+    let uhd_control = finish_after(run, (gap_ns() + 1_000_000 + 100_000_000 + 60_000_000) / 1_000_000);
+    // The shape first: the overrun reached each Provider, the Mock's row with the profile's
+    // restart gap, and the UHD's counter once.
+    let rows = section(&mock, "mock", "ezsdr.radio.mock.faults").as_array().expect("the Mock's fault rows");
+    assert_eq!((rows.len(), rows[0]["applied"].as_bool(), rows[0]["lost"].as_u64()), (1, Some(true), Some(gap_ns() as u64 / 1_000)), "the Mock's overrun applied with the profile's restart gap");
+    assert_eq!(section(&uhd, "usrp", "ezsdr.radio.uhd.stats")["rx_overflows"], 1, "the UHD received the report");
+    assert_cut_overflow(&mock, "mock/rx/s0", 1_000, 20_000, true, "the Mock");
+    assert_cut_overflow(&uhd, "usrp/rx/s0", 20_000, 40_000, false, "the UHD");
+    assert_one_mark(&mock_control, "the Mock's control");
+    assert_one_mark(&uhd_control, "the UHD's control");
+}
+
+#[test]
+fn uhd_59_a_loss_after_an_overrun_stops_the_run_and_keeps_the_tail() {
+    // S7 on the UHD: an overrun at 10 ms after T0 leaves the second call's report pending (the
+    // first call delivered [0, 20 000), 20 ms), and the device is lost at 30 ms, found by the
+    // next receive call (the 23 ms wait for the restart, 20 000 samples and the 3 ms allowance).
+    // The default Policy aborts the Run with `DEVICE_LOST`; the tail survives it: one
+    // `RX_OVERFLOW` at kf = 20 000 with `lost` the distance to the cut the loss booked — the
+    // clock's recorded end, which is not 30 000 itself.
+    let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
+    let t0 = spec_t0(&spec);
+    let temp = rig::TempDir::new("uhd-59-tail-loss");
+    let faults = vec![FakeFault::Overflow(device_ns(t0 + 10 * MS)), FakeFault::Lost(device_ns(t0 + 30 * MS))];
+    let run = uhd_spec_run_on(&temp, &spec, 20_000, fake_with_faults(faults), Declared::default()).expecting(Expect::Policy("ezsdr.DEVICE_LOST"));
+    started_within(&run, t0, 10 * MS);
+    let manifest = finish_after(run, 60);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
+    let overflows: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+    assert_eq!(overflows.len(), 1, "one tail: {:?}", manifest.events.delivered);
+    let event = overflows[0];
+    assert_eq!(event.source, source("usrp/rx/s0"));
+    assert_eq!(event.payload.as_array().map(Vec::len), Some(9), "RM-24's nine bytes: {}", event.payload);
+    let payload = RxOverflowPayload::from_payload(&event.payload).unwrap();
+    assert_eq!(payload.cause, RxOverflowCause::Overrun);
+    let kf = 20_000;
+    let clock = manifest.clocks.sample_clocks.iter().find(|record| record.stream.path() == "usrp/rx/s0").expect("the receive clock");
+    assert_eq!(event.time.domain(), clock.domain);
+    assert_eq!(event.time.ticks_in(clock.domain).unwrap(), kf, "the first sample not delivered");
+    // The shape: the capture is partial and holds exactly that prefix, and the tail's stamp is
+    // its exclusive end, so it carries no mark (RS-30).
+    let capture = artifact(&manifest, "rec", 0);
+    assert!(capture.partial, "the loss ends the Run while the capture is open");
+    assert_eq!(capture.size_bytes, 160_000, "the capture holds the delivered prefix [0, 20 000)");
+    assert!(capture.marks.is_empty(), "the tail is stamped at the capture's exclusive end: {:?}", capture.marks);
+    let origin = clock.origin.ticks_in(clock.origin.domain()).unwrap();
+    let end = clock.ended_at.expect("the loss ends the stream").ticks_in(clock.root).unwrap();
+    let sample = (end - origin) / clock.root_ticks_per_tick.num() as i64;
+    assert!(sample >= 30_000, "the loss's cut is at or after its instant 30 000, not before it: {sample}");
+    assert_eq!(payload.lost, (sample - kf) as u64, "the tail reaches the cut the loss booked");
+    assert!(payload.lost > 0);
+    assert_eq!(manifest.events.delivered.iter().filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST).count(), 1, "one DEVICE_LOST");
 }

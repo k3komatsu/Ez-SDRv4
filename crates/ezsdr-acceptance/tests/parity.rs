@@ -325,6 +325,14 @@ impl MockRig {
     fn finish(mut self) -> ProviderInstance {
         self.finish_in_place()
     }
+
+    /// `finish_in_place` with `Abort`: the receive cut is the first sample not delivered
+    /// (RM-16), and the clock and the events are read after it.
+    fn finish_abort_in_place(&mut self) -> ProviderInstance {
+        self.mock.stop(ezsdr_kernel::module_api::StopMode::Abort).unwrap();
+        self.mock.cleanup();
+        self.mock.instance().clone()
+    }
 }
 
 use ezsdr_kernel::time::RelativeBudget;
@@ -525,6 +533,14 @@ impl UhdRig {
     /// The Provider's sections as `cleanup` writes them (UR-30).
     fn finish(mut self) -> ProviderInstance {
         self.finish_in_place()
+    }
+
+    /// `finish_in_place` with `Abort`: the receive cut is the first sample not delivered
+    /// (RM-16), and the clock and the events are read after it.
+    fn finish_abort_in_place(&mut self) -> ProviderInstance {
+        self.radio.stop(ezsdr_kernel::module_api::StopMode::Abort).unwrap();
+        self.radio.cleanup();
+        self.radio.instance().clone()
     }
 }
 
@@ -788,10 +804,17 @@ impl Started {
     }
 
     fn with_fake_config(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], ports: &[&str], fake: FakeConfig) -> Started {
+        Started::with_uhd_selector(selector, constraints, ports, fake, BTreeMap::new())
+    }
+
+    /// As `with_fake_config`, the UHD binding's selector given `uhd` beside the shared layout keys (the Mock refuses a key it does not know).
+    fn with_uhd_selector(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], ports: &[&str], fake: FakeConfig, uhd: BTreeMap<Ident, Value>) -> Started {
         let t0 = ms(2_000) + ms(1);
         let mut mock = MockRig::with_ports(selector.clone(), constraints, ports);
         mock.arm_start(t0);
-        let mut uhd = UhdRig::with_ports(selector, constraints, fake, ports).unwrap();
+        let mut uhd_selector = selector;
+        uhd_selector.extend(uhd);
+        let mut uhd = UhdRig::with_ports(uhd_selector, constraints, fake, ports).unwrap();
         uhd.arm().unwrap();
         // The UHD's own T0: the same lead after `arm` as the Mock's T0 is after its own
         // arm. The 200-tick lattice is the one these comparisons' streams share — their
@@ -817,6 +840,11 @@ impl Started {
 }
 
 fn rx_fault_pair(faults: &[(&str, i64)], fake_faults: Vec<FakeFault>) -> Started {
+    rx_fault_pair_uhd(faults, fake_faults, BTreeMap::new())
+}
+
+/// As `rx_fault_pair`, the UHD binding's selector given `uhd` beside the shared layout keys.
+fn rx_fault_pair_uhd(faults: &[(&str, i64)], fake_faults: Vec<FakeFault>, uhd: BTreeMap<Ident, Value>) -> Started {
     let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
     let constraints = [("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap()))];
     let environment = BTreeMap::from([(
@@ -837,7 +865,9 @@ fn rx_fault_pair(faults: &[(&str, i64)], fake_faults: Vec<FakeFault>) -> Started
     let t0 = ms(2_001);
     let mut mock = MockRig::with_run(selector.clone(), &constraints, &["rx0"], BTreeMap::new(), environment);
     mock.arm_start(t0);
-    let mut uhd = UhdRig::with_ports(selector, &constraints, FakeConfig { faults: fake_faults, ..FakeConfig::default() }, &["rx0"]).unwrap();
+    let mut uhd_selector = selector;
+    uhd_selector.extend(uhd);
+    let mut uhd = UhdRig::with_ports(uhd_selector, &constraints, FakeConfig { faults: fake_faults, ..FakeConfig::default() }, &["rx0"]).unwrap();
     uhd.arm().unwrap();
     let now = uhd.time.now(uhd.root).unwrap().ticks_in(uhd.root).unwrap();
     let uhd_t0 = ezsdr_radio::timeline::lattice(now, Rational::new(200, 1).unwrap()).unwrap() + ms(2_001);
@@ -893,9 +923,16 @@ fn compare_rx_overflow(faults: &[(&str, i64)], fake_faults: Vec<FakeFault>, unti
     pair.uhd.finish();
 }
 
+/// The profile's receive restart gap, in whole milliseconds and in samples at these tests' 1 MS/s.
+fn overflow_gap() -> (i64, u64) {
+    let ns = ezsdr_radio::x3xx::timing().overflow_restart_gap_ns;
+    (ns / 1_000_000, (ns / 1_000) as u64)
+}
+
 #[test]
 fn vh_8_a_reported_overrun_matches_the_block_jump() {
-    compare_rx_overflow(&[("rx_overflow", 0)], vec![FakeFault::Overflow(Wall::ZERO)], 60, RxOverflowCause::Overrun, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, &[50_000], true);
+    let (gap_ms, gap_samples) = overflow_gap();
+    compare_rx_overflow(&[("rx_overflow", 0)], vec![FakeFault::Overflow(Wall::ZERO)], gap_ms + 10, RxOverflowCause::Overrun, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, &[gap_samples], true);
 }
 
 #[test]
@@ -913,32 +950,38 @@ fn vh_8_a_reported_sequence_error_matches_the_block_jump() {
 
 #[test]
 fn vh_8_reports_before_one_block_make_one_overrun_summary() {
+    let (gap_ms, gap_samples) = overflow_gap();
     compare_rx_overflow(
-        &[("rx_overflow", 0), ("rx_sequence_error", 50)],
+        &[("rx_overflow", 0), ("rx_sequence_error", gap_ms)],
         vec![FakeFault::Overflow(Wall::ZERO), FakeFault::SequenceError(Wall::ZERO)],
-        60,
+        gap_ms + 10,
         RxOverflowCause::Overrun,
         BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY,
-        &[50_000, 2_000],
+        &[gap_samples, 2_000],
         true,
     );
 }
 
 #[test]
 fn vh_8_repeated_overruns_before_one_block_make_one_summary() {
+    let (gap_ms, gap_samples) = overflow_gap();
     compare_rx_overflow(
-        &[("rx_overflow", 0), ("rx_overflow", 50)],
+        &[("rx_overflow", 0), ("rx_overflow", gap_ms)],
         vec![FakeFault::Overflow(Wall::ZERO), FakeFault::Overflow(Wall::ZERO)],
-        110,
+        2 * gap_ms + 10,
         RxOverflowCause::Overrun,
         BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED,
-        &[50_000, 50_000],
+        &[gap_samples, gap_samples],
         true,
     );
 }
 
 #[test]
-fn vh_8_a_report_without_a_following_block_emits_no_overflow() {
+fn vh_8_an_overrun_cut_before_its_restart_emits_the_tail_on_both_providers() {
+    // RM-17: the segment reported the overrun and the Stop cut it at 10 ms, before the restart
+    // block could carry the report: one tail at the first sample not delivered, in the primary
+    // root because no block registered the segment's clock.
+    let (_, gap_samples) = overflow_gap();
     let mut pair = rx_fault_pair(&[("rx_overflow", 0)], vec![FakeFault::Overflow(Wall::ZERO)]);
     pair.mock.stop_at("rx/s0");
     pair.uhd.stop_at("rx/s0");
@@ -951,16 +994,134 @@ fn vh_8_a_report_without_a_following_block_emits_no_overflow() {
         pair.uhd.settle(Wall::from_millis(1));
     }
     assert_eq!(pair.uhd.actions.queued(), 0, "the stop Action was taken");
-    pair.uhd.settle(Wall::from_millis(2));
+    // The UHD ends the segment once its cut has been quiet for a block and the delivery
+    // allowance (2 000 samples and 3 ms, about 3.4 ms at 1 MS/s), well before the restart at
+    // the 140 ms gap.
+    pair.uhd.wait_until(pair.uhd_t0 + ms(30));
+    pair.uhd.settle(Wall::from_millis(30));
     assert_eq!(pair.mock.rx_links[0].take_blocks().len(), 0);
     assert_eq!(pair.uhd.rx_links[0].take_blocks().len(), 0);
-    assert_eq!(pair.mock.events().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
-    assert_eq!(pair.uhd.events().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
-    assert_fault_rows(&pair, &[50_000]);
+    // Neither segment published a block, so neither registered its SampleClock.
+    assert!(pair.mock.records().is_empty(), "{:?}", pair.mock.records());
+    assert!(pair.uhd.records().is_empty(), "{:?}", pair.uhd.records());
+    assert_fault_rows(&pair, &[gap_samples]);
+    let mock_events = pair.mock.events();
+    let uhd_events = pair.uhd.events();
+    let (t0, uhd_t0, mock_root, uhd_root) = (pair.t0, pair.uhd_t0, pair.mock.root, pair.uhd.root);
     let mock = pair.mock.finish();
     let uhd = pair.uhd.finish();
     assert_eq!(uhd.sections[&Namespace::parse("ezsdr.radio.uhd.stats").unwrap()]["rx_overflows"], 1, "the UHD report was received before stop despite no block carrying it");
-    assert_eq!(mock.sections[&Namespace::parse("ezsdr.radio.mock.faults").unwrap()][0]["applied"], true);
+    // Each Provider's own cut sample: the Mock's segment end and the UHD's applied Stop, as samples at 1 MS/s from the origin.
+    let per_sample = ROOT_HZ / 1_000_000;
+    let segments = mock.sections[&Namespace::parse("ezsdr.radio.mock.segments").unwrap()].as_array().expect("the Mock's segments");
+    let segment = segments.iter().find(|row| row["direction"] == "rx" && row["stream"].as_u64() == Some(0)).expect("the receive segment");
+    let mock_cut = (segment["ended_at"]["ticks"].as_i64().expect("the segment's end") - t0) / per_sample;
+    let applied = uhd.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()].as_array().expect("the UHD's applied rows");
+    let stop = applied.iter().find(|row| row["key"] == "rx_stop").expect("the receive Stop");
+    let uhd_cut = (stop["at"]["ticks"].as_i64().expect("the Stop's instant") - uhd_t0) / per_sample;
+    let tail = |events: &[Event], root: ClockDomainId| {
+        let overflows: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+        assert_eq!(overflows.len(), 1, "{events:?}");
+        // The stream's own source and the nine-byte hot form, as a block-carried event has (RM-24, UR-20).
+        assert_eq!(overflows[0].source, EventSource::Node { node: rid("radio/rx/s0") });
+        assert_eq!(overflows[0].payload.as_array().map(Vec::len), Some(9), "{}", overflows[0].payload);
+        assert_eq!(overflows[0].time.domain(), root, "the tail is in the primary root: no block registered the clock");
+        (RxOverflowPayload::from_payload(&overflows[0].payload).unwrap(), overflows[0].time.ticks_in(root).unwrap())
+    };
+    let (mock_payload, mock_at) = tail(&mock_events, mock_root);
+    let (uhd_payload, uhd_at) = tail(&uhd_events, uhd_root);
+    // `lost` is the cut's distance from the first sample not delivered: no sample of either segment was delivered.
+    assert_eq!(mock_payload.lost, mock_cut as u64);
+    assert_eq!(uhd_payload.lost, uhd_cut as u64);
+    // The same form: the cause, and the stamp at sample 0, the first sample not delivered.
+    assert_eq!(mock_payload.cause, RxOverflowCause::Overrun);
+    assert_eq!(mock_payload.cause, uhd_payload.cause);
+    assert_eq!((mock_at, uhd_at), (t0, uhd_t0));
+}
+
+#[test]
+fn vh_8_an_abort_in_a_gap_cuts_both_providers_at_the_first_undelivered_sample() {
+    // RM-16, RM-17 (S6p): with an overrun reported and no block since it, an abort ends the
+    // segment at the first sample not delivered on both Providers, and the gap is empty: no
+    // tail (a loss of 0), and the clock ends at that sample.
+    //
+    // The overrun must leave a delivered prefix, so that the segment registered its SampleClock
+    // and the test reads the clock's end (RM-25). At 1 MS/s on this rig's 200 MHz root one sample
+    // is 200 ticks. The rig asks the UHD for 10 000 samples a call (the binding's `block_len`
+    // selector), so the fake device's first call delivers [0, 10 000) and the next one reports
+    // the overrun. The Mock's five 2 000-sample blocks reach the fault's cut at the same sample,
+    // 10 000, and none follows it. Both first undelivered samples are therefore 10 000 = 10 ms at
+    // 1 MS/s, not the layout's 2 000: see the fault's instant below.
+    let (_, gap_samples) = overflow_gap();
+    // `FakeFault::Overflow` is the fake's device time since its zero, never an offset from the
+    // origin (`Wall::ZERO` fires before the origin). T0 is known only after a rig is built, and
+    // the manual clock runs at real speed while its participants are idle (host.rs M5), so two
+    // builds of one rig differ by their construction time: a throwaway pair of the same shape
+    // reads T0, and the real pair's T0 must be within the half-call margin below. The fault is
+    // placed in the middle of the first call's 10 ms — the call reports it only if it starts at
+    // or after the fault's instant, which it does at `next` = T0 + 10 000 samples.
+    let device_ns = |ticks: i64| Wall::from_nanos((i128::from(ticks) * 1_000_000_000 / i128::from(ROOT_HZ)) as u64);
+    let uhd_selector = BTreeMap::from([(Ident::parse("block_len").unwrap(), Value::from(10_000i64))]);
+    let mut probe = rx_fault_pair_uhd(&[("rx_overflow", 10)], vec![], uhd_selector.clone());
+    let probe_t0 = probe.uhd_t0;
+    let _ = probe.mock.finish_abort_in_place();
+    let _ = probe.uhd.finish_abort_in_place();
+    let half_a_call = ms(5);
+    let mut pair = rx_fault_pair_uhd(&[("rx_overflow", 10)], vec![FakeFault::Overflow(device_ns(probe_t0 + half_a_call))], uhd_selector);
+    // The margin is what makes the fault's placement a derivation, not a measurement: on either
+    // side of the probe's T0, the fault still falls inside the first call's 10 ms.
+    // A drift past the margin is a missed timing precondition, not a verdict on the code under test: the runners re-run the test alone.
+    if (pair.uhd_t0 - probe_t0).abs() >= half_a_call {
+        infra::timing(&format!("the UHD's T0 drifted {} ticks from the probe's: more than half a call", pair.uhd_t0 - probe_t0));
+    }
+    assert!((pair.uhd_t0 - probe_t0).abs() < half_a_call, "the UHD's T0 drifted {} ticks from the probe's: more than half a call", pair.uhd_t0 - probe_t0);
+    // Both run to 20 ms after their origins: inside the 140 ms gap, past the fault.
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(20));
+    pair.uhd.settle(Wall::from_millis(20));
+    let prefix = |blocks: Vec<BlockRef>, what: &str| {
+        let shape: Vec<(i64, i64)> =
+            blocks.iter().map(|block| (block.header().first_sample_time.ticks_in(block.header().first_sample_time.domain()).unwrap(), i64::from(block.header().len))).collect();
+        // A contiguous run from sample 0: nothing before it, no jump inside it (the overrun's
+        // report comes only after it), and it ends at the fault's cut.
+        let mut next = 0;
+        for (first, len) in &shape {
+            assert_eq!(*first, next, "{what}: the delivered blocks are contiguous: {shape:?}");
+            next += len;
+        }
+        assert_eq!(next, 10_000, "{what}: the prefix is [0, 10 000) and no sample at or after it: {shape:?}");
+        shape
+    };
+    let mock_prefix = prefix(pair.mock.rx_links[0].take_blocks(), "the Mock");
+    assert_eq!(mock_prefix, [(0, 2_000), (2_000, 2_000), (4_000, 2_000), (6_000, 2_000), (8_000, 2_000)], "the Mock's own block length splits the prefix");
+    // The UHD asks for 10 000 samples a call, so the prefix is that one call's block.
+    assert_eq!(prefix(pair.uhd.rx_links[0].take_blocks(), "the UHD"), [(0, 10_000)], "the UHD delivered the prefix before the report");
+    // Each segment registered exactly one clock at that first block, so both ends are readable.
+    let registered = |records: &[ClockRow]| {
+        assert_eq!(records.iter().map(|(node, _, _, _)| node.as_str()).collect::<Vec<_>>(), ["radio/rx/s0"], "{records:?}");
+    };
+    registered(&pair.mock.records());
+    registered(&pair.uhd.records());
+    assert_fault_rows(&pair, &[gap_samples]);
+    let _ = pair.mock.finish_abort_in_place();
+    let uhd_instance = pair.uhd.finish_abort_in_place();
+    assert_eq!(uhd_instance.sections[&Namespace::parse("ezsdr.radio.uhd.stats").unwrap()]["rx_overflows"], 1, "the UHD report was received before the abort");
+    let (mock_records, uhd_records) = (pair.mock.records(), pair.uhd.records());
+    let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+    // The abort's cut is the first sample not delivered (10 000), never its own instant (20 ms)
+    // and never the gap's far side (10 000 + 140 000): the overrun's samples were not delivered
+    // either.
+    let ended = |records: &[ClockRow], what: &str| {
+        let (node, ratio, origin, end) = &records[0];
+        assert_eq!(node, "radio/rx/s0", "{what}");
+        assert_eq!(*ratio, (200, 1), "{what}: one sample is 200 ticks");
+        // The SampleClock's ticks are samples; `records` holds the root tick, converted back here.
+        (end.unwrap_or_else(|| panic!("{what}: the abort ends the clock")) - origin) / (ROOT_HZ / 1_000_000)
+    };
+    let (mock_end, uhd_end) = (ended(&mock_records, "the Mock"), ended(&uhd_records, "the UHD"));
+    assert_eq!((mock_end, uhd_end), (10_000, 10_000), "both cuts are the first undelivered sample");
+    let overflows = |events: &[Event]| events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count();
+    assert_eq!((overflows(&mock_events), overflows(&uhd_events)), (0, 0), "a loss of 0 makes no tail: the report is spent with no event");
 }
 
 /// The constraints of two receive streams, one channel each: c0 in stream 0 at 2 Msps, c1

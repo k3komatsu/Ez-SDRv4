@@ -26,7 +26,7 @@ use ezsdr_kernel::policy::{EventKindRegistry, Policy};
 use ezsdr_kernel::run::{RunState, Stage, StopCause, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
-use ezsdr_kernel::stream::{BurstEnd, DataLinkDecl};
+use ezsdr_kernel::stream::{BlockFlags, BurstEnd, DataLinkDecl};
 use ezsdr_kernel::time::{ClockRegistry, Duration, EpochRef, RelativeBudget, TimePoint};
 use ezsdr_radio::payloads::{TimeErrorOutcome, TimeErrorPayload};
 use ezsdr_radio_uhd::{ClockMode, Device, DeviceAuthority, Dir, FakeConfig, FakeDevice, FakeFault, TxCode, UhdRadio};
@@ -184,7 +184,7 @@ fn ur_09_the_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz() {
     let timing = &section(&manifest, "envelope")["timing"];
     assert_eq!(timing["min_timed_command_lead_ns"], 5_000_000);
     assert_eq!(timing["startup_latency_ns"], 2_000_000_000i64);
-    assert_eq!(timing["overflow_restart_gap_ns"], 50_000_000);
+    assert_eq!(timing["overflow_restart_gap_ns"], ezsdr_radio::x3xx::timing().overflow_restart_gap_ns);
     assert_eq!(timing["rx_start_lead_ns"], 10_000_000);
     assert_eq!(timing["tx_in_flight_ns"], 10_000_000);
 }
@@ -530,7 +530,7 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     let one = |v: Scalar| ezsdr_kernel::spec::CapabilityValue::One { value: v };
     assert_eq!(capability("radio.timing.min_timed_command_lead_ns"), one(Scalar::from(5_000_000)));
     assert_eq!(capability("radio.timing.startup_latency_ns"), one(Scalar::from(2_000_000_000)));
-    assert_eq!(capability("radio.timing.overflow_restart_gap_ns"), one(Scalar::from(50_000_000)));
+    assert_eq!(capability("radio.timing.overflow_restart_gap_ns"), one(Scalar::from(ezsdr_radio::x3xx::timing().overflow_restart_gap_ns as i64)));
     assert_eq!(capability("radio.timing.rx_start_lead_ns"), one(Scalar::from(10_000_000)));
     assert_eq!(capability("radio.timing.tx_in_flight_ns"), one(Scalar::from(10_000_000)));
     assert_eq!(capability("radio.tx.repeat_max_samples"), one(Scalar::from(4_294_967_295)));
@@ -542,7 +542,7 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(envelope["profile"]["name"], "x3xx");
     assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], 5_000_000);
     assert_eq!(envelope["timing"]["startup_latency_ns"], 2_000_000_000i64);
-    assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], 50_000_000);
+    assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], ezsdr_radio::x3xx::timing().overflow_restart_gap_ns);
     assert_eq!(envelope["timing"]["rx_start_lead_ns"], 10_000_000);
     assert_eq!(envelope["timing"]["tx_in_flight_ns"], 10_000_000);
     assert_eq!(envelope["performance"]["rx_bytes_per_s"], 100_000_000);
@@ -776,7 +776,6 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
             ezsdr_radio::measurement::ValueRecord::Measured { key, .. } | ezsdr_radio::measurement::ValueRecord::Unmeasured { key, .. } => key.as_str().to_owned(),
         })
         .collect();
-    assert!(!measured_keys.contains("radio.timing.overflow_restart_gap_ns"), "overflow contributes observations but no value row");
     assert_eq!(
         measured_keys,
         [
@@ -785,6 +784,7 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
             "radio.perf.rx_bytes_per_s",
             "radio.perf.tx_bytes_per_s",
             "radio.timing.min_timed_command_lead_ns",
+            "radio.timing.overflow_restart_gap_ns",
             "radio.timing.rx_start_lead_ns",
             "radio.rx.c0.gain_db",
             "radio.rx.c0.gain_step_db",
@@ -810,9 +810,6 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     }
     let record = measurement::build_record(ezsdr_radio::measurement::Source::Fake, &binding, &*device, &measurement::rehearsal_metadata(), group, &description).unwrap();
     assert!(record.values.iter().all(|row| matches!(row, ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. } if !reason.trim().is_empty())));
-    assert!(record.values.iter().any(|row| matches!(row,
-        ezsdr_radio::measurement::ValueRecord::Unmeasured { key, reason }
-            if key.as_str() == "radio.timing.overflow_restart_gap_ns" && reason.contains("pending the first hardware bench reading"))));
     for key in &measured_keys {
         assert!(record.values.iter().any(|row| matches!(row,
             ezsdr_radio::measurement::ValueRecord::Unmeasured { key: found, reason }
@@ -6296,6 +6293,54 @@ fn ur_25_a_stop_between_start_rx_and_its_origin_leaves_no_trace() {
 }
 
 #[test]
+fn ur_17_a_restart_in_an_overflow_s_gap_starts_on_time_at_the_fakes_manual_clock() {
+    // S2b, #108: the fake's 5 ms overflow is an absolute device-time threshold against the sample cursor, so it fires at the
+    // first receive call, long before the Stop. This pins that a Stop booked inside the overflow's gap cuts the stream inside
+    // that gap — the restart's own start is not late because of it — and that the successor begins its own clock at sample 0
+    // with no flag.
+    let gap_ns = ezsdr_radio::x3xx::timing().overflow_restart_gap_ns;
+    let gap_ms = gap_ns / 1_000_000;
+    let (port, link) = attached_reading("rx0");
+    let mut direct = Direct::build(FakeConfig { faults: vec![FakeFault::Overflow(Wall::from_millis(5))], ..FakeConfig::default() }, &[], vec![port], json!({}));
+    // Half a gap after the overflow fired: inside the gap, before the restart.
+    direct.settle(Wall::from_millis((gap_ms / 2) as u64));
+    let booked = direct.now();
+    direct.stop_at("usrp/rx/s0");
+    direct.start_rx_at("usrp/rx/s0", None);
+    direct.settle(Wall::from_millis(800));
+    let late = direct.of("radio.LATE_COMMAND");
+    let clocks = direct.clocks.sample_clock_records();
+    let device = direct.device.clone();
+    let instance = direct.finish();
+    let stats = section_of(&instance, "stats");
+    assert_eq!(stats["rx_overflows"], 1, "the overflow was received: {stats}");
+    let timing = &section_of(&instance, "timing");
+    let switch = timing.as_array().unwrap().iter().rfind(|row| row["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
+    // UR-25's ready instant: the successor's origin is at least the booking plus the 3 ms allowance and the 10 ms start lead.
+    let origin = switch["origin"].as_i64().unwrap();
+    assert!(switch["at"].as_i64().unwrap() < origin, "switched after e₂: {switch}");
+    assert!(origin - booked >= ms(3) + ms(start_lead_ms()), "booked {booked}: {switch}");
+    assert!(late.is_empty(), "{late:?}");
+    let rx: Vec<_> = clocks.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
+    let new = rx.last().expect("a receive clock");
+    let headers: Vec<_> = std::iter::from_fn(|| link.receive()).map(|(block, _)| block.header().clone()).collect();
+    let first = headers.iter().find(|header| header.first_sample_time.domain() == new.domain).expect("a block on the new clock");
+    assert_eq!(first.first_sample_time.ticks_in(new.domain).unwrap(), 0, "the successor's first block is its first sample");
+    assert_eq!(first.flags, BlockFlags::NONE, "the successor's first block carries no flag");
+    // The Stop's cut lies inside the overflow's gap: at or after the overflow's first lost sample and before the restart. The
+    // overflow fires at the first receive call, before the first block, so no sample was delivered before its first lost
+    // sample: that sample is the first segment's first sample. A clock registers only with its first block, so the first
+    // segment has no clock record, and the cut is the applied stop's instant.
+    let start = device.calls().iter().find_map(|call| call.strip_prefix("rx_start 0 ")?.parse::<i64>().ok()).expect("the first segment's start");
+    let applied = section_of(&instance, "applied");
+    let cut = applied.as_array().unwrap().iter().find(|row| row["key"] == "rx_stop").expect("the stop's applied row")["at"]["ticks"].as_i64().unwrap();
+    let gap_root = gap_ns * MCR / 1_000_000_000;
+    assert!(start <= cut && cut < start + gap_root, "the cut {cut} is outside the overflow's gap [{start}, {})", start + gap_root);
+    let old = rx.iter().find(|record| record.origin.ticks_in(record.root).unwrap() == start);
+    assert!(old.is_none(), "the first segment registered a clock, which a clock does only with its first block");
+}
+
+#[test]
 fn ur_29_a_loss_while_the_start_is_queued_makes_stop_stop_nothing_more() {
     // UR-29 (#67): the device is lost while the start is queued for T0 2.1 s ahead; `Provider::stop` then ends the Provider without a device
     // stop call after the loss. The loss is published once, and the join stays inside its bound.
@@ -10013,7 +10058,7 @@ fn bench1115_t3_probes_rehearse_on_the_fake() {
 
 #[test]
 fn bench1115_skip_probe_records_a_receive_overflow_and_its_gap() {
-    // The recording side of (a): an overrun on the first receive call of the first trial skips 50 ms, so the capture starts after B's window opened: the
+    // The recording side of (a): an overrun on the first receive call of the first trial skips the profile's overflow gap, so the capture starts after B's window opened: the
     // trial keeps the outcome and is not clean, and the verdict is INCONCLUSIVE (never a FAIL about B), the later trials stay clean. (A gap inside a capture
     // needs a fault that fires after a sample block, which the fake times by the clock; `a_trial_records_the_outcomes...` in bench1115.rs covers it.)
     use common::bench1115::*;
@@ -10117,6 +10162,132 @@ fn s4bench_s2_rehearses_on_the_fake_and_reads_a_scripted_overflow_and_underflow(
     assert!(lines.iter().any(|line| line.contains("rx-1msps") && line.contains("1 failed") && line.contains("RX_OVERFLOW in 1 of 1")), "{lines:?}");
     assert!(lines.iter().any(|line| line.contains("tx-1msps") && line.contains("underflow within it: 1")), "{lines:?}");
     assert!(lines.iter().any(|line| line.contains("tx-2msps") && line.contains("INCONCLUSIVE")), "the clean TX cell cannot show the window in 2 s: {lines:?}");
+}
+
+// ---- S9 (stage 4b): a booking after an overflow start, once on the fake (`common::s9bench`); its pure judgements are unit-tested there.
+
+/// One S9 cell-A trial on a device `make` gives, retried (at most three attempts, each on a fresh device) when the classifier says the booking was late
+/// (`S9_RESUMED`, `S9_NEAR_RESTART`): the host was too loaded to book inside the restart gap, which is not a defect of the code under test. Any other cell is judged.
+fn s9_attempt_a(make: impl Fn() -> Arc<dyn Device>, plan: &common::s9bench::S9Plan) -> common::s9bench::S9Outcome {
+    use common::s9bench::*;
+    let mut resumed = Vec::new();
+    for attempt in 1..=3 {
+        let outcome = s9_trial(make(), plan).unwrap_or_else(|error| panic!("S9 rehearsal trial failed: {error}"));
+        println!("S9 rehearsal: attempt {attempt} was {:?}", outcome.cell);
+        if !matches!(outcome.cell, Cell::Inconclusive(S9_RESUMED) | Cell::Inconclusive(S9_NEAR_RESTART)) {
+            return outcome;
+        }
+        resumed.push(outcome);
+    }
+    panic!(
+        "EZSDR-INFRA: s9_attempt_a: all three S9 rehearsal attempts booked too late (a scheduling exhaustion, not a verdict failure; after the stream had resumed or within a receive wait of the device's own restart; the host was too loaded to book inside the restart gap): {resumed:?}"
+    );
+}
+
+/// Cell A and the incomplete-trace path through `s9_trial`'s body on the manual-clock fake. No duration is judged and no sleep is
+/// fixed: the probe's real timestamps only order the booking against the trace. The schedule-dependent outcomes (the stream resumed
+/// before the booking; the booking ended within a receive wait of the device's own restart) are classified by the code under test and
+/// retried; any other cell is judged. Cell A and the
+/// incomplete-trace path are rehearsed; cell B is not (the fake has no backlog: it reports the overflow at once, so no `samples`
+/// row can follow a booking before the result) and is hardware-only, and
+/// `ur_17_a_restart_booked_while_the_backlog_is_read_is_a_reported_missed_start` (`rx.rs`) is the Module's response to B at unit
+/// level. Each trial takes about 5 s of real time on the manual clock.
+#[test]
+fn s9_rehearses_on_the_fake_cell_a_and_the_inconclusive_path() {
+    use common::s9bench::*;
+    let device = fake(FakeConfig::default());
+    let plan = S9Plan { rate_hz: 1_000_000, stall_ms: 300, after_ms: 100, restart_after_ns: ezsdr_radio::x3xx::timing().overflow_restart_gap_ns as u64, retune: false, target: S9Target::A };
+    let outcome = s9_attempt_a(|| device.clone(), &S9Plan { retune: false, ..plan.clone() });
+    assert_eq!(outcome.cell, Cell::A, "the booking met the restart gap: {outcome:?}");
+    assert!(matches!(outcome.verdict, Verdict::Pass(_)), "cell A passes: {outcome:?}");
+    assert_eq!(outcome.trial.first_block, Some(FirstBlock { index: 0, gap_before: false, seq_discontinuity: false }), "the successor's first published block is on time and gapless: {outcome:?}");
+    assert!(outcome.trial.sample_seen, "the successor returned a sample after its start: {outcome:?}");
+    assert!(outcome.trial.cut_verified, "the old clock's cut is checked against the applied stop and the booked Stop: {outcome:?}");
+    assert_eq!(outcome.trial.tails.len(), 1, "the stall leaves one tail: {outcome:?}");
+    assert_eq!(Some(outcome.trial.tails[0]), outcome.trial.expected_tail, "the tail's lost is the old clock's end less the first sample not delivered: {outcome:?}");
+    assert_eq!(
+        (outcome.trial.late_command, outcome.trial.sequence_overflows, outcome.trial.rx_before_origin),
+        (0, 0, 0),
+        "no late command, sequence overflow or report before the origin: {outcome:?}"
+    );
+    assert!(outcome.pre_stamp_ns <= outcome.post_stamp_ns, "the booking's stamps are in order: {outcome:?}");
+    let outcome = s9_attempt_a(|| device.clone(), &S9Plan { retune: true, ..plan.clone() });
+    assert_eq!(outcome.cell, Cell::A, "the retuned booking met the restart gap: {outcome:?}");
+    assert!(matches!(outcome.verdict, Verdict::Pass(_)), "a retuned cell A passes: {outcome:?}");
+    assert_eq!(
+        outcome.trial.first_block,
+        Some(FirstBlock { index: 0, gap_before: false, seq_discontinuity: false }),
+        "the retuned successor's first published block is on time and gapless: {outcome:?}"
+    );
+    assert!(outcome.trial.sample_seen, "the retuned successor returned a sample after its start: {outcome:?}");
+    assert!(outcome.trial.cut_verified, "the retuned old clock's cut is checked against both instants: {outcome:?}");
+    assert_eq!(outcome.trial.tails.len(), 1, "the stall leaves one tail: {outcome:?}");
+    assert_eq!(Some(outcome.trial.tails[0]), outcome.trial.expected_tail, "the tail's lost is the old clock's end less the first sample not delivered: {outcome:?}");
+    assert_eq!(
+        (outcome.trial.late_command, outcome.trial.sequence_overflows, outcome.trial.rx_before_origin),
+        (0, 0, 0),
+        "no late command, sequence overflow or report before the origin: {outcome:?}"
+    );
+    assert!(outcome.pre_stamp_ns <= outcome.post_stamp_ns, "the booking's stamps are in order: {outcome:?}");
+    // The booking-while-the-reader-sleeps and booking-before-the-stall classifications are pinned by the pure cases 5 and 6 of the
+    // classifier test; this case pins that an incomplete trace reaches the verdict as INCONCLUSIVE through the real body.
+    let outcome = s9_trial_with(device.clone(), &plan, |probe| probe.overfill()).unwrap_or_else(|error| panic!("S9 rehearsal trial failed: {error}"));
+    assert_eq!(outcome.cell, Cell::Inconclusive("the probe dropped rows"), "an incomplete trace is inconclusive whatever the scheduling: {outcome:?}");
+    assert!(matches!(outcome.verdict, Verdict::Inconclusive(_)), "the verdict stays open: {outcome:?}");
+}
+
+/// A sequence error the Module reports before the stall is a host drop, not the cascade race: the Run delivers it (one `sequence_events`) and the
+/// verdict does not FAIL it (`sequence_overflows` stays 0, because the drop is on the old segment's clock, not at the successor's first block).
+#[test]
+fn s9_a_host_drop_before_the_stall_is_reported_and_is_not_the_cascade_race_on_the_fake() {
+    use common::s9bench::*;
+    let plan = S9Plan { rate_hz: 1_000_000, stall_ms: 300, after_ms: 100, restart_after_ns: ezsdr_radio::x3xx::timing().overflow_restart_gap_ns as u64, retune: false, target: S9Target::A };
+    // The fault is a device-time instant: `device.rs` fires it at the first `rx_recv` whose `next` tick is at or after it, once (around line 1752).
+    // The stream's first block is at device time near 0 (its origin) and the reader's stall begins `after_ms` = 100 ms after that block, so 50 ms
+    // falls between the two, in the old segment: the drop is reported before the stall, not at the successor's first block.
+    let outcome = s9_attempt_a(|| fake(FakeConfig { faults: vec![FakeFault::SequenceError(Wall::from_millis(50))], ..FakeConfig::default() }), &plan);
+    assert!(outcome.trial.sequence_events >= 1, "the scripted sequence error was reported: {outcome:?}");
+    assert_eq!(outcome.cell, Cell::A, "the booking still met the restart gap: {outcome:?}");
+    assert_eq!(outcome.trial.sequence_overflows, 0, "a drop in the old segment is not at the successor's first block: {outcome:?}");
+    assert!(matches!(outcome.verdict, Verdict::Pass(_)), "the verdict does not FAIL the reported host drop: {outcome:?}");
+    assert_eq!(outcome.trial.tails.len(), 1, "the stall still leaves one tail: {outcome:?}");
+}
+
+/// `s9_run`'s entry path as the hardware test runs it: a plan's cells through the real runner, its decision lines, the latch's stop
+/// suffix and target B's "not reached" exit. The fake has no backlog, so target B never books there and the trial ends at the bound
+/// with an INCONCLUSIVE cell. A trial's cell may be A or INCONCLUSIVE (`S9_RESUMED`/`S9_NEAR_RESTART`) under load, so the A cell's
+/// assertions are only those the same line keeps whatever the schedule.
+#[test]
+fn s9_run_rehearses_the_runner_the_decision_lines_and_the_target_b_exit_on_the_fake() {
+    use common::s9bench::*;
+    let device: Arc<dyn Device> = fake(FakeConfig::default());
+    let plan = S9Plan { rate_hz: 1_000_000, stall_ms: 300, after_ms: 100, restart_after_ns: ezsdr_radio::x3xx::timing().overflow_restart_gap_ns as u64, retune: false, target: S9Target::A };
+    // The latch stops the run after the first completed trial: cell 0 keeps 1 of its 2 trials, cell 1 none of its 1.
+    let cells = vec![(plan.clone(), 2), (S9Plan { retune: true, ..plan.clone() }, 1)];
+    let run = s9_run(&device, &cells, || Some("test latch".to_owned()));
+    assert_eq!(run.stopped, Some("the device handle is latched (test latch)".to_owned()));
+    assert_eq!(run.cells.len(), 2);
+    assert_eq!((run.cells[0].1, run.cells[0].2.len()), (2, 1), "one of the first cell's two trials ran");
+    assert_eq!((run.cells[1].1, run.cells[1].2.len()), (1, 0), "the latched handle leaves the retune cell unrun");
+    let lines = s9_decisions(&run);
+    assert_eq!(lines.len(), 2);
+    // A cell: 1 trial, target A reached 0 or 1 (the schedule decides whether the booking was retried), no FAIL, the stop suffix.
+    assert!(lines[0].starts_with("S9 decision 1 MS/s stall 300 ms same target A: 1 trials, target A reached "), "{lines:?}");
+    assert!(lines[0].contains("FAIL 0"), "{lines:?}");
+    assert!(lines[0].ends_with("; stopped: the device handle is latched (test latch)"), "{lines:?}");
+    // The retune cell ran no trial: 0 of everything, then the stop suffix.
+    assert_eq!(
+        lines[1],
+        "S9 decision 1 MS/s stall 300 ms retune target A: 0 trials, target A reached 0; classified A 0, B 0, INCONCLUSIVE 0; verdicts pass 0, FAIL 0, inconclusive 0; stopped: the device handle is latched (test latch)"
+    );
+    // Target B needs the device's backlog (a post-stall `samples` row before the overflow result), which the fake does not have: the
+    // run waits its bound (100 + 300 + 3 000 ms of manual-clock time) and returns the open cell.
+    let run = s9_run(&device, &[(S9Plan { target: S9Target::B, retune: false, ..plan }, 1)], || None);
+    assert_eq!(run.stopped, None);
+    let outcome = &run.cells[0].2[0];
+    assert_eq!(outcome.cell, Cell::Inconclusive("the booking state was not reached"));
+    assert!(matches!(outcome.verdict, Verdict::Inconclusive(_)), "the open cell's verdict stays open: {outcome:?}");
+    assert_eq!(s9_decisions(&run), ["S9 decision 1 MS/s stall 300 ms same target B: 1 trials, target B reached 0; classified A 0, B 0, INCONCLUSIVE 1; verdicts pass 0, FAIL 0, inconclusive 1"]);
 }
 
 /// A `FakeDevice` whose underflow reports carry no device time, as an async message with no time spec does.
@@ -10350,4 +10521,34 @@ fn s4bench_s4_runs_the_overflow_trials_and_prints_the_restart_after_resume() {
     assert!(lines.iter().any(|line| line.starts_with("S4 decision stall length at 1 MS/s: ") && line.contains("stall 300 ms") && line.contains("stall 400 ms")), "{lines:?}");
     let (_, stopped) = (0, s4_run(&device, &cells, 200, || Some("a control timeout".to_owned())).stopped);
     assert!(stopped.is_some_and(|reason| reason.contains("a control timeout")));
+}
+
+/// KL-15's 65 536-sample block through one S4 overflow trial: a rehearsal, so it needs no mutation row (the block-length knob's path has
+/// `N108-123`/`N108-124`, and the profile path is `s4_block_len_reaches_the_bench_profile`).
+#[test]
+fn s4_overflow_trial_with_a_65536_block_reaches_a_complete_trial_on_the_fake() {
+    use common::s4bench::*;
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(one_obx())));
+    let device: Arc<dyn Device> = probe.clone();
+    let cells = vec![S4Cell { rate_hz: 1_000_000, stall_ms: 300, trials: 1, sweep: false }];
+    // A 65 536-sample block at 1 MS/s is 65.536 ms, and the stall begins 200 ms after the first block: the first block is read well before
+    // the stall. The Run's capture is after + stall + 250 = 750 ms, and the stall's 300 ms of loss is well inside it.
+    let run = common::with_selector(with_block_len(common::selector_override(), 65_536), || s4_run(&device, &cells, 200, || None));
+    assert_eq!(run.stopped, None, "the trial ran to its end: {run:?}");
+    assert_eq!(run.cells.iter().map(|(_, trials)| trials.len()).collect::<Vec<_>>(), [1], "one cell with one trial: {run:?}");
+    assert!(run.cells[0].1[0].complete(), "the trial reached a complete restart-after-resume estimate at the KL-15 cell's block length: {:?}", run.cells[0].1[0]);
+    let requests: Vec<u64> = probe.rows().iter().filter(|row| row["call"] == "rx_recv").filter_map(|row| row["request_samples"].as_u64()).collect();
+    assert!(!requests.is_empty() && requests.iter().all(|samples| *samples == 65_536), "the Run's receive calls asked for its 65 536-sample blocks: {requests:?}");
+}
+
+/// `EZSDR_S4_BLOCK_LEN`'s path into an S4 Run: the thread's selector override (the slot A pin plus the block length) is laid over the
+/// bench profile that `overflow_manifest` builds for every Run.
+#[test]
+fn s4_block_len_reaches_the_bench_profile() {
+    let device = fake(FakeConfig::default());
+    let dir = common::TempDir::new();
+    let profile = common::with_selector(common::s4bench::with_block_len(common::selector_override(), 65_536), || common::bench_profile(&*device, &dir, json!({}), json!({}), false));
+    let selector = &profile["bindings"]["radio"]["selector"];
+    assert_eq!(selector["block_len"], 65_536, "the block length reaches the profile: {selector}");
+    assert!(selector["rx"].is_array() && selector["tx"].is_array(), "the slot A layout pin stays: {selector}");
 }

@@ -283,7 +283,7 @@ The numbered rules below are cited by number; each is now stated by the rules it
 
 A Mock may deliver any block length and should offer a length-jitter option, so that a Processor assuming a fixed block size fails in simulation, and MockRadio clips at the contract's full scale (MR-36).
 
-An overflow on UHD hardware returns zero samples, distinguishes buffer overrun from host-side sequence error, and restarts a continuous stream about 50 ms later; under this contract it appears as one block boundary with `GAP_BEFORE`, `RESTARTED` and the restart gap as its time jump, identically from a UHD Provider and from a MockRadio fault injection (SC-18).
+An overflow on UHD hardware returns zero samples, distinguishes buffer overrun from host-side sequence error, and restarts a continuous stream once the host has read the samples it had buffered, so the restart comes later by a time that depends on the host; under this contract it appears as one block boundary with `GAP_BEFORE`, `RESTARTED` and the whole loss as its time jump, identically from a UHD Provider and from a MockRadio fault injection (SC-18, RM-17).
 
 The artifact-level `ContinuityMap` (§28) and a SigMF export are derived from these headers and never assembled by hand (SC-30…SC-32).
 

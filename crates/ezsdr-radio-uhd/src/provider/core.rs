@@ -1540,6 +1540,23 @@ impl Core {
         }
     }
 
+    /// UR-29: a device call admitted under `device_gate`, which a loss is published under: a loss published after the caller's check is never followed by the call. `None`: the device was lost by then and no call was made. `before_gate` names the probe a test hooks between the caller's check and the gate.
+    fn admitted<T>(&self, before_gate: &'static str, call: impl FnOnce() -> T) -> Option<T> {
+        self.probe(before_gate, None);
+        let _device_gate = self.lock_device_gate();
+        (!self.is_lost()).then(call)
+    }
+
+    /// UR-17, UR-29: a receive stop (the first of a stream's end, or the second of an overrun stream) admitted under `device_gate`; `None`: the device was lost and no stop was made.
+    pub fn rx_stop_admitted(&self, k: usize, before_gate: &'static str) -> Option<Result<(), DeviceError>> {
+        self.admitted(before_gate, || self.device.rx_stop(k))
+    }
+
+    /// UR-17, UR-29: the restart after a missed start admitted under `device_gate`; `None`: the device was lost and no start was made.
+    pub fn rx_start_admitted(&self, k: usize, at: i64) -> Option<Result<(), DeviceError>> {
+        self.admitted("rx_start_before_gate", || self.device.rx_start(k, at))
+    }
+
     #[cfg(test)]
     fn assert_rx_chain_reusable(&self, k: usize, operation: &str) {
         let chain = self.rx_chain[k].lock();

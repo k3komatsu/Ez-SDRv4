@@ -129,7 +129,7 @@ fn hw_b5_overflow() {
         match result {
             Ok(manifest) => {
                 println!("B5 overflowed with a {stall} ms stall: {}", section(&manifest, "stats"));
-                // The restart gap MR-3 claims is 50 ms (at 10 Msps, 100 ns a sample).
+                // The restart gap is the profile's `overflow_restart_gap_ns` (x3xx::timing()); at 10 Msps a sample is 100 ns.
                 let map = &capture_of(&manifest, "rec").continuity[0];
                 let drops: Vec<_> = map.gaps.iter().filter(|g| g.cause == ezsdr_kernel::stream::GapCause::LinkDrop {}).collect();
                 println!(
@@ -4220,16 +4220,22 @@ fn hw_s4_overflow_gap() {
     // S4 (stage 4, D5): the record's overflow Run (`overflow_trial`: a reader stall, then the restart) at 1/10/25/50/100/200 MS/s with the record's stall for each rate, `EZSDR_S4_TRIALS` (20)
     // each, then the stall-length sweep at `EZSDR_S4_STALL_RATE_HZ` (100 MS/s): `EZSDR_S4_STALLS_MS` (100,500,2000) ms. A row per trial with its restart-after-resume time (the record's
     // INFERRED high-side estimate) and a decision line per cell against the owner's stability criterion, then D5's bound and the stall figures. Receive only: no attenuator.
+    // `EZSDR_S4_BLOCK_LEN` (absent: the Module's default) sets the receive block length of every Run; 65 536 at a low rate is the cell KL-15 names (all rate cells then run at
+    // that block length, so read the 1 and 10 MS/s ones).
     // A Run's capture is a file of the receive samples in /tmp: the container's tmpfs must hold it (about 1 GB at 100 MS/s).
-    let env = env_values(&[&["EZSDR_S4_TRIALS", "EZSDR_S4_STALL_RATE_HZ", "EZSDR_S4_STALLS_MS"][..], &measurement::MeasurementPlan::ENV_NAMES[..]].concat());
+    let env = env_values(&[&["EZSDR_S4_TRIALS", "EZSDR_S4_STALL_RATE_HZ", "EZSDR_S4_STALLS_MS", "EZSDR_S4_BLOCK_LEN"][..], &measurement::MeasurementPlan::ENV_NAMES[..]].concat());
     let plan = measurement::MeasurementPlan::from_env(&env).expect("the measurement plan's values are valid before opening the USRP");
     let stalls = measurement::env_list(&env, "EZSDR_S4_STALLS_MS", &common::s4bench::S4_STALL_SWEEP_MS).unwrap_or_else(|error| panic!("{error}"));
     let sweep_rate = measurement::env_count(&env, "EZSDR_S4_STALL_RATE_HZ", common::s4bench::S4_STALL_SWEEP_RATE_HZ).unwrap_or_else(|error| panic!("{error}"));
+    let block_len = common::s4bench::s4_block_len(&env).unwrap_or_else(|error| panic!("{error}"));
     let cells = common::s4bench::s4_cells(common::s4bench::s4_trials(&env).unwrap_or_else(|error| panic!("{error}")), sweep_rate, &stalls);
     let limit = common::s4bench::s4_planned_seconds(&cells, plan.overflow_after_ms) * 5 / 4 + 900;
-    println!("S4: {} cells, {} ms before the stall, bound {limit} s", cells.len(), plan.overflow_after_ms);
+    println!("S4: {} cells, {} ms before the stall, block_len {block_len:?}, bound {limit} s", cells.len(), plan.overflow_after_ms);
     bounded(Wall::from_secs(limit), "hw_s4_overflow_gap", move || {
         let (guard, device) = slot_a_guarded();
+        if let Some(block_len) = block_len {
+            set_selector_override(Some(common::s4bench::with_block_len(selector_override(), block_len)));
+        }
         let run = common::s4bench::s4_run(&device, &cells, plan.overflow_after_ms, || guard.latched());
         for line in common::s4bench::s4_decisions(&run, sweep_rate) {
             println!("{line}");
@@ -4237,5 +4243,41 @@ fn hw_s4_overflow_gap() {
         drop(device);
         drop(guard);
         assert!(run.stopped.is_none(), "S4 stopped early: {:?}", run.stopped);
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_s9_restart_booked_after_an_overflow() {
+    // S9 (stage 4b): a receive Stop and `start_rx` booked in a Session Run after an overflow, classified after the fact from the probe's
+    // `rx_recv` rows. Receive only: no attenuator. The cells are `EZSDR_S9_TRIALS` (20) trials of each of `S9_RATE_STALLS_MS`'s two rates
+    // (10 MS/s with a 2 000 ms stall, 100 MS/s with 500 ms), at the same values and retuned from the Session's initial 1 GHz to 999.5 MHz
+    // (below the band edge of both boards), each targeting cell A (the booking made inside the restart gap, after the overflow result was read
+    // and before the stream resumed; INCONCLUSIVE ("the stream had resumed before the booking") when it may have ended after the resume, when it
+    // ended within a receive wait of UHD's own 50 ms restart ("booked within a receive wait of the device's own restart"), or when the trace holds
+    // an overflow besides the stall's ("an overflow besides the stall's")) and cell B (the booking met the backlog the reader was returning; a
+    // first block past index 0 needs a LATE_COMMAND, since a START_LEAD_SHORT start keeps its origin: RM-25). Read the `S9 decision` lines:
+    // `exit 0` is not PASS. Cell B is reached by booking when the trace first shows a post-stall `samples` row, so `target B reached n of 20` can
+    // be below 20: the booking can lose the race against the overflow result, which is a bench finding, not a failure. The device's drain (the
+    // backlog) exists only on the USRP; the FakeDevice has no backlog and cannot show cell B. Run the whole test under H0 and under H4. The
+    // probe's record holds 65 536 rows (`PROBE_ROW_LIMIT`); at 100 MS/s with the default block length one trial's trace is at most about 30 000
+    // rows at `EZSDR_S9_AFTER_MS` 100 (INFERRED from the rate, the block length and the after + backlog + tail window), and a dropped row makes
+    // the trial INCONCLUSIVE ("the probe dropped rows").
+    let env = env_values(&["EZSDR_S9_TRIALS", "EZSDR_S9_AFTER_MS"]);
+    let trials = measurement::env_count(&env, "EZSDR_S9_TRIALS", 20).unwrap_or_else(|error| panic!("{error}")) as usize;
+    let after_ms = measurement::env_count(&env, "EZSDR_S9_AFTER_MS", 100).unwrap_or_else(|error| panic!("{error}"));
+    let cells = common::s9bench::s9_cells(trials, &common::s9bench::S9_RATE_STALLS_MS, after_ms);
+    let planned: u64 = cells.iter().map(|(plan, trials)| *trials as u64 * ((after_ms + plan.stall_ms + 3_000) / 1_000 + 5)).sum();
+    let limit = planned * 5 / 4 + 900;
+    println!("S9: {} cells, {} trials each, {} ms before the stall, bound {limit} s", cells.len(), trials, after_ms);
+    bounded(Wall::from_secs(limit), "hw_s9_restart_booked_after_an_overflow", move || {
+        let (guard, device) = slot_a_guarded();
+        let run = common::s9bench::s9_run(&device, &cells, || guard.latched());
+        for line in common::s9bench::s9_decisions(&run) {
+            println!("{line}");
+        }
+        drop(device);
+        drop(guard);
+        assert!(run.stopped.is_none(), "S9 stopped early: {:?}", run.stopped);
     });
 }

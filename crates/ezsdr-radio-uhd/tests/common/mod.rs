@@ -51,6 +51,7 @@ pub mod raw;
 pub mod rig;
 pub mod run;
 pub mod s4bench;
+pub mod s9bench;
 pub mod tone;
 pub use run::{Declared, Expect, Run, capture_markers};
 

@@ -197,6 +197,11 @@ fn terms(profile: &str, direction: Direction, channels: Channels) -> Terms {
     Terms { t0: T0, root_hz: 1_000_000_000, stream: Stream { direction, origin, config, lead, call, allowance } }
 }
 
+/// MR-17's overflow restart gap in this file's root ticks; `ideal`'s profile has none.
+fn restart_gap(profile: &str) -> i64 {
+    if profile == "ideal" { 0 } else { terms(profile, Direction::Rx, Channels::first(0)).ticks(ezsdr_radio::x3xx::timing().overflow_restart_gap_ns) }
+}
+
 fn line_key(direction: Direction, stream: u32) -> StreamKey {
     (direction, stream)
 }
@@ -356,7 +361,7 @@ fn expect(profile: &str, sequence: &LayoutSequence, generated: &Sequence, initia
 
     record.rejected += staged.refused.len();
     let snapshots: BTreeMap<usize, generator::Snapshot> = staged.starts.iter().copied().collect();
-    let gap = if profile == "ideal" { 0 } else { 50 * MS };
+    let gap = restart_gap(profile);
     let mut injected = BTreeMap::new();
     for stream in 0..2 {
         let segments = &lines.line(line_key(Direction::Rx, stream)).unwrap().plan;
@@ -434,7 +439,8 @@ fn receive(stream: u32, clock: usize, segment: &Segment, faults: &[(i64, u64, Op
             flags = flags | BlockFlags::GAP_BEFORE | if *fault == Fault::Overrun { BlockFlags::RESTARTED } else { BlockFlags::SEQ_DISCONTINUITY };
             lost = Some(lost.unwrap_or(0) + (kg - kf) as u64);
         }
-        next = kg.min(end);
+        // The cursor is not clamped to the cut: a fault after a cut-short gap adds only the samples beyond the earlier restart (MR-21).
+        next = kg;
     }
 }
 

@@ -477,6 +477,9 @@ fn rm_17_reported_losses_make_one_payload_for_the_block_jump() {
 
     assert_eq!(rx_overflow_payload(&[], Some(5)), None);
     assert_eq!(rx_overflow_payload(&[RxOverflowCause::Overrun], None), None);
+    // RM-17: a loss of 0 produces no event.
+    assert_eq!(rx_overflow_payload(&[RxOverflowCause::Overrun], Some(0)), None);
+    assert_eq!(rx_overflow_payload(&[RxOverflowCause::Sequence], Some(0)), None);
     assert_eq!(rx_overflow_payload(&[RxOverflowCause::Sequence], Some(5)), Some(RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 5 }));
     assert_eq!(rx_overflow_payload(&[RxOverflowCause::Sequence, RxOverflowCause::Overrun, RxOverflowCause::Overrun], Some(12)), Some(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 12 }),);
     assert_eq!(rx_overflow_payload(&[RxOverflowCause::Overrun, RxOverflowCause::Sequence], Some(12)), Some(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 12 }),);

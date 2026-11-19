@@ -11,6 +11,7 @@ use std::time::{Duration as Wall, Instant};
 
 use super::{Declared, Expect, Run};
 use ezsdr_kernel::binding::{Binding, BindingProfile};
+use ezsdr_kernel::event::EventSource;
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
 use ezsdr_kernel::run::{Lease, RunState};
@@ -225,9 +226,7 @@ fn unmeasured_reason(key: &str) -> &'static str {
         "radio.timing.tx_in_flight_ns" => "Not measured in this record; the Phase 8 stage 3b-2 group is deleted, and the value rests on the bench rows in `plan/phase8/bench-results.md`.",
         "radio.timing.rx_start_lead_ns" => "Not measured in this record; note 47 stage 3 measures the start lead of `start_rx`.",
         "radio.perf.tx_bytes_per_s" => "Not measured in this record; the Phase 8 stage 3c-1 hardware measurement has not been run.",
-        "radio.timing.overflow_restart_gap_ns" => {
-            "Phase 8 stage 3c-1 records full overflow gaps and inferred restart-after-resume estimates as observations; the comparable key stays unmeasured pending the first hardware bench reading and owner decision."
-        }
+        "radio.timing.overflow_restart_gap_ns" => "Not measured in this record; the overflow gap group was not run.",
         _ => "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required.",
     }
 }
@@ -1453,7 +1452,7 @@ pub fn provider_groups() -> [(&'static str, ProviderMeasure, &'static [&'static 
         ("min_timed_command_lead", measure_min_timed_command_lead, &["radio.timing.min_timed_command_lead_ns"]),
         ("rx_start_lead", measure_rx_start_lead, &["radio.timing.rx_start_lead_ns"]),
         ("rx_throughput", measure_rx_throughput, &["radio.perf.rx_bytes_per_s"]),
-        ("overflow_restart_gap", measure_overflow_restart_gap, &[]),
+        ("overflow_restart_gap", measure_overflow_restart_gap, &["radio.timing.overflow_restart_gap_ns"]),
         ("tx_throughput", measure_tx_throughput, &["radio.perf.tx_bytes_per_s"]),
         ("full_duplex", measure_full_duplex, &["radio.full_duplex", "radio.hardware_time"]),
         // The companion groups come after every group that decides a value, and carry no value key: a failure of one is its own.
@@ -2164,7 +2163,7 @@ pub fn measure_min_timed_command_lead(device: Arc<dyn Device>, plan: &Measuremen
 /// The receive-restart conditions of note 47 stage 3: the values unchanged, and a retune across the board's
 /// 1 GHz tuning-path boundary on every restart (UBX `db_ubx.cpp:1153-1172`, OBX `obx_expert.cpp:293-300`;
 /// the endpoints are on opposite sides and never 1 GHz itself).
-const RX_START_LEAD_RETUNE_HZ: (f64, f64) = (999_500_000.0, 1_000_500_000.0);
+pub const RX_START_LEAD_RETUNE_HZ: (f64, f64) = (999_500_000.0, 1_000_500_000.0);
 
 /// One restart of the receive start-lead group: the origin the Module booked (its registered SampleClock, not the device
 /// call), the device's `rx_start` tick, the first block after it, and the two reports that make the stage fail. `lead_left_ns`
@@ -2198,12 +2197,12 @@ fn rx_start_trial_class(trial: &RxStartTrial) -> TrialClass {
 }
 
 /// The device time a restart or a loopback waits for its first sample or its SampleClock (#83: the bound is the device's, not the host's).
-const DEVICE_WAIT_MS: i64 = 2_000;
+pub const DEVICE_WAIT_MS: i64 = 2_000;
 
 /// Advances the Run one millisecond of device time at a time until `done` answers true, or until `limit_ms` of device time has
 /// passed since the call (an absolute deadline, fixed at the start), or once the Run has ended (`advance_to` would fail and time
 /// would stop); whether `done` did. A host that runs the device's threads late delays the answer, not the bound (#83, plan 30 §4.5).
-fn advance_until(run: &mut Run, limit_ms: i64, mut done: impl FnMut(&Run) -> bool) -> bool {
+pub fn advance_until(run: &mut Run, limit_ms: i64, mut done: impl FnMut(&Run) -> bool) -> bool {
     let deadline = super::after(run, super::ms(limit_ms));
     let domain = deadline.domain();
     let end = deadline.ticks_in(domain).unwrap();
@@ -2218,9 +2217,9 @@ fn advance_until(run: &mut Run, limit_ms: i64, mut done: impl FnMut(&Run) -> boo
     }
 }
 
-/// One restart: a stream-scoped `Stop`, the condition's values (when `set_values`), then an untimed `start_rx`; waits
-/// until the start's first sample or the device time bound, then for the SampleClock the Module registered for the restart.
-fn restart_trial(run: &mut Run, probe: &super::probe_device::ProbeDevice, lead_ns: u64, values: Option<(f64, f64)>, channels: usize) -> Result<RxStartTrial, String> {
+/// The booking both S9's body and `restart_trial` submit: a stream-scoped `Stop`, then the per-channel values when given, each
+/// admitted on the control path before anything else is sent.
+pub fn book_receive_stop(run: &mut Run, values: Option<(f64, f64)>, channels: usize) -> Result<(), String> {
     let stop = run.submit(SessionAction::Stop { target: Some(super::resource("radio/rx/s0")) }, None).map_err(|error| error.to_string())?;
     if !super::admitted(&stop) {
         return Err(format!("the receive Stop was not admitted: {:?}", stop.outcome));
@@ -2235,6 +2234,13 @@ fn restart_trial(run: &mut Run, probe: &super::probe_device::ProbeDevice, lead_n
             }
         }
     }
+    Ok(())
+}
+
+/// One restart: a stream-scoped `Stop`, the condition's values (when `set_values`), then an untimed `start_rx`; waits
+/// until the start's first sample or the device time bound, then for the SampleClock the Module registered for the restart.
+fn restart_trial(run: &mut Run, probe: &super::probe_device::ProbeDevice, lead_ns: u64, values: Option<(f64, f64)>, channels: usize) -> Result<RxStartTrial, String> {
+    book_receive_stop(run, values, channels)?;
     let clocks_before = run.sample_clocks().len();
     // The probe keeps a bounded record (PROBE_ROW_LIMIT); a receive at 100 MS/s fills it in a few trials, so each trial reads its own.
     probe.clear_rows();
@@ -2545,6 +2551,7 @@ fn companion_inapplicable(device: &Arc<dyn Device>, name: &str) -> Result<Option
 #[derive(Clone, Debug)]
 pub struct OverflowGap {
     cause: String,
+    domain: Option<ClockDomainId>,
     start_sample: Option<i64>,
     len: u64,
     lost: Option<u64>,
@@ -2605,6 +2612,18 @@ fn restart_after_resume_estimate(first_sample: i64, gap_start_sample: i64, gap_l
     }
 }
 
+/// S6: the overrun event and the `overflow_restart` gap name one stream, one clock and one first lost sample.
+fn overflow_event_agrees(event: &Json, gap: &OverflowGap, clocks: &[SampleClockRecord]) -> bool {
+    let Some(domain) = gap.domain else { return false };
+    let Some(time) = serde_json::from_value::<TimePoint>(event["time"].clone()).ok() else { return false };
+    let Some(clock) = clocks.iter().find(|clock| clock.domain == domain) else { return false };
+    let same_domain = time.domain() == domain;
+    let stream_agrees = clock.stream.to_string().ends_with("usrp/rx/s0");
+    let tick_agrees = time.ticks_in(time.domain()).ok() == gap.start_sample;
+    let source_agrees = serde_json::from_value::<EventSource>(event["source"].clone()).is_ok_and(|source| matches!(source, EventSource::Node { node } if node == clock.stream));
+    same_domain && stream_agrees && tick_agrees && source_agrees
+}
+
 fn extract_overflow_trial(events: &Json, artifacts: &Json, clocks: &[SampleClockRecord], rate_hz: u64, after_ms: u64, stall_ms: u64) -> OverflowTrialEvidence {
     let overflow_rows: Vec<_> = events.as_array().into_iter().flatten().filter(|event| event["kind"] == "radio.RX_OVERFLOW").collect();
     let payloads: Vec<_> = overflow_rows.iter().map(|event| ezsdr_radio::payloads::RxOverflowPayload::from_payload(&event["payload"]).ok()).collect();
@@ -2632,7 +2651,7 @@ fn extract_overflow_trial(events: &Json, artifacts: &Json, clocks: &[SampleClock
                 let cause = gap["cause"]["kind"].as_str().unwrap_or("invalid").to_owned();
                 let start_sample =
                     map_domain.and_then(|domain| serde_json::from_value::<TimePoint>(gap["start"].clone()).ok().filter(|start| start.domain() == domain).and_then(|start| start.ticks_in(domain).ok()));
-                gaps.push(OverflowGap { cause, start_sample, len, lost: gap["lost"].as_u64(), nanoseconds: samples_to_ns_ceil(len, rate_hz) });
+                gaps.push(OverflowGap { cause, domain: map_domain, start_sample, len, lost: gap["lost"].as_u64(), nanoseconds: samples_to_ns_ceil(len, rate_hz) });
             }
         }
     }
@@ -2673,7 +2692,8 @@ fn extract_overflow_trial(events: &Json, artifacts: &Json, clocks: &[SampleClock
         && overflow_gaps.len() == 1
         && overflow_gaps[0].len > 0
         && overflow_gaps[0].lost == Some(overflow_gaps[0].len)
-        && payload_lost.first().copied().flatten() == Some(overflow_gaps[0].len);
+        && payload_lost.first().copied().flatten() == Some(overflow_gaps[0].len)
+        && overflow_rows.first().is_some_and(|event| overflow_event_agrees(event, overflow_gaps[0], clocks));
     OverflowTrialEvidence {
         class: if valid { TrialClass::Success } else { TrialClass::Incomplete },
         overflow_count: overflow_rows.len(),
@@ -2713,7 +2733,7 @@ fn summarize_overflow_gaps(candidates: &BTreeMap<u64, Vec<OverflowTrialEvidence>
         if *rate == 0 || trials.is_empty() {
             return Err("overflow rates and trial lists must be nonempty and positive".to_owned());
         }
-        let successful: Vec<_> = trials.iter().filter(|trial| trial.class == TrialClass::Success).collect();
+        let successful: Vec<_> = trials.iter().filter(|trial| overflow_trial_complete(trial.class, trial.restart_after_resume.nanoseconds)).collect();
         successful_by_rate.insert(*rate, successful.len());
         if successful.len() < required_trials {
             insufficient.push(format!("{rate} Hz: {} complete overflow trials, need {required_trials}", successful.len()));
@@ -2747,6 +2767,33 @@ fn summarize_overflow_gaps(candidates: &BTreeMap<u64, Vec<OverflowTrialEvidence>
         successful_by_rate,
         unmeasured_reason: (!insufficient.is_empty()).then(|| format!("Insufficient complete overflow trials: {}.", insufficient.join("; "))),
     })
+}
+
+/// A trial that counts for the overflow value and for S4: one complete overflow, and a restart-after-resume estimate (S21).
+pub fn overflow_trial_complete(class: TrialClass, restart_ns: Option<u64>) -> bool {
+    class == TrialClass::Success && restart_ns.is_some()
+}
+
+const OVERFLOW_GAP_KEY: &str = "radio.timing.overflow_restart_gap_ns";
+
+/// The overflow group's one value row: `Measured` only when `summary` has no `unmeasured_reason` (every rate cell complete) and a maximum restart-after-resume exists; the
+/// `worst` is that maximum in nanoseconds, the condition is the rate cell that holds it, `trials` the complete trials in that cell. Otherwise `Unmeasured` with the reason.
+fn overflow_value(summary: &OverflowSummary) -> Result<ValueRecord, String> {
+    let key = Key::parse(OVERFLOW_GAP_KEY).map_err(|error| error.to_string())?;
+    if let Some(reason) = &summary.unmeasured_reason {
+        return Ok(ValueRecord::Unmeasured { key, reason: reason.clone() });
+    }
+    if let (Some(ns), Some(rate)) = (summary.maximum_restart_after_resume_ns, summary.maximum_restart_rate_hz) {
+        let trials = summary.successful_by_rate[&rate];
+        return Ok(ValueRecord::Measured {
+            key,
+            worst: model::Worst::Number(ns as f64),
+            trials: u32::try_from(trials).map_err(|_| "measured trial count exceeds u32".to_owned())?,
+            condition: rate_condition(rate),
+            test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+        });
+    }
+    Ok(ValueRecord::Unmeasured { key, reason: "no complete overflow trial carries a restart-after-resume estimate".to_owned() })
 }
 
 pub fn overflow_wait_ms(after_ms: u64, stall_ms: u64) -> Result<u64, String> {
@@ -2848,17 +2895,17 @@ pub fn measure_overflow_restart_gap(device: Arc<dyn Device>, plan: &MeasurementP
     plan.validate()?;
     let mut by_rate = BTreeMap::new();
     let mut rejection_by_rate = BTreeMap::new();
-    let mut conditions = Vec::new();
-    let mut total = 0usize;
     for (rate_hz, stall_ms) in plan.overflow_rates_hz.iter().zip(&plan.overflow_stall_ms) {
-        let condition = rate_condition(*rate_hz);
-        conditions.push(rx_condition(&condition, *rate_hz as f64));
         let (trials, rejections): (Vec<_>, Vec<_>) = overflow_cell(&device, *rate_hz, *stall_ms, plan.overflow_after_ms, plan.overflow_trials)?.into_iter().unzip();
-        total += plan.overflow_trials;
         by_rate.insert(*rate_hz, trials);
         rejection_by_rate.insert(*rate_hz, rejections);
     }
-    let summary = summarize_overflow_gaps(&by_rate, plan.overflow_trials)?;
+    overflow_group(plan, &by_rate, &rejection_by_rate)
+}
+
+fn overflow_group(plan: &MeasurementPlan, by_rate: &BTreeMap<u64, Vec<OverflowTrialEvidence>>, rejection_by_rate: &BTreeMap<u64, Vec<Option<String>>>) -> Result<MeasurementGroup, String> {
+    let conditions = plan.overflow_rates_hz.iter().map(|rate| rx_condition(&rate_condition(*rate), *rate as f64)).collect();
+    let summary = summarize_overflow_gaps(by_rate, plan.overflow_trials)?;
     let rate_observations: Vec<_> = by_rate
         .iter()
         .map(|(rate, trials)| {
@@ -2883,9 +2930,10 @@ pub fn measure_overflow_restart_gap(device: Arc<dyn Device>, plan: &MeasurementP
             })
         })
         .collect();
+    let total = plan.overflow_trials * plan.overflow_rates_hz.len();
     let group = MeasurementGroup {
         conditions,
-        values: vec![],
+        values: vec![overflow_value(&summary)?],
         observations: vec![observation(
             "provider_overflow_restart_gap",
             "tests/hardware.rs::hw_measurements_record",
@@ -4143,7 +4191,14 @@ mod tests {
         let mut clock = synthetic_clock(domain, "usrp/rx/s0", 0, None);
         clock.nominal_rate = ezsdr_kernel::time::Rational::new(1_000_000, 1).unwrap();
         let clocks = [clock.clone()];
-        let event = |cause: &str, lost: u64| json!([{ "kind": "radio.RX_OVERFLOW", "payload": { "cause": cause, "lost": lost } }]);
+        let event = |cause: &str, lost: u64| {
+            json!([{
+                "source": { "kind": "node", "node": { "node": 0, "path": "usrp/rx/s0" } },
+                "time": TimePoint::new(domain, 2_000),
+                "kind": "radio.RX_OVERFLOW",
+                "payload": { "cause": cause, "lost": lost },
+            }])
+        };
         let gap = |len: u64, lost: Json| json!({ "start": TimePoint::new(domain, 2_000), "cause": { "kind": "overflow_restart" }, "len": len, "lost": lost });
         let artifacts = |gaps: Json| {
             json!({ "rec": [{ "partial": false, "continuity": [{
@@ -4175,6 +4230,54 @@ mod tests {
     }
 
     #[test]
+    fn overflow_evidence_requires_the_event_and_the_gap_to_agree() {
+        let domain = ClockDomainId::local(21);
+        let mut clock = synthetic_clock(domain, "usrp/rx/s0", 0, None);
+        clock.nominal_rate = ezsdr_kernel::time::Rational::new(1_000_000, 1).unwrap();
+        let clocks = [clock];
+        let matching = || {
+            json!([{
+                "source": { "kind": "node", "node": { "node": 0, "path": "usrp/rx/s0" } },
+                "time": TimePoint::new(domain, 2_000),
+                "kind": "radio.RX_OVERFLOW",
+                "payload": { "cause": "overrun", "lost": 50 },
+            }])
+        };
+        let artifacts = json!({ "rec": [{ "partial": false, "continuity": [{
+            "domain": domain, "first": TimePoint::new(domain, 0), "end": TimePoint::new(domain, 3_000),
+            "gaps": [{ "start": TimePoint::new(domain, 2_000), "cause": { "kind": "overflow_restart" }, "len": 50, "lost": 50 }], "channel_gaps": []
+        }] }] });
+        let extract = |events: &Json, clocks: &[SampleClockRecord]| extract_overflow_trial(events, &artifacts, clocks, 1_000_000, 1, 1);
+        let complete = extract(&matching(), &clocks);
+        assert_eq!(complete.class, TrialClass::Success);
+
+        let mut other_domain = matching();
+        other_domain[0]["time"] = json!(TimePoint::new(ClockDomainId::local(22), 2_000));
+        assert_eq!(extract(&other_domain, &clocks).class, TrialClass::Incomplete, "the event's clock domain must be the capture map's");
+        let mut other_tick = matching();
+        other_tick[0]["time"] = json!(TimePoint::new(domain, 2_001));
+        assert_eq!(extract(&other_tick, &clocks).class, TrialClass::Incomplete, "the event must name the gap's first lost sample");
+        let mut no_time = matching();
+        no_time[0].as_object_mut().unwrap().remove("time");
+        assert_eq!(extract(&no_time, &clocks).class, TrialClass::Incomplete, "an event without a timestamp cannot complete a trial");
+        let mut unparsable_time = matching();
+        unparsable_time[0]["time"] = json!("x");
+        assert_eq!(extract(&unparsable_time, &clocks).class, TrialClass::Incomplete, "an unparsable timestamp cannot complete a trial");
+
+        let mut other_clock = synthetic_clock(domain, "other/rx/s0", 0, None);
+        other_clock.nominal_rate = ezsdr_kernel::time::Rational::new(1_000_000, 1).unwrap();
+        let mut rate_clock = synthetic_clock(ClockDomainId::local(22), "usrp/rx/s0", 0, None);
+        rate_clock.nominal_rate = ezsdr_kernel::time::Rational::new(1_000_000, 1).unwrap();
+        let mut other_stream = matching();
+        other_stream[0]["source"]["node"]["path"] = json!("other/rx/s0");
+        assert_eq!(extract(&other_stream, &[other_clock, rate_clock]).class, TrialClass::Incomplete, "the clock at the event's domain must name the usrp/rx/s0 stream");
+        // Only the event's source node differs: the clock at the event's domain is still `usrp/rx/s0`, so only the source check refuses it.
+        let mut other_source = matching();
+        other_source[0]["source"]["node"]["path"] = json!("other/rx/s0");
+        assert_eq!(extract(&other_source, &clocks).class, TrialClass::Incomplete, "the event's source must be the clock's stream");
+    }
+
+    #[test]
     fn overflow_restart_after_resume_estimate_uses_gap_end_and_nulls_negative_results() {
         let estimate = restart_after_resume_estimate(100, 1_050, 250, 1_000, 500, 500);
         assert_eq!((estimate.gap_end_sample, estimate.reader_resume_sample, estimate.nanoseconds), (Some(1_300), Some(1_100), Some(200_000_000)));
@@ -4192,7 +4295,7 @@ mod tests {
     }
 
     #[test]
-    fn overflow_summary_keeps_observations_and_the_key_is_not_a_record_value() {
+    fn an_overflow_summary_makes_one_lower_bound_row_or_says_why_not() {
         let complete = |gap_ns, restart_ns| OverflowTrialEvidence {
             class: TrialClass::Success,
             overflow_count: 1,
@@ -4203,20 +4306,155 @@ mod tests {
             restart_after_resume: OverflowRestartEstimate { gap_end_sample: None, reader_resume_sample: None, nanoseconds: Some(restart_ns), reason: None },
             sample_clock_rate_matches: true,
         };
-        let candidates = BTreeMap::from([(1_000_000, vec![complete(50_000, 5_000), complete(51_000, 6_000)]), (10_000_000, vec![complete(60_000, 7_000), complete(55_000, 4_000)])]);
+        // The worst gap (60 000 ns at 25 MS/s) and the worst restart (9 000 ns at 10 MS/s) are at different rates.
+        let candidates = BTreeMap::from([
+            (1_000_000, vec![complete(50_000, 5_000), complete(51_000, 6_000)]),
+            (10_000_000, vec![complete(52_000, 9_000), complete(53_000, 7_000)]),
+            (25_000_000, vec![complete(60_000, 4_000), complete(55_000, 3_000)]),
+        ]);
         let summary = summarize_overflow_gaps(&candidates, 2).unwrap();
-        assert_eq!((summary.worst_gap_ns, summary.limiting_rate_hz), (Some(60_000), Some(10_000_000)));
-        assert_eq!((summary.maximum_restart_after_resume_ns, summary.maximum_restart_rate_hz), (Some(7_000), Some(10_000_000)));
-        assert_eq!(summary.maximum_restart_by_rate, BTreeMap::from([(1_000_000, Some(6_000)), (10_000_000, Some(7_000))]));
+        assert_eq!((summary.worst_gap_ns, summary.limiting_rate_hz), (Some(60_000), Some(25_000_000)), "the worst gap is at its own rate, not the worst restart's rate");
+        assert_eq!((summary.maximum_restart_after_resume_ns, summary.maximum_restart_rate_hz), (Some(9_000), Some(10_000_000)), "the largest restart-after-resume names the rate that holds it");
+        assert_eq!(
+            summary.maximum_restart_by_rate,
+            BTreeMap::from([(1_000_000, Some(6_000)), (10_000_000, Some(9_000)), (25_000_000, Some(4_000))]),
+            "each rate keeps its own largest restart-after-resume"
+        );
+        let row = overflow_value(&summary).unwrap();
+        assert!(matches!(&row, ValueRecord::Measured { key, .. } if key.as_str() == "radio.timing.overflow_restart_gap_ns"), "a complete summary is one measured lower-bound row: {row:?}");
+        let ValueRecord::Measured { worst, condition, trials, test, .. } = row else { panic!("a complete summary must be Measured") };
+        assert_eq!(worst, model::Worst::Number(9_000.0), "the row's worst is the maximum restart-after-resume, not the worst gap");
+        assert_eq!(condition, "rx-10msps", "the condition is the rate cell that holds the maximum restart-after-resume");
+        assert_eq!(trials, 2, "the trials are the complete trials of that cell");
+        assert_eq!(test, "tests/hardware.rs::hw_measurements_record", "the row names the hardware record test");
 
-        let mut incomplete = complete(55_000, 8_000);
+        let mut incomplete = complete(58_000, 10_000);
         incomplete.class = TrialClass::Incomplete;
         incomplete.gap_ns = None;
-        let under_trialed = BTreeMap::from([(1_000_000, vec![complete(50_000, 5_000), complete(51_000, 6_000)]), (10_000_000, vec![complete(60_000, 7_000), incomplete])]);
+        let under_trialed = BTreeMap::from([
+            (1_000_000, vec![complete(50_000, 5_000), complete(51_000, 6_000)]),
+            (10_000_000, vec![complete(52_000, 9_000), complete(53_000, 7_000)]),
+            (25_000_000, vec![complete(60_000, 4_000), incomplete]),
+        ]);
         let summary = summarize_overflow_gaps(&under_trialed, 2).unwrap();
         assert_eq!(summary.worst_gap_ns, Some(60_000), "observations retain the maximum even when the required trial count is short");
-        assert_eq!(summary.maximum_restart_after_resume_ns, Some(7_000), "incomplete trial estimates are not included in the summary");
-        assert!(summary.unmeasured_reason.as_deref().unwrap().contains("10000000 Hz"));
+        assert_eq!(summary.maximum_restart_after_resume_ns, Some(9_000), "an incomplete trial's estimate is not included in the summary");
+        let reason = summary.unmeasured_reason.clone().unwrap_or_else(|| panic!("one incomplete rate cell must state a reason"));
+        assert!(reason.contains("25000000 Hz") && reason.contains("need 2"), "the reason names the under-trialed rate and its count: {reason}");
+        let row = overflow_value(&summary).unwrap();
+        assert!(
+            matches!(&row, ValueRecord::Unmeasured { reason, .. } if reason.contains("25000000 Hz") && reason.contains("need 2")),
+            "an under-trialed cell leaves the row unmeasured with that reason: {row:?}"
+        );
+    }
+
+    #[test]
+    fn an_overflow_summary_with_a_missing_estimate_is_unmeasured() {
+        let trial = |class, gap_ns: u64, restart_ns: Option<u64>| OverflowTrialEvidence {
+            class,
+            overflow_count: 1,
+            overflow_causes: vec!["overrun".to_owned()],
+            payload_lost: vec![Some(1)],
+            gaps: vec![],
+            gap_ns: Some(gap_ns),
+            restart_after_resume: OverflowRestartEstimate { gap_end_sample: None, reader_resume_sample: None, nanoseconds: restart_ns, reason: None },
+            sample_clock_rate_matches: true,
+        };
+        // 1 MS/s has both trials `Success`, but one carries no restart-after-resume estimate: one complete trial.
+        // 10 MS/s has estimates of its own, and a larger gap, so neither may stand in for the missing one.
+        let candidates = BTreeMap::from([
+            (1_000_000, vec![trial(TrialClass::Success, 40_000, Some(4_000)), trial(TrialClass::Success, 41_000, None)]),
+            (10_000_000, vec![trial(TrialClass::Success, 80_000, Some(8_000)), trial(TrialClass::Success, 81_000, Some(9_000))]),
+        ]);
+        let summary = summarize_overflow_gaps(&candidates, 2).unwrap();
+        let reason = summary.unmeasured_reason.clone().unwrap_or_else(|| panic!("a Success trial without an estimate is not a complete overflow trial"));
+        assert!(reason.contains("1000000 Hz") && reason.contains("1 complete overflow trials, need 2"), "the reason names the rate whose estimate is missing: {reason}");
+        assert!(matches!(&overflow_value(&summary).unwrap(), ValueRecord::Unmeasured { .. }), "the value stays unmeasured although the other rate has estimates");
+        assert!(overflow_trial_complete(TrialClass::Success, Some(1)), "a Success trial with an estimate is complete");
+        assert!(!overflow_trial_complete(TrialClass::Success, None), "a Success trial without an estimate is not complete");
+        assert!(!overflow_trial_complete(TrialClass::Incomplete, Some(1)), "an Incomplete trial is not complete even with an estimate");
+        assert!(!overflow_trial_complete(TrialClass::DeviceFailure, Some(1)), "a DeviceFailure trial is not complete even with an estimate");
+    }
+
+    #[test]
+    fn an_overflow_group_with_synthetic_evidence_emits_or_withholds_its_row() {
+        let evidence = |gap_ns, restart_ns| OverflowTrialEvidence {
+            class: TrialClass::Success,
+            overflow_count: 1,
+            overflow_causes: vec!["overrun".to_owned()],
+            payload_lost: vec![Some(1)],
+            gaps: vec![],
+            gap_ns: Some(gap_ns),
+            restart_after_resume: OverflowRestartEstimate { gap_end_sample: None, reader_resume_sample: None, nanoseconds: restart_ns, reason: None },
+            sample_clock_rate_matches: true,
+        };
+        let plan = MeasurementPlan { overflow_rates_hz: vec![1_000_000, 10_000_000], overflow_stall_ms: vec![20_000, 2_000], overflow_trials: 2, ..MeasurementPlan::rehearsal() };
+        let rejection_by_rate = BTreeMap::from([(1_000_000, vec![None, None]), (10_000_000, vec![None, None])]);
+        let by_rate =
+            BTreeMap::from([(1_000_000, vec![evidence(50_000, Some(5_000)), evidence(51_000, Some(6_000))]), (10_000_000, vec![evidence(52_000, Some(7_000)), evidence(53_000, Some(9_000))])]);
+        let group = overflow_group(&plan, &by_rate, &rejection_by_rate).unwrap();
+        assert_eq!(group.values.len(), 1, "the overflow group emits exactly one value row");
+        assert!(
+            matches!(&group.values[0], ValueRecord::Measured { worst: model::Worst::Number(worst), condition, .. } if *worst == 9_000.0 && condition == "rx-10msps"),
+            "complete evidence at both rates is measured with the cross-rate maximum: {:?}",
+            group.values[0]
+        );
+        assert!(group.conditions.iter().any(|condition| condition.id == "rx-10msps"), "the value's condition is among the group's conditions");
+        let observation = |group: &MeasurementGroup| {
+            group.observations.iter().find(|row| row.name == "provider_overflow_restart_gap").cloned().unwrap_or_else(|| panic!("the group has no provider_overflow_restart_gap observation"))
+        };
+        let row = observation(&group);
+        assert!(
+            row.result.contains_key("maximum_restart_after_resume_ns") && row.result.contains_key("rate_measurements"),
+            "the complete group's observation keeps its restart maximum and rate measurements"
+        );
+
+        let missing = BTreeMap::from([(1_000_000, vec![evidence(50_000, Some(5_000)), evidence(51_000, None)]), (10_000_000, vec![evidence(52_000, Some(7_000)), evidence(53_000, Some(9_000))])]);
+        let group = overflow_group(&plan, &missing, &rejection_by_rate).unwrap();
+        assert_eq!(group.values.len(), 1, "the overflow group still emits exactly one value row");
+        assert!(matches!(&group.values[0], ValueRecord::Unmeasured { reason, .. } if reason.contains("1000000 Hz")), "one missing estimate at 1 MS/s withholds the row: {:?}", group.values[0]);
+        let row = observation(&group);
+        assert!(
+            row.result.contains_key("maximum_restart_after_resume_ns") && row.result.contains_key("rate_measurements"),
+            "the withheld group's observation keeps its restart maximum and rate measurements"
+        );
+    }
+
+    #[test]
+    fn an_overflow_group_with_synthetic_evidence_is_compared_in_a_hardware_record() {
+        let profile_ns = ezsdr_radio::x3xx::timing().overflow_restart_gap_ns as u64;
+        let evidence = |restart_ns| OverflowTrialEvidence {
+            class: TrialClass::Success,
+            overflow_count: 1,
+            overflow_causes: vec!["overrun".to_owned()],
+            payload_lost: vec![Some(1)],
+            gaps: vec![],
+            gap_ns: Some(1),
+            restart_after_resume: OverflowRestartEstimate { gap_end_sample: None, reader_resume_sample: None, nanoseconds: Some(restart_ns), reason: None },
+            sample_clock_rate_matches: true,
+        };
+        let plan = MeasurementPlan { overflow_rates_hz: vec![1_000_000, 10_000_000], overflow_stall_ms: vec![20_000, 2_000], overflow_trials: 2, ..MeasurementPlan::rehearsal() };
+        let rejection_by_rate = BTreeMap::from([(1_000_000, vec![None, None]), (10_000_000, vec![None, None])]);
+        let dir = super::super::TempDir::new();
+        let document = super::super::profile(&dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+        let binding = radio_binding(&document).unwrap();
+        let uhd = description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+        let build = |restarts: [u64; 2]| {
+            let by_rate = BTreeMap::from([(1_000_000, vec![evidence(profile_ns / 2), evidence(profile_ns / 2)]), (10_000_000, vec![evidence(restarts[0]), evidence(restarts[1])])]);
+            let group = overflow_group(&plan, &by_rate, &rejection_by_rate).unwrap();
+            build_record_with_identity(Source::Hardware, &binding, json!({ "uhd_version": "4.10.0.0" }), "SERIAL".to_owned(), &rehearsal_metadata(), group, &uhd).unwrap()
+        };
+        let key = Key::parse(OVERFLOW_GAP_KEY).unwrap();
+        let record = build([profile_ns / 2, profile_ns / 2]);
+        let value = record.values.iter().find(|value| match value {
+            ValueRecord::Measured { key: found, .. } | ValueRecord::Unmeasured { key: found, .. } => found == &key,
+        });
+        assert!(value.is_some_and(|value| matches!(value, ValueRecord::Measured { .. })), "the measured overflow row survives merge_values in a hardware record");
+        let violations: Vec<_> = model::compare(&record, &uhd).into_iter().filter(|violation| violation.key == OVERFLOW_GAP_KEY).collect();
+        assert!(violations.is_empty(), "a maximum at or below the profile's value is no violation: {violations:?}");
+        let record = build([profile_ns / 2, profile_ns + 1]);
+        let violations: Vec<_> = model::compare(&record, &uhd).into_iter().filter(|violation| violation.key == OVERFLOW_GAP_KEY).collect();
+        assert_eq!(violations.len(), 1, "a maximum above the profile's value is the one violation: {violations:?}");
     }
 
     #[test]
@@ -4587,7 +4825,7 @@ mod tests {
         assert!(sample_rate_reason.contains("3c-2a") && sample_rate_reason.contains("sample-rate read-back"), "{sample_rate_reason}");
         assert!(lead_reason.contains("has not been run"), "{lead_reason}");
         assert!(startup_reason.contains("3b-1"), "{startup_reason}");
-        assert!(overflow_reason.contains("3c-1") && tx_throughput_reason.contains("3c-1"));
+        assert!(overflow_reason.contains("overflow gap group") && tx_throughput_reason.contains("3c-1"));
         assert_ne!(lead_reason, startup_reason);
         let no_pass = BTreeMap::from([("tx-1msps".to_owned(), vec![CandidateStage { value: 1, trials: vec![TrialClass::ProviderFailure] }])]);
         let summary = summarize_candidates(SummaryMode::MinimumLead, &no_pass, 1).unwrap();

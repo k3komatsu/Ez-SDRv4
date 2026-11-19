@@ -411,7 +411,7 @@ impl Image {
 
 /// The TimingEnvelope every `x3xx` description declares (RM-6, RM-20): one set of values for both Providers.
 pub fn timing() -> TimingEnvelope {
-    TimingEnvelope { min_timed_command_lead_ns: 5_000_000, startup_latency_ns: 2_000_000_000, overflow_restart_gap_ns: 50_000_000, rx_start_lead_ns: 10_000_000, tx_in_flight_ns: 10_000_000 }
+    TimingEnvelope { min_timed_command_lead_ns: 5_000_000, startup_latency_ns: 2_000_000_000, overflow_restart_gap_ns: 140_000_000, rx_start_lead_ns: 10_000_000, tx_in_flight_ns: 10_000_000 }
 }
 
 /// The PerformanceEnvelope of an `x3xx` with one `link_gbps` GbE link (RM-7, RM-20): 100 MB/s on 1 GbE

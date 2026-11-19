@@ -652,7 +652,7 @@ fn s4a_x3xx_values_are_the_measured_ones() {
     let timing = x3xx::timing();
     assert_eq!(
         (timing.min_timed_command_lead_ns, timing.startup_latency_ns, timing.overflow_restart_gap_ns, timing.rx_start_lead_ns, timing.tx_in_flight_ns),
-        (5_000_000, 2_000_000_000, 50_000_000, 10_000_000, 10_000_000)
+        (5_000_000, 2_000_000_000, 140_000_000, 10_000_000, 10_000_000)
     );
     let (one, ten) = (x3xx::performance(1), x3xx::performance(10));
     assert_eq!((one.rx_bytes_per_s, one.tx_bytes_per_s, one.wire_bytes_per_sample), (100_000_000, 100_000_000, 4));

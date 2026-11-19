@@ -13,6 +13,16 @@ use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 use serde_json::json;
 use support::{T0, artifact, asking, end_session, finish_at, finish_checked, loopback_run, output, resource, root, section, session_run, source, spec_run};
 
+/// MR-17's overflow restart gap from the x3xx profile, in root ticks (the acceptance root is 1 GHz).
+fn gap_ns() -> i64 {
+    ezsdr_radio::x3xx::timing().overflow_restart_gap_ns
+}
+
+/// The gap at the tests' 1 MS/s.
+fn gap_samples() -> i64 {
+    gap_ns() / 1_000
+}
+
 fn complete(spec: &serde_json::Value, profile_name: &str, selector: serde_json::Value, environment: serde_json::Value, test: &str, horizon: i64) -> Manifest {
     let temp = rig::TempDir::new(test);
     let profile = rig::spec_profile(profile_name, selector, &temp.0, environment);
@@ -143,7 +153,8 @@ fn v58_03_the_seed_changes_block_boundaries_not_data() {
 fn v58_04_mock_events_reach_counters_policy_and_manifest() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }] });
-    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults.clone(), "v58-04", 160_000_000);
+    let horizon = gap_ns() + 1_000_000 + 100_000_000 + 60_000_000;
+    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults.clone(), "v58-04", horizon);
     let rows = &manifest.events.counters;
     assert_eq!(rows.iter().find(|row| row.source == source("mock/rx/s0") && row.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap().count, 1);
     let events: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
@@ -161,9 +172,51 @@ fn v58_04_mock_events_reach_counters_policy_and_manifest() {
     let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, faults);
     let run = spec_run(&temp, &stopped, &profile, BTreeMap::new());
     let clock = root(&run);
-    let manifest = finish_at(run, clock, T0 + 160_000_000);
+    let manifest = finish_at(run, clock, T0 + horizon);
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: EventKind::parse("radio.RX_OVERFLOW").unwrap() } });
     assert!(manifest.run.transitions.iter().any(|entry| entry.state == RunState::Stopping { mode: CleanupMode::Orderly }));
+}
+
+#[test]
+fn v58_05_a_loss_after_an_overrun_stops_the_run_and_keeps_the_tail() {
+    // S7: an overrun at 1 ms leaves its report unspent (the restart block never came), and the
+    // loss at 6 ms ends the Run by Policy. The tail survives it: one `RX_OVERFLOW` at the first
+    // sample not delivered, sample 1 000 (the block [0, 1 000) was cut at the overrun's instant,
+    // MR-20), with `lost` the distance to the loss's cut — 5 000 = 6 000 − 1 000, 6 ms at
+    // 1 MS/s — and the capture holds that prefix and no more: the tail is stamped at its
+    // exclusive end, so it carries no mark (RS-30).
+    let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
+    let faults = json!({ "sim.faults": [
+        { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
+        { "at_ns": 6_000_000, "fault": "device_lost", "target": "radio" }
+    ] });
+    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults, "v58-05-tail", 20_000_000);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: EventKind::parse(EventKind::DEVICE_LOST).unwrap() } });
+    assert!(manifest.run.transitions.iter().any(|entry| entry.state == RunState::Stopping { mode: CleanupMode::Abort }));
+    // The shape first: both faults took effect, the overrun with the profile's 140 000-sample
+    // restart gap and the loss with none of its own.
+    let rows = section(&manifest, "mock", "ezsdr.radio.mock.faults").as_array().expect("the Mock's fault rows");
+    let applied: Vec<(String, bool, u64)> =
+        rows.iter().map(|row| (row["fault"].as_str().expect("a fault kind").to_owned(), row["applied"].as_bool().unwrap(), row["lost"].as_u64().unwrap())).collect();
+    assert_eq!(applied, [("rx_overflow".to_owned(), true, gap_samples() as u64), ("device_lost".to_owned(), true, 0)], "{rows:?}");
+    // One tail, at sample 1 000 of the segment's own clock.
+    let overflows: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+    assert_eq!(overflows.len(), 1, "{:?}", manifest.events.delivered);
+    let event = overflows[0];
+    assert_eq!(event.source, source("mock/rx/s0"));
+    assert_eq!(event.payload.as_array().map(Vec::len), Some(9), "RM-24's nine bytes: {}", event.payload);
+    assert_eq!(RxOverflowPayload::from_payload(&event.payload).unwrap(), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 5_000 });
+    let clock = manifest.clocks.sample_clocks.iter().find(|record| record.stream.path() == "mock/rx/s0").expect("the receive clock");
+    assert_eq!(event.time.domain(), clock.domain, "the tail is stamped in the segment's SampleClock");
+    assert_eq!(event.time.ticks_in(clock.domain).unwrap(), 1_000, "the first sample not delivered");
+    let origin = clock.origin.ticks_in(clock.origin.domain()).unwrap();
+    let end = clock.ended_at.expect("the loss ends the stream").ticks_in(clock.root).unwrap();
+    assert_eq!((end - origin) / clock.root_ticks_per_tick.num() as i64, 6_000, "the loss's cut, 6 ms at 1 MS/s");
+    assert_eq!(manifest.events.delivered.iter().filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST).count(), 1, "one DEVICE_LOST");
+    let capture = artifact(&manifest, "rec", 0);
+    assert!(capture.partial, "the loss ends the Run while the capture is open");
+    assert_eq!(capture.size_bytes, 8_000, "the capture holds the delivered prefix [0, 1 000)");
+    assert!(capture.marks.is_empty(), "the tail is stamped at the capture's exclusive end (RS-30): {:?}", capture.marks);
 }
 
 #[test]
@@ -184,18 +237,18 @@ fn v58_05_device_lost_aborts_with_full_cleanup() {
 fn v58_06_injected_overflow_is_a_uhd_overflow() {
     let spec = experiments::receive(1, 1.0e6, 1.0e9, Some(100_000));
     let faults = json!({ "sim.faults": [{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }] });
-    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults, "v58-06-overflow", 160_000_000);
+    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults, "v58-06-overflow", gap_ns() + 1_000_000 + 100_000_000 + 60_000_000);
     let capture = artifact(&manifest, "rec", 0);
     assert_eq!(capture.size_bytes, 800_000);
     assert_eq!(capture.continuity[0].gaps.len(), 1);
     let gap = &capture.continuity[0].gaps[0];
     assert_eq!(gap.cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
     assert_eq!(gap.start.ticks_in(gap.start.domain()).unwrap(), 1_000);
-    assert_eq!(gap.len, 50_000);
-    assert_eq!(gap.lost, Some(50_000));
+    assert_eq!(gap.len, gap_samples() as u64);
+    assert_eq!(gap.lost, Some(gap_samples() as u64));
     assert_eq!(gap.link_dropped, 0);
     let event = manifest.events.delivered.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap();
-    assert_eq!(RxOverflowPayload::from_payload(&event.payload).unwrap(), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 });
+    assert_eq!(RxOverflowPayload::from_payload(&event.payload).unwrap(), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: gap_samples() as u64 });
 }
 
 #[test]
@@ -209,7 +262,7 @@ fn v51_an_overflowed_capture_is_a_sigmf_recording() {
     let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, faults);
     let run = spec_run(&temp, &spec, &profile, BTreeMap::new());
     let clock = root(&run);
-    let manifest = finish_at(run, clock, T0 + 160_000_000);
+    let manifest = finish_at(run, clock, T0 + gap_ns() + 1_000_000 + 100_000_000 + 60_000_000);
     let capture = artifact(&manifest, "rec", 0);
     let data = capture.uri.strip_prefix("file://").unwrap();
     assert!(data.ends_with(".sigmf-data"), "{data}");
@@ -217,17 +270,18 @@ fn v51_an_overflowed_capture_is_a_sigmf_recording() {
     assert_eq!(meta["global"]["core:datatype"], "cf32_le");
     assert_eq!(meta["global"]["core:sample_rate"], json!(1_000_000.0));
     assert_eq!(meta["global"]["ezsdr:partial"], false);
+    let restart = 1_000 + gap_samples();
     assert_eq!(
         meta["captures"],
         json!([
             { "core:sample_start": 0, "core:global_index": 0 },
-            { "core:sample_start": 1_000, "core:global_index": 51_000 }
+            { "core:sample_start": 1_000, "core:global_index": restart }
         ])
     );
     let gaps = meta["global"]["ezsdr:gaps"].as_array().unwrap();
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0]["cause"], json!({ "kind": "overflow_restart" }));
-    assert_eq!((gaps[0]["global_index"].clone(), gaps[0]["len"].clone(), gaps[0]["lost"].clone()), (json!(1_000), json!(50_000), json!(50_000)));
+    assert_eq!((gaps[0]["global_index"].clone(), gaps[0]["len"].clone(), gaps[0]["lost"].clone()), (json!(1_000), json!(gap_samples()), json!(gap_samples())));
 }
 
 #[test]
@@ -250,12 +304,14 @@ fn v58_06_overflows_inside_a_gap_extend_the_recorded_loss() {
         { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
         { "at_ns": 10_000_000, "fault": "rx_overflow", "target": "radio" }
     ] });
-    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults, "v58-06-overlap", 160_000_000);
-    let gap = &artifact(&manifest, "rec", 0).continuity[0].gaps[0];
+    let manifest = complete(&spec, "x3xx", json!({ "id": "mock" }), faults, "v58-06-overlap", gap_ns() + 1_000_000 + 100_000_000 + 60_000_000);
+    let gaps = &artifact(&manifest, "rec", 0).continuity[0].gaps;
+    assert_eq!(gaps.len(), 1);
+    let gap = &gaps[0];
     assert_eq!(gap.cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
     assert_eq!(gap.start.ticks_in(gap.start.domain()).unwrap(), 1_000);
-    assert_eq!(gap.len, 59_000);
-    assert_eq!(gap.lost, Some(59_000));
+    assert_eq!(gap.len, (gap_samples() + 9_000) as u64);
+    assert_eq!(gap.lost, Some((gap_samples() + 9_000) as u64));
 }
 
 #[test]

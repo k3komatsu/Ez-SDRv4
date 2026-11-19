@@ -94,6 +94,16 @@ fn rid(name: &str) -> ResourceId {
     ResourceId::parse(name).unwrap()
 }
 
+/// MR-17's overflow restart gap from the x3xx profile, in root ticks (the tests' root is 1 GHz).
+fn gap_ns() -> i64 {
+    ezsdr_radio::x3xx::timing().overflow_restart_gap_ns
+}
+
+/// The gap at the tests' 1 MS/s (1 000 root ticks a sample).
+fn gap_samples() -> i64 {
+    gap_ns() / 1_000
+}
+
 /// A resource target written as the node path the test resolves it to: the double plays
 /// KC-23 with `matched` the identity, `<resource>[/<path>]` (spec 27).
 fn tgt(path: &str) -> Target {
@@ -537,7 +547,7 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(capabilities[&key("radio.tx.repeat_align_samples")], one(Scalar::from(if x3xx { 2 } else { 1 })));
         assert_eq!(capabilities[&key("radio.rx.block_len")], one(Scalar::from(2_000)));
         let envelope = &radio.instance().sections[&Namespace::parse("ezsdr.radio.mock.envelope").unwrap()];
-        let (lead, startup, gap, bytes_per_s, wire, in_flight) = if x3xx { (5_000_000, 2_000_000_000, 50_000_000, 100_000_000, 4, 10_000_000) } else { (0, 0, 0, 1_i64 << 62, 8, 0) };
+        let (lead, startup, gap, bytes_per_s, wire, in_flight) = if x3xx { (5_000_000, 2_000_000_000, gap_ns(), 100_000_000, 4, 10_000_000) } else { (0, 0, 0, 1_i64 << 62, 8, 0) };
         // Each direction's own start lead (RM-25; design 33 D5).
         let start_lead = if x3xx { 10_000_000 } else { 0 };
         assert_eq!(capabilities[&key("radio.timing.min_timed_command_lead_ns")], one(Scalar::from(lead)));
@@ -870,7 +880,7 @@ fn mr_12_jitter_draws_belong_to_blocks_after_a_receive_cut() {
     let mut harness = Harness::new("x3xx", &[], &selector, &env, Some((BackPressure::DropOldest, 8)));
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_003_100_000).unwrap();
-    harness.step(2_056_000_000).unwrap();
+    harness.step(2_000_000_000 + gap_ns() + 6_000_000).unwrap();
     let blocks: Vec<_> = std::iter::from_fn(|| harness.link.as_ref().unwrap().receive().map(|(b, _)| b)).collect();
     let mut rng = ezsdr_sim::SimRng::new(7, "mock/rx/s0");
     let first_len = 1 + rng.below(4_000) as i64;
@@ -881,7 +891,7 @@ fn mr_12_jitter_draws_belong_to_blocks_after_a_receive_cut() {
     assert_eq!(blocks.len(), 3);
     assert_eq!(i64::from(blocks[0].header().len), first_len);
     assert_eq!(i64::from(blocks[1].header().len), fault_sample - first_len);
-    assert_eq!(blocks[2].header().first_sample_time.ticks_in(blocks[2].header().first_sample_time.domain()).unwrap(), 53_100);
+    assert_eq!(blocks[2].header().first_sample_time.ticks_in(blocks[2].header().first_sample_time.domain()).unwrap(), fault_sample + gap_samples());
     assert_eq!(i64::from(blocks[2].header().len), third_len);
 }
 
@@ -2172,36 +2182,43 @@ fn mr_09_the_transmit_clock_starts_on_its_lattice() {
 
 #[test]
 fn mr_19_backpressure_is_an_overrun() {
+    // Catches: a refusal that emits its own event at once (the ring would hold it before the
+    // block a link accepts).
+    let gap = gap_samples();
     let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::Block, 1)));
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_001_999_001).unwrap();
     harness.step(2_003_999_001).unwrap();
+    // The block at `a = 2 000` was refused: the link still holds block 0 and nothing is reported yet.
+    assert_eq!(harness.link.as_ref().unwrap().queued(), 1, "the link holds block 0");
+    assert!(rx_overflows(&harness).is_empty(), "the refused block's report waits for the block a link accepts");
+    assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.stats").unwrap()]["rx_blocks"], 1, "a refused block is no block");
     let first = harness.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), 0);
-    harness.step(2_053_999_001).unwrap();
+    let restart = 2_000 + gap;
+    harness.step(2_000_000_000 + (restart + 1_999) * 1_000 + 1).unwrap();
     let restarted = harness.link.as_ref().unwrap().receive().unwrap().0;
-    assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), 52_000);
+    assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), restart);
     assert!(restarted.header().flags.contains(BlockFlags::GAP_BEFORE));
     assert!(restarted.header().flags.contains(ezsdr_kernel::stream::BlockFlags::RESTARTED));
-    assert_eq!(restarted.header().lost, Some(50_000));
+    assert_eq!(restarted.header().lost, Some(gap as u64));
     assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.stats").unwrap()]["rx_blocks"], 2);
-    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
-    let overflows: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
-    assert_eq!(overflows.len(), 1);
-    // MR-37: the back-pressure overrun travels the hot path too, as RM-24's bytes.
-    assert!(overflows[0].payload.is_array(), "{}", overflows[0].payload);
-    assert_eq!(RxOverflowPayload::from_payload(&overflows[0].payload).unwrap(), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 });
+    // MR-19, RM-17: one report for the refused block's loss at its first sample `a`, carried by
+    // the block a link accepted, in the segment's clock (RM-24's hot bytes).
+    let domain = restarted.header().first_sample_time.domain();
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(domain, 2_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: gap as u64 })]);
 
     let mut fractional = Harness::new_with_options("x3xx", &[], &[], &[], Some((BackPressure::Block, 1)), ExecutionClass::Simulation, Rational::new(1_000_000_001, 1).unwrap(), 0, "rx0").unwrap();
     let start = 2_000_000_002;
+    let fractional_gap = gap_samples() + 1;
     fractional.arm_start(start).unwrap();
     fractional.step(start + 4_000_000).unwrap();
     let first = fractional.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), 0);
-    fractional.step(start + 54_001_000).unwrap();
+    fractional.step(start + (2_000 + fractional_gap + 2_000) * 1_000).unwrap();
     let restarted = fractional.link.as_ref().unwrap().receive().unwrap().0;
-    assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), 52_001);
-    assert_eq!(restarted.header().lost, Some(50_001));
+    assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), 2_000 + fractional_gap);
+    assert_eq!(restarted.header().lost, Some(fractional_gap as u64));
 }
 
 #[test]
@@ -2214,6 +2231,7 @@ fn mr_19_a_zero_gap_still_loses_the_dropped_block() {
     // Block 0 [0, 2 000) fills the one-slot link; block 1 [2 000, 4 000) finds it Full.
     harness.step(1_999_001).unwrap();
     harness.step(3_999_001).unwrap();
+    assert!(rx_overflows(&harness).is_empty(), "the refusal's report waits for the block a link accepts");
     let first = harness.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), 0);
     // The block at `b` = 4 000, carrying the whole dropped block as its loss.
@@ -2230,43 +2248,314 @@ fn mr_19_a_zero_gap_still_loses_the_dropped_block() {
 }
 
 #[test]
-fn mr_19_a_fault_overflow_and_repeated_backpressure_are_counted_once() {
+fn mr_19_repeated_refusals_are_one_overrun_with_the_first_block_a_link_accepts() {
+    // S11b, MR-19: a second refusal while the consumer is still away adds its loss to the same
+    // report. Catches: a refused publish that consumes the pending reports (the second refusal
+    // would take the first one's report and emit it at once).
+    let gap = gap_samples();
+    let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::Block, 1)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_999_001).unwrap();
+    harness.step(2_003_999_001).unwrap();
+    let restart = 2_000 + gap;
+    harness.step(2_000_000_000 + (restart + 1_999) * 1_000 + 1).unwrap();
+    // The block at `restart` was refused too: block 0 still holds the link, no block was accepted, nothing is reported.
+    assert_eq!(harness.link.as_ref().unwrap().queued(), 1, "the link still holds block 0");
+    assert!(rx_overflows(&harness).is_empty(), "both refusals wait for the block a link accepts");
+    assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.stats").unwrap()]["rx_blocks"], 1);
+    let first = harness.link.as_ref().unwrap().receive().unwrap().0;
+    assert_eq!(first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), 0);
+    harness.step(2_000_000_000 + (2_000 + 2 * gap + 1_999) * 1_000 + 1).unwrap();
+    let restarted = harness.link.as_ref().unwrap().receive().unwrap().0;
+    assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), 2_000 + 2 * gap);
+    assert!(restarted.header().flags.contains(BlockFlags::GAP_BEFORE | ezsdr_kernel::stream::BlockFlags::RESTARTED));
+    assert_eq!(restarted.header().lost, Some(2 * gap as u64));
+    let domain = restarted.header().first_sample_time.domain();
+    assert_eq!(
+        rx_tails(&harness),
+        [(TimePoint::new(domain, 2_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 2 * gap as u64 })],
+        "one event for the whole lost stretch, at its first lost sample"
+    );
+}
+
+#[test]
+fn mr_19_a_fault_report_survives_a_refused_publish() {
+    // S11c, MR-19 and RM-17: a refused publish consumes no pending report. Catches: `if !full`
+    // widened to `if true` (the fault's report would leave at the refused attempt).
+    let gap = gap_samples();
     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
     let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::Block, 1)));
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_001_999_001).unwrap();
+    // Block 0 [0, 1 000) is accepted (the fault cuts it) and holds the link; the fault fired.
     assert_eq!(harness.link.as_ref().unwrap().queued(), 1);
-    assert!(rx_overflows(&harness).is_empty(), "the fault waits for its restarted block");
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))]);
+    assert!(rx_overflows(&harness).is_empty(), "the fault's event waits for its restart block");
+    let restart = 1_000 + gap;
+    harness.step(2_000_000_000 + (restart + 2_999) * 1_000 + 1).unwrap();
+    // The restart block [restart, restart + 2 000) is refused: no block accepted, the fault's report still pending.
+    assert_eq!(harness.link.as_ref().unwrap().queued(), 1, "the link holds block 0");
+    assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.stats").unwrap()]["rx_blocks"], 1);
+    assert!(rx_overflows(&harness).is_empty(), "a refused publish consumes no report");
+    let first = harness.link.as_ref().unwrap().receive().unwrap().0;
+    assert_eq!((first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), first.header().len), (0, 1_000), "block 0 was cut at the fault");
+    harness.step(2_000_000_000 + (restart + gap + 1_999) * 1_000 + 1).unwrap();
+    let restarted = harness.link.as_ref().unwrap().receive().unwrap().0;
+    assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), restart + gap);
+    assert!(restarted.header().flags.contains(BlockFlags::GAP_BEFORE | ezsdr_kernel::stream::BlockFlags::RESTARTED));
+    assert_eq!(restarted.header().lost, Some(2 * gap as u64), "the fault's G plus the refusal's G");
+    let domain = restarted.header().first_sample_time.domain();
+    assert_eq!(
+        rx_tails(&harness),
+        [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 2 * gap as u64 })],
+        "one event for both reports, at the first lost sample"
+    );
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))], "the row keeps what the fault injected");
+}
 
-    harness.step(2_053_999_001).unwrap();
-    harness.step(2_103_999_001).unwrap();
-    let events: Vec<_> = rx_overflows(&harness).into_iter().map(|(time, payload)| (time.ticks_in(time.domain()).unwrap(), payload.cause, payload.lost)).collect();
-    assert_eq!(events, [(1_000, RxOverflowCause::Overrun, 50_000), (51_000, RxOverflowCause::Overrun, 50_000), (101_000, RxOverflowCause::Overrun, 50_000),]);
-    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
+#[test]
+fn mr_19_a_stop_before_acceptance_emits_the_tail_from_the_refused_block() {
+    // S11d, MR-19 and RM-17: a cut before the block a link accepts ends the refused block's
+    // loss as one tail from its first sample. Catches: `rx.undelivered = next_sample` in the
+    // refusal branch (no tail at all) and `rx.undelivered = stop` (a tail of 26 000 at 4 000).
+    let gap = gap_samples();
+    assert!(30_000 < 2_000 + gap, "the Stop's cut is inside the refused block's gap");
+    let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::Block, 1)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_999_001).unwrap();
+    harness.step(2_003_999_001).unwrap();
+    assert!(rx_overflows(&harness).is_empty(), "the refusal reports nothing at once");
+    assert_eq!(harness.link.as_ref().unwrap().queued(), 1, "the link holds block 0");
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.step(2_030_000_000).unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!(record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()), Some(2_030_000_000), "the clock ends at the cut");
+    let headers = received(&harness);
+    assert_eq!(
+        headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(),
+        [(0, 2_000)],
+        "only block 0 was delivered"
+    );
+    let domain = headers[0].first_sample_time.domain();
+    // c - a = 30 000 - 2 000 = 28 000, one event at the refused block's first sample.
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(domain, 2_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 28_000 })], "one tail for [a, c)");
+    harness.step(2_200_000_000).unwrap();
+    assert!(rx_overflows(&harness).is_empty(), "no further event");
+}
 
-    harness.mock.stop(StopMode::Orderly).unwrap();
-    assert!(rx_overflows(&harness).is_empty(), "stop before the next block emits nothing");
+#[test]
+fn mr_19_an_abort_after_a_refusal_loses_nothing_before_its_cut() {
+    // 4b-2b deviation 7, RM-16: an abort cuts at the first sample not delivered, which is the
+    // refused block's first sample `a`; the refused block lies beyond the cut. Catches:
+    // `rx.undelivered = stop` (the clock would end at 2 004 000 000) and
+    // `rx.undelivered = next_sample` (at 2 142 000 000).
+    let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::Block, 1)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_999_001).unwrap();
+    harness.step(2_003_999_001).unwrap();
+    assert!(rx_overflows(&harness).is_empty(), "the refusal reports nothing at once");
+    assert_eq!(harness.link.as_ref().unwrap().queued(), 1, "the link holds block 0");
+    harness.mock.stop(StopMode::Abort).unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!(record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()), Some(2_002_000_000), "the abort cuts at a = 2 000");
+    assert!(rx_tails(&harness).is_empty(), "a loss of 0 before the cut produces none");
+    let headers = received(&harness);
+    assert_eq!(
+        headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(),
+        [(0, 2_000)],
+        "only block 0 was delivered"
+    );
+    assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.stats").unwrap()]["rx_blocks"], 1);
+}
+
+#[test]
+fn mr_19_a_fault_inside_a_refusal_s_gap_then_a_stop_counts_the_stretch_once() {
+    // m6, MR-19 and RM-17: a fault inside the refused block's gap makes a second report; a Stop
+    // cutting the segment ends both as one tail over [a, c), counted once. Catches: the
+    // refusal's direct event (the ring would hold {G} at 2 000 and the 28 000 tail).
+    let gap = gap_samples();
+    assert!(10_000 < gap, "the fault instant is inside the refused block's gap");
+    let env = [("sim.faults", serde_json::json!([{ "at_ns": 10_000_000, "fault": "rx_overflow", "target": "radio" }]))];
+    let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::Block, 1)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_999_001).unwrap();
+    harness.step(2_003_999_001).unwrap();
+    // The block at `a = 2 000` was refused and its report is pending.
+    assert!(rx_overflows(&harness).is_empty(), "no event at the refusal");
+    assert_eq!(harness.link.as_ref().unwrap().queued(), 1, "the link holds block 0");
+    harness.step(2_015_000_000).unwrap();
+    // The fault fires at sample 10 000, inside [a, a + G): k_f = max(10 000, 2 000 + G) = 2 000 + G,
+    // k_g = 10 000 + G, so its row loses 10 000 - 2 000 = 8 000.
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(10_000 - 2_000))], "the fault fired inside the gap");
+    assert!(rx_overflows(&harness).is_empty(), "both reports are pending");
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.step(2_030_000_000).unwrap();
+    let headers = received(&harness);
+    assert_eq!(
+        headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(),
+        [(0, 2_000)],
+        "only block 0 was delivered"
+    );
+    let domain = headers[0].first_sample_time.domain();
+    // One event for [a, c): c - a = 30 000 - 2 000 = 28 000, at `a`.
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(domain, 2_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 28_000 })], "the stretch is counted once");
+}
+
+#[test]
+fn mr_19_a_refused_first_block_registers_the_clock_and_its_tail_is_timed_in_it() {
+    // S19, RM-25: `publish_rx` registers the receive clock before it knows the link refused, so
+    // even a refused first block's tail has its segment's clock. Catches:
+    // `rx.undelivered = stop` in the refusal branch (the tail would be 18 000 from the dropped
+    // block's end 2 000, not 20 000 from the origin).
+    let gap = gap_samples();
+    assert!(20_000 < gap, "the Stop's cut is inside the refused first block's gap");
+    let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::Block, 0)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_999_001).unwrap();
+    assert_eq!(harness.link.as_ref().unwrap().queued(), 0, "a capacity-0 link refuses every block");
+    assert!(received(&harness).is_empty());
+    assert!(rx_overflows(&harness).is_empty(), "the refusal reports nothing at once");
+    assert!(harness.clocks.sample_clock_records().iter().any(|record| record.stream == rid("mock/rx/s0")), "publish_rx registered the receive clock before the refusal");
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.step(2_020_000_000).unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(record.domain, 0), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 20_000 })], "the tail from the origin");
+    assert_eq!(record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()), Some(2_020_000_000));
+}
+
+#[test]
+fn mr_37_pending_reports_keep_the_first_sample_and_the_causes_not_a_list() {
+    // MR-37, RM-17, RM-19: the pending reports of one stretch merge into one small record —
+    // the first lost sample and the causes reported — so the event does not depend on how
+    // many of them there were. This passes before and after that change (it is
+    // behaviour-preserving); its value is pinning the merge for N108-153/154/155.
+    //
+    // (1) A capacity-0 `Block` link refuses every block. At 1 MS/s the x3xx gap is 140 ms =
+    // 140 000 samples, so the blocks [0, 2 000) at 0, [140 000, 142 000) at 140 000 and
+    // [280 000, 282 000) at 280 000 are refused (each `k_g = max(b, a + 140 000)` moves the
+    // next block on by the gap). The `Stop` at 300 ms cuts at sample 300 000, inside the
+    // third stretch: `mr_19_a_refused_first_block_registers_the_clock_and_its_tail_is_timed_in_it`
+    // pins the same rule for one refusal (20 000 from 0); here the one tail is
+    // 300 000 - 0 = 300 000, at sample 0, the first refused block's first sample.
+    let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::Block, 0)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_999_001).unwrap();
+    harness.step(2_141_999_001).unwrap();
+    harness.step(2_281_999_001).unwrap();
+    assert!(rx_overflows(&harness).is_empty(), "capacity 0 accepts no block: every report waits");
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.step(2_300_000_000).unwrap();
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(record.domain, 0), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 300_000 })], "one event for all three refusals");
+
+    // (2) A sequence report and an overrun report, in the two orders the fault generator can
+    // list them, with a refused block's report: the event is an overrun (overrun wins over
+    // sequence) at the smallest first sample. A capacity-1 link holds block [0, 1 000) (the
+    // first fault cuts block 0 there), so the block after the faults' restart is refused;
+    // draining the link lets the next block carry the one event.
+    // Order sequence, overrun: the sequence error loses [1 000, 3 000) (2 000); the overrun
+    // loses [3 000, 142 000) (139 000); the refused block at 142 000 restarts at
+    // 142 000 + 140 000 = 282 000 (140 000), so `lost` is 2 000 + 139 000 + 140 000 = 281 000.
+    // Order overrun, sequence: [1 000, 141 000) (140 000), then [141 000, 143 000) (2 000),
+    // then the refused block at 143 000 restarts at 283 000 (140 000): 282 000.
+    // In both, the smallest first sample is 1 000, the first fault's.
+    for (early, late, lost) in [("rx_sequence_error", "rx_overflow", 281_000u64), ("rx_overflow", "rx_sequence_error", 282_000u64)] {
+        let env = [(
+            "sim.faults",
+            serde_json::json!([
+                { "at_ns": 1_000_000, "fault": early, "target": "radio" },
+                { "at_ns": 2_000_000, "fault": late, "target": "radio" }
+            ]),
+        )];
+        let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::Block, 1)));
+        harness.arm_start(2_000_000_000).unwrap();
+        harness.step(2_150_000_000).unwrap();
+        let first = harness.link.as_ref().unwrap().receive().unwrap().0;
+        assert_eq!((first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), first.header().len), (0, 1_000), "{early} first: the fault's block filled the link");
+        harness.step(2_300_000_000).unwrap();
+        let restarted = harness.link.as_ref().unwrap().receive().unwrap().0;
+        let domain = restarted.header().first_sample_time.domain();
+        assert_eq!(
+            rx_tails(&harness),
+            [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost })],
+            "{early} first: overrun wins and the first sample is the smallest"
+        );
+    }
+}
+
+#[test]
+fn mr_19_an_abort_at_a_refused_first_block_ends_its_clock_at_the_origin() {
+    // MR-19, MR-25, RM-17: `publish_rx` registers the segment's clock before the link answers,
+    // so a segment whose first block was refused has a clock and no delivered block; an abort
+    // cutting it at its origin ends that clock and the segment's row there. Catches: the `None`
+    // arm does not end the registered clock (ended_at stays None).
+    let check = |harness: &Harness, rx_blocks: i64| {
+        let record = harness.clocks.sample_clock_records().into_iter().rfind(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+        assert_eq!(record.ended_at, Some(record.origin), "the clock ends at the segment's origin");
+        let rows = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.segments").unwrap()].as_array().unwrap().clone();
+        let row = rows.iter().rev().find(|row| row["direction"] == "rx" && row["stream"] == 0).expect("the segment's row");
+        assert_eq!(row["ended_at"], serde_json::to_value(record.origin).unwrap(), "the segment's row ends at the origin too");
+        assert!(rx_tails(harness).is_empty(), "a loss of 0 before the cut produces no event");
+        assert!(harness.clocks.sample_clock_records().iter().filter(|record| record.stream == rid("mock/rx/s0")).all(|record| record.ended_at.is_some()), "every clock of the stream is ended");
+        assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.stats").unwrap()]["rx_blocks"], serde_json::json!(rx_blocks));
+    };
+    // Case "capacity 0": block 0 [0, 2 000) is refused and registers the clock; `undelivered`
+    // stays 0, so the abort cuts at the origin.
+    let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::Block, 0)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_999_001).unwrap();
+    assert_eq!(harness.link.as_ref().unwrap().queued(), 0, "a capacity-0 link refuses every block");
+    let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx/s0")).collect();
+    assert_eq!(records.len(), 1, "the refused first block registered the receive clock");
+    assert!(records[0].ended_at.is_none(), "the clock is not ended before the abort");
+    harness.mock.stop(StopMode::Abort).unwrap();
+    check(&harness, 0);
+
+    // Case "second segment on a capacity-1 link": block 0 is accepted and holds the link; a
+    // Stop at 2.010 s cuts sample 10 000, and `start_rx` begins the successor at
+    // 2.010 s + 2 000 samples (one receive call) + 3 ms + 10 ms = 2.025 s; its first block
+    // [0, 2 000) is refused inside the step at 2.030 s (its last sample is at 2.026 999 000).
+    let mut harness = Harness::new("x3xx", &[], &[], &[], Some((BackPressure::Block, 1)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_999_001).unwrap();
+    assert_eq!(harness.link.as_ref().unwrap().queued(), 1, "block 0 is accepted and never drained");
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.actions.push(start_rx("mock/rx/s0", None));
+    harness.step(2_010_000_000).unwrap();
+    harness.step(2_030_000_000).unwrap();
+    let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx/s0")).collect();
+    assert_eq!(records.len(), 2, "the stopped clock and the successor's");
+    assert!(records[1].ended_at.is_none(), "the refused first block of the successor registered its clock");
+    let first_end = records[0].ended_at.expect("the stopped clock ended").ticks_in(records[0].root).unwrap();
+    assert!(records[1].origin.ticks_in(records[1].root).unwrap() > first_end, "the successor begins after the stopped clock ended");
+    assert_eq!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.stats").unwrap()]["rx_blocks"], 1, "only block 0 was accepted");
+    // The Stop's cut at sample 10 000, less the first sample not delivered (2 000), is one
+    // tail of 8 000 at sample 2 000, before the abort.
+    let first_domain = records[0].domain;
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(first_domain, 2_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 8_000 })]);
+    harness.mock.stop(StopMode::Abort).unwrap();
+    check(&harness, 1);
 }
 
 #[test]
 fn mr_20_faults_fire_at_their_instants() {
-    // The second fault for `radio` comes after the overrun's 50 ms restart gap: inside it,
-    // the two losses would add up on the block at 53 000 (MR-21).
+    // The second fault for `radio` comes after the overrun's restart gap (the profile's `overflow_restart_gap_ns`),
+    // at gap + 10 ms: inside the gap the two losses would add up on the block at 1 ms + gap + 2 ms (MR-21).
     let env = [(
         "sim.faults",
         serde_json::json!([
             { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
             { "at_ns": 2_000_000, "fault": "rx_sequence_error", "target": "other" },
-            { "at_ns": 60_000_000, "fault": "rx_sequence_error", "target": "radio" }
+            { "at_ns": gap_ns() + 10_000_000, "fault": "rx_sequence_error", "target": "radio" }
         ]),
     )];
     let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
     harness.arm_start(2_000_000_000).unwrap();
     harness.step(2_001_000_000).unwrap();
     harness.step(2_002_000_000).unwrap();
-    // RM-17: the overrun's event comes with the block at 51 000, which carries its loss, and
+    // RM-17: the overrun's event comes with the block at 1 ms + the gap, which carries its loss, and
     // its row was written when it fired (MR-20; spec 22, VH-5).
-    harness.step(2_053_000_000).unwrap();
+    harness.step(2_000_000_000 + gap_ns() + 3_000_000).unwrap();
     let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 1);
     let overflow = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap();
@@ -2382,6 +2671,22 @@ fn rx_overflows(harness: &Harness) -> Vec<(TimePoint, RxOverflowPayload)> {
         .collect()
 }
 
+/// The `RX_OVERFLOW` events a drained ring holds, each checked for the node it came from and
+/// the hot form RM-24 gives it before it is read (RM-22, RM-24, MR-37).
+fn rx_tails(harness: &Harness) -> Vec<(TimePoint, RxOverflowPayload)> {
+    harness
+        .events
+        .drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
+        .into_iter()
+        .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW)
+        .map(|event| {
+            assert_eq!(event.source, EventSource::Node { node: rid("mock/rx/s0") });
+            assert_eq!(event.payload.as_array().map(Vec::len), Some(9), "RM-24: the hot form is nine bytes");
+            (event.time, RxOverflowPayload::from_payload(&event.payload).unwrap())
+        })
+        .collect()
+}
+
 /// The `faults` rows of one fault kind, as `(applied, lost)`, in the order written (MR-27).
 fn fault_rows(harness: &Harness, kind: &str) -> Vec<(serde_json::Value, serde_json::Value)> {
     let faults = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.faults").unwrap()];
@@ -2398,8 +2703,8 @@ fn received(harness: &Harness) -> Vec<BlockHeader> {
 
 #[test]
 fn mr_20a_the_overflow_comes_with_the_block_that_carries_it() {
-    // RM-17: an overrun at 1 ms on x3xx at 1 MS/s loses 50 000 samples (a 50 ms restart
-    // gap): its RX_OVERFLOW waits for the block at 51 000, which carries the loss, as a USRP
+    // RM-17: an overrun at 1 ms on x3xx at 1 MS/s loses the profile's restart gap in samples
+    // (a block at 1 ms + the gap): its RX_OVERFLOW waits for that block, which carries the loss, as a USRP
     // reports an overflow with the next packet (UR-18, MR-37); its row is written when it
     // fires (MR-20; spec 22, VH-5).
     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
@@ -2409,14 +2714,14 @@ fn mr_20a_the_overflow_comes_with_the_block_that_carries_it() {
     let headers = received(&harness);
     assert_eq!(headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
     assert!(rx_overflows(&harness).is_empty());
-    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap_samples()))]);
 
-    harness.step(2_060_000_000).unwrap();
+    harness.step(2_000_000_000 + gap_ns() + 10_000_000).unwrap();
     let rx_domain = harness.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx/s0")).unwrap().domain;
-    assert_eq!(rx_overflows(&harness), [(TimePoint::new(rx_domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 })]);
-    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
+    assert_eq!(rx_overflows(&harness), [(TimePoint::new(rx_domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: gap_samples() as u64 })]);
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap_samples()))]);
     let headers = received(&harness);
-    assert_eq!((headers[0].first_sample_time.ticks_in(headers[0].first_sample_time.domain()).unwrap(), headers[0].lost), (51_000, Some(50_000)));
+    assert_eq!((headers[0].first_sample_time.ticks_in(headers[0].first_sample_time.domain()).unwrap(), headers[0].lost), (1_000 + gap_samples(), Some(gap_samples() as u64)));
     assert_eq!(headers[0].flags, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED);
     assert!(headers[1..].iter().all(|header| header.lost.is_none()));
 }
@@ -2609,25 +2914,26 @@ fn mr_20_the_faults_a_loss_leaves_are_recorded_in_instant_order() {
 
 #[test]
 fn mr_21_overrun_shape() {
+    let gap = gap_samples();
     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
     let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
     harness.arm_start(2_000_000_000).unwrap();
-    harness.step(2_052_999_001).unwrap();
+    harness.step(2_000_000_000 + (1_000 + gap + 1_999) * 1_000 + 1).unwrap();
     let mut headers = Vec::new();
     while let Some((block, _)) = harness.link.as_ref().unwrap().receive() {
         headers.push(block.header().clone());
     }
-    let restarted = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 51_000).unwrap();
-    assert_eq!(restarted.lost, Some(50_000));
+    let restarted = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 1_000 + gap).expect("the restarted block");
+    assert_eq!(restarted.lost, Some(gap as u64));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
     assert!(!restarted.flags.contains(BlockFlags::SEQ_DISCONTINUITY));
     let domain = restarted.first_sample_time.domain();
-    assert_eq!(rx_overflows(&harness), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 })]);
+    assert_eq!(rx_overflows(&harness), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: gap as u64 })]);
     let previous = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 0).unwrap();
     assert_eq!(
         restarted.first_sample_time.ticks_in(restarted.first_sample_time.domain()).unwrap()
             - (previous.first_sample_time.ticks_in(previous.first_sample_time.domain()).unwrap() + i64::from(previous.len)),
-        50_000
+        gap
     );
 
     let env = [(
@@ -2639,13 +2945,14 @@ fn mr_21_overrun_shape() {
     )];
     let mut overlap = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
     overlap.arm_start(2_000_000_000).unwrap();
-    overlap.step(2_062_999_001).unwrap();
+    let overlapped = 10_000 + gap;
+    overlap.step(2_000_000_000 + (overlapped + 2_999) * 1_000 + 1).unwrap();
     let mut headers = Vec::new();
     while let Some((block, _)) = overlap.link.as_ref().unwrap().receive() {
         headers.push(block.header().clone());
     }
-    let restarted = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 60_000).unwrap();
-    assert_eq!(restarted.lost, Some(59_000));
+    let restarted = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == overlapped).expect("the restarted block");
+    assert_eq!(restarted.lost, Some((gap + 9_000) as u64));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
     // One block carries both reports and their whole time jump (MR-20a).
     let overflows: Vec<_> = overlap
@@ -2658,55 +2965,68 @@ fn mr_21_overrun_shape() {
             (event.time.ticks_in(event.time.domain()).unwrap(), payload.cause, payload.lost)
         })
         .collect();
-    assert_eq!(overflows, [(1_000, RxOverflowCause::Overrun, 59_000)]);
+    assert_eq!(overflows, [(1_000, RxOverflowCause::Overrun, (gap + 9_000) as u64)]);
     let faults = overlap.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.faults").unwrap()].clone();
     let rows: Vec<_> = faults.as_array().unwrap().iter().map(|row| (row["applied"].clone(), row["lost"].clone())).collect();
-    assert_eq!(rows, [(serde_json::json!(true), serde_json::json!(50_000)), (serde_json::json!(true), serde_json::json!(9_000))]);
+    assert_eq!(rows, [(serde_json::json!(true), serde_json::json!(gap)), (serde_json::json!(true), serde_json::json!(9_000))]);
 
     let env = [(
         "sim.faults",
         serde_json::json!([
             { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
-            { "at_ns": 60_000_000, "fault": "rx_sequence_error", "target": "radio" }
+            { "at_ns": gap_ns() + 10_000_000, "fault": "rx_sequence_error", "target": "radio" }
         ]),
     )];
     let mut later = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
     later.arm_start(2_000_000_000).unwrap();
-    later.step(2_067_000_000).unwrap();
+    later.step(2_000_000_000 + gap_ns() + 17_000_000).unwrap();
     let events = rx_overflows(&later);
     assert_eq!(
         events.iter().map(|(at, payload)| (at.ticks_in(at.domain()).unwrap(), payload.cause, payload.lost)).collect::<Vec<_>>(),
-        [(1_000, RxOverflowCause::Overrun, 50_000), (60_000, RxOverflowCause::Sequence, 2_000),]
+        [(1_000, RxOverflowCause::Overrun, gap as u64), (gap + 10_000, RxOverflowCause::Sequence, 2_000),]
     );
 
+    let second_fault = 2 * gap_ns() + 2_000_000;
     let env = [(
         "sim.faults",
         serde_json::json!([
             { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
-            { "at_ns": 102_000_000, "fault": "rx_overflow", "target": "radio" }
+            { "at_ns": second_fault, "fault": "rx_overflow", "target": "radio" }
         ]),
     )];
     let mut blocked = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::Block, 1)));
     blocked.arm_start(2_000_000_000).unwrap();
-    for tick in [2_001_999_001, 2_053_999_001, 2_103_999_001, 2_154_999_001] {
+    // Timeline, in samples, all from `G`: block 0 [0, 1 000) is accepted (fault 1 cuts it) and
+    // holds the link; fault 1 reports (1 000, G). The block at 1 000 + G is refused (loss G);
+    // the block at 1 000 + 2G is refused (loss G), its cut at 2G + 2 000 by fault 2. Fault 2
+    // applies with k_f = 1 000 + 3G (the refused restart point) and k_g = 2 000 + 3G, losing
+    // 1 000; the block at 2 000 + 3G is refused (loss G), so next = 2 000 + 4G.
+    let restart = 1_000 + gap;
+    let after_backpressure = restart + gap;
+    let cut_by_fault = after_backpressure + gap;
+    for tick in [2_001_999_001, 2_000_000_000 + (restart + 2_999) * 1_000 + 1, 2_000_000_000 + (after_backpressure + 2_999) * 1_000 + 1, 2_000_000_000 + (cut_by_fault + 1_000 + 2_999) * 1_000 + 1] {
         blocked.step(tick).unwrap();
     }
-    let events = rx_overflows(&blocked);
+    // MR-19, RM-17: every block after block 0 was refused, so every report still waits.
+    // Catches: the refusal's direct event (five events here, one per refusal and fault).
+    assert!(rx_overflows(&blocked).is_empty(), "the refusals report nothing at once");
+    assert_eq!(fault_rows(&blocked, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap)), (serde_json::json!(true), serde_json::json!(1_000)),]);
+    // Drain block 0; the block at 2 000 + 4G accepted carries the whole stretch:
+    // G + G + G + 1 000 + G = 4G + 1 000, one event at the first lost sample 1 000.
+    received(&blocked);
+    blocked.step(2_000_000_000 + (2_000 + 4 * gap + 1_999) * 1_000 + 1).unwrap();
+    let headers = received(&blocked);
     assert_eq!(
-        events.iter().map(|(at, payload)| (at.ticks_in(at.domain()).unwrap(), payload.cause, payload.lost)).collect::<Vec<_>>(),
-        [
-            (1_000, RxOverflowCause::Overrun, 50_000),
-            (51_000, RxOverflowCause::Overrun, 50_000),
-            (101_000, RxOverflowCause::Overrun, 50_000),
-            (151_000, RxOverflowCause::Overrun, 1_000),
-            (152_000, RxOverflowCause::Overrun, 50_000),
-        ]
+        (headers.len(), headers[0].first_sample_time.ticks_in(headers[0].first_sample_time.domain()).unwrap(), headers[0].flags, headers[0].lost),
+        (1, 2_000 + 4 * gap, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(4 * gap as u64 + 1_000))
     );
-    assert_eq!(fault_rows(&blocked, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000)), (serde_json::json!(true), serde_json::json!(1_000)),]);
+    let domain = headers[0].first_sample_time.domain();
+    assert_eq!(rx_tails(&blocked), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 4 * gap as u64 + 1_000 })], "one event for the whole lost stretch");
+    assert_eq!(fault_rows(&blocked, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap)), (serde_json::json!(true), serde_json::json!(1_000)),]);
 
     // The row is what the overrun injected, `k_g - k_f`, written when it fires and never
     // revised: a `Stop` handled at 20 ms, before `k_g` and in the step that applies the fault, leaves
-    // it 50 000 (VH-5).
+    // it the gap (VH-5).
     let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
     let mut cut = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
     cut.arm_start(2_000_000_000).unwrap();
@@ -2714,8 +3034,10 @@ fn mr_21_overrun_shape() {
     cut.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
     cut.step(2_020_000_000).unwrap();
     cut.step(2_100_000_000).unwrap();
-    assert_eq!(fault_rows(&cut, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
-    assert!(rx_overflows(&cut).is_empty(), "no block carries the loss");
+    assert_eq!(fault_rows(&cut, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))]);
+    // RM-17: no block carries the report, so the Stop's cut makes it one tail: 20 000 - 1 000 = 19 000 samples lost, stamped at the first sample no block was accepted for, in the segment's clock.
+    let domain = received(&cut).first().expect("the block before the fault").first_sample_time.domain();
+    assert_eq!(rx_overflows(&cut), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 19_000 })]);
 }
 
 #[test]
@@ -2761,6 +3083,37 @@ fn mr_20_a_fault_between_receive_clocks_is_not_applied() {
         assert_eq!(first.lost, None, "{fault}");
         assert_eq!(first.flags, BlockFlags::NONE, "{fault}");
     }
+}
+
+#[test]
+fn mr_21_a_restart_booked_after_an_overrun_starts_at_its_origin() {
+    // MR-21, MR-25, #108: the Mock already starts a successor on time (the fix of #108 was in uhd-rx); this pins the rule
+    // from the other Provider. The Stop and start_rx are booked 9 ms after the overrun, inside its restart gap (the profile's).
+    let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
+    let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 4096)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.actions.push(start_rx("mock/rx/s0", None));
+    harness.step(2_010_000_000).unwrap();
+    harness.step(2_300_000_000).unwrap();
+    let faults = fault_rows(&harness, "rx_overflow");
+    assert_eq!(faults.len(), 1, "the overrun fired: {faults:?}");
+    assert_eq!(faults[0], (serde_json::json!(true), serde_json::json!(gap_samples())));
+    let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx/s0")).collect();
+    assert_eq!(records.len(), 2, "the old clock and the new one: {records:?}");
+    let cut = records[0].ended_at.expect("the stopped clock ended").ticks_in(records[0].root).unwrap();
+    assert_eq!(cut, 2_010_000_000, "the Stop is handled in the step that ends at 2.010 s");
+    assert!(cut < 2_001_000_000 + gap_ns(), "the cut is inside the gap: {cut} < {}", 2_001_000_000 + gap_ns());
+    // RM-25: one 2 000-sample receive call at 1 MS/s (2 ms), the 3 ms delivery allowance and the 10 ms start lead.
+    let origin = records[1].origin.ticks_in(records[1].root).unwrap();
+    assert_eq!(origin, cut + 2_000_000 + 3_000_000 + 10_000_000, "cut {cut}");
+    let headers = received(&harness);
+    let first = headers.iter().find(|header| header.first_sample_time.domain() == records[1].domain).expect("a block on the new clock");
+    assert_eq!(first.first_sample_time.ticks_in(records[1].domain).unwrap(), 0, "the first block is the successor's sample 0");
+    assert_eq!(first.lost, None);
+    assert_eq!(first.flags, BlockFlags::NONE);
+    let overflows: Vec<_> = rx_overflows(&harness).into_iter().filter(|(at, _)| at.domain() == records[1].domain).collect();
+    assert!(overflows.is_empty(), "the new clock carries no overflow: {overflows:?}");
 }
 
 #[test]
@@ -2909,6 +3262,356 @@ fn mr_22_sequence_error_shape() {
     assert!(!restarted.flags.contains(BlockFlags::RESTARTED));
     let domain = restarted.first_sample_time.domain();
     assert_eq!(rx_overflows(&harness), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 2_000 })]);
+}
+
+#[test]
+fn mr_21_a_stop_after_the_restart_block_began_emits_one_event_with_the_block_and_no_tail() {
+    // S5m, RM-17: an overrun at 1 ms loses [1 000, 1 000 + g), so the restart block begins at
+    // k_g = 1 000 + g. A Stop cutting 500 samples after k_g (c = k_g + 500) falls after the
+    // block began: the block carries the event and the cut adds none.
+    let gap = gap_samples();
+    let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
+    let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_000_000_000).unwrap();
+    let kg = 1_000 + gap;
+    let cut = kg + 500;
+    assert!(cut > 1_000, "the cut falls after the restart block began");
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.step(2_000_000_000 + cut * 1_000).unwrap();
+    harness.step(2_000_000_000 + (cut + 1_000) * 1_000).unwrap();
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))], "the overflow fired");
+    let headers = received(&harness);
+    let shape: Vec<_> = headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len, header.lost, header.flags)).collect();
+    assert_eq!(shape, [(0, 1_000, None, BlockFlags::NONE), (kg, 500, Some(gap as u64), BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED)]);
+    assert!(headers.iter().all(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() < cut), "nothing after the cut");
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!((record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())), (2_000_000_000, Some(2_000_000_000 + cut * 1_000)));
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(record.domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: gap as u64 })]);
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))]);
+}
+
+#[test]
+fn mr_25_an_abort_in_a_gap_cuts_at_the_first_undelivered_sample() {
+    // S6m, RM-16: under `abort` a receive cut is the first sample not delivered (k_f), never
+    // the restart point a pending report names. The gap is [k_f, k_g) = [1 000, 141 000);
+    // the abort at 20 ms is inside it.
+    let gap = gap_samples();
+    let kg = 1_000 + gap;
+    assert!(20_000 < kg, "the abort instant is inside the gap");
+    let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
+    let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_000_000).unwrap();
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))], "the fault fired");
+    let headers = received(&harness);
+    assert_eq!(headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
+    harness.step(2_020_000_000).unwrap();
+    assert!(received(&harness).is_empty(), "no block after the first was received");
+    harness.mock.stop(StopMode::Abort).unwrap();
+    harness.step(2_030_000_000).unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!((record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())), (2_000_000_000, Some(2_001_000_000)), "the abort cuts at k_f = 1 000, not at k_g");
+    assert!(rx_tails(&harness).is_empty(), "a loss of 0 produces none");
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))], "the row keeps what the fault injected");
+    assert!(received(&harness).is_empty());
+
+    // A second overrun at 10 ms falls inside the first's gap: its k_f is the first's k_g
+    // (141 000) and its k_g is 10 000 + g = 150 000, so it loses 9 000. The abort at 20 ms
+    // still cuts at the FIRST fault's k_f = 1 000.
+    assert_eq!(10_000 + gap - (1_000 + gap), 9_000);
+    let env = [(
+        "sim.faults",
+        serde_json::json!([
+            { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
+            { "at_ns": 10_000_000, "fault": "rx_overflow", "target": "radio" }
+        ]),
+    )];
+    let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_000_000).unwrap();
+    harness.step(2_010_000_000).unwrap();
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap)), (serde_json::json!(true), serde_json::json!(9_000))]);
+    let headers = received(&harness);
+    assert_eq!(headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(), [(0, 1_000)]);
+    harness.step(2_020_000_000).unwrap();
+    assert!(received(&harness).is_empty(), "no block after the first was received");
+    harness.mock.stop(StopMode::Abort).unwrap();
+    harness.step(2_030_000_000).unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!(
+        (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())),
+        (2_000_000_000, Some(2_001_000_000)),
+        "the abort cuts at the first fault's k_f, not at either k_g"
+    );
+    assert!(rx_tails(&harness).is_empty(), "a loss of 0 produces none");
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap)), (serde_json::json!(true), serde_json::json!(9_000))]);
+}
+
+#[test]
+fn mr_20_a_loss_in_a_gap_emits_the_tail_to_the_loss() {
+    // S7, RM-17: a device loss at c cuts the receive stream there. A report pending at the
+    // cut makes one tail `{cause, c - k_f}` at k_f, in the segment's clock; the loss ends the
+    // clock at c. The Mock itself publishes no DEVICE_LOST (the coordinator does, from the
+    // step's error), so the Run-level tests count it (`v58_05_a_loss_after_an_overrun_*`).
+    // (i) `ideal`: a sequence error at 1 ms skips [1 000, 3 000); the loss at 1.1 ms cuts at
+    // c = 1 100, so the tail is 1 100 - 1 000 = 100.
+    {
+        let env = [(
+            "sim.faults",
+            serde_json::json!([
+                { "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" },
+                device_lost_at(1_100_000)
+            ]),
+        )];
+        let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
+        harness.arm_start(0).unwrap();
+        harness.step(1_000_000).unwrap();
+        assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(true), serde_json::json!(2_000))], "the sequence error fired");
+        let headers = received(&harness);
+        let shape: Vec<_> = headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect();
+        assert_eq!(shape, [(0, 1_000)], "the delivered prefix");
+        let domain = headers[0].first_sample_time.domain();
+        let error = harness.step(1_100_000).unwrap_err();
+        assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+        harness.auth.advance_to(TimePoint::new(ROOT, 2_000_000)).unwrap();
+        harness.mock.stop(StopMode::Orderly).unwrap();
+        assert!(received(&harness).is_empty(), "no block after the prefix");
+        let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+        assert_eq!((record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())), (0, Some(1_100_000)), "the clock ends at the loss");
+        let events = harness.events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        let tails: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+        assert_eq!(tails.len(), 1, "one tail");
+        assert_eq!(tails[0].source, EventSource::Node { node: rid("mock/rx/s0") });
+        assert_eq!(tails[0].payload.as_array().map(Vec::len), Some(9), "RM-24: the hot form is nine bytes");
+        assert_eq!((tails[0].time, RxOverflowPayload::from_payload(&tails[0].payload).unwrap()), (TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 100 }));
+        assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(true), serde_json::json!(2_000))], "the row keeps the injection");
+    }
+    // (ii) `x3xx`: the same with an overrun at 1 ms (k_f = 1 000, k_g = 141 000) and the loss
+    // at 6 ms: c = 6 000, so the tail is 6 000 - 1 000 = 5 000.
+    {
+        let env = [(
+            "sim.faults",
+            serde_json::json!([
+                { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
+                device_lost_at(6_000_000)
+            ]),
+        )];
+        let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
+        harness.arm_start(2_000_000_000).unwrap();
+        harness.step(2_001_000_000).unwrap();
+        assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap_samples()))], "the overrun fired");
+        let headers = received(&harness);
+        let shape: Vec<_> = headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect();
+        assert_eq!(shape, [(0, 1_000)], "the delivered prefix");
+        let domain = headers[0].first_sample_time.domain();
+        let error = harness.step(2_006_000_000).unwrap_err();
+        assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+        assert!(received(&harness).is_empty(), "no block after the prefix");
+        let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+        assert_eq!((record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())), (2_000_000_000, Some(2_006_000_000)), "the clock ends at the loss");
+        let events = harness.events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        let tails: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+        assert_eq!(tails.len(), 1, "one tail");
+        assert_eq!(tails[0].source, EventSource::Node { node: rid("mock/rx/s0") });
+        assert_eq!(tails[0].payload.as_array().map(Vec::len), Some(9), "RM-24: the hot form is nine bytes");
+        assert_eq!((tails[0].time, RxOverflowPayload::from_payload(&tails[0].payload).unwrap()), (TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 5_000 }));
+        assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap_samples()))], "the row keeps the injection");
+    }
+}
+
+#[test]
+fn mr_20_a_loss_then_a_stop_in_the_gap_keeps_the_tail() {
+    // S7c, RM-17: the loss at 6 ms cuts at c = 6 000 and emits its tail; the Run's abort
+    // booked afterwards finds the segment ended, so the clock stays at the loss and no
+    // second tail appears.
+    let gap = gap_samples();
+    let env = [(
+        "sim.faults",
+        serde_json::json!([
+            { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
+            device_lost_at(6_000_000)
+        ]),
+    )];
+    let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 64)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_000_000).unwrap();
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))], "the overrun fired");
+    let headers = received(&harness);
+    let shape: Vec<_> = headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect();
+    assert_eq!(shape, [(0, 1_000)], "the delivered prefix");
+    let domain = headers[0].first_sample_time.domain();
+    let error = harness.step(2_006_000_000).unwrap_err();
+    assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!((record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())), (2_000_000_000, Some(2_006_000_000)), "the clock ends at the loss");
+    harness.mock.stop(StopMode::Abort).unwrap();
+    harness.step(2_020_000_000).unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!((record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())), (2_000_000_000, Some(2_006_000_000)), "the abort does not move the loss's end");
+    assert!(received(&harness).is_empty(), "no block after the prefix");
+    let events = harness.events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+    let tails: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+    assert_eq!(tails.len(), 1, "one tail");
+    assert_eq!(tails[0].source, EventSource::Node { node: rid("mock/rx/s0") });
+    assert_eq!(tails[0].payload.as_array().map(Vec::len), Some(9), "RM-24: the hot form is nine bytes");
+    assert_eq!((tails[0].time, RxOverflowPayload::from_payload(&tails[0].payload).unwrap()), (TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 5_000 }));
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))], "the row keeps the injection");
+}
+
+#[test]
+fn mr_22_a_cut_inside_a_sequence_error_s_skip_emits_the_tail() {
+    // S8a, RM-18: a sequence error at 1 ms skips `block_len` = 2 000 samples from k_f = 1 000,
+    // so the skip is [1 000, 3 000). A Stop at 2 ms cuts at c = 2 000, inside it and less
+    // than a block after k_f: the tail is 2 000 - 1 000 = 1 000, not the whole skip.
+    let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_sequence_error", "target": "radio" }]))];
+    let mut harness = Harness::new("ideal", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+    harness.arm_start(0).unwrap();
+    harness.step(1_000_000).unwrap();
+    assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(true), serde_json::json!(2_000))], "the sequence error fired");
+    let headers = received(&harness);
+    let shape: Vec<_> = headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect();
+    assert_eq!(shape, [(0, 1_000)], "the delivered prefix");
+    let domain = headers[0].first_sample_time.domain();
+    let cut = 2_000;
+    assert!(cut > 1_000 && cut < 1_000 + 2_000, "the cut is inside the skip and greater than k_f");
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.step(2_000_000).unwrap();
+    harness.step(3_000_000).unwrap();
+    assert!(received(&harness).is_empty(), "no block after the prefix");
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 1_000 })]);
+    assert_eq!(fault_rows(&harness, "rx_sequence_error"), [(serde_json::json!(true), serde_json::json!(2_000))], "the row keeps the injection");
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!((record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())), (0, Some(cut * 1_000)));
+}
+
+/// S8b: a sequence error and an overrun, each at its own instant before one cut, in the order
+/// `first` then `second` (Mock fault kinds), make one tail. The cause is `overrun` in either
+/// order; `lost` is the distance from the first report's k_f to the cut, not the reports' sum.
+fn two_reports_then_a_cut(first: &str, second: &str) {
+    let gap = gap_samples();
+    let env = [(
+        "sim.faults",
+        serde_json::json!([
+            { "at_ns": 1_000_000, "fault": first, "target": "radio" },
+            { "at_ns": 2_000_000, "fault": second, "target": "radio" }
+        ]),
+    )];
+    let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_000_000).unwrap();
+    // The first fault fires at 1 ms: block_len = 2 000 for a sequence error, the gap for an
+    // overrun.
+    let first_lost = if first == "rx_sequence_error" { 2_000 } else { gap };
+    assert_eq!(fault_rows(&harness, first), [(serde_json::json!(true), serde_json::json!(first_lost))], "{first}, then {second}: the first fault fired");
+    let headers = received(&harness);
+    let shape: Vec<_> = headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect();
+    assert_eq!(shape, [(0, 1_000)], "{first}, then {second}: the delivered prefix");
+    let domain = headers[0].first_sample_time.domain();
+    harness.step(2_002_000_000).unwrap();
+    // The second fault lands before any block: a sequence error inside the overrun's gap loses
+    // block_len = 2 000 from the first k_g; an overrun inside the sequence error's skip
+    // [1 000, 3 000) loses (2 ms + g) - 3 000 = g - 1 000.
+    let second_lost = if second == "rx_overflow" { gap - 1_000 } else { 2_000 };
+    assert_eq!(fault_rows(&harness, second), [(serde_json::json!(true), serde_json::json!(second_lost))], "{first}, then {second}: the second fault fired");
+    // Both reports are pending: no block was published between the first fault and the cut.
+    harness.step(2_010_000_000).unwrap();
+    assert!(received(&harness).is_empty(), "{first}, then {second}: no block between the first fault and the cut");
+    // The Stop at 20 ms: c = 20 000, so the tail is 20 000 - 1 000 = 19 000.
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.step(2_020_000_000).unwrap();
+    harness.step(2_030_000_000).unwrap();
+    assert!(received(&harness).is_empty(), "{first}, then {second}: no block after the prefix");
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 19_000 })], "{first}, then {second}");
+    assert_eq!(fault_rows(&harness, first), [(serde_json::json!(true), serde_json::json!(first_lost))], "{first}, then {second}: the first row is unchanged");
+    assert_eq!(fault_rows(&harness, second), [(serde_json::json!(true), serde_json::json!(second_lost))], "{first}, then {second}: the second row is unchanged");
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!(
+        (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())),
+        (2_000_000_000, Some(2_020_000_000)),
+        "{first}, then {second}: the clock ends at the cut"
+    );
+}
+
+#[test]
+fn mr_21_a_sequence_error_then_an_overrun_before_one_cut_make_one_tail() {
+    two_reports_then_a_cut("rx_sequence_error", "rx_overflow");
+}
+
+#[test]
+fn mr_21_an_overrun_then_a_sequence_error_before_one_cut_make_one_tail() {
+    two_reports_then_a_cut("rx_overflow", "rx_sequence_error");
+}
+
+#[test]
+fn mr_21_a_second_overrun_in_a_gap_then_a_cut_reports_the_cut_not_the_sum() {
+    // S8c, RM-17: an overrun at 1 ms loses [1 000, 141 000); a second at 10 ms starts from the
+    // first's k_g = 141 000 and loses 10 000 + g - 141 000 = 9 000. A Stop at 20 ms cuts at
+    // c = 20 000: the tail is 20 000 - 1 000 = 19 000, not the rows' sum g + 9 000 = 149 000.
+    let gap = gap_samples();
+    let env = [(
+        "sim.faults",
+        serde_json::json!([
+            { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
+            { "at_ns": 10_000_000, "fault": "rx_overflow", "target": "radio" }
+        ]),
+    )];
+    let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_000_000).unwrap();
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))], "the first overrun fired");
+    let headers = received(&harness);
+    let shape: Vec<_> = headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect();
+    assert_eq!(shape, [(0, 1_000)], "the delivered prefix");
+    let domain = headers[0].first_sample_time.domain();
+    harness.step(2_010_000_000).unwrap();
+    assert_eq!(
+        fault_rows(&harness, "rx_overflow"),
+        [(serde_json::json!(true), serde_json::json!(gap)), (serde_json::json!(true), serde_json::json!(9_000))],
+        "the second overrun fired inside the gap"
+    );
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.step(2_020_000_000).unwrap();
+    harness.step(2_030_000_000).unwrap();
+    assert!(received(&harness).is_empty(), "no block after the prefix");
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 19_000 })]);
+    assert_ne!(19_000, gap + 9_000, "the tail is the cut's distance, not the reports' sum");
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap)), (serde_json::json!(true), serde_json::json!(9_000))], "the rows keep the injections");
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!((record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())), (2_000_000_000, Some(2_020_000_000)));
+}
+
+#[test]
+fn mr_25_an_abort_after_a_stop_in_the_gap_keeps_the_stop_s_cut_and_its_tail() {
+    // S15e, RM-17: a Stop of the stream at 6 ms cuts at c = 6 000 while the overrun's report
+    // is pending: the segment settles with the tail 6 000 - 1 000 = 5 000 and the clock ends
+    // there. The abort the Run books afterwards finds no running segment and changes neither.
+    let gap = gap_samples();
+    let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
+    let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_000_000_000).unwrap();
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    harness.step(2_006_000_000).unwrap();
+    harness.step(2_010_000_000).unwrap();
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))], "the overrun fired");
+    let headers = received(&harness);
+    let shape: Vec<_> = headers.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect();
+    assert_eq!(shape, [(0, 1_000)], "the delivered prefix");
+    let domain = headers[0].first_sample_time.domain();
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!(
+        (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())),
+        (2_000_000_000, Some(2_006_000_000)),
+        "the Stop already settled the segment at its cut"
+    );
+    harness.mock.stop(StopMode::Abort).unwrap();
+    harness.step(2_020_000_000).unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/rx/s0")).expect("the receive clock");
+    assert_eq!((record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap())), (2_000_000_000, Some(2_006_000_000)), "the abort keeps the Stop's end, not k_f");
+    assert!(received(&harness).is_empty(), "no block after the prefix");
+    assert_eq!(rx_tails(&harness), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 5_000 })]);
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(gap))], "the row keeps the injection");
 }
 
 #[test]
@@ -3140,13 +3843,13 @@ fn mr_37_the_overflow_travels_the_hot_path() {
         "sim.faults",
         serde_json::json!([
             { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
-            { "at_ns": 60_000_000, "fault": "rx_sequence_error", "target": "radio" }
+            { "at_ns": gap_ns() + 10_000_000, "fault": "rx_sequence_error", "target": "radio" }
         ]),
     )];
     let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
     RING_DEPTH.with(|depth| depth.set(4096));
     harness.arm_start(2_000_000_000).unwrap();
-    for ms in 1..=66 {
+    for ms in 1..=(gap_ns() / 1_000_000 + 16) {
         harness.step(2_000_000_000 + ms * 1_000_000).unwrap();
     }
     let faults = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.faults").unwrap()];
@@ -3159,7 +3862,7 @@ fn mr_37_the_overflow_travels_the_hot_path() {
     assert_eq!(delivered[0].severity, ezsdr_kernel::event::Severity::Warning, "RM-10's severity");
     assert_eq!(delivered[0].source, node_src("mock/rx/s0"));
     assert_eq!(delivered[0].payload.as_array().map(Vec::len), Some(9), "RM-24's bytes: {}", delivered[0].payload);
-    assert_eq!(RxOverflowPayload::from_payload(&delivered[0].payload).unwrap(), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 });
+    assert_eq!(RxOverflowPayload::from_payload(&delivered[0].payload).unwrap(), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: gap_samples() as u64 });
     let dropped: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::EVENTS_DROPPED).collect();
     assert_eq!(dropped.len(), 1);
     assert_eq!(dropped[0].payload, serde_json::json!({ "kind": ezsdr_radio::kinds::RX_OVERFLOW, "count": 1 }));

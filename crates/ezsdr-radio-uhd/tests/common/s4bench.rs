@@ -510,8 +510,10 @@ pub const S4_STALL_SWEEP_MS: [u64; 3] = [100, 500, 2_000];
 pub const S4_STALL_SWEEP_RATE_HZ: u64 = 100_000_000;
 /// The owner's stability criterion (41 §8, 2026-10-27): (max - min) / max of the restart-after-resume times at a rate is at most this (here 1/2).
 pub const S4_STABILITY_NUM_DEN: (u64, u64) = (1, 2);
-/// D5's decided value for the overflow restart gap (owner, 2026-11-13): the maximum of the 2026-11-13 loaded run, 139.111 ms, rounded up.
-pub const S4_D5_VALUE_NS: u64 = 140_000_000;
+/// The bound the D5 decision line compares the maximum with: the profile's `overflow_restart_gap_ns`.
+pub fn s4_bound_ns() -> u64 {
+    ezsdr_radio::x3xx::timing().overflow_restart_gap_ns as u64
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct S4Cell {
@@ -562,7 +564,7 @@ impl S4Trial {
 
     /// A trial that counts: one overflow, the whole gap read, and a restart-after-resume time.
     pub fn complete(&self) -> bool {
-        self.class == TrialClass::Success && self.restart_ns.is_some()
+        measurement::overflow_trial_complete(self.class, self.restart_ns)
     }
 
     pub fn row(&self, cell: &S4Cell, index: usize) -> String {
@@ -657,20 +659,28 @@ pub fn s4_cell_decision(cell: &S4Cell, trials: &[S4Trial], stopped: Option<&str>
     format!("S4 decision {name}: {observed}; owner's criterion (max - min)/max <= 0.5: {met} ({} of {} trials)", times.len(), cell.trials)
 }
 
-/// The decision lines of the run: every cell, then D5's bound over the rate cells, then the stall-length figures of the cells at `sweep_rate_hz` (the rate the sweep ran at).
+/// The `S4 decision {label}` bound line over `cells`: the maximum restart-after-resume, and whether every cell has its planned complete trials.
+fn bound_line(label: &str, cells: &[&(S4Cell, Vec<S4Trial>)], what: &str) -> String {
+    let max_of = |cells: &[&(S4Cell, Vec<S4Trial>)]| cells.iter().flat_map(|(_, trials)| trials.iter().filter(|trial| trial.complete()).filter_map(|trial| trial.restart_ns)).max();
+    let complete = cells.iter().all(|(cell, trials)| trials.iter().filter(|trial| trial.complete()).count() == cell.trials);
+    if let Some(max) = max_of(cells) {
+        let bound = s4_bound_ns();
+        let (rounded, side) = (max.div_ceil(1_000_000), if max <= bound { "at or below" } else { "above" });
+        let text = format!("max restart-after-resume over the {what} {} ms (whole ms: {rounded} ms), {side} D5's {} ms", ms(max), bound / 1_000_000);
+        return if complete { format!("S4 decision {label}: {text}") } else { format!("S4 decision {label}: INCONCLUSIVE: a {} is incomplete; observed: {text}", what.trim_end_matches('s')) };
+    }
+    format!("S4 decision {label}: INCONCLUSIVE: no complete trial")
+}
+
+/// The decision lines of the run: every cell, then D5's bound over the rate cells and over the sweep cells, then the stall-length figures of the cells at `sweep_rate_hz` (the rate the sweep ran at).
 pub fn s4_decisions(run: &S4Run, sweep_rate_hz: u64) -> Vec<String> {
     let mut lines: Vec<String> = run.cells.iter().map(|(cell, trials)| s4_cell_decision(cell, trials, run.stopped.as_deref())).collect();
     let rate_cells: Vec<_> = run.cells.iter().filter(|(cell, _)| !cell.sweep).collect();
-    let max_of = |cells: &[&(S4Cell, Vec<S4Trial>)]| cells.iter().flat_map(|(_, trials)| trials.iter().filter(|trial| trial.complete()).filter_map(|trial| trial.restart_ns)).max();
-    let complete = rate_cells.iter().all(|(cell, trials)| trials.iter().filter(|trial| trial.complete()).count() == cell.trials);
-    if let Some(max) = max_of(&rate_cells) {
-        let (rounded, side) = (max.div_ceil(1_000_000), if max <= S4_D5_VALUE_NS { "at or below" } else { "above" });
-        let text = format!("max restart-after-resume over the rate cells {} ms (whole ms: {rounded} ms), {side} D5's {} ms", ms(max), S4_D5_VALUE_NS / 1_000_000);
-        lines.push(if complete { format!("S4 decision D5 bound: {text}") } else { format!("S4 decision D5 bound: INCONCLUSIVE: a rate cell is incomplete; observed: {text}") });
-    } else {
-        lines.push("S4 decision D5 bound: INCONCLUSIVE: no complete trial".to_owned());
-    }
+    lines.push(bound_line("D5 bound", &rate_cells, "rate cells"));
     let sweep: Vec<_> = run.cells.iter().filter(|(cell, _)| cell.rate_hz == sweep_rate_hz).collect();
+    if run.cells.iter().any(|(cell, _)| cell.sweep) {
+        lines.push(bound_line("D5 bound (sweep cells)", &sweep, "sweep cells"));
+    }
     if sweep.len() > 1 {
         let figures: Vec<String> = sweep
             .iter()
@@ -693,6 +703,19 @@ pub fn s4_decisions(run: &S4Run, sweep_rate_hz: u64) -> Vec<String> {
 /// `trials` for S4 from the environment-style map, 20 by default (the owner's plan).
 pub fn s4_trials(values: &BTreeMap<String, String>) -> Result<usize, String> {
     usize::try_from(env_count(values, "EZSDR_S4_TRIALS", 20)?).map_err(|_| "EZSDR_S4_TRIALS is too large".to_owned())
+}
+
+/// `EZSDR_S4_BLOCK_LEN` from the environment-style map: the receive block length (UR-5 `block_len`) the S4 Runs use; `None` (the Module's
+/// default) when absent. The Module refuses a value outside 1..=65536 when the Session opens.
+pub fn s4_block_len(values: &BTreeMap<String, String>) -> Result<Option<u64>, String> {
+    values.contains_key("EZSDR_S4_BLOCK_LEN").then(|| env_count(values, "EZSDR_S4_BLOCK_LEN", 0)).transpose()
+}
+
+/// The thread's selector override with `block_len` laid in, so that `slot_a_guarded`'s `rx`/`tx` pin stays.
+pub fn with_block_len(selector: Option<Json>, block_len: u64) -> Json {
+    let mut selector = selector.unwrap_or_else(|| json!({}));
+    selector["block_len"] = json!(block_len);
+    selector
 }
 
 #[cfg(test)]
@@ -905,8 +928,9 @@ mod tests {
 
     #[test]
     fn d5s_bound_is_inconclusive_while_a_rate_cell_is_incomplete() {
+        let bound_ms = (ezsdr_radio::x3xx::timing().overflow_restart_gap_ns / 1_000_000) as u64;
         let cell = |rate_hz| S4Cell { rate_hz, stall_ms: 500, trials: 2, sweep: false };
-        let run = S4Run { cells: vec![(cell(1_000_000), vec![s4(Some(70)), s4(Some(80))]), (cell(10_000_000), vec![s4(Some(70)), s4(None)])], stopped: None };
+        let run = S4Run { cells: vec![(cell(1_000_000), vec![s4(Some(bound_ms / 2)), s4(Some(80))]), (cell(10_000_000), vec![s4(Some(bound_ms / 2)), s4(None)])], stopped: None };
         let lines = s4_decisions(&run, S4_STALL_SWEEP_RATE_HZ);
         assert!(lines.last().unwrap().contains("D5 bound: INCONCLUSIVE: a rate cell is incomplete") && lines.last().unwrap().contains("80.000 ms"), "{lines:?}");
     }
@@ -924,23 +948,32 @@ mod tests {
 
     #[test]
     fn s4_decisions_state_the_spread_the_bound_and_the_stall_figures() {
+        let bound_ms = (ezsdr_radio::x3xx::timing().overflow_restart_gap_ns / 1_000_000) as u64;
         let cell = |rate_hz, stall_ms, sweep| S4Cell { rate_hz, stall_ms, trials: 2, sweep };
         let run = S4Run {
             cells: vec![
-                (cell(1_000_000, 20_000, false), vec![s4(Some(70)), s4(Some(140))]),
-                (cell(100_000_000, 500, false), vec![s4(Some(70)), s4(Some(141))]),
+                (cell(1_000_000, 20_000, false), vec![s4(Some(bound_ms / 2)), s4(Some(bound_ms))]),
+                (cell(100_000_000, 500, false), vec![s4(Some(bound_ms / 2)), s4(Some(bound_ms + 1))]),
                 (cell(100_000_000, 100, true), vec![s4(Some(80)), s4(None)]),
             ],
             stopped: None,
         };
         let lines = s4_decisions(&run, S4_STALL_SWEEP_RATE_HZ);
-        assert!(lines[0].contains("max 140.000 ms") && lines[0].contains("<= 0.5: met"), "{}", lines[0]);
-        assert!(lines[1].contains("max 141.000 ms") && lines[1].contains("not met"), "{}", lines[1]);
+        assert!(lines[0].contains(&format!("max {bound_ms}.000 ms")) && lines[0].contains("<= 0.5: met"), "{}", lines[0]);
+        assert!(lines[1].contains(&format!("max {}.000 ms", bound_ms + 1)) && lines[1].contains("not met"), "{}", lines[1]);
         assert!(lines[2].contains("INCONCLUSIVE") && lines[2].contains("1 complete of 2"), "{}", lines[2]);
-        assert!(lines[3].contains("max restart-after-resume over the rate cells 141.000 ms (whole ms: 141 ms), above D5's 140 ms") && !lines[3].contains("INCONCLUSIVE"), "{}", lines[3]);
-        assert!(lines[4].contains("stall length at 100 MS/s: INCONCLUSIVE") && lines[4].contains("stall 100 ms") && lines[4].contains("stall 500 ms"), "{}", lines[4]);
-        let at = S4Run { cells: vec![(cell(1_000_000, 20_000, false), vec![s4(Some(140)), s4(Some(140))])], stopped: None };
-        assert!(s4_decisions(&at, S4_STALL_SWEEP_RATE_HZ)[1].contains("at or below D5's 140 ms"), "the bound is inclusive");
+        assert!(
+            lines[3].contains(&format!("max restart-after-resume over the rate cells {}.000 ms (whole ms: {} ms), above D5's {bound_ms} ms", bound_ms + 1, bound_ms + 1))
+                && !lines[3].contains("INCONCLUSIVE"),
+            "{}",
+            lines[3]
+        );
+        // The sweep bound now covers every cell at the sweep's rate: the shared 100 MS/s 500 ms rate cell (max bound_ms + 1)
+        // as well as the 100 MS/s 100 ms sweep cell (max 80), and the sweep cell is incomplete.
+        assert!(lines[4].contains("D5 bound (sweep cells): INCONCLUSIVE: a sweep cell is incomplete") && lines[4].contains(&format!("over the sweep cells {}.000 ms", bound_ms + 1)), "{}", lines[4]);
+        assert!(lines[5].contains("stall length at 100 MS/s: INCONCLUSIVE") && lines[5].contains("stall 100 ms") && lines[5].contains("stall 500 ms"), "{}", lines[5]);
+        let at = S4Run { cells: vec![(cell(1_000_000, 20_000, false), vec![s4(Some(bound_ms)), s4(Some(bound_ms))])], stopped: None };
+        assert!(s4_decisions(&at, S4_STALL_SWEEP_RATE_HZ)[1].contains(&format!("at or below D5's {bound_ms} ms")), "the bound is inclusive");
         let at_50 = S4Run {
             cells: vec![
                 (cell(50_000_000, 500, false), vec![s4(Some(70)), s4(Some(90))]),
@@ -951,6 +984,57 @@ mod tests {
         };
         let sweep = s4_decisions(&at_50, 50_000_000).pop().unwrap();
         assert!(sweep.contains("stall length at 50 MS/s: stall 500 ms") && sweep.contains("stall 2000 ms") && !sweep.contains("INCONCLUSIVE"), "the summary follows the sweep's own rate: {sweep}");
+    }
+
+    #[test]
+    fn s4_decisions_report_a_sweep_cell_above_the_bound() {
+        let bound_ms = (ezsdr_radio::x3xx::timing().overflow_restart_gap_ns / 1_000_000) as u64;
+        let cell = |rate_hz, stall_ms, sweep| S4Cell { rate_hz, stall_ms, trials: 2, sweep };
+        let decide = |sweep_trials: Vec<S4Trial>| {
+            let run = S4Run { cells: vec![(cell(1_000_000, 20_000, false), vec![s4(Some(bound_ms / 2)), s4(Some(bound_ms))]), (cell(100_000_000, 100, true), sweep_trials)], stopped: None };
+            s4_decisions(&run, S4_STALL_SWEEP_RATE_HZ)
+        };
+        let sweep_line =
+            |lines: &[String]| lines.iter().find(|line| line.starts_with("S4 decision D5 bound (sweep cells):")).cloned().unwrap_or_else(|| panic!("no sweep-cell bound line in {lines:?}"));
+        let rate_line = |lines: &[String]| lines.iter().find(|line| line.starts_with("S4 decision D5 bound:")).cloned().unwrap_or_else(|| panic!("no rate-cell bound line in {lines:?}"));
+        let above = decide(vec![s4(Some(bound_ms / 2)), s4(Some(bound_ms + 1))]);
+        assert!(sweep_line(&above).contains(&format!("above D5's {bound_ms} ms")), "a sweep trial above the bound: {}", sweep_line(&above));
+        assert!(rate_line(&above).contains("at or below"), "the rate cells stay at or below: {}", rate_line(&above));
+        let at = decide(vec![s4(Some(bound_ms / 2)), s4(Some(bound_ms))]);
+        assert!(sweep_line(&at).contains("at or below"), "the bound is inclusive for a sweep cell: {}", sweep_line(&at));
+        let incomplete = decide(vec![s4(Some(bound_ms / 2)), s4(None)]);
+        assert!(
+            sweep_line(&incomplete).contains("INCONCLUSIVE: a sweep cell is incomplete") && sweep_line(&incomplete).contains(&format!("over the sweep cells {}.000 ms", bound_ms / 2)),
+            "a sweep cell without its second trial: {}",
+            sweep_line(&incomplete)
+        );
+    }
+
+    #[test]
+    fn s4_decisions_sweep_bound_counts_the_shared_rate_cell() {
+        let bound_ms = (ezsdr_radio::x3xx::timing().overflow_restart_gap_ns / 1_000_000) as u64;
+        let cell = |rate_hz, stall_ms, sweep| S4Cell { rate_hz, stall_ms, trials: 2, sweep };
+        let with_sweep = S4Run {
+            cells: vec![
+                (cell(1_000_000, 20_000, false), vec![s4(Some(bound_ms / 2)), s4(Some(bound_ms))]),
+                (cell(100_000_000, 500, false), vec![s4(Some(bound_ms / 2)), s4(Some(bound_ms + 1))]),
+                (cell(100_000_000, 100, true), vec![s4(Some(bound_ms / 2)), s4(Some(bound_ms))]),
+            ],
+            stopped: None,
+        };
+        let sweep_line =
+            |lines: &[String]| lines.iter().find(|line| line.starts_with("S4 decision D5 bound (sweep cells)")).cloned().unwrap_or_else(|| panic!("no sweep-cell bound line in {lines:?}"));
+        assert!(
+            sweep_line(&s4_decisions(&with_sweep, S4_STALL_SWEEP_RATE_HZ)).contains(&format!("above D5's {bound_ms} ms")),
+            "the shared rate cell's bound_ms + 1 exceeds D5: {:?}",
+            s4_decisions(&with_sweep, S4_STALL_SWEEP_RATE_HZ)
+        );
+        let without_sweep = S4Run { cells: with_sweep.cells.iter().filter(|(cell, _)| !cell.sweep).cloned().collect(), stopped: None };
+        assert!(
+            s4_decisions(&without_sweep, S4_STALL_SWEEP_RATE_HZ).iter().all(|line| !line.starts_with("S4 decision D5 bound (sweep cells)")),
+            "a run without a sweep-only cell has no sweep bound line: {:?}",
+            s4_decisions(&without_sweep, S4_STALL_SWEEP_RATE_HZ)
+        );
     }
 
     #[test]
@@ -975,5 +1059,21 @@ mod tests {
         let line = t200_decision(&[run(0), run(1), run(0)], 3, &plan, None);
         assert!(line.contains("2 Success, 1 failed") && line.contains("[0, 1, 0]") && line.contains("[61.5] s") && !line.contains("INCONCLUSIVE"), "{line}");
         assert!(t200_decision(&[run(0), run(0)], 3, &plan, Some("latched")).contains("INCONCLUSIVE"));
+    }
+
+    #[test]
+    fn s4_block_len_is_optional_and_positive() {
+        let env = |value: Option<&str>| -> BTreeMap<String, String> { value.map(|value| ("EZSDR_S4_BLOCK_LEN".to_owned(), value.to_owned())).into_iter().collect() };
+        assert_eq!(s4_block_len(&env(None)), Ok(None), "absent: the Module's default");
+        assert_eq!(s4_block_len(&env(Some("65536"))), Ok(Some(65_536)));
+        assert!(s4_block_len(&env(Some("0"))).is_err(), "zero is not a block length");
+        assert!(s4_block_len(&env(Some("x"))).is_err(), "not a number");
+    }
+
+    #[test]
+    fn with_block_len_keeps_the_layout_pin() {
+        let layout = json!({"rx":["0:A:ubx:0"],"tx":["0:A:ubx:0"]});
+        assert_eq!(with_block_len(Some(layout), 65_536), json!({"rx":["0:A:ubx:0"],"tx":["0:A:ubx:0"],"block_len":65_536}));
+        assert_eq!(with_block_len(None, 4_000), json!({"block_len":4_000}));
     }
 }

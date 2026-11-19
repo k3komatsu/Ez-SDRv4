@@ -62,7 +62,7 @@ An AI agent should be able to:
 
 ## The Timing Envelope, and why Mock must enforce it
 
-"Change only the BindingProfile" holds only if the constraints of the hardware are (a) visible at `validate()` time and (b) enforced by the Mock. The constraints are concrete: a minimum lead time for timed commands, a start-up latency (PPS synchronisation takes up to two seconds), the time a device needs before a stream can start again, coercion of sample rate / gain / frequency to a device grid, a restart gap after an RX overflow (UHD restarts a continuous stream about 50 ms later), and alignment constraints for repeat waveforms held in device memory.
+"Change only the BindingProfile" holds only if the constraints of the hardware are (a) visible at `validate()` time and (b) enforced by the Mock. The constraints are concrete: a minimum lead time for timed commands, a start-up latency (PPS synchronisation takes up to two seconds), the time a device needs before a stream can start again, coercion of sample rate / gain / frequency to a device grid, a restart gap after an RX overflow (UHD restarts a continuous stream once the host has read the samples it had buffered, which the profile bounds: RM-17), and alignment constraints for repeat waveforms held in device memory.
 
 A software radio that accepts everything is the OpenAirInterface `rfsimulator` pattern: it implements the same device interface as real hardware but never emulates late, underflow or overflow, so experiments pass in software and fail on the bench.
 

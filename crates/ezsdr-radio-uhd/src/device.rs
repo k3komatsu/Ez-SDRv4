@@ -268,8 +268,16 @@ pub fn decimation(mcr: u64, rate: f64) -> Option<u64> {
 /// its time was set.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FakeFault {
-    /// An overrun: the receive stream skips 50 ms and reports `Overflow`.
+    /// An overrun: the receive stream skips the profile's `overflow_restart_gap_ns` (`x3xx::timing`) and reports `Overflow`.
     Overflow(Duration),
+    /// UHD's queued restart overtakes the stop (UR-17, UR-18): after an overrun (a scripted `Overflow` or a behind overflow), until a sample of its restart
+    /// has been returned, the first `rx_stop` leaves the stream running from its restart, and the next `rx_stop` clears it, as does any stop once the
+    /// restart's samples have flowed. A start issued while the stream survives is queued behind it. UHD posts the restart request asynchronously from inside
+    /// the receive call and a stop is a synchronous post into the same action queue (`rfnoc_rx_streamer.cpp:131–150, 179–186`, `graph.cpp:573–622`): a stop
+    /// queued before the radio's handler has posted its START is processed first and the START survives it; that stop's own post returns only on an empty,
+    /// idle queue, so the START is already written when the next stop is issued, and the next stop clears it (`radio_rx_core.v:171–183`). The order is the knob's, scripted; the fake invents no timing for the
+    /// race, which is INFERRED. Consumed once.
+    RestartOvertakesStop,
     /// A sequence error: one block lost, reported `Overflow { out_of_sequence }`.
     SequenceError(Duration),
     /// An alignment error: one block lost, reported `Alignment`.
@@ -482,6 +490,10 @@ struct RxStreamer {
     end: Option<i64>,
     /// A start issued while a stopped stream's tail is still being delivered: its origin and its ticks a sample.
     then: Option<(i64, i64)>,
+    /// The pending restart of an overrun whose START UHD has queued and no sample of which has been returned.
+    restart: bool,
+    /// A stop left the restart running.
+    survivor: bool,
     /// Where the running stream's packets begin: its start (UHD's packets are the
     /// stream's, not a request's; Review O, N-2).
     origin: i64,
@@ -493,7 +505,7 @@ struct RxStreamer {
 
 impl RxStreamer {
     fn new(channels: Vec<usize>) -> RxStreamer {
-        RxStreamer { channels, next: None, ratio: 1, end: None, then: None, origin: 0, head_until: 0, late: None, last: None }
+        RxStreamer { channels, next: None, ratio: 1, end: None, then: None, restart: false, survivor: false, origin: 0, head_until: 0, late: None, last: None }
     }
 
     /// A start at tick `at` with `ratio` ticks a sample: the packets begin there and so does the head.
@@ -1194,6 +1206,11 @@ impl FakeDevice {
         (duration.as_nanos() as i128 * self.config.master_clock_rate as i128 / 1_000_000_000) as i64
     }
 
+    /// The profile's overflow restart gap in master-clock ticks (`x3xx::timing`).
+    fn restart_gap_ticks(&self) -> i64 {
+        self.ticks_of(Duration::from_nanos(ezsdr_radio::x3xx::timing().overflow_restart_gap_ns as u64))
+    }
+
     fn now(&self, st: &Fake) -> i64 {
         self.base(st) + st.offset
     }
@@ -1327,6 +1344,8 @@ impl FakeDevice {
                 st.rx.get_mut(&stream).expect("checked").late = Some(at);
             }
             None if at < now => st.rx.get_mut(&stream).expect("checked").late = Some(at),
+            // Queued behind a surviving restart, which the next stop clears.
+            None if st.rx[&stream].survivor => st.rx.get_mut(&stream).expect("checked").then = Some((at, ratio)),
             // Behind the stopped stream's tail, which is delivered first.
             None if st.rx[&stream].end.is_some() => st.rx.get_mut(&stream).expect("checked").then = Some((at, ratio)),
             None => st.rx.get_mut(&stream).expect("checked").begin(at, ratio),
@@ -1461,6 +1480,8 @@ impl Device for FakeDevice {
             streamer.next = None;
             streamer.end = None;
             streamer.then = None;
+            streamer.restart = false;
+            streamer.survivor = false;
             streamer.late = None;
         }
         Ok(())
@@ -1654,7 +1675,18 @@ impl Device for FakeDevice {
         if !st.rx.contains_key(&stream) {
             return Err(DeviceError::failed(format!("fake: receive stream {stream} is not open")));
         }
+        let st = &mut *st;
+        let overtaken = self.config.faults.iter().position(|f| *f == FakeFault::RestartOvertakesStop).filter(|i| !st.fired[*i]);
         let streamer = st.rx.get_mut(&stream).expect("checked");
+        if std::mem::take(&mut streamer.restart) {
+            if let Some(index) = overtaken {
+                streamer.survivor = true;
+                st.fired[index] = true;
+                st.calls.push(format!("rx_restart_survived {stream}"));
+                return Ok(());
+            }
+        }
+        streamer.survivor = false;
         streamer.then = None;
         match streamer.next {
             Some(next) if next < now => streamer.end = Some(streamer.end.map_or(now, |end| end.min(now))),
@@ -1733,9 +1765,10 @@ impl Device for FakeDevice {
             let block = n as i64 * ratio;
             match fault {
                 FakeFault::Overflow(_) => {
-                    let skip = (self.ticks_of(Duration::from_millis(50)) + ratio - 1) / ratio * ratio;
+                    let skip = (self.restart_gap_ticks() + ratio - 1) / ratio * ratio;
                     let streamer = st.rx.get_mut(&stream).expect("checked");
                     streamer.next = Some(next + skip);
+                    streamer.restart = true;
                     streamer.head_until = rx_head_until(next + skip, ratio);
                     return RxRecv::Overflow { out_of_sequence: false };
                 }
@@ -1772,9 +1805,11 @@ impl Device for FakeDevice {
         }
         let end = next + n * ratio;
         if now - end > behind {
-            let restart = next + ((now - next) / ratio + 1) * ratio;
+            let gap_ticks = self.restart_gap_ticks();
+            let restart = next + ((now + gap_ticks - next + ratio - 1) / ratio) * ratio;
             let streamer = st.rx.get_mut(&stream).expect("checked");
             streamer.next = Some(restart);
+            streamer.restart = true;
             streamer.head_until = rx_head_until(restart, ratio);
             return RxRecv::Overflow { out_of_sequence: false };
         }
@@ -1860,6 +1895,7 @@ impl Device for FakeDevice {
         {
             let streamer = st.rx.get_mut(&stream).expect("checked");
             streamer.last = Some(next);
+            streamer.restart = false;
             if streamer.next.is_some() {
                 streamer.next = Some(next + got * ratio);
             }
@@ -2180,6 +2216,14 @@ impl Device for FakeDevice {
     fn raise_thread_priority(&self) -> Result<(), DeviceError> {
         Ok(())
     }
+}
+
+/// The fake's restart after an overrun: the first tick of the stream's grid at or after `now` plus the profile's gap, from its cursor `next` (the fake's own formula).
+#[cfg(test)]
+pub(crate) fn restart_from(next: i64, now: i64) -> i64 {
+    let ratio = 200; // 200 MHz master clock / 1 MS/s: one sample is 200 ticks.
+    let gap_ticks = ezsdr_radio::x3xx::timing().overflow_restart_gap_ns * 200_000_000 / 1_000_000_000;
+    next + (now + gap_ticks - next + ratio - 1) / ratio * ratio
 }
 
 #[cfg(test)]
@@ -2704,16 +2748,29 @@ mod tests {
             device.rx_open(0, &[0]).unwrap();
             let at = ms(5);
             device.rx_start(0, at).unwrap();
+            let gap_ticks = ezsdr_radio::x3xx::timing().overflow_restart_gap_ns * 200_000_000 / 1_000_000_000;
             let mut seen = 0;
+            let mut cursor = at;
+            let mut overrun_now = None;
             let mut got: Vec<(i64, Iq)> = Vec::new();
             for call in 0..20_000 {
                 if late_reader && call == 20 {
                     device.host().sleep(Duration::from_millis(150));
                 }
+                let now = device.time_now().unwrap();
                 match device.rx_recv(0, 100, Duration::from_millis(100), false) {
-                    RxRecv::Samples { first_tick, samples } if seen > 0 => got.extend(samples[0].iter().enumerate().map(|(i, sample)| (first_tick + i as i64 * 200, *sample))),
-                    RxRecv::Samples { .. } | RxRecv::Timeout => {}
-                    RxRecv::Overflow { out_of_sequence: false } => seen += 1,
+                    RxRecv::Samples { first_tick, samples } => {
+                        if seen == 0 {
+                            cursor = first_tick + samples[0].len() as i64 * 200;
+                        } else {
+                            got.extend(samples[0].iter().enumerate().map(|(i, sample)| (first_tick + i as i64 * 200, *sample)));
+                        }
+                    }
+                    RxRecv::Timeout => {}
+                    RxRecv::Overflow { out_of_sequence: false } => {
+                        overrun_now = Some(now);
+                        seen += 1;
+                    }
                     other => panic!("{other:?}"),
                 }
                 if got.len() >= 100 {
@@ -2722,7 +2779,14 @@ mod tests {
             }
             assert_eq!(seen, 1, "one overrun");
             let restart = got[0].0;
-            assert!(restart > at + 100 * 200, "the restart is after the gap: {restart}");
+            if late_reader {
+                let now = overrun_now.expect("the overrun's device time");
+                assert!(restart >= now + gap_ticks, "the restart is at or after now + the gap: {restart} < {}", now + gap_ticks);
+                assert!(restart < now + gap_ticks + 200, "the restart is the first sample at or after now + the gap: {restart}");
+                assert_eq!((restart - at) % 200, 0, "the restart is on the stream's grid: {restart}");
+            } else {
+                assert_eq!(restart, cursor + (gap_ticks + 199) / 200 * 200, "the restart is the gap after the last sample the reader got");
+            }
             assert_segment(&got, restart, 200, &|t| ramp_at(t, 200), if late_reader { "a reader behind" } else { "the scripted overflow" });
         });
     }
@@ -2731,6 +2795,179 @@ mod tests {
     fn ur_33_the_fakes_overflow_restart_begins_with_the_head() {
         overrun_case(false);
         overrun_case(true);
+    }
+
+    /// Sets `device`'s time to zero, opens `channels` as stream 0 at 1 MS/s and starts it at tick 0.
+    fn zero_start(device: &FakeDevice, channels: &[usize]) {
+        device.set_time_zero(false).unwrap();
+        for chan in channels {
+            device.apply(Dir::Rx, *chan, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
+        }
+        device.rx_open(0, channels).unwrap();
+        device.rx_start(0, 0).unwrap();
+    }
+
+    #[test]
+    fn ur_33_a_restart_that_overtakes_the_first_stop_survives_it_and_the_second_clears_it() {
+        // UR-17, UR-18: UHD posts an overrun's restart asynchronously and a stop synchronously into one action queue; a
+        // stop that overtakes the queued START leaves the stream running from its restart, and the next stop clears it.
+        let ratio = 200; // 200 MHz master clock / 1 MS/s: one sample is 200 ticks.
+        let restart = restart_from(0, 0); // The restart of a stream at tick 0, whole samples.
+        // 1. No knob: the stop clears the queued restart, and no sample follows it.
+        {
+            let device = manual(FakeConfig { faults: vec![FakeFault::Overflow(Duration::ZERO)], ..FakeConfig::default() });
+            participant(&device, move |device| {
+                zero_start(&device, &[0]);
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Overflow { out_of_sequence: false }, "the scripted overrun");
+                device.rx_stop(0).unwrap();
+                assert!(device.calls().iter().any(|call| call == "rx_stop 0 now"), "the stop reached the device: {:?}", device.calls());
+                assert!(!device.calls().iter().any(|call| call == "rx_restart_survived 0"), "no knob, no survivor: {:?}", device.calls());
+                device.set_time(restart + ms(1));
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Timeout, "the cleared restart delivered nothing");
+            });
+        }
+        // 2. The knob: the first stop leaves the restart running; the samples prove the survivor, not a call count.
+        {
+            let device = manual(FakeConfig { faults: vec![FakeFault::Overflow(Duration::ZERO), FakeFault::RestartOvertakesStop], ..FakeConfig::default() });
+            participant(&device, move |device| {
+                zero_start(&device, &[0]);
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Overflow { out_of_sequence: false }, "the scripted overrun");
+                device.rx_stop(0).unwrap();
+                assert!(device.calls().iter().any(|call| call == "rx_stop 0 now"), "the swallowed stop still reached the device: {:?}", device.calls());
+                assert_eq!(device.calls().iter().filter(|call| *call == "rx_restart_survived 0").count(), 1, "one marker for the stop the restart survived: {:?}", device.calls());
+                device.set_time(restart + ms(1));
+                match device.rx_recv(0, 100, Duration::from_millis(1), false) {
+                    RxRecv::Samples { first_tick, samples } => {
+                        assert_eq!(first_tick, restart, "the survivor runs from the restart UHD queued");
+                        assert!(samples.iter().all(|channel| channel.len() == 100), "{samples:?}");
+                    }
+                    other => panic!("the survivor's samples: {other:?}"),
+                }
+            });
+        }
+        // 3. A start issued while the survivor runs is queued behind it; the second stop clears both.
+        {
+            let device = manual(FakeConfig { faults: vec![FakeFault::Overflow(Duration::ZERO), FakeFault::RestartOvertakesStop], ..FakeConfig::default() });
+            participant(&device, move |device| {
+                zero_start(&device, &[0]);
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Overflow { out_of_sequence: false }, "the scripted overrun");
+                device.rx_stop(0).unwrap();
+                device.set_time(restart + ms(1));
+                // Catch the reader up to the device's time: 1 ms of samples from the restart.
+                match device.rx_recv(0, 1_000, Duration::from_millis(1), false) {
+                    RxRecv::Samples { first_tick, .. } => assert_eq!(first_tick, restart, "the survivor's first block"),
+                    other => panic!("the survivor's first block: {other:?}"),
+                }
+                let at = restart + ms(50); // well beyond every block the survivor delivers below.
+                device.rx_start(0, at).unwrap();
+                device.set_time(at);
+                match device.rx_recv(0, 49_000, Duration::from_millis(1), false) {
+                    RxRecv::Samples { first_tick, samples } => {
+                        assert_eq!(first_tick, restart + ms(1), "the survivor's next block, not the queued start's origin");
+                        assert!(first_tick < at, "nothing at the queued origin arrives while the survivor runs: {first_tick} >= {at}");
+                        assert_eq!(samples[0].len(), 49_000, "the survivor keeps producing up to the queued origin");
+                    }
+                    other => panic!("the survivor's samples at the queued origin: {other:?}"),
+                }
+                device.rx_stop(0).unwrap();
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Timeout, "the second stop cleared the survivor");
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Timeout, "and the queued start with it");
+                assert_eq!(device.calls().iter().filter(|call| *call == "rx_restart_survived 0").count(), 1, "the first stop's marker, and the second's none: {:?}", device.calls());
+                // The cleared survivor holds no start: a new one begins at its own origin, 10 ms on (whole samples at 1 MS/s).
+                let at2 = device.time_now().unwrap() + ms(10);
+                assert_eq!(at2 % ratio, 0, "a whole number of samples after the clock's time");
+                device.rx_start(0, at2).unwrap();
+                device.set_time(at2 + ms(1));
+                match device.rx_recv(0, 100, Duration::from_millis(1), false) {
+                    RxRecv::Samples { first_tick, .. } => assert_eq!(first_tick, at2, "the new start is not queued behind a survivor: it begins at its own origin"),
+                    other => panic!("the new start's samples: {other:?}"),
+                }
+            });
+        }
+        // 4. The knob needs that no sample of the restart has been returned: a stop after samples flowed clears normally.
+        {
+            let device = manual(FakeConfig { faults: vec![FakeFault::Overflow(Duration::ZERO), FakeFault::RestartOvertakesStop], ..FakeConfig::default() });
+            participant(&device, move |device| {
+                zero_start(&device, &[0]);
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Overflow { out_of_sequence: false }, "the scripted overrun");
+                device.set_time(restart + ms(1));
+                match device.rx_recv(0, 1_000, Duration::from_millis(1), false) {
+                    RxRecv::Samples { first_tick, .. } => assert_eq!(first_tick, restart, "a sample of the restart was returned"),
+                    other => panic!("a sample of the restart: {other:?}"),
+                }
+                device.rx_stop(0).unwrap();
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Timeout, "no survivor: the knob needs that no sample of the restart has been returned");
+                assert!(!device.calls().iter().any(|call| call == "rx_restart_survived 0"), "a sample of the restart was returned, so no survivor: {:?}", device.calls());
+            });
+        }
+        // 5. Two channels of one streamer both survive.
+        {
+            let device = manual(FakeConfig { faults: vec![FakeFault::Overflow(Duration::ZERO), FakeFault::RestartOvertakesStop], ..FakeConfig::default() });
+            participant(&device, move |device| {
+                zero_start(&device, &[0, 1]);
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Overflow { out_of_sequence: false }, "the scripted overrun");
+                device.rx_stop(0).unwrap();
+                assert_eq!(device.calls().iter().filter(|call| *call == "rx_restart_survived 0").count(), 1, "one marker for the streamer's stop, not one per channel: {:?}", device.calls());
+                device.set_time(restart + ms(1));
+                match device.rx_recv(0, 100, Duration::from_millis(1), false) {
+                    RxRecv::Samples { first_tick, samples } => {
+                        assert_eq!(first_tick, restart, "both channels run from the restart");
+                        assert_eq!(samples.len(), 2, "both channels of the streamer survive the stop: {samples:?}");
+                        assert!(samples.iter().all(|channel| channel.len() == 100), "{samples:?}");
+                    }
+                    other => panic!("both channels' samples: {other:?}"),
+                }
+            });
+        }
+        // 6. The behind overflow arms the knob too: the reader is more than `OVERRUN_BEHIND` (100 ms) past the stream's
+        //    cursor at its first call, so the fake reports an overrun whose restart the stop overtakes.
+        {
+            let device = manual(FakeConfig { faults: vec![FakeFault::RestartOvertakesStop], ..FakeConfig::default() });
+            participant(&device, move |device| {
+                zero_start(&device, &[0]);
+                let restart = restart_from(0, ms(300)); // nothing was read before: the cursor is still 0, the reader 300 ms behind.
+                device.set_time(ms(300));
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Overflow { out_of_sequence: false }, "the reader is behind");
+                device.rx_stop(0).unwrap();
+                assert_eq!(device.calls().iter().filter(|call| *call == "rx_restart_survived 0").count(), 1, "the behind overflow armed the knob: {:?}", device.calls());
+                device.set_time(restart + ms(1));
+                match device.rx_recv(0, 100, Duration::from_millis(1), false) {
+                    RxRecv::Samples { first_tick, .. } => assert_eq!(first_tick, restart, "the survivor runs from the restart UHD queued for the behind overflow"),
+                    other => panic!("the survivor's samples: {other:?}"),
+                }
+            });
+        }
+        // 7a. A time reset spends the knob's pending restart: the stop after it finds none, though the streamer is the same.
+        {
+            let device = manual(FakeConfig { faults: vec![FakeFault::Overflow(Duration::ZERO), FakeFault::RestartOvertakesStop], ..FakeConfig::default() });
+            participant(&device, move |device| {
+                zero_start(&device, &[0]);
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Overflow { out_of_sequence: false }, "the scripted overrun");
+                device.set_time_zero(false).unwrap();
+                // The streamer is still open; the reset cleared its stream state, so a start at 0 works and the stop meets no restart.
+                device.rx_start(0, 0).unwrap();
+                device.rx_stop(0).unwrap();
+                assert!(!device.calls().iter().any(|call| *call == "rx_restart_survived 0"), "the reset spent the pending restart: {:?}", device.calls());
+            });
+        }
+        // 7b. The reset clears the survivor: a start after it is not queued behind the stream the first stop left running.
+        {
+            let device = manual(FakeConfig { faults: vec![FakeFault::Overflow(Duration::ZERO), FakeFault::RestartOvertakesStop], ..FakeConfig::default() });
+            participant(&device, move |device| {
+                zero_start(&device, &[0]);
+                assert_eq!(device.rx_recv(0, 100, Duration::from_millis(1), false), RxRecv::Overflow { out_of_sequence: false }, "the scripted overrun");
+                device.rx_stop(0).unwrap();
+                assert_eq!(device.calls().iter().filter(|call| *call == "rx_restart_survived 0").count(), 1, "the first stop survives: {:?}", device.calls());
+                device.set_time_zero(false).unwrap();
+                let at = ms(10);
+                device.rx_start(0, at).unwrap();
+                device.set_time(at + ms(1));
+                match device.rx_recv(0, 100, Duration::from_millis(1), false) {
+                    RxRecv::Samples { first_tick, .. } => assert_eq!(first_tick, at, "the new start is not queued behind a survivor: it begins at its own origin"),
+                    other => panic!("the new start's samples: {other:?}"),
+                }
+            });
+        }
     }
 
     #[test]

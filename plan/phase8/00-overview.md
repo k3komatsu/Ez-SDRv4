@@ -59,7 +59,7 @@ owner が用意できるもの（2026-10-16）：**USRP X300 × 2，UBX × 1，O
 1. **X310 の description を1か所にまとめ，channel と stream を分ける**（P1 (c)）．MockRadio と UHD Module は同じ名前の profile を同じ値で使う（文書監査 D3 はこの構造で片づく）．混在 board（UBX＋LFTX＋BasicRX など）と，設定の違う channel を1本の aligned stream で受けることを表せるようにする．独立した amendment spec にする（設計：[33-channels-and-streams.md](33-channels-and-streams.md)）．
 2. **parity test**（P2）：測定記録と，実機なしで毎回回る比較テスト．各値に「どちら向きが緩いか」を宣言する（文書監査 D10）．
 3. **測定スイート**：`hardware.rs` の `hw_b8_raw_*` などを，記録を出す測定にまとめ直す．H1〜H5，#56，B8 の残り，送信側の start lead，overflow の restart gap 単独，送信と 2ch の throughput（測れる範囲），coercion の read-back．FakeDevice でリハーサルしてから実機で回す．
-4. **Mock が緩い既知の箇所を直す**：#62（in-order release），#51 と D2（イベントの報告規則．先に設計メモ，AGENTS.md §6 の three strikes），#59（read-back 拒否の fault），preemption の bound，queue depth．
+4. **Mock が緩い既知の箇所を直す**：#62（in-order release），#51 と D2（イベントの報告規則．先に設計メモ，AGENTS.md §6 の three strikes），#59（read-back 拒否の fault），preemption の bound．（queue depth は note 48 S2b-i で `command_queue_depth` を外したので外す，2026-11-18）
 5. **方向別の start lead**（owner 決定 2026-10-08．未実装）：`radio.timing.start_lead_ns` を受信・送信の2つの値にする．
 6. **計画32 の A2**（RM/MR/UR の 14 条件）と **B**（4件，実機が要る）のテスト．多くは 4 の変更で書き直すので，4 の後に書く．
 7. **ホスト設定の script**：`ibfd_sefdm/set_addr.sh` をこのリポジトリへ移す（handoff §6.3）．

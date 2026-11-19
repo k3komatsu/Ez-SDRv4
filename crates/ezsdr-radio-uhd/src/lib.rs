@@ -35,6 +35,11 @@ pub fn module_ref() -> ModuleRef {
     ModuleRef { id: ModuleId::parse("ezsdr.radio.uhd").expect("a valid Module id"), version: Version::new(0, 4, 0) }
 }
 
+/// The block index a first raw tick at `offset` root ticks from the stream's origin is published at, on a lattice of `n` root ticks per sample: the nearest sample (UR-17, UR-18). The one place the rule is written: uhd-rx and the S9 bench tool both call it.
+pub fn lattice_index(offset: i64, n: i64) -> i64 {
+    (offset + n / 2).div_euclid(n)
+}
+
 /// The Module descriptor: one Module, the Provider and the Authority roles (UR-1).
 pub fn descriptor() -> ModuleDescriptor {
     let module = module_ref();

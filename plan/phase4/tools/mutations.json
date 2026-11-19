@@ -91,17 +91,6 @@
   "filter": "mr_37_the_overflow_travels_the_hot_path"
  },
  {
-  "id": "D10",
-  "name": "MR-37 the back-pressure overrun on the control path",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "let payload = ezsdr_radio::payloads::RxOverflowPayload { cause: ezsdr_radio::payloads::RxOverflowCause::Overrun, lost: lost.max(0) as u64 };\n        self.emit_overflow(k, payload",
-   "new": "self.emit_event(\"rx\", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, serde_json::json!({\"cause\": \"overrun\", \"lost\": lost.max(0) as u64})",
-   "scope": "fn emit_rx_overflow",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_19_backpressure_is_an_overrun"
- },
- {
   "id": "D11",
   "name": "MR-1 radio requirement left at 1.1.0",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
@@ -332,17 +321,6 @@
   "filter": "mr_37_the_overflow_travels_the_hot_path"
  },
  {
-  "id": "D34",
-  "name": "MR-19 the back-pressure overrun reports no loss",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "lost.max(0) as u64",
-  "new": "0",
-  "scope": "fn emit_rx_overflow",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_19_backpressure_is_an_overrun"
- },
- {
   "id": "D35",
   "name": "RM-17 chooses the last reported cause",
   "file": "crates/ezsdr-radio/src/lib.rs",
@@ -368,16 +346,6 @@
   "file": "crates/ezsdr-radio/src/lib.rs",
   "old": "        } else {\n            return None;\n        };\n        Some(RxOverflowPayload { cause, lost })",
   "new": "        } else {\n            RxOverflowCause::Sequence\n        };\n        Some(RxOverflowPayload { cause, lost })",
-  "crate": "ezsdr-radio",
-  "test_bin": "radio_model",
-  "filter": "rm_17_reported_losses_make_one_payload_for_the_block_jump"
- },
- {
-  "id": "D38",
-  "name": "RM-17 treats a gapless block as a zero-loss jump",
-  "file": "crates/ezsdr-radio/src/lib.rs",
-  "old": "        let lost = lost?;",
-  "new": "        let lost = lost.unwrap_or(0);",
   "crate": "ezsdr-radio",
   "test_bin": "radio_model",
   "filter": "rm_17_reported_losses_make_one_payload_for_the_block_jump"

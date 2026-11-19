@@ -30,6 +30,11 @@ fn rx_rate(d: u64) -> (&'static str, Constraint) {
     ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(rate(d)).unwrap()))
 }
 
+/// MR-17's overflow restart gap from the x3xx profile, in root ticks (the tests' root is 1 GHz).
+fn gap_ns() -> i64 {
+    ezsdr_radio::x3xx::timing().overflow_restart_gap_ns
+}
+
 fn start_rx(at: Option<i64>) -> Action {
     Action::Command { target: tgt("mock/rx/s0"), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: at.map(|tick| AbsoluteDeadline::new(TimePoint::new(ROOT, tick))) }
 }
@@ -274,7 +279,7 @@ fn s4a_an_injected_overflow_restart_begins_with_the_head() {
         let waveform = world.waveform(&ramp(WAVE));
         radio.push(burst(&radio, &world, waveform, TX_AT / 5, true));
         step(&world, &mut [&mut radio], T0);
-        step(&world, &mut [&mut radio], T0 + 50_000_000 + 5_000_000 + 20_000 * 5 * d as i64);
+        step(&world, &mut [&mut radio], T0 + gap_ns() + 5_000_000 + 20_000 * 5 * d as i64);
         let got = blocks(&radio, &world);
         let after = got.iter().find(|block| block.flags.bits() & BlockFlags::RESTARTED.bits() != 0).expect("a restarted block");
         assert!(after.flags.bits() & BlockFlags::GAP_BEFORE.bits() != 0 && after.first > 0, "the gap accounting is as before");
@@ -342,7 +347,7 @@ fn s4a_a_back_pressure_restart_begins_with_the_head() {
     let mut got = blocks(&radio, &world);
     assert_eq!(got.len(), 1, "one block queued, the second was refused");
     *radio.link.limit.lock().unwrap() = None;
-    step(&world, &mut [&mut radio], T0 + 150_000_000);
+    step(&world, &mut [&mut radio], T0 + gap_ns() + 100_000_000);
     got.extend(blocks(&radio, &world));
     let after = got.iter().find(|block| block.flags.bits() & BlockFlags::RESTARTED.bits() != 0).expect("a restarted block");
     assert!(after.flags.bits() & BlockFlags::GAP_BEFORE.bits() != 0 && after.first > 2_000, "the gap accounting is as before");

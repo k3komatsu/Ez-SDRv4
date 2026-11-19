@@ -59,6 +59,10 @@ struct Stream {
     expected: i64,
     /// The distinct reports since the last block, in arrival order (UR-17…UR-19).
     pending: Vec<Pending>,
+    /// An overrun the origin gate dropped: UHD requested a restart for it, so the stream's end stops once more until a block is published (UR-17, UR-18).
+    stale_overrun: bool,
+    /// An overrun was reported and no packet has come back since: the next receive is one-packet (UR-17). One packet ends it, published or not.
+    one_packet: bool,
     /// The timed start's instant: the segment's origin (UR-17).
     start: i64,
     /// Blocks before this root tick are the previous stream's, still in flight after its
@@ -75,6 +79,8 @@ impl Stream {
             channels,
             expected: 0,
             pending: Vec::new(),
+            stale_overrun: false,
+            one_packet: false,
             start: clock.origin,
             not_before: not_before.unwrap_or(i64::MIN),
         }
@@ -82,6 +88,7 @@ impl Stream {
 
     /// Keeps each distinct report until the next block; repeats of one kind coalesce.
     fn report(&mut self, pending: Pending) {
+        self.one_packet |= pending == Pending::Overrun;
         if !self.pending.contains(&pending) {
             self.pending.push(pending);
         }
@@ -108,6 +115,8 @@ pub(crate) struct Rx {
     stall_at: Option<Wall>,
     /// When the last untimed stop was issued: the next stream drops what precedes it.
     last_stop: Option<i64>,
+    /// Set when `finish_locked` took a stream: the next stream begun is a successor (UR-18).
+    successor: bool,
 }
 
 const RECV_TIMEOUT: Wall = Wall::from_millis(100);
@@ -155,6 +164,7 @@ impl Rx {
             first: true,
             stall_at: None,
             last_stop: None,
+            successor: false,
         }
     }
 
@@ -230,7 +240,7 @@ impl Rx {
         // A cut booked during the wait cuts this block too: `samples` reads the plan (RM-16).
         let len = self.recv_len();
         let timeout = self.recv_timeout();
-        if len == 0 || timeout < Wall::from_millis(1) {
+        if len == 0 {
             self.core.rx_chain[self.k].lock().request_end_now();
             self.try_end();
             return Turn::Idle;
@@ -239,6 +249,8 @@ impl Rx {
             let chain = self.core.rx_chain[self.k].lock();
             (chain.cut().is_some_and(|cut| self.core.now() >= cut), self.core.is_lost() || matches!(chain.device(), RxDevice::Lost))
         };
+        // UR-17: after an overrun report, until a packet comes back, UHD is silent for its restart delay and then collects packets for the whole request: one packet bounds the call by its wait.
+        let one_packet = one_packet || self.stream.as_ref().is_some_and(|stream| stream.one_packet);
         if lost {
             self.finish();
             return if terminate { Turn::Exit } else { Turn::Idle };
@@ -267,17 +279,21 @@ impl Rx {
     pub(super) fn try_end(&mut self) {
         let Some(stream) = self.stream.as_ref() else { return };
         let clock = stream.clock;
+        // UR-17: an overrun reported since the last published block — or the origin gate dropped one (UR-18) — may have left UHD's restart START queued behind this stop; a second stop clears it.
+        let overrun = stream.pending.contains(&Pending::Overrun) || stream.stale_overrun;
         let core = self.core.clone();
         let mut chain = core.rx_chain[self.k].lock();
         let streams = lock(&self.core.streams);
         refresh_intent(&mut chain, &streams, stream_key(Dir::Rx, self.k), stream);
         drop(streams);
+        let end = self.end_cut(&chain, stream);
+        // Kept although the gate re-checks the loss: past it, a lost device would still get the `rx_stop_untimed` row of a stop never made.
         if self.core.is_lost() || matches!(chain.device(), RxDevice::Lost) {
             chain.lose();
-            self.finish_locked(&mut chain);
+            self.finish_locked(&mut chain, end);
             return;
         }
-        let cut = chain.cut().unwrap_or_else(|| {
+        let cut = end.unwrap_or_else(|| {
             assert!(chain.end_now());
             clock.instant(self.stream.as_ref().expect("a stream").expected)
         });
@@ -285,20 +301,37 @@ impl Rx {
         if active {
             let now = self.core.now();
             self.core.timing(json!({ "what": "rx_stop_untimed", "cut": cut, "at": now }));
-            let result = self.core.device.rx_stop(self.k);
-            match chain.stop_result(result) {
-                Ok(()) => {
+            // UR-29: each stop is admitted under the device gate; `None` is a device lost before the gate, with no call made.
+            let result = self.core.rx_stop_admitted(self.k, "rx_first_stop_before_gate");
+            // The pair's last result is the stop's: the chain takes one transition (`stop_result` needs an `Armed` or `Streaming` chain). A device lost since the first stop returned makes no second call (the gate's check), and the first stop's result stands as the pair's.
+            let result = match result {
+                Some(Ok(())) if overrun => {
+                    self.core.timing(json!({ "what": "rx_stop_overrun_clear", "at": self.core.now() }));
+                    self.core.rx_stop_admitted(self.k, "rx_stop_before_gate").or(Some(Ok(())))
+                }
+                result => result,
+            };
+            // No stop was made, so none is applied: the loss ends the chain below.
+            match result.map(|result| chain.stop_result(result)) {
+                Some(Ok(())) => {
                     lock(&self.core.rec).applied.push(json!({ "key": "rx_stop", "at": self.core.at(cut), "issued": self.core.at(now) }));
                     self.last_stop = Some(self.core.now() + self.core.ticks(DEVICE_LEAD_NS)).or(self.last_stop);
                 }
-                Err(error) => self.core.device_failed(None, "stop", &error),
+                Some(Err(error)) => self.core.device_failed(None, "stop", &error),
+                None => {}
             }
         }
         if self.core.is_lost() && !matches!(chain.device(), RxDevice::Lost) {
             chain.lose();
         }
         self.core.probe("rx_before_finish", None);
-        self.finish_locked(&mut chain);
+        self.finish_locked(&mut chain, end);
+    }
+
+    /// The root tick the stream ends at (UR-17, UR-18): the chain's cut; with a loss report pending, the plan's cut, which a later abort does not lower.
+    fn end_cut(&self, chain: &RxChain, stream: &Stream) -> Option<i64> {
+        let cut = chain.cut();
+        if loss_causes(&stream.pending).is_empty() { cut } else { self.planned_end(stream).or(cut) }
     }
 
     fn finish(&mut self) {
@@ -311,18 +344,22 @@ impl Rx {
         if self.core.is_lost() {
             chain.lose();
         }
-        self.finish_locked(&mut chain);
+        let end = self.stream.as_ref().and_then(|stream| self.end_cut(&chain, stream));
+        self.finish_locked(&mut chain, end);
     }
 
-    fn finish_locked(&mut self, chain: &mut RxChain) {
+    fn finish_locked(&mut self, chain: &mut RxChain, end: Option<i64>) {
         let stream = self.stream.take();
-        let cut = chain.cut();
         chain.finish();
         if let Some(stream) = stream {
+            // UR-18: the next stream begun is a successor.
+            self.successor = true;
             let key = stream_key(Dir::Rx, self.k);
+            // RM-17, UR-18: the reports no block carried are one tail event, up to the end cut.
+            self.emit_tail(&stream, &loss_causes(&stream.pending), end);
             let mut streams = lock(&self.core.streams);
-            if let (None, Some(cut)) = (&stream.handle, cut) {
-                if let Err(error) = self.core.clocks.end(stream.clock.domain, self.core.at(cut)) {
+            if let (None, Some(end)) = (&stream.handle, end) {
+                if let Err(error) = self.core.clocks.end(stream.clock.domain, self.core.at(end)) {
                     self.core.reject_note(json!({ "clock_not_ended": error.to_string() }));
                 }
             }
@@ -330,6 +367,23 @@ impl Rx {
             let by = streams.line(key).and_then(|line| line.segment(stream.clock.origin, stream.config)).and_then(|segment| segment.by);
             streams.prune(key, by);
         }
+    }
+
+    /// The stream's end at the plan's cut of its segment, as a root tick, or `None` when the plan has no cut for it (RM-16, RM-17).
+    fn planned_end(&self, stream: &Stream) -> Option<i64> {
+        let streams = lock(&self.core.streams);
+        let planned = streams.line(stream_key(Dir::Rx, self.k)).and_then(|line| line.segment(stream.clock.origin, stream.config)).and_then(|segment| segment.cut)?;
+        Some(stream.clock.instant(planned.max(stream.expected)))
+    }
+
+    /// RM-17, UR-18: the loss the stream reported and no block carried, up to the end `end` it was cut at: one `RX_OVERFLOW` at the first sample not delivered, `lost` that distance (a loss of 0 makes none).
+    fn emit_tail(&self, stream: &Stream, causes: &[RxOverflowCause], end: Option<i64>) {
+        let Some(end) = end else { return };
+        let lost = (stream.clock.at_or_after(end) - stream.expected).max(0) as u64;
+        let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(causes, Some(lost)) else { return };
+        // RM-11: in the segment's SampleClock once registered (a block was published), else in the primary root.
+        let at = if stream.handle.is_none() { TimePoint::new(stream.clock.domain, stream.expected) } else { self.core.at(stream.clock.instant(stream.expected)) };
+        emit_overflow(&self.core, self.k, at, &payload);
     }
 
     /// RM-25, UR-17: the next planned segment begins: the streamer reopened when its
@@ -444,15 +498,18 @@ impl Rx {
         left.clamp(1, block as i64) as usize
     }
 
-    /// How long `rx_recv` may wait: while a cut is pending, no longer than to the cut plus
-    /// `quiet_span`, so that a stream that has stopped yielding is ended soon after its
-    /// cut and not at the next 100 ms timeout (UR-17; design-notes §11 F2); never under
-    /// 1 ms (UHD truncates the timeout to whole milliseconds).
+    /// How long `rx_recv` may wait: with a cut pending, to the cut plus `quiet_span`; with no cut
+    /// pending, one block plus the delivery allowance, so that a Stop and a start booked during
+    /// that wait are read within one block plus the allowance. Each wait is clamped to 1 ms ..
+    /// 100 ms (UHD truncates the timeout to whole milliseconds).
     fn recv_timeout(&self) -> Wall {
         let Some(stream) = self.stream.as_ref() else { return RECV_TIMEOUT };
         let chain = self.core.rx_chain[self.k].lock();
-        let Some(cut) = chain.cut() else { return RECV_TIMEOUT };
-        let left = i128::from(cut) + i128::from(quiet_span(&self.core, stream)) - i128::from(self.core.now());
+        let span = i128::from(quiet_span(&self.core, stream));
+        let left = match chain.cut() {
+            Some(cut) => i128::from(cut) + span - i128::from(self.core.now()),
+            None => span,
+        };
         let ns = (left.max(0) * 1_000_000_000 / i128::from(self.core.mcr)).clamp(1_000_000, RECV_TIMEOUT.as_nanos() as i128);
         Wall::from_nanos(ns.min(u64::MAX as i128) as u64)
     }
@@ -471,8 +528,20 @@ impl Rx {
             return;
         }
         let Some(stream) = self.stream.as_mut() else { return };
+        // UR-18: a device report that reaches a successor before its origin is the previous stream's: counted, noted, not attached.
+        let before_origin = self.successor && now < stream.clock.origin;
         match result {
+            RxRecv::Overflow { .. } | RxRecv::BadPacket | RxRecv::Alignment if before_origin => {
+                if !matches!(result, RxRecv::Alignment) {
+                    self.core.stat("rx_overflows", 1);
+                }
+                if matches!(result, RxRecv::Overflow { out_of_sequence: false }) {
+                    stream.stale_overrun = true;
+                }
+                self.core.timing(json!({ "what": "rx_report_before_origin", "origin": stream.clock.origin, "at": now }));
+            }
             RxRecv::Samples { first_tick, samples } => {
+                stream.one_packet = false;
                 self.last_samples = self.host.now();
                 self.samples(first_tick, samples);
             }
@@ -498,7 +567,8 @@ impl Rx {
                 self.core.timing(json!({ "what": "rx_restart", "requested": stream.start, "at": restart }));
                 let result = {
                     let mut chain = self.core.rx_chain[self.k].lock();
-                    if self.core.is_lost() || chain.device() == RxDevice::Lost { None } else { Some(chain.restart_result(restart, self.core.device.rx_start(self.k, restart))) }
+                    // UR-29: admitted under the device gate: a device lost before it makes no start (`None`).
+                    if self.core.is_lost() || chain.device() == RxDevice::Lost { None } else { self.core.rx_start_admitted(self.k, restart).map(|started| chain.restart_result(restart, started)) }
                 };
                 match result {
                     None => self.try_end(),
@@ -552,7 +622,7 @@ impl Rx {
         if offset.rem_euclid(clock.n) != 0 {
             self.core.stat("rx_off_lattice", 1);
         }
-        let mut k = (offset + clock.n / 2).div_euclid(clock.n);
+        let mut k = crate::lattice_index(offset, clock.n);
         let mut len = samples.first().map_or(0, Vec::len) as i64;
         let mut ended = false;
         // The cut and what this block delivers are read and written together, so that a
@@ -593,6 +663,7 @@ impl Rx {
             let expected = stream.expected;
             let lost = (k > expected).then(|| (k - expected) as u64);
             let pending = std::mem::take(&mut stream.pending);
+            stream.stale_overrun = false;
             let mut flags = BlockFlags::NONE;
             if lost.is_some() {
                 // Each report adds its flag; a jump no report announced is a sequence
@@ -615,19 +686,10 @@ impl Rx {
             stream.expected = k + len;
             let at = TimePoint::new(clock.domain, expected);
             let lost_n = lost.unwrap_or(0);
-            let reports: Vec<_> = pending
-                .iter()
-                .filter_map(|pending| match pending {
-                    Pending::Overrun => Some(RxOverflowCause::Overrun),
-                    Pending::Sequence => Some(RxOverflowCause::Sequence),
-                    Pending::Alignment | Pending::MissedStart => None,
-                })
-                .collect();
+            let reports = loss_causes(&pending);
             if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&reports, lost) {
                 // UR-20: one hot-path event for the block's whole reported loss.
-                if let Err(error) = self.core.events.emit(self.core.overflow(self.k), at, Severity::Warning, &payload.to_hot()) {
-                    self.core.reject_note(json!({ "event_not_emitted": kinds::RX_OVERFLOW, "error": error.to_string() }));
-                }
+                emit_overflow(&self.core, self.k, at, &payload);
             }
             for pending in pending {
                 match pending {
@@ -701,6 +763,25 @@ fn refresh_intent(chain: &mut RxChain, streams: &super::core::Streams, key: Stre
 /// for (Review N, B2).
 fn quiet_span(core: &Core, stream: &Stream) -> i64 {
     core.block_len as i64 * stream.clock.n + core.ticks(DELIVERY_ALLOWANCE_NS)
+}
+
+/// The causes of the loss reports among `pending`, in arrival order: an alignment report or a missed start is not a loss (RM-17).
+fn loss_causes(pending: &[Pending]) -> Vec<RxOverflowCause> {
+    pending
+        .iter()
+        .filter_map(|pending| match pending {
+            Pending::Overrun => Some(RxOverflowCause::Overrun),
+            Pending::Sequence => Some(RxOverflowCause::Sequence),
+            Pending::Alignment | Pending::MissedStart => None,
+        })
+        .collect()
+}
+
+/// UR-20: one hot-path `RX_OVERFLOW` of stream `k`.
+fn emit_overflow(core: &Core, k: usize, at: TimePoint, payload: &ezsdr_radio::payloads::RxOverflowPayload) {
+    if let Err(error) = core.events.emit(core.overflow(k), at, Severity::Warning, &payload.to_hot()) {
+        core.reject_note(json!({ "event_not_emitted": kinds::RX_OVERFLOW, "error": error.to_string() }));
+    }
 }
 
 #[cfg(test)]
@@ -1094,6 +1175,8 @@ mod tests {
         rx.try_end();
 
         assert_eq!(spy.log().len(), calls_at_loss, "finish makes no recovery call after loss: {:?}", spy.log());
+        // The loss branch ends the stream before any stop is booked: without it the gate would return `None` after the `rx_stop_untimed` row of a stop never made.
+        assert!(!lock(&core.rec).timing.iter().any(|row| row["what"] == "rx_stop_untimed"), "no stop row for a stop never made: {:?}", lock(&core.rec).timing);
         assert!(rx.stream.is_none());
         let chain = core.rx_chain[0].lock();
         assert_eq!(chain.device(), RxDevice::Lost);
@@ -1438,12 +1521,13 @@ mod tests {
         let restart = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_restart").unwrap()["at"].as_i64().unwrap();
         let missed = ((restart - clock.origin) / clock.n) as u64;
         rx.receive(RxRecv::Overflow { out_of_sequence: false });
-        let first = restart + core.ticks(50_000_000);
+        let gap = core.ticks(ezsdr_radio::x3xx::timing().overflow_restart_gap_ns);
+        let first = restart + gap;
         rx.receive(samples(first, 2));
 
         let block = link.receive().expect("the samples after both gaps arrived").0;
         assert_eq!(block.header().flags, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED);
-        assert_eq!(block.header().lost, Some(missed + 50_000));
+        assert_eq!(block.header().lost, Some(missed + (gap / clock.n) as u64));
         let events = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
         assert_eq!(events.iter().filter(|event| event.kind.as_str() == kinds::LATE_COMMAND).count(), 1);
         let overflows: Vec<_> = events.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
@@ -1964,15 +2048,814 @@ mod tests {
                 streams.end(&core, ms(5), false, false);
                 core.release_streams(streams);
             }
-            time.advance_to(core.at(ms(50))).unwrap();
-            rx.last_samples = rx.host.now();
-            rx.host.sleep(Wall::from_millis(10));
-            rx.receive(RxRecv::Timeout);
+            end_quietly(&mut rx, &core, &time);
             assert!(rx.stream.is_none(), "lost: {lost}");
             let cut = lock(&core.streams).planned(stream_key(Dir::Rx, 0))[0].segment.cut;
             assert_eq!(cut, Some(5_000), "lost: {lost}");
             assert_eq!(clocks(&core), [(0, Some(clock.instant(5_000)))], "lost: {lost}");
         }
+    }
+
+    // ------------------------------------------------------------ 4b-2b: the tail (UR-18, RM-17)
+
+    /// The `RX_OVERFLOW` events the collector holds, drained (a drain consumes).
+    fn overflow_events(events: &ezsdr_kernel::event::EventCollector) -> Vec<ezsdr_kernel::event::Event> {
+        events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect()
+    }
+
+    /// The stream is past its cut and quiet for longer than the quiet span: the owner ends it (the sequence every tail test repeated).
+    fn end_quietly(rx: &mut Rx, core: &Core, time: &ezsdr_kernel::time::ManualTimeAuthority) {
+        time.advance_to(core.at(core.ticks(50_000_000))).unwrap();
+        rx.last_samples = rx.host.now();
+        rx.host.sleep(Wall::from_millis(10));
+        rx.receive(RxRecv::Timeout);
+    }
+
+    /// UR-18, RM-17, RM-24: a tail is this stream's, at `at`, in RM-24's nine bytes, with `lost`.
+    fn assert_tail(event: &ezsdr_kernel::event::Event, core: &Core, at: TimePoint, cause: RxOverflowCause, lost: u64) {
+        assert_eq!(event.source, ezsdr_kernel::event::EventSource::Node { node: core.rx_id.clone() }, "the tail names the receive stream's node");
+        assert_eq!(event.time, at);
+        assert_eq!(event.payload.as_array().map(Vec::len), Some(9), "RM-24's bytes: {}", event.payload);
+        assert_eq!(RxOverflowPayload::from_payload(&event.payload).unwrap(), RxOverflowPayload { cause, lost });
+    }
+
+    // ------------------------------------------------------------ 4b-2c: the second stop (UR-26, S18)
+
+    /// The S18 rig: a `LockSpy` on a manual clock whose stream 0 began at 0 and published 1 000 samples
+    /// (`kf` = 1 000: its clock is registered and the chain is `Streaming`).
+    struct Second {
+        rx: Rx,
+        spy: Arc<super::super::test_support::LockSpy>,
+        core: Arc<Core>,
+        time: Arc<ezsdr_kernel::time::ManualTimeAuthority>,
+        events: Arc<ezsdr_kernel::event::EventCollector>,
+        clock: Clock,
+        _guard: crate::host::Driver,
+    }
+
+    fn second_stop_rig() -> Second {
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
+        let (core, time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        spy.watch(&core);
+        let _guard = super::super::test_support::clock_guard(&spy.host());
+        spy.set_time(core.now());
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(samples(clock.instant(0), 1_000));
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Streaming, "the first block made the chain streaming");
+        Second { rx, spy, core, time, events, clock, _guard }
+    }
+
+    #[test]
+    fn ur_26_a_second_stop_follows_only_an_unanswered_overrun_report() {
+        // UR-17, UR-26 (S18a, S18g, S18h): a stop follows an overrun the device reported and no block has carried
+        // since, because the restart UHD queued may still be behind it; the second stop clears it. A report a block
+        // carried, or no loss, makes the one stop. S18 runs on `LockSpy`, whose every device call fails under the
+        // line lock, so the second call is covered by UR-25's rule without a test of its own.
+        // One-line wrong change: no second stop: the overrun cases see one call and no `rx_stop_overrun_clear` row.
+        for (case, stops, tail) in [
+            ("overrun unanswered", 2usize, Some((RxOverflowCause::Overrun, 5_000))),
+            ("overrun then timeouts", 2, Some((RxOverflowCause::Overrun, 5_000))),
+            ("sequence only", 1, Some((RxOverflowCause::Sequence, 5_000))),
+            ("alignment only", 1, None),
+            ("missed start only", 1, None),
+            ("no report", 1, None),
+            ("overrun then a recovered block", 1, None),
+            ("overrun then a gapless block", 1, None),
+        ] {
+            let Second { mut rx, spy, core, time, events, clock, _guard } = second_stop_rig();
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            match case {
+                "overrun unanswered" => {
+                    rx.receive(RxRecv::Overflow { out_of_sequence: false });
+                    assert!(rx.stream.as_ref().unwrap().pending == [Pending::Overrun], "{case}");
+                }
+                "overrun then timeouts" => {
+                    rx.receive(RxRecv::Overflow { out_of_sequence: false });
+                    for _ in 0..3 {
+                        rx.receive(RxRecv::Timeout);
+                    }
+                    assert!(rx.stream.as_ref().unwrap().pending == [Pending::Overrun], "{case}: the timeouts change nothing");
+                }
+                "sequence only" => {
+                    rx.receive(RxRecv::Overflow { out_of_sequence: true });
+                    assert!(rx.stream.as_ref().unwrap().pending == [Pending::Sequence], "{case}");
+                }
+                "alignment only" => {
+                    rx.receive(RxRecv::Alignment);
+                    assert!(rx.stream.as_ref().unwrap().pending == [Pending::Alignment], "{case}");
+                }
+                "missed start only" => {
+                    rx.receive(RxRecv::LateCommand);
+                    assert!(rx.stream.as_ref().unwrap().pending == [Pending::MissedStart], "{case}");
+                }
+                "no report" => assert!(rx.stream.as_ref().unwrap().pending.is_empty(), "{case}"),
+                "overrun then a recovered block" => {
+                    rx.receive(RxRecv::Overflow { out_of_sequence: false });
+                    rx.receive(samples(clock.instant(3_000), 1_000));
+                    assert!(rx.stream.as_ref().unwrap().pending.is_empty(), "{case}: the block carried the report");
+                    // The block's own event: the 2 000 samples it jumped, not a tail at the end.
+                    let carried = overflow_events(&events);
+                    assert_eq!(carried.len(), 1, "{case}: {carried:?}");
+                    assert_tail(&carried[0], &core, TimePoint::new(clock.domain, 1_000), RxOverflowCause::Overrun, 2_000);
+                }
+                "overrun then a gapless block" => {
+                    rx.receive(RxRecv::Overflow { out_of_sequence: false });
+                    rx.receive(samples(clock.instant(1_000), 1_000));
+                    assert!(rx.stream.as_ref().unwrap().pending.is_empty(), "{case}: the block spent the report with no event");
+                }
+                other => panic!("{other}"),
+            }
+            book(&core, ms(6), 1, Kind::Stop);
+            rx.poll();
+            end_quietly(&mut rx, &core, &time);
+
+            assert!(rx.stream.is_none(), "{case}");
+            assert_eq!(spy.seen("rx_stop"), stops, "{case}");
+            assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Off, "{case}");
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(6_000)))], "{case}");
+            let applied = lock(&core.rec).applied.clone();
+            let rows: Vec<_> = applied.iter().filter(|row| row["key"] == "rx_stop").collect();
+            assert_eq!(rows.len(), 1, "{case}: {applied:?}");
+            assert_eq!(rows[0]["at"]["ticks"].as_i64(), Some(clock.instant(6_000)), "{case}: the row names the cut the clock ends at: {applied:?}");
+            let timing = lock(&core.rec).timing.clone();
+            assert_eq!(timing.iter().filter(|row| row["what"] == "rx_stop_untimed").count(), 1, "{case}");
+            assert_eq!(timing.iter().filter(|row| row["what"] == "rx_stop_overrun_clear").count(), stops - 1, "{case}");
+            let got = overflow_events(&events);
+            match tail {
+                Some((cause, lost)) => {
+                    assert_eq!(got.len(), 1, "{case}: {got:?}");
+                    assert_tail(&got[0], &core, TimePoint::new(clock.domain, 1_000), cause, lost);
+                }
+                None => assert!(got.is_empty(), "{case}: no tail: {got:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ur_26_a_failed_first_stop_makes_no_second() {
+        // UR-26 (S18b, S18c): the first stop's failure is the stop's: no second call and no applied row. A lost
+        // refusal loses the chain; a plain one leaves it uncertain and is the refusal of a stop.
+        // One-line wrong change: a second stop after a failed first: `seen("rx_stop")` is 2.
+        for lost in [true, false] {
+            let Second { mut rx, spy, core, time, events, clock, _guard } = second_stop_rig();
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            rx.receive(RxRecv::Overflow { out_of_sequence: false });
+            assert!(rx.stream.as_ref().unwrap().pending == [Pending::Overrun], "lost {lost}");
+            book(&core, ms(6), 1, Kind::Stop);
+            rx.poll();
+            spy.refuse_rx_stop(crate::DeviceError { lost, message: "test: scripted refusal".to_owned() });
+            end_quietly(&mut rx, &core, &time);
+
+            assert!(rx.stream.is_none(), "lost {lost}");
+            assert_eq!(spy.seen("rx_stop"), 1, "lost {lost}: the failed first stop makes no second");
+            let applied = lock(&core.rec).applied.clone();
+            assert_eq!(applied.iter().filter(|row| row["key"] == "rx_stop").count(), 0, "lost {lost}: a failed stop is no applied row: {applied:?}");
+            let timing = lock(&core.rec).timing.clone();
+            assert_eq!(timing.iter().filter(|row| row["what"] == "rx_stop_overrun_clear").count(), 0, "lost {lost}");
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(6_000)))], "lost {lost}");
+            let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+            let device_lost = delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count();
+            let rejected: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).collect();
+            let tails: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+            assert_eq!(tails.len(), 1, "lost {lost}: {delivered:?}");
+            assert_tail(tails[0], &core, TimePoint::new(clock.domain, 1_000), RxOverflowCause::Overrun, 5_000);
+            if lost {
+                assert!(core.is_lost(), "lost {lost}");
+                assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Lost, "lost {lost}");
+                assert_eq!(device_lost, 1, "lost {lost}: {delivered:?}");
+                assert!(rejected.is_empty(), "lost {lost}: a loss is no refusal: {delivered:?}");
+            } else {
+                assert!(!core.is_lost(), "lost {lost}");
+                assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Uncertain, "lost {lost}");
+                assert_eq!(device_lost, 0, "lost {lost}: {delivered:?}");
+                assert_eq!(rejected.len(), 1, "lost {lost}: {delivered:?}");
+                assert_eq!(rejected[0].payload["kind"], "stop", "lost {lost}: {}", rejected[0].payload);
+            }
+        }
+    }
+
+    #[test]
+    fn ur_26_a_failing_second_stop_is_the_stops_failure() {
+        // UR-26 (S18d, S18e): the first stop passed and the second failed: the pair's last result is the stop's,
+        // so the applied row and the chain follow the second.
+        // One-line wrong change: the first stop's result kept as the stop's: the applied row appears and the chain is Off.
+        for lost in [true, false] {
+            let Second { mut rx, spy, core, time, events, clock, _guard } = second_stop_rig();
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            rx.receive(RxRecv::Overflow { out_of_sequence: false });
+            assert!(rx.stream.as_ref().unwrap().pending == [Pending::Overrun], "lost {lost}");
+            book(&core, ms(6), 1, Kind::Stop);
+            rx.poll();
+            spy.script_rx_stop(|result| result);
+            spy.script_rx_stop(move |_| Err(crate::DeviceError { lost, message: "test: second stop".to_owned() }));
+            end_quietly(&mut rx, &core, &time);
+
+            assert!(rx.stream.is_none(), "lost {lost}");
+            assert_eq!(spy.seen("rx_stop"), 2, "lost {lost}");
+            let applied = lock(&core.rec).applied.clone();
+            assert_eq!(applied.iter().filter(|row| row["key"] == "rx_stop").count(), 0, "lost {lost}: the second stop's failure is the stop's: {applied:?}");
+            let timing = lock(&core.rec).timing.clone();
+            assert_eq!(timing.iter().filter(|row| row["what"] == "rx_stop_overrun_clear").count(), 1, "lost {lost}");
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(6_000)))], "lost {lost}");
+            let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+            let device_lost = delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count();
+            let rejected: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).collect();
+            let tails: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+            assert_eq!(tails.len(), 1, "lost {lost}: {delivered:?}");
+            assert_tail(tails[0], &core, TimePoint::new(clock.domain, 1_000), RxOverflowCause::Overrun, 5_000);
+            if lost {
+                assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Lost, "lost {lost}");
+                assert_eq!(device_lost, 1, "lost {lost}: {delivered:?}");
+                assert!(rejected.is_empty(), "lost {lost}: a loss is no refusal: {delivered:?}");
+            } else {
+                assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Uncertain, "lost {lost}");
+                assert_eq!(device_lost, 0, "lost {lost}: {delivered:?}");
+                assert_eq!(rejected.len(), 1, "lost {lost}: {delivered:?}");
+                assert_eq!(rejected[0].payload["kind"], "stop", "lost {lost}: {}", rejected[0].payload);
+            }
+        }
+    }
+
+    #[test]
+    fn ur_29_a_loss_found_before_the_stop_of_an_overrun_stream_makes_no_stop_call() {
+        // UR-29, UR-26 (S18f): a loss published before the stop ends the stream with no device call.
+        // One-line wrong change: the stop is called even when the device is lost: `seen("rx_stop")` is 1.
+        let Second { mut rx, spy, core, events, _guard, .. } = second_stop_rig();
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        assert!(rx.stream.as_ref().unwrap().pending == [Pending::Overrun], "the overrun is pending");
+        core.device_lost("test: loss before the stop");
+        rx.poll();
+        // The poll itself ends the stream: its cut at the first sample not delivered takes `try_end`'s loss branch before any device call, so no quiet wait is needed.
+        assert!(rx.stream.is_none(), "the loss ends the stream at the poll");
+        assert_eq!(spy.seen("rx_stop"), 0, "the loss needs no stop call");
+        // The loss branch ends the stream before any stop is booked: the gate alone would return `None` after the `rx_stop_untimed` row of a stop never made.
+        assert!(!lock(&core.rec).timing.iter().any(|row| row["what"] == "rx_stop_untimed"), "no stop row for a stop never made: {:?}", lock(&core.rec).timing);
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Lost);
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{delivered:?}");
+    }
+
+    #[test]
+    fn ur_29_a_loss_publication_waits_for_the_second_stop_in_the_device() {
+        // UR-17, UR-29 (S18i): a loss the transmit async path publishes while the second stop is in
+        // the device waits for it — the second stop is admitted under `device_gate`, which the
+        // publication takes — so no device call follows a published loss. One-line wrong change: no
+        // gate on the second stop: the loss publishes at once and "done" arrives before "waiting".
+        let Second { mut rx, spy, core, time, events, _guard, .. } = second_stop_rig();
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        assert!(rx.stream.as_ref().unwrap().pending == [Pending::Overrun]);
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+
+        let (events_tx, events_rx) = std::sync::mpsc::channel::<&'static str>();
+        let waiting = std::sync::Mutex::new(events_tx.clone());
+        super::super::test_support::probe(&core, "device_gate_waiting", move |_| {
+            let _ = waiting.lock().unwrap().send("waiting");
+        });
+        let (handles, handled) = std::sync::mpsc::channel::<std::thread::JoinHandle<()>>();
+        let hook_core = core.clone();
+        spy.script_rx_stop(|result| result);
+        spy.script_rx_stop(move |result| {
+            let loss_core = hook_core.clone();
+            let done = events_tx.clone();
+            let handle = hook_core
+                .device
+                .host()
+                .spawn("tx-async-loss", move || {
+                    loss_core.device_lost("test: the transmit path loses the device");
+                    let _ = done.send("done");
+                })
+                .expect("the loss thread");
+            let _ = handles.send(handle);
+            let event = events_rx.recv_timeout(Wall::from_secs(10)).expect("the loss thread's first event");
+            assert_eq!(event, "waiting", "the loss publication waits for the second stop");
+            assert!(!hook_core.is_lost(), "the loss is not published while the second stop is in the device");
+            result
+        });
+        end_quietly(&mut rx, &core, &time);
+        let handle = handled.recv_timeout(Wall::from_secs(10)).expect("the loss thread's handle");
+        handle.join().unwrap();
+        // The stop pair's own turn ended before the publication landed: the owner's next turn
+        // reads the loss and loses the chain, as its run loop does.
+        assert!(rx.stream.is_none());
+        rx.turn();
+
+        assert!(rx.stream.is_none());
+        assert_eq!(spy.seen("rx_stop"), 2);
+        assert!(core.is_lost());
+        let calls = spy.log();
+        let stops: Vec<usize> = calls.iter().enumerate().filter(|(_, call)| *call == "rx_stop 0 now").map(|(at, _)| at).collect();
+        assert_eq!(stops.len(), 2, "{calls:?}");
+        let mark = calls.iter().position(|call| call == "mark_lost").expect("the loss marks the device");
+        assert!(stops[1] < mark, "the second stop precedes the mark: {calls:?}");
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{delivered:?}");
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Lost);
+    }
+
+    #[test]
+    fn ur_29_a_loss_published_just_before_the_second_stop_s_gate_makes_no_call() {
+        // UR-17, UR-29: a loss published after the second-stop branch read `!is_lost()` and before
+        // the gate is taken makes no second call; the pair's `Ok` and the decision's clear row stand,
+        // and the chain is lost. One-line wrong change: no second loss check under the gate — the
+        // second call is made and `seen("rx_stop")` is 2.
+        // 1 MS/s on the 200 MHz root: the `Stop` at 6 ms cuts at sample 6 000 (1 200 000 root
+        // ticks ÷ 200); 1 000 samples were delivered, so the clock ends at 6 000 and the tail's
+        // `lost` is 5 000 = 6 000 − 1 000.
+        let Second { mut rx, spy, core, time, events, clock, _guard } = second_stop_rig();
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        assert!(rx.stream.as_ref().unwrap().pending == [Pending::Overrun]);
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+        let hook_core = core.clone();
+        super::super::test_support::probe(&core, "rx_stop_before_gate", move |_| hook_core.device_lost("test: lost before the gate"));
+        end_quietly(&mut rx, &core, &time);
+
+        assert!(rx.stream.is_none());
+        assert_eq!(spy.seen("rx_stop"), 1, "the loss before the gate makes no second call");
+        assert!(core.is_lost());
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(6_000)))], "the end cut was fixed before the call");
+        let timing = lock(&core.rec).timing.clone();
+        assert_eq!(timing.iter().filter(|row| row["what"] == "rx_stop_overrun_clear").count(), 1, "the decision to clear was made");
+        let applied = lock(&core.rec).applied.clone();
+        assert_eq!(applied.iter().filter(|row| row["key"] == "rx_stop").count(), 1, "{applied:?}");
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Lost);
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{delivered:?}");
+        let tails: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+        assert_eq!(tails.len(), 1, "{delivered:?}");
+        assert_tail(tails[0], &core, TimePoint::new(clock.domain, 1_000), RxOverflowCause::Overrun, 5_000);
+    }
+
+    #[test]
+    fn ur_29_a_loss_publication_waits_for_the_first_stop_in_the_device() {
+        // UR-29: a loss the transmit async path publishes while the first stop is in the
+        // device waits for it — the stop is admitted under `device_gate`, which the
+        // publication takes — so no device call follows a published loss. One-line wrong
+        // change: no gate on the first stop: the loss publishes at once and "done" arrives
+        // before "waiting".
+        let Second { mut rx, spy, core, time, events, _guard, .. } = second_stop_rig();
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+
+        let (events_tx, events_rx) = std::sync::mpsc::channel::<&'static str>();
+        let waiting = std::sync::Mutex::new(events_tx.clone());
+        super::super::test_support::probe(&core, "device_gate_waiting", move |_| {
+            let _ = waiting.lock().unwrap().send("waiting");
+        });
+        let (handles, handled) = std::sync::mpsc::channel::<std::thread::JoinHandle<()>>();
+        let hook_core = core.clone();
+        spy.script_rx_stop(move |result| {
+            let loss_core = hook_core.clone();
+            let done = events_tx.clone();
+            let handle = hook_core
+                .device
+                .host()
+                .spawn("tx-async-loss", move || {
+                    loss_core.device_lost("test: the transmit path loses the device");
+                    let _ = done.send("done");
+                })
+                .expect("the loss thread");
+            let _ = handles.send(handle);
+            let event = events_rx.recv_timeout(Wall::from_secs(10)).expect("the loss thread's first event");
+            assert_eq!(event, "waiting", "the loss publication waits for the first stop");
+            assert!(!hook_core.is_lost(), "the loss is not published while the first stop is in the device");
+            result
+        });
+        end_quietly(&mut rx, &core, &time);
+        let handle = handled.recv_timeout(Wall::from_secs(10)).expect("the loss thread's handle");
+        handle.join().unwrap();
+        // The stop's own turn ended before the publication landed: the owner's next turn
+        // reads the loss and loses the chain, as its run loop does.
+        rx.turn();
+
+        assert!(rx.stream.is_none());
+        assert_eq!(spy.seen("rx_stop"), 1, "an ordinary stream makes one stop");
+        assert!(core.is_lost());
+        let calls = spy.log();
+        let stops: Vec<usize> = calls.iter().enumerate().filter(|(_, call)| *call == "rx_stop 0 now").map(|(at, _)| at).collect();
+        assert_eq!(stops.len(), 1, "{calls:?}");
+        let mark = calls.iter().position(|call| call == "mark_lost").expect("the loss marks the device");
+        assert!(stops[0] < mark, "the stop precedes the mark: {calls:?}");
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{delivered:?}");
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Lost);
+    }
+
+    #[test]
+    fn ur_29_a_loss_published_just_before_the_first_stop_s_gate_makes_no_call() {
+        // UR-29: a loss published after `try_end` read `!is_lost()` and before the first
+        // stop's gate is taken makes no stop call: no call, no `applied` row, the chain lost,
+        // and the loss is no refusal. One-line wrong change: no gate on the first stop — the
+        // stop is called.
+        let Second { mut rx, spy, core, time, events, _guard, .. } = second_stop_rig();
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+        let hook_core = core.clone();
+        super::super::test_support::probe(&core, "rx_first_stop_before_gate", move |_| hook_core.device_lost("test: lost before the first stop's gate"));
+        end_quietly(&mut rx, &core, &time);
+
+        assert!(core.is_lost(), "the pre-gate hook published the loss");
+        assert_eq!(spy.seen("rx_stop"), 0, "the loss before the gate makes no call");
+        let applied = lock(&core.rec).applied.clone();
+        assert_eq!(applied.iter().filter(|row| row["key"] == "rx_stop").count(), 0, "no call, no applied row: {applied:?}");
+        assert!(rx.stream.is_none());
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Lost);
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{delivered:?}");
+        assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).count(), 0, "{delivered:?}");
+    }
+
+    #[test]
+    fn ur_29_a_loss_published_just_before_the_restart_start_s_gate_makes_no_call() {
+        // UR-29: a missed start's restart is admitted under the device gate: a loss published
+        // between the owner's check and the gate makes no start call, and the stream ends.
+        // One-line wrong change: no gate on the restart — the call is made and
+        // `seen("rx_start")` grows by one.
+        let Second { mut rx, spy, core, events, _guard, .. } = second_stop_rig();
+        let starts = spy.seen("rx_start");
+        assert_eq!(starts, 1, "the stream's own timed start");
+        let hook_core = core.clone();
+        super::super::test_support::probe(&core, "rx_start_before_gate", move |_| hook_core.device_lost("test: lost before the restart's gate"));
+        rx.receive(RxRecv::LateCommand);
+
+        assert_eq!(spy.seen("rx_start"), starts, "the loss before the gate makes no restart call");
+        assert!(core.is_lost(), "the pre-gate hook published the loss");
+        assert!(rx.stream.is_none(), "the restart that was not made ends the stream");
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Lost);
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1, "{delivered:?}");
+    }
+
+    #[test]
+    fn ur_18_a_restart_packet_past_the_cut_is_dropped_and_the_tail_is_emitted_once() {
+        // UR-18 (S5): 1 000 samples are delivered, an overrun is reported and a `Stop` at 6 ms
+        // cuts the segment at sample 6 000 (1 MS/s on the 200 MHz root: 6 ms = 1 200 000 root
+        // ticks ÷ 200 = 6 000). The device's next packet starts at 7 000, past the cut: it
+        // delivers nothing, and the report no block carried is one tail at the first sample not
+        // delivered, `lost` 5 000 = 6 000 − 1 000.
+        let link = link();
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(samples(clock.instant(0), 1_000));
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+        rx.receive(samples(clock.instant(7_000), 2_000));
+
+        assert!(rx.stream.is_none(), "the cut ends the stream");
+        let kf = 1_000;
+        let cut = 6_000;
+        assert!(cut > kf);
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 1);
+        assert_eq!(received(&link), [(clock.domain, 0, 1_000)], "the prefix only: the packet past the cut publishes nothing");
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(cut)))]);
+        let got = overflow_events(&events);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_tail(&got[0], &core, TimePoint::new(clock.domain, kf), RxOverflowCause::Overrun, 5_000);
+    }
+
+    #[test]
+    fn ur_18_a_packet_across_the_cut_carries_the_event_and_no_tail_follows() {
+        // UR-18 (S5b): the packet that contains the cut 6 000 is published up to it — [5 000,
+        // 6 000) — and carries the overrun: `lost` 4 000 = 5 000 − 1 000 (the jump it skipped)
+        // and `GAP_BEFORE | RESTARTED`. The report is spent with that event, so the end makes
+        // no second one.
+        let link = link();
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(samples(clock.instant(0), 1_000));
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+        rx.receive(samples(clock.instant(5_000), 2_000));
+
+        assert!(rx.stream.is_none(), "the packet ends at the cut");
+        let kf = 1_000;
+        let cut = 6_000;
+        assert!(cut > kf);
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 1);
+        let mut blocks = Vec::new();
+        while let Some((block, _)) = link.receive() {
+            blocks.push(block);
+        }
+        let shape: Vec<_> = blocks.iter().map(|block| (block.header().first_sample_time, block.header().len)).collect();
+        assert_eq!(shape, [(TimePoint::new(clock.domain, 0), 1_000), (TimePoint::new(clock.domain, 5_000), 1_000)], "the prefix and the packet's part before the cut");
+        assert!(blocks.iter().all(|block| block.header().first_sample_time.ticks_in(clock.domain).unwrap() < cut), "no block starts at or after the cut");
+        let second = &blocks[1];
+        assert_eq!((second.header().lost, second.header().flags), (Some(4_000), BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED), "5 000 − 1 000 samples skipped");
+        let got = overflow_events(&events);
+        assert_eq!(got.len(), 1, "one event for the block's loss, none from the tail: {got:?}");
+        assert_tail(&got[0], &core, TimePoint::new(clock.domain, kf), RxOverflowCause::Overrun, 4_000);
+    }
+
+    #[test]
+    fn ur_24_an_abort_in_the_gap_cuts_at_the_first_undelivered_sample() {
+        // UR-18, UR-24 (S6u): with an overrun pending and no block since it, an abort ends the
+        // stream at the first sample not delivered (1 000), so the gap is empty: no tail (a loss
+        // of 0), the clock ends at 1 000 and the report is spent with no event. The three ways
+        // the abort reaches uhd-rx are the same cut.
+        for variant in ["a command alone", "booked as Provider::stop books it", "booked, then a packet"] {
+            let link = link();
+            let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, clock) = rx(&core, 1);
+            rx.receive(samples(clock.instant(0), 1_000));
+            rx.receive(RxRecv::Overflow { out_of_sequence: false });
+            assert_eq!(lock(&core.rec).stats["rx_overflows"], 1, "{variant}");
+            if variant != "a command alone" {
+                // As `Provider::stop(abort)` books it (UR-26).
+                let now = core.now();
+                let mut streams = lock(&core.streams);
+                streams.stop = Some((now, StopMode::Abort));
+                streams.end(&core, now, true, false);
+                core.release_streams(streams);
+                if variant == "booked, then a packet" {
+                    // A packet in the gap, before uhd-rx reads the plan: nothing at or after 1 000 is published.
+                    rx.receive(samples(clock.instant(3_000), 4_000));
+                }
+                rx.poll();
+            }
+            rx.command(RxCmd::Shutdown(StopMode::Abort));
+
+            assert!(rx.stream.is_none(), "{variant}");
+            let kf = 1_000;
+            let cut = kf; // the abort cuts at the first sample not delivered, so the gap is empty
+            assert_eq!(cut, kf, "{variant}: a loss of 0 is the one cut that cannot lie past the first sample not delivered");
+            assert_eq!(received(&link), [(clock.domain, 0, 1_000)], "{variant}: the prefix only");
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(cut)))], "{variant}");
+            assert_eq!(lock(&core.rec).applied.iter().filter(|row| row["key"] == "rx_stop").count(), 1, "{variant}");
+            let got = overflow_events(&events);
+            assert!(got.is_empty(), "{variant}: a loss of 0 makes no tail: {got:?}");
+        }
+    }
+
+    #[test]
+    fn ur_18_an_orderly_stop_in_the_gap_emits_the_tail_to_its_cut() {
+        // UR-18 (S6o): a `Stop` at 6 ms ends a stream that went silent past it; with an overrun
+        // pending and no block after the 1 000th sample, the tail reports the gap to the cut:
+        // `lost` 5 000 = 6 000 − 1 000.
+        let link = link();
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(samples(clock.instant(0), 1_000));
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+        // Past the cut and quiet for longer than the quiet span: the owner ends the stream.
+        end_quietly(&mut rx, &core, &time);
+
+        assert!(rx.stream.is_none());
+        let kf = 1_000;
+        let cut = 6_000;
+        assert!(cut > kf);
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 1);
+        assert_eq!(received(&link), [(clock.domain, 0, 1_000)]);
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(cut)))]);
+        let got = overflow_events(&events);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_tail(&got[0], &core, TimePoint::new(clock.domain, kf), RxOverflowCause::Overrun, 5_000);
+    }
+
+    #[test]
+    fn ur_29_a_loss_in_a_gap_emits_the_tail_to_the_loss() {
+        // UR-18, UR-29 (S7): the loss at 6 ms books the stream's end at sample 6 000 (6 ms =
+        // 1 200 000 root ticks ÷ 200); uhd-rx ends it there, and the pending overrun's tail
+        // reports the gap to that end: `lost` 5 000 = 6 000 − 1 000.
+        let link = link();
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(samples(clock.instant(0), 1_000));
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        time.advance_to(core.at(ms(6))).unwrap();
+        core.device_lost("test");
+        time.advance_to(core.at(ms(7))).unwrap();
+        rx.finish();
+
+        assert!(rx.stream.is_none());
+        let kf = 1_000;
+        let cut = 6_000;
+        assert!(cut > kf);
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 1);
+        assert_eq!(received(&link), [(clock.domain, 0, 1_000)]);
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(cut)))]);
+        // One drain holds both: the loss's DEVICE_LOST and the tail.
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let lost: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).collect();
+        assert_eq!(lost.len(), 1, "{delivered:?}");
+        let tails: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+        assert_eq!(tails.len(), 1, "{delivered:?}");
+        assert_tail(tails[0], &core, TimePoint::new(clock.domain, kf), RxOverflowCause::Overrun, 5_000);
+    }
+
+    #[test]
+    fn ur_29_a_loss_then_a_policy_abort_in_the_gap_keeps_the_tail() {
+        // UR-18, UR-29 (S7c): the loss at 6 ms books the end at 6 000; the abort `Provider::stop`
+        // reads afterwards lowers the chain's cut to the first sample not delivered (1 000), but
+        // the plan's cut stands (RM-17): the tail reports the loss's cut, `lost` 5 000, and the
+        // clock ends at 6 000, not at 1 000.
+        let link = link();
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(samples(clock.instant(0), 1_000));
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        time.advance_to(core.at(ms(6))).unwrap();
+        core.device_lost("test");
+        rx.command(RxCmd::Shutdown(StopMode::Abort));
+
+        assert!(rx.stream.is_none());
+        let kf = 1_000;
+        let cut = 6_000;
+        assert!(cut > kf);
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 1);
+        assert_eq!(received(&link), [(clock.domain, 0, 1_000)]);
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(cut)))], "the loss's cut, not the abort's");
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let lost: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).collect();
+        assert_eq!(lost.len(), 1, "{delivered:?}");
+        let tails: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+        assert_eq!(tails.len(), 1, "one tail, no second event: {delivered:?}");
+        assert_tail(tails[0], &core, TimePoint::new(clock.domain, kf), RxOverflowCause::Overrun, 5_000);
+    }
+
+    #[test]
+    fn ur_18_a_sequence_error_cut_inside_its_skip_emits_the_tail_to_the_cut() {
+        // UR-18 (S8a): a sequence error's skip, then a `Stop` at 2 ms — 1 000 samples past the
+        // first not delivered and less than a block: the tail is the sequence's, from 1 000 to
+        // the cut 2 000, `lost` 1 000 = 2 000 − 1 000.
+        let link = link();
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(samples(clock.instant(0), 1_000));
+        rx.receive(RxRecv::Overflow { out_of_sequence: true });
+        book(&core, ms(2), 1, Kind::Stop);
+        rx.poll();
+        end_quietly(&mut rx, &core, &time);
+
+        assert!(rx.stream.is_none());
+        let kf = 1_000;
+        let cut = 2_000;
+        assert!(cut > kf);
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 1);
+        assert_eq!(received(&link), [(clock.domain, 0, 1_000)]);
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(cut)))]);
+        let got = overflow_events(&events);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_tail(&got[0], &core, TimePoint::new(clock.domain, kf), RxOverflowCause::Sequence, 1_000);
+    }
+
+    #[test]
+    fn ur_18_a_tail_names_the_overrun_over_the_sequence_error() {
+        // UR-18 (S8b): both loss reports reach one cut at 6 ms with no block between; the tail
+        // is one event and names the overrun, whatever the reports' arrival order.
+        for reports in
+            [[RxRecv::Overflow { out_of_sequence: true }, RxRecv::Overflow { out_of_sequence: false }], [RxRecv::Overflow { out_of_sequence: false }, RxRecv::Overflow { out_of_sequence: true }]]
+        {
+            let order: Vec<bool> = reports.iter().map(|report| matches!(report, RxRecv::Overflow { out_of_sequence: true })).collect();
+            let link = link();
+            let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, clock) = rx(&core, 1);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            rx.receive(samples(clock.instant(0), 1_000));
+            for report in reports {
+                rx.receive(report);
+            }
+            assert_eq!(rx.stream.as_ref().unwrap().pending.len(), 2, "{order:?}: both reports are pending");
+            assert_eq!(lock(&core.rec).stats["rx_overflows"], 2, "{order:?}");
+            book(&core, ms(6), 1, Kind::Stop);
+            rx.poll();
+            end_quietly(&mut rx, &core, &time);
+
+            assert!(rx.stream.is_none(), "{order:?}");
+            let kf = 1_000;
+            let cut = 6_000;
+            assert!(cut > kf);
+            assert_eq!(received(&link), [(clock.domain, 0, 1_000)], "{order:?}");
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(cut)))], "{order:?}");
+            let got = overflow_events(&events);
+            assert_eq!(got.len(), 1, "{order:?}: {got:?}");
+            assert_tail(&got[0], &core, TimePoint::new(clock.domain, kf), RxOverflowCause::Overrun, 5_000);
+        }
+    }
+
+    #[test]
+    fn ur_18_two_overflows_then_a_cut_report_one_tail() {
+        // UR-18 (S8c): a repeated overrun is the same pending report, so the tail is one event
+        // at the cut's distance, `lost` 5 000 = 6 000 − 1 000 — not a sum of the reports and not
+        // a doubled count. A report does not move the first sample not delivered.
+        let link = link();
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(samples(clock.instant(0), 1_000));
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        assert_eq!(rx.stream.as_ref().unwrap().expected, 1_000, "an overflow does not move the first sample not delivered");
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 2);
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+        end_quietly(&mut rx, &core, &time);
+
+        assert!(rx.stream.is_none());
+        let kf = 1_000;
+        let cut = 6_000;
+        assert!(cut > kf);
+        assert_eq!(received(&link), [(clock.domain, 0, 1_000)]);
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(cut)))]);
+        let got = overflow_events(&events);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_tail(&got[0], &core, TimePoint::new(clock.domain, kf), RxOverflowCause::Overrun, 5_000);
+    }
+
+    #[test]
+    fn ur_18_a_tail_with_no_block_published_is_stamped_in_the_primary_root() {
+        // UR-18, RM-11 (ROOT): no block was ever published, so the segment's SampleClock is
+        // never registered and there is no clock record; the tail is stamped in the primary root
+        // at the clock's origin (sample 0, root tick 0), and `lost` counts from sample 0: the
+        // cut at 6 ms is sample 6 000, so `lost` 6 000 = 6 000 − 0.
+        let link = link();
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+        end_quietly(&mut rx, &core, &time);
+
+        assert!(rx.stream.is_none());
+        let kf = 0;
+        let cut = 6_000;
+        assert!(cut > kf);
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 1);
+        assert!(received(&link).is_empty(), "no block was published");
+        assert!(clocks(&core).is_empty(), "no clock was registered");
+        let got = overflow_events(&events);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_tail(&got[0], &core, core.at(clock.instant(0)), RxOverflowCause::Overrun, 6_000);
+    }
+
+    #[test]
+    fn ur_18_a_silent_end_with_no_report_makes_no_tail() {
+        // UR-18 (S16d, m2): the stream ends at the cut 5 000 samples after the first not
+        // delivered (the clock ends at 6 000), and with no report pending the gap makes no
+        // event: a tail is a pending loss, not every gap.
+        let link = link();
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(samples(clock.instant(0), 1_000));
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+        end_quietly(&mut rx, &core, &time);
+
+        assert!(rx.stream.is_none());
+        let kf = 1_000;
+        let cut = 6_000;
+        assert!(cut > kf, "a positive distance to the cut");
+        assert_eq!(lock(&core.rec).stats.get("rx_overflows").copied().unwrap_or(0), 0);
+        assert_eq!(received(&link), [(clock.domain, 0, 1_000)]);
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(cut)))]);
+        let got = overflow_events(&events);
+        assert!(got.is_empty(), "no report, no tail: {got:?}");
+    }
+
+    #[test]
+    fn ur_19_an_alignment_report_with_no_following_block_makes_no_event_and_no_tail() {
+        // UR-18, UR-19 (S17): an alignment report is no loss (RM-17), and the ALIGNMENT_ERROR is
+        // the block's own: with the stream cut at 6 ms and no block after it, neither event is
+        // made and the clock ends cleanly at 6 000.
+        let link = link();
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        rx.receive(samples(clock.instant(0), 1_000));
+        rx.receive(RxRecv::Alignment);
+        book(&core, ms(6), 1, Kind::Stop);
+        rx.poll();
+        end_quietly(&mut rx, &core, &time);
+
+        assert!(rx.stream.is_none());
+        let kf = 1_000;
+        let cut = 6_000;
+        assert!(cut > kf);
+        assert_eq!(lock(&core.rec).stats.get("rx_overflows").copied().unwrap_or(0), 0);
+        assert_eq!(received(&link), [(clock.domain, 0, 1_000)]);
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(cut)))]);
+        // One drain holds both: the alignment report and the absence of a tail.
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let overflows: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+        assert!(overflows.is_empty(), "{delivered:?}");
+        let alignments: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::ALIGNMENT_ERROR).collect();
+        assert!(alignments.is_empty(), "{delivered:?}");
     }
 
     #[test]
@@ -2127,6 +3010,666 @@ mod tests {
         assert_eq!(switch["origin"].as_i64(), Some(ms(60)), "{switch}");
         assert_eq!(switch["at"].as_i64(), Some(ms(15)), "{switch}");
         assert!(device.calls().iter().any(|c| *c == format!("rx_start 0 {}", ms(60))), "{:?}", device.calls());
+    }
+
+    // ------------------------------------------------------------ 4b-2c: a surviving restart (UR-17, S13)
+
+    #[test]
+    fn ur_17_a_restart_that_overtakes_the_stop_is_cleared_by_the_second_stop() {
+        // UR-17, UR-18 (S13a): the fake's overrun leaves UHD's restart START queued; the stop that overtakes it
+        // leaves the stream running from the restart, so the owner's second stop clears it. Without that stop the
+        // successor's start is queued behind the survivor (the device's next samples are 140 ms away) and its first
+        // block never arrives. One-line wrong change: no second stop: the log lacks the second `rx_stop` and the
+        // successor's first block never arrives.
+        let link = link();
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            faults: vec![crate::device::FakeFault::Overflow(Wall::ZERO), crate::device::FakeFault::RestartOvertakesStop],
+            ..crate::device::FakeConfig::default()
+        }));
+        let (core, time, events) = super::super::test_support::rig_on(device.clone(), vec![link.clone()], 2_000);
+        let _guard = super::super::test_support::clock_guard(&device.host());
+        super::super::test_support::device_at(&core, &time, &device, 0);
+        let (mut rx, clock) = rx(&core, 1);
+        // The module's own host clock, moved by the test: the device's is held for `device_at`.
+        rx.host = crate::host::HostClock::manual();
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let restart = crate::device::restart_from(0, 0); // The overrun's restart, whole samples.
+        assert_eq!(rx.turn(), Turn::Busy);
+        // The overrun came from the fake's own `rx_recv`, which armed the knob.
+        assert!(rx.stream.as_ref().unwrap().pending == [Pending::Overrun], "the overrun is pending");
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 1);
+        assert_eq!(rx.stream.as_ref().unwrap().expected, 0, "nothing was delivered: the fault fires at the first call");
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_stop")), "{:?}", device.calls());
+
+        book(&core, ms(10), 1, Kind::Stop);
+        book(&core, ms(10), 2, Kind::Start);
+        rx.poll();
+        let origin = lock(&core.streams).planned(stream_key(Dir::Rx, 0))[1].segment.origin;
+        assert_eq!(origin, ms(10) + 400_000 + core.ticks(3_000_000) + core.ticks(10_000_000), "the successor's origin: the cut, one 2 000-sample call, the allowance and the lead");
+        assert_eq!(origin, ms(25));
+        assert!(origin < restart, "the successor's origin is before the survivor's next sample at {restart}: without the second stop its start would be queued behind it");
+        // The old stream is silent past its cut: the owner ends it at the cut once it has been quiet for the span.
+        super::super::test_support::device_at(&core, &time, &device, ms(15));
+        rx.host.advance_for_test(Wall::from_millis(6));
+        rx.last_samples = Wall::ZERO;
+        let mut turns = 0;
+        while rx.stream.is_some() {
+            assert!(turns < 10, "the old stream did not end in 10 turns");
+            turns += 1;
+            rx.turn();
+        }
+        // 1. The first stop left the restart running; the second cleared it.
+        assert!(rx.begin(), "the successor begins");
+        let calls = device.calls();
+        let first_stop = calls.iter().position(|call| call == "rx_stop 0 now").expect("the first stop");
+        let next_start = calls[first_stop..].iter().position(|call| call.starts_with("rx_start")).map(|at| first_stop + at).expect("the successor's start");
+        // The window also holds the successor's own configure (`apply rx 0 …`); the stops in it are the pair.
+        let stops_in_window: Vec<_> = calls[first_stop..next_start].iter().filter(|call| call.starts_with("rx_stop") || call.starts_with("rx_restart_survived")).cloned().collect();
+        assert_eq!(stops_in_window, ["rx_stop 0 now", "rx_restart_survived 0", "rx_stop 0 now"], "the first stop's survivor and the second's clear: {calls:?}");
+        // 2. One applied stop at the cut; one untimed stop and one overrun clear.
+        let applied = lock(&core.rec).applied.clone();
+        let stops: Vec<_> = applied.iter().filter(|row| row["key"] == "rx_stop").collect();
+        assert_eq!(stops.len(), 1, "{applied:?}");
+        assert_eq!(stops[0]["at"]["ticks"].as_i64(), Some(clock.instant(10_000)), "{stops:?}");
+        let timing = lock(&core.rec).timing.clone();
+        assert_eq!(timing.iter().filter(|row| row["what"] == "rx_stop_untimed").count(), 1);
+        assert_eq!(timing.iter().filter(|row| row["what"] == "rx_stop_overrun_clear").count(), 1);
+        // 3. No block was published, so no clock was registered: the tail is in the primary root at the origin.
+        assert!(clocks(&core).is_empty(), "no block was published");
+        let got = overflow_events(&events);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_tail(&got[0], &core, core.at(clock.instant(0)), RxOverflowCause::Overrun, 10_000);
+        // 4. The successor's start, and its first block at its own index 0.
+        assert!(device.calls().contains(&format!("rx_start 0 {origin}")), "the successor's start: {:?}", device.calls());
+        super::super::test_support::device_at(&core, &time, &device, origin + ms(5));
+        let mut turns = 0;
+        let mut blocks = Vec::new();
+        while blocks.is_empty() {
+            assert!(turns < 10, "the successor's first block did not arrive in 10 turns");
+            turns += 1;
+            assert_eq!(rx.turn(), Turn::Busy, "turn {turns}");
+            blocks = std::iter::from_fn(|| link.receive().map(|(block, _)| block)).collect();
+        }
+        let successor = rx.stream.as_ref().expect("the successor").clock.domain;
+        assert_eq!(blocks.len(), 1, "one block: the successor's first");
+        assert_eq!(blocks[0].header().first_sample_time, TimePoint::new(successor, 0), "the successor's first sample is its own 0");
+        assert_eq!(blocks[0].header().flags, BlockFlags::NONE);
+        assert_eq!(lock(&core.rec).stats.get("rx_before_origin").copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn ur_17_a_restart_that_overtakes_an_abort_or_a_two_channel_stop_is_cleared_by_the_second_stop() {
+        // UR-17 (S13b): the same survivor under an abort (one and two channels) and an orderly Stop of two
+        // channels; the stop pair is the streamer's, not one per channel. One-line wrong change: no second stop:
+        // the log lacks the second `rx_stop` and the device is not clear.
+        for (case, channels, abort) in [("abort, one channel", 1usize, true), ("orderly stop, two channels", 2, false), ("abort, two channels", 2, true)] {
+            let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig {
+                clock: crate::ClockMode::Manual,
+                faults: vec![crate::device::FakeFault::Overflow(Wall::ZERO), crate::device::FakeFault::RestartOvertakesStop],
+                ..crate::device::FakeConfig::default()
+            }));
+            let (core, time, _events) = super::super::test_support::rig_on(device.clone(), vec![link()], 2_000);
+            let _guard = super::super::test_support::clock_guard(&device.host());
+            super::super::test_support::device_at(&core, &time, &device, 0);
+            let (mut rx, _clock) = rx(&core, channels);
+            rx.host = crate::host::HostClock::manual();
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            let restart = crate::device::restart_from(0, 0);
+            assert_eq!(rx.turn(), Turn::Busy, "{case}");
+            assert!(rx.stream.as_ref().unwrap().pending == [Pending::Overrun], "{case}: the overrun is pending");
+            assert_eq!(lock(&core.rec).stats["rx_overflows"], 1, "{case}");
+            assert_eq!(rx.stream.as_ref().unwrap().expected, 0, "{case}: nothing was delivered: the fault fires at the first call");
+            assert!(!device.calls().iter().any(|call| call.starts_with("rx_stop")), "{case}: {:?}", device.calls());
+            if abort {
+                rx.command(RxCmd::Shutdown(StopMode::Abort));
+            } else {
+                book(&core, ms(10), 1, Kind::Stop);
+                rx.poll();
+                super::super::test_support::device_at(&core, &time, &device, ms(15));
+                rx.host.advance_for_test(Wall::from_millis(6));
+                rx.last_samples = Wall::ZERO;
+                let mut turns = 0;
+                while rx.stream.is_some() {
+                    assert!(turns < 10, "{case}: the old stream did not end in 10 turns");
+                    turns += 1;
+                    rx.turn();
+                }
+            }
+            assert!(rx.stream.is_none(), "{case}");
+            let calls = device.calls();
+            let first_stop = calls.iter().position(|call| call == "rx_stop 0 now").expect("the first stop");
+            let end = calls[first_stop..].iter().position(|call| call.starts_with("rx_start")).map_or(calls.len(), |at| first_stop + at);
+            assert_eq!(&calls[first_stop..end], ["rx_stop 0 now", "rx_restart_survived 0", "rx_stop 0 now"], "{case}: one survivor and one clear for the streamer: {calls:?}");
+            let applied = lock(&core.rec).applied.clone();
+            assert_eq!(applied.iter().filter(|row| row["key"] == "rx_stop").count(), 1, "{case}: {applied:?}");
+            // A surviving restart would deliver from `restart`; a cleared one leaves the stream stopped.
+            super::super::test_support::device_at(&core, &time, &device, restart + ms(1));
+            assert_eq!(device.rx_recv(0, 2_000, Wall::from_millis(1), false), RxRecv::Timeout, "{case}: a surviving restart would deliver from {restart}");
+        }
+    }
+
+    #[test]
+    fn ur_17_a_gated_overrun_arms_the_successor_s_second_stop() {
+        // UR-18 (S13d): the successor's first call reads an overrun from before its origin — the previous stream's —
+        // and the gate drops it; UHD has still queued a restart for it, so the successor's stop leaves it running
+        // unless the stream stops once more. The control rows (a sequence error, an alignment, a bad packet) ask UHD
+        // for no restart, so they make one stop.
+        // One-line wrong change: the gate does not arm: the list lacks the second stop and the device keeps streaming.
+        // One-line wrong change for the control rows: the gate arms for every gated class: the control rows show a second stop.
+        for (case, faults, stop) in [
+            ("an abort", vec![crate::device::FakeFault::Overflow(Wall::from_millis(20)), crate::device::FakeFault::RestartOvertakesStop], "abort"),
+            ("the plan drops the successor", vec![crate::device::FakeFault::Overflow(Wall::from_millis(20)), crate::device::FakeFault::RestartOvertakesStop], "plan"),
+            ("a gated sequence error", Vec::new(), "sequence"),
+            ("a gated alignment", Vec::new(), "alignment"),
+            ("a gated bad packet", Vec::new(), "badpacket"),
+        ] {
+            let origin = lock_ticks(25);
+            let restart = origin + crate::device::restart_from(0, 0); // the scripted fault fires at B's cursor, which is its origin
+            let mut q = queued(origin, faults);
+            let armed = matches!(stop, "abort" | "plan");
+            match stop {
+                // A's cut is 10 ms and it reads no device sample after it; the fault at 20 ms is between A's cut and
+                // B's origin, so B's first call is where the fake fires it.
+                "abort" | "plan" => assert_eq!(q.rx.turn(), Turn::Busy, "{case}: one receive that is a gate, not a wait"),
+                "sequence" => q.rx.receive(RxRecv::Overflow { out_of_sequence: true }),
+                "alignment" => q.rx.receive(RxRecv::Alignment),
+                _ => q.rx.receive(RxRecv::BadPacket),
+            }
+            // Before the stop: the report reached the gate, nothing carried it, and the stream is armed for one more stop.
+            // The gate counts a loss; an alignment is not one and never sets the stat: 0 for that row, 1 for the others.
+            assert_eq!(lock(&q.core.rec).stats.get("rx_overflows").copied().unwrap_or(0), if stop == "alignment" { 0 } else { 1 }, "{case}");
+            let gate: Vec<_> = lock(&q.core.rec).timing.iter().filter(|row| row["what"] == "rx_report_before_origin").cloned().collect();
+            assert_eq!(gate.len(), 1, "{case}: {gate:?}");
+            assert!(q.rx.stream.as_ref().unwrap().pending.is_empty(), "{case}: the gated report enters nothing pending");
+            assert_eq!(q.rx.stream.as_ref().unwrap().stale_overrun, armed, "{case}");
+            assert!(overflow_events(&q.events).is_empty(), "{case}: a gated report makes no event");
+            assert!(q.after_start(origin).is_empty(), "{case}: no stop yet since B began");
+            match stop {
+                "abort" => q.rx.command(RxCmd::Shutdown(StopMode::Abort)),
+                "plan" => {
+                    plan(&q.core, &[(0, Some(10_000), None)]);
+                    q.rx.poll();
+                }
+                _ => q.rx.command(RxCmd::Shutdown(StopMode::Abort)),
+            }
+            assert!(q.rx.stream.is_none(), "{case}");
+            let expected = if armed { vec!["rx_stop 0 now".to_owned(), "rx_restart_survived 0".to_owned(), "rx_stop 0 now".to_owned()] } else { vec!["rx_stop 0 now".to_owned()] };
+            assert_eq!(q.after_start(origin), expected, "{case}: {:?}", q.device.calls());
+            let applied = lock(&q.core.rec).applied.clone();
+            assert_eq!(applied.iter().filter(|row| row["key"] == "rx_stop").count(), 2, "{case}: A's and B's: {applied:?}");
+            // A's stop had no overrun pending and B's report made no tail: only B's second stop writes a clear row.
+            let clear = lock(&q.core.rec).timing.iter().filter(|row| row["what"] == "rx_stop_overrun_clear").count();
+            assert_eq!(clear, if armed { 1 } else { 0 }, "{case}");
+            assert!(overflow_events(&q.events).is_empty(), "{case}: the gated report makes no tail");
+            super::super::test_support::device_at(&q.core, &q.time, &q.device, restart + lock_ticks(1));
+            assert_eq!(q.device.rx_recv(0, 2_000, Wall::from_millis(1), false), RxRecv::Timeout, "{case}: a survivor would deliver from {restart}");
+        }
+    }
+
+    #[test]
+    fn ur_17_a_block_ends_the_successor_s_gated_arming() {
+        // UR-18 (S13d): the gated overrun arms the successor's end only until it publishes a block; the block carries no
+        // flag and clears the arming, so the stream's end stops once.
+        // One-line wrong change: the block does not clear the arming: `stale_overrun` stays set and the end stops twice.
+        let origin = lock_ticks(25);
+        let mut q = queued(origin, Vec::new());
+        q.rx.receive(RxRecv::Overflow { out_of_sequence: false }); // 0 < the origin: the gate drops it.
+        assert!(q.rx.stream.as_ref().unwrap().stale_overrun, "the gated overrun arms the end");
+        assert!(q.rx.stream.as_ref().unwrap().pending.is_empty(), "a gated report enters nothing pending");
+        super::super::test_support::device_at(&q.core, &q.time, &q.device, origin + lock_ticks(3));
+        q.rx.receive(samples(origin, 2_000));
+        let domain = q.rx.stream.as_ref().unwrap().clock.domain;
+        let mut blocks = Vec::new();
+        while let Some((block, _)) = q.link.receive() {
+            blocks.push(block);
+        }
+        assert_eq!(blocks.len(), 2, "A's block and B's: {:?}", received(&q.link));
+        let b = &blocks[1];
+        assert_eq!((b.header().first_sample_time, b.header().len, b.header().flags), (TimePoint::new(domain, 0), 2_000, BlockFlags::NONE), "B's first block carries no flag");
+        assert!(!q.rx.stream.as_ref().unwrap().stale_overrun, "a published block ends the arming");
+        q.rx.command(RxCmd::Shutdown(StopMode::Abort));
+        assert!(q.rx.stream.is_none());
+        assert_eq!(q.after_start(origin), ["rx_stop 0 now"], "one stop: {:?}", q.device.calls());
+        assert_eq!(lock(&q.core.rec).timing.iter().filter(|row| row["what"] == "rx_stop_overrun_clear").count(), 0);
+    }
+
+    #[test]
+    fn ur_17_the_receive_wait_without_a_cut_is_one_block_plus_the_allowance() {
+        // S12, #108: with no cut pending the wait is one block at the stream's rate plus the
+        // 3 ms delivery allowance, capped at 100 ms, so a Stop and Start booked during it are
+        // seen within a block. Each expectation is a literal, not read from the code under test.
+        let shapes = [(2_000u32, 200u64, Wall::from_millis(5)), (65_536, 200, Wall::from_nanos(68_536_000)), (65_536, 512, Wall::from_millis(100))];
+        for (block_len, ratio, expected) in shapes {
+            let config = crate::device::FakeConfig { faults: vec![crate::device::FakeFault::Silence(Wall::ZERO)], ..Default::default() };
+            let (core, device) = if ratio == 200 && block_len == 2_000 {
+                let (core, device, _, _) = super::super::test_support::rig_with(config, vec![link()]);
+                (core, device)
+            } else {
+                let fake = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..config }));
+                let (core, _, _) = super::super::test_support::rig_on(fake.clone(), vec![link()], block_len);
+                (core, fake)
+            };
+            let mut rx = if ratio == 200 {
+                rx(&core, 1).0
+            } else {
+                let _ = rx_setup(&core, 1);
+                rx_with_plan(&core, &[Segment { origin: 0, cut: None, config: Config { channels: Channels::first(1), ratio: Rational::new(512, 1).unwrap() }, by: None }]).0
+            };
+            assert_eq!(rx.recv_timeout(), expected, "block {block_len}, ratio {ratio}");
+            // The value reaches `rx_recv`: a silent fake returns at once and records the wait.
+            rx.host = crate::host::HostClock::manual();
+            rx.turn();
+            assert_eq!(device.min_recv_timeout(), expected, "block {block_len}, ratio {ratio}");
+        }
+    }
+
+    #[test]
+    fn ur_17_a_stop_and_start_booked_during_a_no_cut_receive_start_at_their_origin() {
+        // S2a, S3, #108: the receive wait with no cut pending is one block plus the 3 ms
+        // allowance, so a Stop and Start booked during it reach the owner within a block and
+        // the successor is begun with its lead. The lateness is what is asserted, not only the end.
+        for (block_len, wait_ns) in [(2_000u32, 5_000_000i64), (65_536, 68_536_000)] {
+            let link = link();
+            let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+            let (core, time, events) = super::super::test_support::rig_on(spy.clone(), vec![link.clone()], block_len);
+            spy.watch(&core);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            let t_call = ms(20);
+            let e = t_call + ms(1);
+            let (mut rx, clock) = rx(&core, 1);
+            rx.host = crate::host::HostClock::manual();
+
+            spy.script_rx_recv(move |_| samples(clock.instant(0), 1_000));
+            assert_eq!(rx.turn(), Turn::Busy);
+            spy.script_rx_recv(|_| RxRecv::Overflow { out_of_sequence: false });
+            rx.turn();
+
+            time.advance_to(core.at(t_call)).unwrap();
+            rx.host.advance_for_test(Wall::from_millis(20));
+
+            // The wait under test: the Stop and Start are booked while the receive call is open.
+            let (hook_core, hook_time, hook_host) = (core.clone(), time.clone(), rx.host.clone());
+            spy.script_rx_recv(move |timeout| {
+                hook_time.advance_to(hook_core.at(e)).unwrap();
+                hook_host.advance_for_test(Wall::from_millis(1));
+                book(&hook_core, e, 1, Kind::Stop);
+                book(&hook_core, e, 2, Kind::Start);
+                hook_time.advance_to(hook_core.at(t_call + hook_core.ticks(timeout.as_nanos() as i64))).unwrap();
+                hook_host.advance_for_test(timeout - Wall::from_millis(1));
+                RxRecv::Timeout
+            });
+            rx.turn();
+            assert_eq!(spy.rx_timeouts()[2], Wall::from_nanos(wait_ns as u64), "the no-cut wait of block {block_len}");
+
+            // Every later wait runs the controlled clocks on by what the call was given.
+            let mut turns = 0;
+            while rx.stream.is_some() {
+                assert!(turns < 10, "block {block_len}: the stream did not end within 10 turns");
+                turns += 1;
+                let (hook_core, hook_time, hook_host) = (core.clone(), time.clone(), rx.host.clone());
+                spy.script_rx_recv(move |timeout| {
+                    hook_time.advance_to(hook_core.at(hook_core.now() + hook_core.ticks(timeout.as_nanos() as i64))).unwrap();
+                    hook_host.advance_for_test(timeout);
+                    RxRecv::Timeout
+                });
+                rx.turn();
+            }
+            rx.turn();
+            assert!(rx.stream.is_some(), "block {block_len}: the successor is the active stream");
+
+            let applied = lock(&core.rec).applied.clone();
+            let stops: Vec<_> = applied.iter().filter(|row| row["key"] == "rx_stop").collect();
+            assert_eq!(stops.len(), 1, "block {block_len}: {applied:?}");
+            let issued = stops[0]["issued"]["ticks"].as_i64().expect("the stop's issued instant");
+            let span = core.ticks(wait_ns);
+            assert!(issued >= e && issued <= e + span + ms(1), "block {block_len}: the stop was issued at {issued}, e={e}, span={span}");
+
+            let call = spy.rx_packet_samples(0).max(block_len as usize) as i64 * 200;
+            let origin = e + call + core.ticks(3_000_000) + core.ticks(10_000_000);
+            let planned = lock(&core.streams).planned(stream_key(Dir::Rx, 0));
+            assert_eq!(planned.len(), 2, "block {block_len}");
+            assert_eq!(planned[1].segment.origin, origin, "block {block_len}: the successor's origin");
+            let timing = lock(&core.rec).timing.clone();
+            let switch = timing.iter().find(|row| row["what"] == "rx_segment").unwrap_or_else(|| panic!("no switch: {timing:?}"));
+            assert_eq!(switch["origin"].as_i64(), Some(origin), "block {block_len}");
+            let at = switch["at"].as_i64().expect("the start's instant");
+            assert!(origin - at >= core.ticks(DEVICE_LEAD_NS), "block {block_len}: the start was issued at {at}, origin {origin}");
+            assert!(spy.log().iter().any(|call| *call == format!("rx_start 0 {origin}")), "block {block_len}: {:?}", spy.log());
+
+            rx.receive(samples(origin, 2_000));
+            let mut blocks = Vec::new();
+            while let Some((block, _)) = link.receive() {
+                blocks.push(block);
+            }
+            let domain = rx.stream.as_ref().expect("the successor").clock.domain;
+            let block = blocks.iter().find(|block| block.header().first_sample_time.domain() == domain).expect("the successor's block");
+            assert_eq!(block.header().first_sample_time.ticks_in(domain).unwrap(), 0, "block {block_len}: the successor's first sample is its own 0");
+            assert_eq!(block.header().flags, BlockFlags::NONE, "block {block_len}");
+
+            let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+            let late: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::LATE_COMMAND).collect();
+            assert_eq!(late.len(), 0, "block {block_len}: {late:?}");
+            // UR-18, RM-17: the overrun the OLD segment reported and no block of it carried is
+            // one tail at its first sample not delivered (1 000). The Stop at e = 21 ms cuts at
+            // sample 21 000 whatever the block length: 21 ms = 4 200 000 root ticks ÷ 200, so the
+            // tail's `lost` is 20 000 = 21 000 − 1 000 and its clock ends at 21 000.
+            let overflow: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+            assert_eq!(overflow.len(), 1, "block {block_len}: {delivered:?}");
+            assert_tail(overflow[0], &core, TimePoint::new(clock.domain, 1_000), RxOverflowCause::Overrun, 20_000);
+            assert_eq!(clocks(&core)[0], (0, Some(clock.instant(21_000))), "block {block_len}: the old clock ends at the cut");
+            assert_eq!(lock(&core.rec).stats.get("rx_before_origin").copied().unwrap_or(0), 0, "block {block_len}");
+        }
+    }
+
+    #[test]
+    fn ur_17_an_overrun_silence_receive_returns_at_its_first_packet() {
+        // UR-17, #108: after an overrun UHD is silent for its restart delay (about 50 ms) and
+        // then returns every packet of the request with a fresh wait for each, so one packet
+        // bounds the no-cut call by its wait. At 1 MS/s on the 200 MHz root the call under test
+        // begins at 20 ms; a Stop and a start_rx booked at 21 ms cut at sample 21 000 and make
+        // the successor due at 21 + 65.536 + 3 + 10 = 99.536 ms. The restart's first
+        // 2 000-sample packet completes at 72 ms (52 ms into the 68.536 ms wait), while a
+        // multi-packet call would collect to 70 ms + 65.536 ms = 135.536 ms.
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+        let (core, time, events) = super::super::test_support::rig_on(spy.clone(), vec![link()], 65_536);
+        spy.watch(&core);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let t_call = ms(20);
+        let e = t_call + ms(1);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.host = crate::host::HostClock::manual();
+
+        spy.script_rx_recv(move |_| samples(clock.instant(0), 1_000));
+        assert_eq!(rx.turn(), Turn::Busy);
+        spy.script_rx_recv(|_| RxRecv::Overflow { out_of_sequence: false });
+        rx.turn();
+
+        time.advance_to(core.at(t_call)).unwrap();
+        rx.host.advance_for_test(Wall::from_millis(20));
+
+        // The wait under test: the Stop and Start are booked while the receive call is open,
+        // then UHD answers as it does after an overrun — a restart 50 ms after the call began.
+        let restart = t_call + ms(50);
+        let (hook_core, hook_time, hook_host, hook_spy) = (core.clone(), time.clone(), rx.host.clone(), spy.clone());
+        spy.script_rx_recv(move |_| {
+            hook_time.advance_to(hook_core.at(e)).unwrap();
+            hook_host.advance_for_test(Wall::from_millis(1));
+            book(&hook_core, e, 1, Kind::Stop);
+            book(&hook_core, e, 2, Kind::Start);
+            // 1 MS/s: `len` samples complete that many µs after the restart at 70 ms.
+            let (returns, len) = match hook_spy.rx_packet_modes().last().copied().expect("the mode") {
+                true => (restart + hook_core.ticks(2_000 * 1_000), 2_000),
+                false => {
+                    let n = hook_spy.rx_requests().last().copied().expect("the request");
+                    (restart + hook_core.ticks(n as i64 * 1_000), n)
+                }
+            };
+            hook_time.advance_to(hook_core.at(returns)).unwrap();
+            // The host clock moves by the same delta as the device's.
+            hook_host.advance_for_test(Wall::from_nanos(hook_core.ns(returns - e) as u64));
+            samples(clock.instant(70_000), len)
+        });
+        rx.turn();
+
+        // Every later wait runs the controlled clocks on by what the call was given, as the template does.
+        let mut turns = 0;
+        while rx.stream.is_some() {
+            assert!(turns < 10, "the stream did not end within 10 turns");
+            turns += 1;
+            let (hook_core, hook_time, hook_host) = (core.clone(), time.clone(), rx.host.clone());
+            spy.script_rx_recv(move |timeout| {
+                hook_time.advance_to(hook_core.at(hook_core.now() + hook_core.ticks(timeout.as_nanos() as i64))).unwrap();
+                hook_host.advance_for_test(timeout);
+                RxRecv::Timeout
+            });
+            rx.turn();
+        }
+        rx.turn();
+        assert!(rx.stream.is_some(), "the successor is the active stream");
+
+        assert_eq!(spy.rx_packet_modes(), [false, false, true], "the silence call is one-packet and the earlier two are not");
+
+        let applied = lock(&core.rec).applied.clone();
+        let stops: Vec<_> = applied.iter().filter(|row| row["key"] == "rx_stop").collect();
+        assert_eq!(stops.len(), 1, "{applied:?}");
+        let issued = stops[0]["issued"]["ticks"].as_i64().expect("the stop's issued instant");
+        let span = core.ticks(68_536_000);
+        assert!(issued >= e && issued <= e + span + ms(1), "the stop was issued at {issued}, e={e}, span={span}");
+        assert!(issued <= ms(75), "the stop is issued by the first packet, not after the whole block: {issued}");
+
+        let call = spy.rx_packet_samples(0).max(65_536) as i64 * 200;
+        let origin = e + call + core.ticks(3_000_000) + core.ticks(10_000_000);
+        assert!(spy.log().iter().any(|call| *call == format!("rx_start 0 {origin}")), "{:?}", spy.log());
+        let timing = lock(&core.rec).timing.clone();
+        let switch = timing.iter().find(|row| row["what"] == "rx_segment").unwrap_or_else(|| panic!("no switch: {timing:?}"));
+        assert_eq!(switch["origin"].as_i64(), Some(origin), "the successor's origin");
+        let at = switch["at"].as_i64().expect("the start's instant");
+        assert!(origin - at >= core.ticks(DEVICE_LEAD_NS), "the start was issued at {at}, origin {origin}");
+
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let late: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::LATE_COMMAND).collect();
+        assert_eq!(late.len(), 0, "{late:?}");
+        assert_eq!(lock(&core.rec).stats.get("rx_before_origin").copied().unwrap_or(0), 0, "no old-stream packet reaches the successor");
+        // The Stop at 21 ms cuts at sample 21 000; the first sample not delivered is 1 000.
+        let overflow: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+        assert_eq!(overflow.len(), 1, "{delivered:?}");
+        assert_tail(overflow[0], &core, TimePoint::new(clock.domain, 1_000), RxOverflowCause::Overrun, 20_000);
+    }
+
+    #[test]
+    fn ur_17_only_an_overrun_report_makes_the_next_receive_one_packet() {
+        // UR-17: the one-packet call belongs to a pending overrun alone — a sequence error or an
+        // alignment leaves the call multi-packet — and a block that carries the report clears it.
+        // One-line wrong change: every pending report is one-packet, or none is.
+        for case in ["no report", "overrun", "sequence", "alignment", "overrun then a block"] {
+            let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+            let (core, _time, _) = super::super::test_support::rig_on(spy.clone(), vec![link()], 2_000);
+            spy.watch(&core);
+            let _guard = super::super::test_support::clock_guard(&spy.host());
+            spy.set_time(core.now());
+            let (mut rx, clock) = rx(&core, 1);
+            match case {
+                "no report" => {}
+                "overrun" => rx.receive(RxRecv::Overflow { out_of_sequence: false }),
+                "sequence" => rx.receive(RxRecv::Overflow { out_of_sequence: true }),
+                "alignment" => rx.receive(RxRecv::Alignment),
+                "overrun then a block" => {
+                    rx.receive(RxRecv::Overflow { out_of_sequence: false });
+                    spy.script_rx_recv(move |_| samples(clock.instant(0), 1_000));
+                    assert_eq!(rx.turn(), Turn::Busy, "{case}");
+                    assert!(rx.stream.as_ref().unwrap().pending.is_empty(), "{case}: the block carried the report");
+                }
+                other => panic!("{other}"),
+            }
+            let pending_overrun = rx.stream.as_ref().unwrap().pending == [Pending::Overrun];
+            assert_eq!(pending_overrun, case == "overrun", "{case}: {} reports pending", rx.stream.as_ref().unwrap().pending.len());
+            spy.script_rx_recv(|_| RxRecv::Timeout);
+            rx.turn();
+            assert_eq!(spy.rx_packet_modes().last().copied(), Some(pending_overrun), "{case}: only a pending overrun makes the next call one-packet");
+        }
+    }
+
+    #[test]
+    fn ur_17_the_one_packet_receive_ends_after_one_packet_returned_published_or_not() {
+        // UR-17: one packet ends the one-packet call, published or not. Turn 1 publishes
+        // [0, 1 000) (1 MS/s, 200 root ticks a sample), so the stream's next expected sample
+        // is 1 000. An overrun then arms the mode. Turn 2 returns the same packet again: it
+        // overlaps that delivery whole, so the Provider counts one `rx_overlapping`, publishes
+        // nothing and keeps the report pending — under the old rule (a pending overrun) every
+        // later call would stay one-packet. Turn 3 times out with the mode already over, and
+        // the modes read [false (the first call), true (the pending overrun), false (one packet
+        // came back)].
+        let link = link();
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+        let (core, _time, _) = super::super::test_support::rig_on(spy.clone(), vec![link.clone()], 2_000);
+        spy.watch(&core);
+        let _guard = super::super::test_support::clock_guard(&spy.host());
+        spy.set_time(core.now());
+        let (mut rx, clock) = rx(&core, 1);
+
+        spy.script_rx_recv(move |_| samples(clock.instant(0), 1_000));
+        assert_eq!(rx.turn(), Turn::Busy, "the first packet is published");
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+
+        spy.script_rx_recv(move |_| samples(clock.instant(0), 1_000));
+        assert_eq!(rx.turn(), Turn::Busy);
+        assert_eq!(spy.rx_packet_modes(), [false, true], "the pending overrun makes the call one-packet");
+        assert_eq!(lock(&core.rec).stats["rx_overlapping"], 1, "the repeated packet overlaps [0, 1 000) whole");
+        assert!(rx.stream.as_ref().unwrap().pending == [Pending::Overrun], "the dropped packet carries no report");
+        assert_eq!(received(&link), [(clock.domain, 0, 1_000)], "the prefix only: the overlapping packet publishes nothing");
+
+        spy.script_rx_recv(|_| RxRecv::Timeout);
+        assert_eq!(rx.turn(), Turn::Busy);
+        assert_eq!(spy.rx_packet_modes(), [false, true, false], "the packet that came back ended the one-packet mode");
+    }
+
+    #[test]
+    fn ur_17_a_restart_booked_while_the_backlog_is_read_is_a_reported_missed_start() {
+        // UR-17, M1 (S10b): a Stop and Start booked after an overflow while uhd-rx is still
+        // reading the samples buffered before it are a reported missed start. The backlog is read
+        // to its end; the stream ends only once it has been quiet past the booked cut; the
+        // successor's origin is by then in the past, so the fake's own timed start is late, the
+        // owner reports one LATE_COMMAND and restarts a start lead on, and the restart's first
+        // block carries the gap. Not rehearsed here: the device's own drain after a stall (the
+        // fake has no backlog; whether it occurs on the USRP is bench S9's cell B) and the
+        // 20–90 ms figure (INFERRED from S4).
+        let link = link();
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+        let (core, time, events) = super::super::test_support::rig_on(spy.clone(), vec![link.clone()], 2_000);
+        spy.watch(&core);
+        let _guard = super::super::test_support::clock_guard(&spy.host());
+        spy.set_time(core.now());
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.host = crate::host::HostClock::manual();
+
+        // The first block: 1 000 samples at sample 0 (0 root ticks), published at device time 0.
+        spy.script_rx_recv(move |_| samples(clock.instant(0), 1_000));
+        assert_eq!(rx.turn(), Turn::Busy, "the first block is published");
+
+        // The backlog: blocks i = 1…7 at sample 1 000 + 2 000·(i−1), 2 000 samples each, so
+        // contiguous from the first block and ending at sample 15 000 = 1 000 + 7·2 000. Each
+        // turn moves the device and the owner's host clock 5 ms on; the third books the Stop and
+        // the Start at e = 15 ms + 1 ms = 16 ms (16 ms · 200 000 ticks/ms = 3 200 000 root ticks,
+        // sample 16 000), past the backlog's end: ending the stream at the cut while samples still
+        // arrive is the wrong behaviour this test forbids.
+        for i in 1..=7i64 {
+            let first = clock.instant(1_000 + 2_000 * (i - 1));
+            let (hook_core, hook_time, hook_host) = (core.clone(), time.clone(), rx.host.clone());
+            spy.script_rx_recv(move |_| {
+                hook_time.advance_to(hook_core.at(hook_core.now() + hook_core.ticks(5_000_000))).unwrap();
+                hook_host.advance_for_test(Wall::from_millis(5));
+                if i == 3 {
+                    let e = hook_core.now() + hook_core.ticks(1_000_000);
+                    book(&hook_core, e, 1, Kind::Stop);
+                    book(&hook_core, e, 2, Kind::Start);
+                }
+                samples(first, 2_000)
+            });
+            assert_eq!(rx.turn(), Turn::Busy, "backlog block {i} is read");
+        }
+        assert!(rx.stream.is_some(), "the backlog is read past the booking: the stream did not end at the cut");
+        assert!(!spy.log().iter().any(|call| call.starts_with("rx_stop")), "no rx_stop is issued before the overflow result is read: {:?}", spy.log());
+        assert_eq!(lock(&core.rec).stats.get("rx_overflows").copied().unwrap_or(0), 0, "the overflow has not been read yet");
+
+        // The overflow result at t_o = 7 · 5 ms = 35 ms (7 000 000 root ticks).
+        spy.script_rx_recv(|_| RxRecv::Overflow { out_of_sequence: false });
+        rx.turn();
+        let t_o = core.now();
+        assert_eq!(t_o, ms(35), "the overflow is read after the seventh 5 ms backlog turn");
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 1, "one overrun reported");
+
+        // The cut (16 ms) is past; the stop goes out once the stream has been quiet the quiet
+        // span = 2 000 samples · 200 ticks + 3 ms = 1 000 000 ticks = 5 ms, i.e. at 40 ms. Each
+        // wait is 1 ms because cut + span (21 ms) is already behind: five 1 ms turns.
+        let span = core.block_len as i64 * clock.n + core.ticks(3_000_000);
+        assert_eq!(span, core.ticks(5_000_000), "the quiet span is one block plus the 3 ms allowance");
+        let mut turns = 0;
+        while rx.stream.is_some() {
+            assert!(turns < 10, "the stream did not end within 10 quiet turns");
+            turns += 1;
+            let (hook_core, hook_time, hook_host) = (core.clone(), time.clone(), rx.host.clone());
+            spy.script_rx_recv(move |timeout| {
+                hook_time.advance_to(hook_core.at(hook_core.now() + hook_core.ticks(timeout.as_nanos() as i64))).unwrap();
+                hook_host.advance_for_test(timeout);
+                RxRecv::Timeout
+            });
+            rx.turn();
+        }
+        assert!(rx.stream.is_none(), "the stream ends once it is quiet past its cut");
+
+        // One applied stop, at the cut (sample 16 000 = 3 200 000 root ticks) and issued at
+        // t_o + span = 40 ms: a stop at the booking instant (16 ms) while samples still arrive is
+        // what the assertion above the applied row guards against. The overrun is unanswered, so
+        // the device sees the pair (UR-26); the applied row is one for the pair, as the S13/S18
+        // tests read it, the second stop being the device call.
+        let applied = lock(&core.rec).applied.clone();
+        let stops: Vec<_> = applied.iter().filter(|row| row["key"] == "rx_stop").collect();
+        assert_eq!(stops.len(), 1, "one applied stop for the pair: {applied:?}");
+        assert_eq!(stops[0]["at"]["ticks"].as_i64(), Some(clock.instant(16_000)), "the stop names the cut: {applied:?}");
+        let issued = stops[0]["issued"]["ticks"].as_i64().expect("the stop's issued instant");
+        assert!(issued >= t_o + span, "the stop was issued at {issued}, before t_o {t_o} + span {span}: it ended at the cut while the backlog still arrived");
+        assert!(issued <= t_o + span + ms(1), "the stop was issued at {issued}, more than a millisecond past t_o {t_o} + span {span}");
+        let device_stops: Vec<_> = spy.log().into_iter().filter(|call| call.starts_with("rx_stop")).collect();
+        assert_eq!(device_stops, ["rx_stop 0 now", "rx_stop 0 now"], "the stop and the unanswered overrun's second stop are both rx_stop calls");
+        assert_eq!(spy.seen("rx_stop"), 2, "the unanswered overrun's second stop follows: {:?}", spy.log());
+        let timing = lock(&core.rec).timing.clone();
+        assert_eq!(timing.iter().filter(|row| row["what"] == "rx_stop_overrun_clear").count(), 1, "one clear of the queued restart");
+
+        // The successor, begun at 40 ms: its origin is the cut (16 ms) plus one 2 000-sample call
+        // (2 ms) plus the allowance (3 ms) plus the start lead (10 ms) = 31 ms, before the 40 ms
+        // it is issued at. The device is at the owner's now, so its timed start is late.
+        let now_at_begin = core.now();
+        spy.set_time(now_at_begin);
+        assert!(rx.begin(), "the successor begins");
+        let now_at_begin = core.now();
+        let planned = lock(&core.streams).planned(stream_key(Dir::Rx, 0));
+        assert_eq!(planned.len(), 2, "the old segment and the successor");
+        let origin = planned[1].segment.origin;
+        assert_eq!(origin, ms(31), "the successor's origin: 16 ms + 2 ms + 3 ms + 10 ms = 31 ms");
+        let timing = lock(&core.rec).timing.clone();
+        let switch = timing.iter().find(|row| row["what"] == "rx_segment").unwrap_or_else(|| panic!("no switch: {timing:?}"));
+        assert_eq!(switch["origin"].as_i64(), Some(origin), "the timing row names the origin");
+        assert_eq!(switch["at"].as_i64(), Some(now_at_begin), "the timing row names the issuance");
+        assert!(origin < now_at_begin, "the start is late by construction: origin {origin} (31 ms) is before its issuance {now_at_begin} (40 ms)");
+        assert!(spy.log().iter().any(|call| *call == format!("rx_start 0 {origin}")), "the start at its origin: {:?}", spy.log());
+
+        // The fake's own timed start is late: one turn returns LateCommand, and the owner restarts
+        // a start lead (10 ms) after now: 40 ms + 10 ms = 50 ms.
+        rx.turn();
+        let timing = lock(&core.rec).timing.clone();
+        let restart = timing.iter().find(|row| row["what"] == "rx_restart").expect("the owner restarted the missed start")["at"].as_i64().unwrap();
+        assert_eq!(restart, ms(50), "the restart waits the 10 ms start lead from 40 ms");
+        let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing));
+        assert!(restart >= now_at_begin + lead, "the restart {restart} waits the start lead past now {now_at_begin}");
+
+        // Past the restart, the device's first block: in the successor's own domain, from the
+        // restart 50 ms, carrying GAP_BEFORE and the samples between the origin and the restart:
+        // (50 ms − 31 ms) · 200 000 ticks/ms ÷ 200 = 19 000.
+        time.advance_to(core.at(restart + ms(5))).unwrap();
+        spy.set_time(core.now());
+        rx.turn();
+        let blocks: Vec<_> = std::iter::from_fn(|| link.receive().map(|(block, _)| block)).collect();
+        let domain = rx.stream.as_ref().expect("the successor").clock.domain;
+        let block = blocks.iter().find(|block| block.header().first_sample_time.domain() == domain).expect("the successor's first block");
+        assert_eq!(block.header().first_sample_time.ticks_in(domain).unwrap(), 19_000, "the first sample is at (50 ms − 31 ms) ÷ 200 = 19 000");
+        assert_eq!(block.header().flags, BlockFlags::GAP_BEFORE, "the restart's first block carries the missed start's gap");
+        assert_eq!(block.header().lost, Some(((restart - origin) / 200) as u64), "the lost samples: (50 − 31) ms ÷ 200 ticks = 19 000");
+
+        // The old segment's tail: its clock ends at the cut (16 000 = 3 200 000 ÷ 200), the first
+        // sample not delivered is the backlog's end 15 000 = 1 000 + 7 · 2 000, and lost is
+        // 1 000 = 16 000 − 15 000, at sample 15 000 in the old domain.
+        assert_eq!(clocks(&core)[0], (0, Some(clock.instant(16_000))), "the old clock ends at the cut");
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let late: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::LATE_COMMAND).collect();
+        assert_eq!(late.len(), 1, "one missed start: {delivered:?}");
+        let payload: LateCommandPayload = serde_json::from_value(late[0].payload.clone()).unwrap();
+        assert_eq!((payload.requested, payload.applied), (core.at(origin), core.at(restart)), "the missed start names its origin and its restart");
+        let tails: Vec<_> = delivered.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+        assert_eq!(tails.len(), 1, "one tail: {delivered:?}");
+        assert_tail(tails[0], &core, TimePoint::new(clock.domain, 15_000), RxOverflowCause::Overrun, 1_000);
+        assert_eq!(lock(&core.rec).stats.get("rx_before_origin").copied().unwrap_or(0), 0, "the successor's block was not dropped at the origin gate");
     }
 
     #[test]
@@ -2547,11 +4090,15 @@ mod tests {
         // ends the stream with no device call.
         let origin = lock_ticks(900);
         let mut q = queued(origin, Vec::new());
+        // The first stream's own stop is booked by now; the loss must add none.
+        let stops = q.untimed_stops().len();
         q.core.device_lost("test: loss while a start is queued");
         let calls = q.device.calls().len();
         q.rx.poll();
         assert!(q.rx.stream.is_none());
         assert_eq!(q.device.calls().len(), calls, "no device call after the loss: {:?}", q.device.calls());
+        // The loss branch ends the stream before any stop is booked: the gate alone would return `None` after the `rx_stop_untimed` row of a stop never made.
+        assert_eq!(q.untimed_stops().len(), stops, "no stop row for a stop never made: {:?}", q.untimed_stops());
         assert_eq!(q.core.rx_chain[0].lock().device(), RxDevice::Lost);
         assert_eq!(clocks(&q.core).len(), 1, "no clock for the queued start");
     }
@@ -2949,5 +4496,369 @@ mod tests {
         assert!(applies()[1].contains("freq=3000000000"), "the new command's own snapshot: {:?}", applies());
         assert!(core.owner_configure(Dir::Rx, 0, &planned[2]).unwrap());
         assert_eq!(applies().len(), 3, "a command with the same values configures again: {:?}", device.calls());
+    }
+
+    // ------------------------------------------------- 4b-2b-2b: the P5 and P6 rules (UR-18, UR-26)
+
+    #[test]
+    fn ur_26_a_reached_stop_cut_survives_a_later_abort_while_a_loss_is_pending() {
+        // UR-18, UR-26 (P5): a `Stop` at 6 ms cuts the segment at sample 6 000 (1 200 000 root
+        // ticks ÷ 200) and the sequence report is still pending; a later abort lowers the chain's
+        // cut to the first sample not delivered (1 000) but not the stream's end, which is the
+        // plan's cut while a report is pending: the tail is that gap (5 000 = 6 000 − 1 000), the
+        // clock ends at 1 200 000, and delivery stops at 1 000. The rule reads the plan, not
+        // `now`: the `off` row books the abort ten ticks before the cut's instant. The `rx_stop`
+        // row names the same cut: its `at` is the instant the clock ends at.
+        for (how, lattice) in [("direct", "on"), ("direct", "off"), ("published", "on"), ("published", "off"), ("in flight", "on"), ("in flight", "off")] {
+            let case = format!("{how}, {lattice}");
+            let link = link();
+            let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, clock) = rx(&core, 1);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            rx.receive(samples(clock.instant(0), 1_000));
+            rx.receive(RxRecv::Overflow { out_of_sequence: true });
+            // The cut is the first sample at or after the Stop's tick: 6 000 for 6 ms, and still
+            // 6 000 for the half sample before its instant, ceil(1 199 900 / 200).
+            let stop_at = if lattice == "on" { ms(6) } else { ms(6) - 100 };
+            book(&core, stop_at, 1, Kind::Stop);
+            rx.poll();
+            let now = if lattice == "on" { ms(7) } else { stop_at + 10 };
+            time.advance_to(core.at(now)).unwrap();
+            assert!(rx.stream.is_some(), "{case}: the stream still runs when the abort arrives");
+            assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0))[0].segment.cut, Some(6_000), "{case}: the Stop's cut is in the plan");
+            assert_eq!(core.rx_chain[0].lock().cut(), Some(clock.instant(6_000)), "{case}: the Stop's cut took effect");
+            assert_eq!(rx.stream.as_ref().unwrap().expected, 1_000, "{case}");
+            assert_eq!(lock(&core.rec).stats["rx_overflows"], 1, "{case}");
+            if lattice == "on" {
+                assert!(now > clock.instant(6_000), "{case}: the abort is after the cut's instant");
+            } else {
+                assert!(now < clock.instant(6_000), "{case}: the abort is before the cut's instant");
+            }
+            if how != "direct" {
+                // As `Provider::stop(abort)` books it (UR-26).
+                let mut streams = lock(&core.streams);
+                streams.stop = Some((now, StopMode::Abort));
+                streams.end(&core, now, true, false);
+                core.release_streams(streams);
+                assert_eq!(lock(&core.streams).stop, Some((now, StopMode::Abort)), "{case}: the abort was published");
+            }
+            if how == "in flight" {
+                // The receive that was in flight when the abort was published: only the abort's cut
+                // bounds it, not the plan's cut past it.
+                rx.receive(samples(clock.instant(3_000), 4_000));
+            } else {
+                rx.command(RxCmd::Shutdown(StopMode::Abort));
+            }
+            assert!(rx.stream.is_none(), "{case}: the abort ends the stream");
+            assert_eq!(received(&link), [(clock.domain, 0, 1_000)], "{case}: the prefix only: delivery follows the first sample not delivered, not the plan's cut");
+            let got = overflow_events(&events);
+            assert_eq!(got.len(), 1, "{case}: one tail, and no block's: {got:?}");
+            assert_tail(&got[0], &core, TimePoint::new(clock.domain, 1_000), RxOverflowCause::Sequence, 5_000);
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(6_000)))], "{case}: the Stop's cut is the end, not the abort's");
+            let applied = lock(&core.rec).applied.clone();
+            let stops: Vec<_> = applied.iter().filter(|row| row["key"] == "rx_stop").collect();
+            assert_eq!(stops.len(), 1, "{case}: {applied:?}");
+            assert_eq!(stops[0]["at"]["ticks"].as_i64(), Some(clock.instant(6_000)), "{case}: the row names the cut the clock ends at: {}", stops[0]);
+        }
+    }
+
+    #[test]
+    fn ur_26_a_stop_cut_with_no_loss_report_does_not_survive_an_abort_and_a_plain_abort_has_no_tail() {
+        // UR-18, UR-26 (P5's controls). (i) A `Stop` at 1 ms cut the chain at 1 000 and no report
+        // ever came: the abort at 5 ms ends the stream at the first sample not delivered (300), not
+        // at the Stop's cut, and makes no tail. (ii) An overrun is pending and no Stop exists: the
+        // abort's own cut is the first sample not delivered (1 000, which its `End` carries into
+        // the plan), so the gap is 0 and no tail is made.
+        {
+            let link = link();
+            let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, clock) = rx(&core, 1);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            rx.receive(samples(clock.instant(0), 300));
+            book(&core, ms(1), 1, Kind::Stop);
+            rx.poll();
+            assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0))[0].segment.cut, Some(1_000), "(i): the Stop's cut is in the plan");
+            assert_eq!(core.rx_chain[0].lock().cut(), Some(clock.instant(1_000)), "(i): the Stop's cut took effect");
+            assert!(rx.stream.is_some(), "(i)");
+            let now = ms(5);
+            time.advance_to(core.at(now)).unwrap();
+            {
+                // As `Provider::stop(abort)` books it (UR-26).
+                let mut streams = lock(&core.streams);
+                streams.stop = Some((now, StopMode::Abort));
+                streams.end(&core, now, true, false);
+                core.release_streams(streams);
+            }
+            assert_eq!(lock(&core.streams).stop, Some((now, StopMode::Abort)), "(i): the abort was published");
+            rx.command(RxCmd::Shutdown(StopMode::Abort));
+            assert!(rx.stream.is_none(), "(i)");
+            assert_eq!(received(&link), [(clock.domain, 0, 300)], "(i): the prefix only");
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(300)))], "(i): the end is the first sample not delivered, not the Stop's cut");
+            let got = overflow_events(&events);
+            assert!(got.is_empty(), "(i): no report, no tail: {got:?}");
+        }
+        {
+            let link = link();
+            let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, clock) = rx(&core, 1);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            rx.receive(samples(clock.instant(0), 1_000));
+            rx.receive(RxRecv::Overflow { out_of_sequence: false });
+            assert_eq!(rx.stream.as_ref().unwrap().pending.len(), 1, "(ii): the overrun is pending");
+            assert_eq!(lock(&core.rec).stats["rx_overflows"], 1, "(ii)");
+            let now = ms(5);
+            {
+                // As `Provider::stop(abort)` books it (UR-26).
+                let mut streams = lock(&core.streams);
+                streams.stop = Some((now, StopMode::Abort));
+                streams.end(&core, now, true, false);
+                core.release_streams(streams);
+            }
+            assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0))[0].segment.cut, Some(1_000), "(ii): the abort's own cut is the first sample not delivered");
+            assert!(rx.stream.is_some(), "(ii): publishing alone ends nothing");
+            rx.poll();
+            assert!(rx.stream.is_none(), "(ii): the owner ends the stream at the abort");
+            assert_eq!(received(&link), [(clock.domain, 0, 1_000)], "(ii): the prefix only");
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(1_000)))], "(ii): the abort's own cut is the end");
+            let got = overflow_events(&events);
+            assert!(got.is_empty(), "(ii): a loss of 0 makes no tail: {got:?}");
+        }
+    }
+
+    /// What a P6 test reads once B is the active stream: B's clock and its origin, in the future of
+    /// the device's clock (0).
+    struct Successor {
+        core: Arc<Core>,
+        rx: Rx,
+        link: Arc<dyn ezsdr_kernel::stream::DataLink>,
+        events: Arc<ezsdr_kernel::event::EventCollector>,
+        time: Arc<ezsdr_kernel::time::ManualTimeAuthority>,
+        clock: Clock,
+        origin: i64,
+    }
+
+    /// uhd-rx after A (samples 0…10 000, ended at a `Stop`'s cut at 10 ms) has begun its successor B
+    /// at B's own origin (15 ms plus the start lead), the device's clock still at 0. With `spy`, A's
+    /// stop is that spy's one refusal: the chain is left Uncertain, with no loss, and B begins on it.
+    fn successor(spy: Option<&Arc<super::super::test_support::LockSpy>>) -> Successor {
+        let link = link();
+        let device: Arc<dyn Device> = match spy {
+            Some(spy) => spy.clone(),
+            None => Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() })),
+        };
+        let (core, time, events) = super::super::test_support::rig_on(device, vec![link.clone()], 2_000);
+        if let Some(spy) = spy {
+            spy.watch(&core);
+        }
+        let (mut rx, clock_a) = rx(&core, 1);
+        book(&core, core.ticks(10_000_000), 1, Kind::Stop);
+        book(&core, core.ticks(15_000_000), 2, Kind::Start);
+        rx.poll();
+        rx.receive(samples(0, 10_000));
+        assert!(rx.stream.is_none(), "A ends at its Stop's cut");
+        assert_eq!(received(&link), [(clock_a.domain, 0, 10_000)], "A's prefix, up to its cut");
+        if spy.is_some() {
+            assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Uncertain, "A's stop was refused without losing the device");
+        }
+        assert!(rx.begin(), "the successor begins");
+        let stream = rx.stream.as_ref().expect("B is the active stream");
+        assert!(rx.successor, "the owner remembers the stream it ended");
+        let (clock, origin) = (stream.clock, stream.clock.origin);
+        Successor { core, rx, link, events, time, clock, origin }
+    }
+
+    #[test]
+    fn ur_18_a_late_overflow_before_the_next_stream_s_first_block_makes_no_event() {
+        // UR-18 (P6, S16a): a report that reaches a successor before its origin is the previous
+        // stream's: it is counted and noted, not pending on B. B's first block starts at its
+        // expected sample 0, so it has no flags and no `lost`, and no overrun event is made.
+        let Successor { mut rx, link, events, core, clock, .. } = successor(None);
+        assert!(core.now() < clock.origin, "the report arrives before B's origin");
+        let before = lock(&core.rec).stats["rx_overflows"];
+        assert_eq!(before, 0, "a fresh successor rig counted no report");
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        assert!(rx.stream.as_ref().unwrap().pending.is_empty(), "the report did not reach B");
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], before + 1, "the gated report is counted once");
+        rx.receive(samples(clock.instant(0), 1_000));
+        let block = link.receive().expect("B's first block").0;
+        assert_eq!((block.header().flags, block.header().lost), (BlockFlags::NONE, None), "B's block at its expected sample takes nothing from the report");
+        assert!(overflow_events(&events).is_empty(), "the gated report makes no event");
+        let rows: Vec<_> = lock(&core.rec).timing.iter().filter(|row| row["what"] == "rx_report_before_origin").cloned().collect();
+        assert_eq!(rows.len(), 1, "one gate row: {rows:?}");
+        assert_eq!(rows[0]["origin"].as_i64(), Some(clock.origin), "{rows:?}");
+    }
+
+    #[test]
+    fn ur_18_a_late_overflow_does_not_mark_the_next_stream_s_first_jump_block() {
+        // UR-18 (P6, S16b): the same gated report, then B's first kept block starts at sample 2:
+        // the jump is B's own, an unannounced sequence discontinuity — not a restart, which would
+        // put the previous stream's overrun on this stream's block — and no overrun event is made.
+        let Successor { mut rx, link, events, core, clock, .. } = successor(None);
+        assert!(core.now() < clock.origin, "the report arrives before B's origin");
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        rx.receive(samples(clock.instant(2), 1_000));
+        let block = link.receive().expect("B's first block").0;
+        assert_eq!((block.header().flags, block.header().lost), (BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(2)), "the gated overrun adds no RESTARTED");
+        assert!(overflow_events(&events).is_empty(), "the gated report makes no event");
+    }
+
+    #[test]
+    fn ur_18_a_genuine_overflow_is_kept() {
+        // UR-18 (P6, S16c): at or after its origin a report is B's. (1) At exactly B's origin the
+        // overrun is pending: its first block (a jump to 2) is `GAP_BEFORE | RESTARTED` with `lost`
+        // 2, and one RX_OVERFLOW names the overrun at B's expected sample 0. (2) A rig's first
+        // stream has no earlier stream to have reported before its origin, so its report is kept
+        // before the origin too.
+        {
+            let Successor { mut rx, link, events, core, time, clock, origin } = successor(None);
+            time.advance_to(core.at(origin)).unwrap();
+            assert_eq!(core.now(), origin, "the report arrives at B's origin");
+            rx.receive(RxRecv::Overflow { out_of_sequence: false });
+            assert_eq!(rx.stream.as_ref().unwrap().pending.len(), 1, "the report is B's");
+            rx.receive(samples(clock.instant(2), 1_000));
+            let block = link.receive().expect("B's first block").0;
+            assert_eq!((block.header().flags, block.header().lost), (BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(2)));
+            let got = overflow_events(&events);
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_tail(&got[0], &core, TimePoint::new(clock.domain, 0), RxOverflowCause::Overrun, 2);
+            assert!(lock(&core.rec).timing.iter().all(|row| row["what"] != "rx_report_before_origin"), "no gate row at the origin");
+        }
+        {
+            let link = link();
+            let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, _) = rx_unopened(&core, 1);
+            let origin = core.ticks(5_000_000);
+            plan(&core, &[(origin, None, Some(1))]);
+            assert!(rx.begin(), "the first segment begins");
+            let clock = rx.stream.as_ref().expect("the first stream").clock;
+            assert!(!rx.successor, "no earlier stream: not a successor");
+            assert!(core.now() < clock.origin, "the report arrives before the origin");
+            rx.receive(RxRecv::Overflow { out_of_sequence: false });
+            assert_eq!(rx.stream.as_ref().unwrap().pending.len(), 1, "the first stream keeps its report");
+            rx.receive(samples(clock.instant(2), 1_000));
+            let block = link.receive().expect("the first block").0;
+            assert_eq!((block.header().flags, block.header().lost), (BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(2)));
+            let got = overflow_events(&events);
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_tail(&got[0], &core, TimePoint::new(clock.domain, 0), RxOverflowCause::Overrun, 2);
+            assert!(lock(&core.rec).timing.iter().all(|row| row["what"] != "rx_report_before_origin"), "no gate row on a first stream");
+        }
+    }
+
+    #[test]
+    fn ur_18_the_origin_gate_is_strict() {
+        // UR-18 (P6, S16e): the gate is `now < origin` itself, so a report one tick before a
+        // successor's origin is the previous stream's, and one at the origin is the successor's.
+        {
+            let Successor { mut rx, link, events, core, time, clock, origin } = successor(None);
+            time.advance_to(core.at(origin - 1)).unwrap();
+            assert_eq!(core.now(), origin - 1, "one tick before B's origin");
+            rx.receive(RxRecv::Overflow { out_of_sequence: false });
+            rx.receive(samples(clock.instant(2), 1_000));
+            let block = link.receive().expect("B's first block").0;
+            assert_eq!((block.header().flags, block.header().lost), (BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(2)), "one tick before the origin is gated");
+            assert!(overflow_events(&events).is_empty(), "no event from the gated report");
+        }
+        {
+            let Successor { mut rx, link, events, core, time, clock, origin } = successor(None);
+            time.advance_to(core.at(origin)).unwrap();
+            assert_eq!(core.now(), origin, "at B's origin");
+            rx.receive(RxRecv::Overflow { out_of_sequence: false });
+            rx.receive(samples(clock.instant(2), 1_000));
+            let block = link.receive().expect("B's first block").0;
+            assert_eq!((block.header().flags, block.header().lost), (BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(2)), "at the origin the report is B's");
+            assert_eq!(overflow_events(&events).len(), 1, "B's overrun makes its event");
+        }
+    }
+
+    #[test]
+    fn ur_18_a_failed_stop_does_not_stop_the_gate() {
+        // UR-18 (P6, S16f): A's stop was refused without losing the device, which leaves the chain
+        // Uncertain; B still begins as a successor — the record of the end is the stream's, not the
+        // stop's — so a report before B's origin is still gated.
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
+        spy.refuse_rx_stop(crate::DeviceError::failed("test: scripted rx_stop refusal"));
+        let Successor { mut rx, link, events, core, clock, .. } = successor(Some(&spy));
+        assert_eq!(spy.seen("rx_stop"), 1, "A's stop went out once: {:?}", spy.order());
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Armed { at: clock.origin }, "B began on the uncertain chain: {:?}", spy.order());
+        assert!(core.now() < clock.origin, "the report arrives before B's origin");
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        rx.receive(samples(clock.instant(2), 1_000));
+        let block = link.receive().expect("B's first block").0;
+        assert_eq!((block.header().flags, block.header().lost), (BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(2)), "the gate held after the refused stop");
+        assert!(overflow_events(&events).is_empty(), "no event from the gated report");
+        let rows: Vec<_> = lock(&core.rec).timing.iter().filter(|row| row["what"] == "rx_report_before_origin").cloned().collect();
+        assert_eq!(rows.len(), 1, "one gate row: {rows:?}");
+    }
+
+    #[test]
+    fn ur_18_the_origin_gate_covers_every_report_class() {
+        // UR-18 (P6, S16g): every device report class is gated before a successor's origin — the
+        // two loss classes counted once, an alignment not counted — leaving nothing on B's first
+        // jump block; at or after the origin each is B's, with the flags
+        // `ur_19_reports_before_one_block_keep_each_kind` gives it.
+        for (what, report, gated, kept, overflows) in [
+            ("overrun", RxRecv::Overflow { out_of_sequence: false }, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, 1),
+            ("sequence error", RxRecv::Overflow { out_of_sequence: true }, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, 1),
+            ("bad packet", RxRecv::BadPacket, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, 1),
+            ("alignment", RxRecv::Alignment, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, BlockFlags::GAP_BEFORE | BlockFlags::ALIGNMENT, 0),
+        ] {
+            {
+                let Successor { mut rx, link, events, core, clock, .. } = successor(None);
+                assert!(core.now() < clock.origin, "{what}: the report arrives before B's origin");
+                let before = lock(&core.rec).stats["rx_overflows"];
+                rx.receive(report.clone());
+                assert_eq!(lock(&core.rec).stats["rx_overflows"], before + overflows, "{what}: the gate counts a loss once and an alignment not at all");
+                assert!(rx.stream.as_ref().unwrap().pending.is_empty(), "{what}: the report did not reach B");
+                rx.receive(samples(clock.instant(2), 1_000));
+                let block = link.receive().expect("B's first block").0;
+                assert_eq!((block.header().flags, block.header().lost), (gated, Some(2)), "{what}: the gated report adds no flag");
+                let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+                assert!(!delivered.iter().any(|event| [kinds::RX_OVERFLOW, kinds::ALIGNMENT_ERROR].contains(&event.kind.as_str())), "{what}: {delivered:?}");
+                let rows: Vec<_> = lock(&core.rec).timing.iter().filter(|row| row["what"] == "rx_report_before_origin").cloned().collect();
+                assert_eq!(rows.len(), 1, "{what}: one gate row: {rows:?}");
+            }
+            {
+                let Successor { mut rx, link, core, time, clock, origin, .. } = successor(None);
+                time.advance_to(core.at(origin)).unwrap();
+                assert_eq!(core.now(), clock.origin, "{what}: at B's origin");
+                rx.receive(report);
+                assert_eq!(rx.stream.as_ref().unwrap().pending.len(), 1, "{what}: the report is B's");
+                rx.receive(samples(clock.instant(2), 1_000));
+                let block = link.receive().expect("B's first block").0;
+                assert_eq!((block.header().flags, block.header().lost), (kept, Some(2)), "{what}: the report's own flags");
+                assert!(lock(&core.rec).timing.iter().all(|row| row["what"] != "rx_report_before_origin"), "{what}: no gate row at the origin");
+            }
+        }
+    }
+
+    #[test]
+    fn ur_18_a_first_stream_after_an_empty_finish_is_not_a_successor() {
+        // UR-18 (P6, S16h): an owner that finished with no stream ended nothing, so the first stream
+        // it begins afterwards is nobody's successor and keeps a report that arrives before its
+        // origin. A defensive pin (row N108-76): production reaches `finish` with no stream only at
+        // a Run's end or after a loss, when no stream follows; the flag is still set only where a
+        // stream was taken.
+        let link = link();
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, _) = rx_unopened(&core, 1);
+        rx.finish();
+        assert!(rx.stream.is_none(), "there was no stream");
+        assert!(!rx.successor, "nothing ended, so nothing has a successor");
+        let origin = core.ticks(5_000_000);
+        plan(&core, &[(origin, None, Some(1))]);
+        assert!(rx.begin(), "the first segment begins");
+        let clock = rx.stream.as_ref().expect("the first stream").clock;
+        assert!(!rx.successor, "a first stream is not a successor");
+        assert!(core.now() < clock.origin, "the report arrives before the origin");
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        assert_eq!(rx.stream.as_ref().unwrap().pending.len(), 1, "the first stream keeps its report");
+        rx.receive(samples(clock.instant(2), 1_000));
+        let block = link.receive().expect("the first block").0;
+        assert_eq!((block.header().flags, block.header().lost), (BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(2)));
+        let got = overflow_events(&events);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_tail(&got[0], &core, TimePoint::new(clock.domain, 0), RxOverflowCause::Overrun, 2);
+        assert!(lock(&core.rec).timing.iter().all(|row| row["what"] != "rx_report_before_origin"), "no gate row on a first stream");
     }
 }

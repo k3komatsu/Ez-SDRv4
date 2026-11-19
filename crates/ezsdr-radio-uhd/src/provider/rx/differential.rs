@@ -10,7 +10,7 @@
 //! sequence's overruns, sequence errors and loss. It moves the rig's time while a receive call
 //! waits, booking on the way, so that a booking can come during a wait. Every field is gated.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -27,8 +27,9 @@ use generator::{Fault, Leaf, Op, Sequence, Terms};
 use super::super::control::ColdConfig;
 use super::super::core::{Core, booked_stream, lock};
 use super::{Rx, RxCmd, Turn};
+use crate::HostClock;
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, FakeFault, Iq, RxRecv, Settings, TxReport};
-use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
+use crate::profile::DELIVERY_ALLOWANCE_NS;
 use ezsdr_radio::staging::Staging;
 
 use super::super::generator;
@@ -37,8 +38,11 @@ use super::super::generator;
 const T0: i64 = 400_000_000;
 /// Root ticks per millisecond.
 const MS: i64 = 200_000;
-/// What an overrun loses, as MockRadio's `x3xx` (layer 1).
-const GAP: i64 = 50 * MS;
+/// What an overrun loses, in root ticks: the profile's `overflow_restart_gap_ns`, shared with
+/// MockRadio and the hardware.
+fn gap() -> i64 {
+    (ezsdr_radio::x3xx::timing().overflow_restart_gap_ns + 4) / 5
+}
 /// The arrival order of `Provider::stop`, after every command of a sequence.
 const STOP_SEQ: u64 = 1_000;
 
@@ -63,6 +67,8 @@ struct Extra {
     refuse: Option<u64>,
     /// Past every origin and cut, so that every cut is delivered and every origin passed.
     horizon: i64,
+    /// A restart survives the first stop after it: the START UHD queued behind the stop, cleared only by a second stop.
+    survivor: bool,
 }
 
 fn extra(seed: u64, sequence: &Sequence) -> Extra {
@@ -78,11 +84,12 @@ fn extra(seed: u64, sequence: &Sequence) -> Extra {
     let block = if draw(seed, 5, 3) == 0 { 65_536 } else { 2_000 };
     let lag = MS * draw(seed, 6, 3) as i64;
     // Past every origin and cut the sequence's commands plan, by two receive calls at the
-    // lowest rate and the allowances.
+    // lowest rate and the allowances; a gap-delayed block still falls inside it when the
+    // profile's gap grows.
     let segments = plan(&terms(block).stream, &sequence.items(&terms(block))).unwrap();
     let last = segments.iter().map(|s| s.cut.map_or(s.origin, |cut| s.instant(cut).unwrap())).max().unwrap_or(T0);
-    let horizon = last.max(T0 + 90_000_000) + 20 * MS + 2 * block * 500;
-    Extra { latency, lag, block, stop, refuse: rate.filter(|_| draw(seed, 4, 2) == 0), horizon }
+    let horizon = last.max(T0 + 90_000_000 + (gap() - 50 * MS)) + 20 * MS + 2 * block * 500;
+    Extra { latency, lag, block, stop, refuse: rate.filter(|_| draw(seed, 4, 2) == 0), horizon, survivor: draw(seed, 7, 2) == 1 }
 }
 
 /// This Module's timeline terms for the receive stream on the rig: the start lead, one
@@ -111,13 +118,12 @@ fn rm_26_the_timeline_against_uhd_rx() {
     // `EZSDR_TIMELINE_SEED=<seed>` prints that sequence's run.
     let shown: Option<u64> = std::env::var("EZSDR_TIMELINE_SEED").ok().and_then(|seed| seed.parse().ok());
     let mut failed = Vec::new();
-    let mut excused_seeds = Vec::new();
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
     for seed in 0..1_000 {
         let sequence = generator::sequence(seed);
         let extra = extra(seed, &sequence);
         let observed = run(&sequence, &extra);
-        let (problems, floored, excused) = compare(&sequence, &extra, &observed);
+        let (problems, reach) = compare(&sequence, &extra, &observed);
         if shown == Some(seed) {
             eprintln!("seed {seed}: {sequence:?}\n{extra:?}\nobserved {observed:#?}\nproblems {problems:#?}");
         }
@@ -129,23 +135,46 @@ fn rm_26_the_timeline_against_uhd_rx() {
             ("loss", observed.lost),
             ("fault", observed.blocks.iter().any(|(_, (_, _, flags, _))| *flags != BlockFlags::NONE)),
             ("booking during a wait", observed.straddled),
-            ("a cut floored at what was delivered", floored),
+            ("a cut floored at what was delivered", reach.floored),
+            ("a cut inside an overrun's gap", reach.cut_in_gap),
+            ("a block after an overrun's gap", reach.block_after_gap),
+            ("a survivor cleared by a second stop", reach.survivor_cleared),
             ("block_len 65 536", extra.block == 65_536),
             ("items pruned", observed.pruned),
         ] {
             *seen.entry(what).or_default() += usize::from(counted);
-        }
-        if excused {
-            excused_seeds.push(seed);
         }
         if !problems.is_empty() {
             failed.push(format!("seed {seed}, {:?}: {problems:?}", sequence.class));
         }
     }
     eprintln!("layer 3: 1000 sequences; cases {seen:?}");
-    // The excused sequences are these three and no other (#108); a fourth, or one fewer, is a change to look at.
-    assert_eq!(excused_seeds, [243, 766, 875], "the sequences whose start the overrun gap delays");
+    // S20: the shapes #108 needed are still exercised, so a change that stops producing them cannot pass quietly.
+    assert!(seen["a cut inside an overrun's gap"] >= 3, "the rig no longer produces a cut inside an overrun's gap");
+    assert!(seen["a block after an overrun's gap"] > 0, "the rig no longer produces a block after an overrun's gap");
+    assert!(seen["a survivor cleared by a second stop"] >= 4, "the rig no longer produces a restart that survives a stop");
     assert!(failed.is_empty(), "{} sequences differ (EZSDR_TIMELINE_SEED=<seed> shows one), the first: {:#?}", failed.len(), &failed[..failed.len().min(20)]);
+}
+
+#[test]
+fn rm_26_the_coverage_shapes_come_from_the_observed_run() {
+    let mut observed = Observed::default();
+    assert_eq!(observed_shapes(&observed), (false, false), "an empty run shows neither shape");
+    observed.blocks.push((0, (0, 2_000, BlockFlags::GAP_BEFORE, Some(10))));
+    assert_eq!(observed_shapes(&observed), (false, false), "a block after a gap alone is not a restart");
+    observed.blocks.push((0, (2_000, 2_000, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(10))));
+    assert_eq!(observed_shapes(&observed), (false, true), "a published RESTARTED block is the block-after-gap shape");
+
+    let cut = Observed { clocks: vec![(0, Some(100)), (200, None)], overruns: vec![(0, 50)], ..Observed::default() };
+    assert_eq!(observed_shapes(&cut), (true, false), "an overrun tail on an ended clock with a successor is a cut inside the gap");
+    let no_successor = Observed { clocks: vec![(0, Some(100))], ..cut.clone() };
+    assert!(!observed_shapes(&no_successor).0, "the last clock has no successor to reach");
+    let no_tail = Observed { overruns: Vec::new(), ..cut.clone() };
+    assert!(!observed_shapes(&no_tail).0, "without a delivered overrun tail nothing says the cut was in a gap");
+    let not_ended = Observed { clocks: vec![(0, None), (200, None)], ..cut.clone() };
+    assert!(!observed_shapes(&not_ended).0, "a clock that did not end was not cut");
+    let answered = Observed { blocks: vec![(0, (50, 2_000, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(10)))], ..cut.clone() };
+    assert!(!observed_shapes(&answered).0, "a published block at the first lost sample answered the report");
 }
 
 /// The successor origin of a Stop and a Start at one cut: one receive call at the old rate, the
@@ -168,8 +197,12 @@ fn n5_the_receive_successor_origin_is_old_rate_call_plus_allowance_plus_lead() {
 struct Observed {
     clocks: Vec<(i64, Option<i64>)>,
     blocks: Vec<(usize, Block)>,
+    /// The overrun `RX_OVERFLOW` events the run delivered, as `(clock index, first lost sample)`.
+    overruns: Vec<(usize, i64)>,
     calls: Vec<(i64, String)>,
     stops: Vec<(i64, i64)>,
+    /// The origins of the reports a successor's origin gate dropped (UR-18), from its `rx_report_before_origin` rows.
+    gated: Vec<i64>,
     refused: Vec<u64>,
     /// Configurations the device was asked for at the refused rate.
     refusable: usize,
@@ -177,6 +210,8 @@ struct Observed {
     late: usize,
     lost: bool,
     abort: bool,
+    /// The stops that left a restart streaming, by their index in `calls`: the device's log of survivors.
+    survived: Vec<usize>,
     /// The device still streams at the end, unstopped.
     streaming: bool,
     /// Timed starts of segments the plan dropped before their origin (#67).
@@ -189,11 +224,37 @@ struct Observed {
     /// How many `Set`s the line refused (RM-21), and the values each start's configure applied, by the origin it started.
     set_refused: usize,
     start_values: Vec<(i64, Option<(f64, f64)>)>,
+    /// The rig's device time at the end, in root ticks, and its host clock's reading then.
+    end: i64,
+    host: Wall,
+}
+
+/// What a sequence's run shows of the rig's reach (S20).
+#[derive(Default)]
+struct Reach {
+    floored: bool,
+    cut_in_gap: bool,
+    block_after_gap: bool,
+    /// A stop left a restart streaming that only a second stop cleared.
+    survivor_cleared: bool,
+}
+
+/// S20's two coverage shapes, from what the run showed: a published `RESTARTED` block, and an overrun
+/// tail (an `RX_OVERFLOW` with no published block at or after its first lost sample) on a receive clock
+/// that ended with a successor.
+fn observed_shapes(observed: &Observed) -> (bool, bool) {
+    let cut_in_gap = observed.overruns.iter().any(|(clock, tick)| {
+        observed.clocks.get(*clock).is_some_and(|(_, ended)| ended.is_some())
+            && observed.clocks.get(clock + 1).is_some()
+            && observed.blocks.iter().filter(|(block_clock, _)| block_clock == clock).all(|(_, (first, _, _, _))| first < tick)
+    });
+    let block_after_gap = observed.blocks.iter().any(|(_, (_, _, flags, _))| flags.contains(BlockFlags::RESTARTED));
+    (cut_in_gap, block_after_gap)
 }
 
 /// The timeline's account of what uhd-rx does with a sequence's plans, compared with what it
-/// did; the problems found, and whether RM-16's floor moved a cut.
-fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<String>, bool, bool) {
+/// did; the problems found, and which of the rig's shapes (S20) the run shows.
+fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<String>, Reach) {
     let terms = terms(extra.block);
     let mut problems = observed.violations.clone();
     let items = sequence.items(&terms);
@@ -233,13 +294,32 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
         }
     }
     all.sort_by_key(|s| s.origin);
-    // Each overrun and sequence error on the segment the device runs when it fires: the one
-    // begun last by then. One past that segment's cut leaves its blocks as they are.
+    // The cut a segment carries in the last plan that has it: none when only the first plan has
+    // it, where no stop was booked and its stream runs on.
+    let planned_cut = |segment: &Segment| -> Option<i64> {
+        let last = plans.iter().enumerate().filter_map(|(index, (_, plan))| plan.iter().find(|s| key(s) == key(segment)).map(|s| (index, s.cut))).next_back();
+        match last {
+            Some((index, cut)) if index > 0 => cut,
+            _ => None,
+        }
+    };
+    // Each overrun and sequence error on the segment the scripted device runs when it fires: the
+    // one begun last by then. The device fires a fault whose sample an earlier overrun's skip has
+    // passed at the skipping stream's next call, even past its cut, so it stays on that segment;
+    // that is the device's behaviour, not UHD's. A hit placed by the skip fires; a fallback hit
+    // fires iff its sample is before the planned cut (at the cut itself the stream stops before a
+    // call could fire it). Limitation: the planned cut, not the floored cut RM-16 may take, decides.
     let mut hits: Vec<Vec<(i64, Fault)>> = vec![Vec::new(); all.len()];
-    for (at, fault) in sequence.faults.iter().filter(|(_, fault)| *fault != Fault::Loss) {
-        let f = terms.t0 + terms.ticks(*at);
-        if let Some(index) = all.iter().rposition(|s| s.origin <= f) {
-            hits[index].push((f, *fault));
+    let mut fired: BTreeSet<(usize, i64)> = BTreeSet::new();
+    let mut faults: Vec<(i64, Fault)> = sequence.faults.iter().filter(|(_, fault)| *fault != Fault::Loss).map(|(at, fault)| (terms.t0 + terms.ticks(*at), *fault)).collect();
+    faults.sort_by_key(|(f, _)| *f);
+    for (f, fault) in faults {
+        let skipped = (0..all.len()).find(|index| hits[*index].iter().any(|(f1, kind)| *kind == Fault::Overrun && fired.contains(&(*index, *f1)) && *f1 <= f && f < *f1 + gap()));
+        if let Some(index) = skipped.or_else(|| all.iter().rposition(|s| s.origin <= f)) {
+            if fault == Fault::Overrun && (skipped == Some(index) || planned_cut(&all[index]).is_none_or(|cut| all[index].sample_at_or_after(f).unwrap() < cut)) {
+                fired.insert((index, f));
+            }
+            hits[index].push((f, fault));
         }
     }
     for hits in &mut hits {
@@ -352,7 +432,26 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
         let index = all.iter().position(|s| s.origin == origin);
         index.is_some_and(|index| early_stop_legal(kept.contains(&index), cancelled[index], at))
     };
+    // The first sample of each block uhd-rx published, by its stream's origin: a block after an overrun begins at or
+    // after the restart, so any block at or after `kf0` answered that overrun's report (UR-17, UR-18).
+    let published: BTreeMap<i64, Vec<i64>> =
+        observed.clocks.iter().enumerate().map(|(index, (origin, _))| (*origin, observed.blocks.iter().filter(|(clock, _)| *clock == index).map(|(_, (first, _, _, _))| *first).collect())).collect();
+    // The last overrun hit of a kept segment and still unanswered by a published block: a second stop may follow
+    // there, and it clears the START UHD queued behind the first. A report the device returns needs no
+    // prediction by the rig, so no `fired` condition: the oracle permits a second stop wherever an overrun hit of
+    // the segment has no published block at or after it, and the device's own log is what requires one.
+    let unanswered = |origin: i64| {
+        let Some(index) = segments.iter().position(|segment| segment.origin == origin) else { return false };
+        let Some((f, _)) = hits[index].iter().rfind(|(_, fault)| *fault == Fault::Overrun) else { return false };
+        let kf0 = segments[index].sample_at_or_after(*f).unwrap();
+        published.get(&origin).is_none_or(|firsts| firsts.iter().all(|first| *first < kf0))
+    };
     let mut stop_origins = Vec::new();
+    let mut second_stops = 0;
+    let mut ended: Option<i64> = None;
+    // A report the successor's gate dropped (UR-18) armed that stream's end, so its stop may need the second one too;
+    // a published block would have cleared the arming, and a block is on a clock at the stream's origin.
+    let gated = |origin: i64| observed.gated.contains(&origin) && observed.clocks.iter().all(|(clock, _)| *clock != origin);
     let (mut started, mut opened): (Option<i64>, usize) = (None, 0);
     for (at, call) in &observed.calls {
         let value = call.split(' ').nth(1).unwrap_or_default();
@@ -361,14 +460,17 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
                 problems.push(format!("{call} at {at}: the stream started before is not stopped"));
             }
             started = value.parse().ok();
+            ended = None;
         } else if call.starts_with("rx_stop ") {
             match started.take() {
                 Some(origin) => {
                     stop_origins.push(origin);
+                    ended = Some(origin);
                     if *at < origin && !early(origin, *at) {
                         problems.push(format!("{call} at {at}: before the origin {origin} of a segment the plan keeps, or before the plan took it away"));
                     }
                 }
+                None if ended.take().is_some_and(|origin| unanswered(origin) || gated(origin)) => second_stops += 1,
                 None => problems.push(format!("{call} at {at}: no stream to stop")),
             }
             if value != "now" {
@@ -383,8 +485,16 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
         }
     }
     let stopped_calls = observed.calls.iter().filter(|(_, call)| call.starts_with("rx_stop ")).count();
-    if observed.stops.len() != stopped_calls {
-        problems.push(format!("{} rx_stop rows for {stopped_calls} stops", observed.stops.len()));
+    if observed.stops.len() + second_stops != stopped_calls {
+        problems.push(format!("{} rx_stop rows and {second_stops} second stops for {stopped_calls} stops", observed.stops.len()));
+    }
+    // A survivor the device's log shows must be cleared by the next stop: the second stop (UR-17, UR-26).
+    if !observed.lost {
+        for i in &observed.survived {
+            if observed.calls.get(i + 1).is_none_or(|(_, call)| !call.starts_with("rx_stop ")) {
+                problems.push(format!("a restart survived the stop at call {i} and no second stop cleared it"));
+            }
+        }
     }
     if let Some((at, issued)) =
         observed.stops.iter().zip(&stop_origins).find(|((at, issued), origin)| issued < at && abort_at.is_none_or(|abort| *issued < abort) && !early(**origin, *issued)).map(|(row, _)| row)
@@ -430,62 +540,10 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     if observed.late > 0 {
         problems.push(format!("{} late starts", observed.late));
     }
-    // #108: the rig's device never returns `LateCommand`, so a start issued after its origin is not restarted (the hardware would answer it with
-    // `LateCommand` and UR-17's restart: INFERRED). What the rig shows is the start's call at a device time past its origin and a segment whose first
-    // block is `GAP_BEFORE | SEQ_DISCONTINUITY` with `lost` its index, not at sample 0 (the plan's): uhd-rx drops the packets stamped before the previous
-    // stop plus the device lead (`Stream::not_before`), so the first kept block is the plan's first block at or after that guard, and the new stream
-    // starts with no overrun pending, so uhd-rx reads the jump as a sequence discontinuity (the dropped overrun explains only the missing `RESTARTED`).
-    // That happens when the previous segment's cut falls in an overrun's restart gap [f, f + GAP), f an overrun that segment ran through:
-    // the old stream delivers again only after the gap, later than the 10 ms start lead puts the new origin.
-    // Exactly those two problems, for the one origin, are excused, and the excused segment's blocks are checked on their own (`excused_blocks`); the gap
-    // against the lead is stage 4b's to decide.
-    let mut excused = false;
-    for origin in
-        problems.iter().filter(|problem| problem.ends_with(LATE_START)).filter_map(|problem| problem.strip_prefix("rx_start")?.split_whitespace().next()?.parse::<i64>().ok()).collect::<Vec<_>>()
-    {
-        let Some(index) = segments.iter().position(|segment| segment.origin == origin).filter(|index| *index > 0) else { continue };
-        let Some(cut) = segments[index - 1].cut.map(|cut| segments[index - 1].instant(cut).unwrap()) else { continue };
-        if gap_excuses(&hits, index, cut) {
-            problems.retain(|problem| !(problem.starts_with(&format!("rx_start {origin} at ")) && problem.ends_with(LATE_START)) && !problem.starts_with(&format!("segment {index} at {origin}:")));
-            let got: Vec<Block> =
-                observed.clocks.iter().position(|(o, _)| *o == origin).map(|clock| observed.blocks.iter().filter(|(c, _)| *c == clock).map(|(_, block)| *block).collect()).unwrap_or_default();
-            let full = blocks(&segments[index], &hits[index], extra);
-            // The guard: the device time of the stop that ended the previous segment, plus the device lead, as a sample of this segment.
-            let begun = observed.calls.iter().position(|(_, call)| call.strip_prefix("rx_start ") == Some(origin.to_string().as_str()));
-            let stopped_at = begun.and_then(|begun| observed.calls[..begun].iter().rev().find(|(_, call)| call.starts_with("rx_stop ")).map(|(at, _)| *at));
-            let guard = stopped_at.map_or(i64::MAX, |at| segments[index].sample_at_or_after(at + (DEVICE_LEAD_NS + 4) / 5).unwrap());
-            problems.extend(excused_blocks(&got, &full, guard, cutoff).map(|why| format!("segment {index} at {origin}, excused for its late start, is not as the overrun gap leaves it: {why}")));
-            excused = true;
-        }
-    }
-    (problems, floor, excused)
-}
-
-/// Whether segment `index`'s late start is the overrun gap's: the previous segment ran through an overrun at `f` and its cut falls in `[f, f + GAP)`.
-fn gap_excuses(hits: &[Vec<(i64, Fault)>], index: usize, cut: i64) -> bool {
-    hits[index - 1].iter().any(|(f, fault)| *fault == Fault::Overrun && (*f..*f + GAP).contains(&cut))
-}
-
-/// What an excused segment (#108) looks like: its first block is the plan's first block at or after sample `guard` (the previous stop's device time plus
-/// the device lead), begun as `GAP_BEFORE | SEQ_DISCONTINUITY` with `lost` its first sample, and every block after it is the plan's own (its
-/// flags and `lost` too); it ends where the plan's does (a loss or an abort may end it earlier). `full` is the plan's blocks.
-fn excused_blocks(got: &[Block], full: &[Block], guard: i64, cutoff: bool) -> Option<String> {
-    let Some(&(first, len, flags, lost)) = got.first() else { return Some("no block".to_owned()) };
-    if flags != BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY || lost != Some(first as u64) {
-        return Some(format!("its first block is {:?}", got[0]));
-    }
-    if guard <= 0 {
-        return Some(format!("the guard is at sample {guard}, not after sample 0"));
-    }
-    let Some(kept) = full.iter().position(|(first, ..)| *first >= guard) else { return Some(format!("the plan has no block at or after the guard, sample {guard}")) };
-    if (first, len) != (full[kept].0, full[kept].1) {
-        return Some(format!("its first block is at {first} for {len}, the plan's first at or after the guard (sample {guard}) at {} for {}", full[kept].0, full[kept].1));
-    }
-    let (rest, n) = (&full[kept + 1..], got.len() - 1);
-    if n > rest.len() || (!cutoff && n != rest.len()) || got[1..] != rest[..n] {
-        return Some(format!("the blocks after the first are {:?}, the plan's {rest:?}", &got[1..]));
-    }
-    None
+    // S20: the shapes the rig is here to reach, so that a run which stops producing them fails instead of passing quietly.
+    let (cut_in_gap, block_after_gap) = observed_shapes(observed);
+    let reach = Reach { floored: floor, cut_in_gap, block_after_gap, survivor_cleared: !observed.survived.is_empty() };
+    (problems, reach)
 }
 
 /// The rig device's problem for a timed start issued at or after its origin.
@@ -499,72 +557,40 @@ fn early_stop_legal(kept: bool, cancelled: Option<i64>, at: i64) -> bool {
 }
 
 #[test]
-fn rm_26_an_excused_segment_is_checked_on_its_own() {
-    // The excused segment of #108: a first block `GAP_BEFORE | SEQ_DISCONTINUITY` with `lost` its first sample, then contiguous blocks to the plan's end.
-    let gap = BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY;
-    let plan: Vec<Block> = (0..5).map(|n| (n * 2_000, 2_000, BlockFlags::NONE, None)).collect();
-    let good: Vec<Block> = vec![(4_000, 2_000, gap, Some(4_000)), (6_000, 2_000, BlockFlags::NONE, None), (8_000, 2_000, BlockFlags::NONE, None)];
-    assert_eq!(excused_blocks(&good, &plan, 3_001, false), None);
-    assert_eq!(excused_blocks(&good[..1], &plan, 3_001, true), None, "a loss or an abort may end it early");
-    let bad = |blocks: Vec<Block>, cutoff: bool| excused_blocks(&blocks, &plan, 3_001, cutoff).is_some();
-    assert!(bad(vec![], false), "no block");
-    assert!(bad(good[..1].to_vec(), false), "it ends before the plan's end");
-    assert!(bad(vec![good[0], good[1], good[2], (10_000, 2_000, BlockFlags::NONE, None)], true), "it ends after the plan's end");
-    let from_zero: Vec<Block> = (0..5).map(|n| (n * 2_000, 2_000, if n == 0 { gap } else { BlockFlags::NONE }, (n == 0).then_some(0))).collect();
-    assert!(bad(from_zero, false), "it begins at sample 0");
-    let from_zero_again: Vec<Block> = plan.iter().enumerate().map(|(n, block)| if n == 0 { (0, 2_000, gap, Some(0)) } else { *block }).collect();
-    assert!(excused_blocks(&from_zero_again, &plan, 0, false).is_some(), "a guard at sample 0 excuses nothing");
-    assert!(bad(vec![(4_000, 2_000, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(4_000)), good[1], good[2]], false), "an overrun's flags");
-    assert!(bad(vec![(4_000, 2_000, gap, Some(2_000)), good[1], good[2]], false), "lost is not its first sample");
-    assert!(bad(vec![good[0], (6_000, 2_000, BlockFlags::SEQ_DISCONTINUITY, None), good[2]], false), "a flagged block after it");
-    assert!(bad(vec![good[0], (7_000, 4_000, BlockFlags::NONE, None)], false), "a hole after it, the plan's end reached");
-    assert!(bad(vec![(6_000, 2_000, gap, Some(6_000)), good[2]], false), "it begins at a later block than the guard's: a delayed guard");
-    assert!(bad(vec![(6_000, 2_000, gap, Some(6_000))], true), "a later first block, nothing after it");
-    assert!(bad(vec![(4_000, 1_000, gap, Some(4_000))], true), "the first block's length is the plan's");
-    assert!(bad(vec![(2_000, 2_000, gap, Some(2_000)), good[0], good[1], good[2]], false), "it begins before the guard");
-    assert!(bad(vec![good[0], (6_000, 1_000, BlockFlags::NONE, None), (7_000, 1_000, BlockFlags::NONE, None), good[2]], false), "block lengths are the plan's");
-}
-
-#[test]
-fn rm_26_compare_judges_the_excused_segment_it_finds() {
-    // Seed 243's run, tampered: the excused segment's blocks are held against the plan's (`excused_blocks`) through `compare`, not only as a unit.
-    let sequence = generator::sequence(243);
-    let extra = extra(243, &sequence);
-    let observed = run(&sequence, &extra);
-    let (problems, _, excused) = compare(&sequence, &extra, &observed);
-    assert!(excused && problems.is_empty(), "{problems:?}");
-    let late_origin = observed.calls.iter().find_map(|(at, call)| call.strip_prefix("rx_start ")?.parse::<i64>().ok().filter(|origin| at >= origin)).expect("a late start");
-    let clock = observed.clocks.iter().position(|(origin, _)| *origin == late_origin).unwrap();
-    let first = observed.blocks.iter().position(|(c, _)| *c == clock).unwrap();
-    for (what, tamper) in [
-        ("an overrun's flags", Box::new(|block: &mut Block| block.2 = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED) as Box<dyn Fn(&mut Block)>),
-        ("a first block later than the guard's", Box::new(|block: &mut Block| block.0 += block.1 as i64)),
-    ] {
-        let mut forged = observed.clone();
-        tamper(&mut forged.blocks[first].1);
-        let (problems, _, _) = compare(&sequence, &extra, &forged);
-        assert!(problems.iter().any(|problem| problem.contains("excused for its late start")), "{what}: {problems:?}");
-    }
-}
-
-#[test]
-fn rm_26_a_late_start_is_excused_only_by_an_overrun_the_previous_segment_ran_through() {
-    // `hits[i]` are the faults segment `i` ran through; the cut is that of segment `index - 1`.
-    let gap = |f: i64| (f, Fault::Overrun);
-    let hits = vec![vec![gap(1_000)], vec![(5_000, Fault::Sequence)], vec![]];
-    assert!(gap_excuses(&hits, 1, 1_000 + GAP - 1) && gap_excuses(&hits, 1, 1_000), "the previous segment's overrun, the gap's ends");
-    assert!(!gap_excuses(&hits, 1, 1_000 + GAP) && !gap_excuses(&hits, 1, 999), "outside the gap");
-    assert!(!gap_excuses(&hits, 2, 1_500), "an overrun two segments back is not the previous segment's");
-    assert!(!gap_excuses(&hits, 2, 5_000), "a sequence error has no gap");
-}
-
-#[test]
 fn n67_an_early_stop_is_legal_only_for_a_cancelled_segment_after_its_plan() {
     assert!(early_stop_legal(false, Some(10), 10));
     assert!(early_stop_legal(false, Some(10), 11));
     assert!(!early_stop_legal(false, Some(10), 9), "before the plan that cancelled it arrived");
     assert!(!early_stop_legal(false, None, 11), "no plan cancelled it");
     assert!(!early_stop_legal(true, Some(10), 11), "the plan keeps the segment: its samples are lost");
+}
+
+#[test]
+fn rm_26_the_rig_s_host_clock_moves_with_its_device_time() {
+    let device = FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() });
+    let mut host = RigHost::new(device.host());
+    let step = 4_000_000;
+    // A bracket, not a bound: the manual clock can creep by real time between the reads, so an
+    // over-advance by a further step fails whatever the host's speed.
+    let real_before = std::time::Instant::now();
+    let before = host.clock.now();
+    host.advance(step);
+    let after = host.clock.now();
+    let real = real_before.elapsed();
+    let delta = Wall::from_millis(20);
+    assert!(after - before >= delta, "the clock moved {:?}, less than the device time's {delta:?}", after - before);
+    assert!(after - before <= delta + real, "the clock moved {:?}, further than {delta:?} and the {real:?} it could creep", after - before);
+    assert_eq!(host.given, delta);
+}
+
+#[test]
+fn rm_26_the_rig_s_host_clock_follows_set_now() {
+    let sequence = generator::sequence(1);
+    let extra = extra(1, &sequence);
+    let observed = run(&sequence, &extra);
+    assert!(observed.end > T0, "the rig's device time ended at {}", observed.end);
+    // A host clock left on real time stays far below the device time it should have followed.
+    assert!(observed.host >= Wall::from_nanos(observed.end as u64 * 5), "the host clock reads {:?}, before the device time {} in it", observed.host, observed.end);
 }
 
 /// One segment's blocks: a packet of `block_len` samples a request, the last before the cut
@@ -590,7 +616,7 @@ fn blocks(segment: &Segment, hits: &[(i64, Fault)], extra: &Extra) -> Vec<Block>
         let Some((f, fault)) = hits.next() else { return out };
         let kf = k(*f).max(next);
         let (kg, flag) = match fault {
-            Fault::Overrun => (k(f + GAP).max(kf), BlockFlags::RESTARTED),
+            Fault::Overrun => (k(f + gap()).max(kf), BlockFlags::RESTARTED),
             _ => (kf + extra.block, BlockFlags::SEQ_DISCONTINUITY),
         };
         flags = flags | BlockFlags::GAP_BEFORE | flag;
@@ -648,11 +674,32 @@ struct Run {
     end: Option<i64>,
 }
 
+/// The rig's host clock: the FakeDevice's own manual clock (the one uhd-rx reads), moved with the rig's device time.
+struct RigHost {
+    clock: HostClock,
+    given: Wall,
+}
+
+impl RigHost {
+    fn new(clock: HostClock) -> RigHost {
+        RigHost { clock, given: Wall::ZERO }
+    }
+
+    /// Moves the clock by `ticks` of device time (5 ns each on the 200 MHz root) and records the step given.
+    fn advance(&mut self, ticks: i64) {
+        let step = Wall::from_nanos(ticks as u64 * 5);
+        self.given += step;
+        self.clock.advance_for_test(step);
+    }
+}
+
 /// The rig's time, what uhd-control does, and the scripted device's receive side.
 struct World {
     time: Option<Arc<ManualTimeAuthority>>,
     root: ClockDomainId,
     now: i64,
+    /// The device's host clock, which uhd-rx's silence monitor and waits read.
+    host: RigHost,
     events: BTreeMap<(i64, u64), Ev>,
     order: u64,
     to_rx: Sender<RxCmd>,
@@ -668,6 +715,12 @@ struct World {
     runs: VecDeque<Run>,
     lost: bool,
     faults: Vec<(i64, Fault, bool)>,
+    /// The knob: a restart may survive the first stop after it (UHD's queued START).
+    survive: bool,
+    /// UHD has queued an overrun's restart START and no sample of it has been returned yet.
+    restart: bool,
+    /// The index in `calls` of each stop that left a survivor.
+    survived: Vec<usize>,
     latency: i64,
     lag: i64,
     block: i64,
@@ -693,6 +746,7 @@ impl World {
 
     fn set_now(&mut self, t: i64) {
         if t > self.now {
+            self.host.advance(t - self.now);
             self.now = t;
             self.time.as_ref().expect("the rig's time").advance_to(TimePoint::new(self.root, t)).unwrap();
         }
@@ -887,6 +941,15 @@ impl Device for Scripted {
             return Err(DeviceError { lost: true, message: "scripted: the device is gone".to_owned() });
         }
         world.call("rx_stop now".to_owned());
+        // UHD's START behind the stop: the first stop after an overrun, before a sample at or after its restart came back,
+        // leaves the run streaming until a second stop (graph.cpp:573–622, INFERRED as the model of the race).
+        if world.survive && std::mem::take(&mut world.restart) {
+            world.survive = false;
+            let call = world.calls.len() - 1;
+            world.survived.push(call);
+            return Ok(());
+        }
+        world.restart = false;
         let now = world.now;
         for run in world.runs.iter_mut().filter(|run| run.end.is_none() && run.origin <= now) {
             run.end = Some(now);
@@ -938,8 +1001,12 @@ impl Device for Scripted {
         if let Some((kf, index, f, fault)) = fault {
             if kf == k {
                 world.faults[index].2 = true;
+                // UHD restarts only after an overrun: its START sits queued until a sample of it is returned.
+                if fault == Fault::Overrun {
+                    world.restart = true;
+                }
                 let kg = match fault {
-                    Fault::Overrun => ((f + GAP - origin + step - 1) / step).max(kf),
+                    Fault::Overrun => ((f + gap() - origin + step - 1) / step).max(kf),
                     _ => kf + world.block,
                 };
                 world.runs[0].next = origin + kg * step;
@@ -972,6 +1039,8 @@ impl Device for Scripted {
         world.runs[0].next = origin + stop * step;
         let channels = world.calls.iter().rev().find_map(|(_, call)| call.strip_prefix("rx_open ")).map_or(1, |c| c.parse().unwrap());
         let samples: Vec<Vec<Iq>> = vec![vec![[0.0, 0.0]; (stop - k) as usize]; channels];
+        // A sample of the restart has been returned: after a report the run's next sample is its `kg`, so any later samples are at or after it.
+        world.restart = false;
         RxRecv::Samples { first_tick: origin + k * step, samples }
     }
 
@@ -1009,11 +1078,14 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     let link = Arc::new(Headers::default());
     let refuse = extra.refuse.map(|rate| FakeFault::WrongRate { claimed: rate as f64, applied: rate as f64 - 1_000.0, nth: 0 });
     let inner = FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, faults: refuse.into_iter().collect(), ..FakeConfig::default() });
+    // The device's own clock, the one `Scripted::host` hands uhd-rx: a clock of its own would let the tests pass and fix nothing.
+    let host = inner.host();
     let (to_rx, cmds) = channel();
     let world = Arc::new(Mutex::new(World {
         time: None,
         root: ClockDomainId::local(0),
         now: 0,
+        host: RigHost::new(host),
         events: BTreeMap::new(),
         order: 0,
         to_rx,
@@ -1026,6 +1098,9 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         runs: VecDeque::new(),
         lost: false,
         faults: sequence.faults.iter().map(|(at, fault)| (terms.t0 + terms.ticks(*at), *fault, false)).collect(),
+        survive: extra.survivor,
+        restart: false,
+        survived: Vec::new(),
         latency: extra.latency,
         lag: extra.lag,
         block: extra.block,
@@ -1132,6 +1207,16 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     if lost_at != loss.filter(|_| core.is_lost()).map(|loss| loss.e) {
         violations.push(format!("lost at {lost_at:?}, not at the sequence's loss"));
     }
+    let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+    let overruns = delivered
+        .iter()
+        .filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW)
+        .filter(|event| ezsdr_radio::payloads::RxOverflowPayload::from_payload(&event.payload).is_ok_and(|payload| payload.cause == ezsdr_radio::payloads::RxOverflowCause::Overrun))
+        .filter_map(|event| {
+            let clock = rx_clocks.iter().position(|clock| clock.domain == event.time.domain())?;
+            Some((clock, event.time.ticks_in(rx_clocks[clock].domain).ok()?))
+        })
+        .collect();
     Observed {
         clocks: rx_clocks.iter().map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|t| t.ticks_in(r.root).unwrap()))).collect(),
         blocks: headers
@@ -1141,13 +1226,16 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
                 (clock, (h.first_sample_time.ticks_in(rx_clocks[clock].domain).unwrap(), h.len, h.flags, h.lost))
             })
             .collect(),
+        overruns,
         stops: rec.applied.iter().filter(|r| r["key"] == "rx_stop").map(|r| (r["at"]["ticks"].as_i64().unwrap(), r["issued"]["ticks"].as_i64().unwrap())).collect(),
+        gated: rec.timing.iter().filter(|row| row["what"] == "rx_report_before_origin").filter_map(|row| row["origin"].as_i64()).collect(),
         refused: w.refused.clone(),
         refusable: extra.refuse.map_or(0, |rate| device.inner.calls().iter().filter(|c| c.starts_with(&format!("apply rx 0 rate={rate} "))).count()),
         rejected: rec.rejected.len(),
-        late: events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).count(),
+        late: delivered.iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).count(),
         lost: core.is_lost(),
         abort: w.abort,
+        survived: w.survived.clone(),
         streaming: !w.lost && w.runs.iter().any(|run| run.end.is_none()),
         dropped: w.calls.iter().filter_map(|(_, call)| call.strip_prefix("rx_start ")).filter(|at| !final_plan.iter().any(|s| s.origin.to_string() == *at)).count(),
         straddled: w.straddled,
@@ -1156,5 +1244,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         violations,
         set_refused: w.set_refused,
         start_values: w.start_values.clone(),
+        end: w.now,
+        host: w.host.clock.now(),
     }
 }

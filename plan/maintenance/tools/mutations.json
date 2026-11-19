@@ -60,16 +60,6 @@
   "filter": "mr_20a_the_overflow_comes_with_the_block_that_carries_it"
  },
  {
-  "id": "F32",
-  "name": "a stream that ends before the block carrying a loss still emits its RX_OVERFLOW",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        self.rx_settle(k, t)?;\n        if self.rx[k].running.as_ref().is_some_and(|rx| rx.ended) { self.rx[k].running = None; }\n",
-   "new": "        self.rx_settle(k, t)?;\n        if let Some(domain) = self.rx[k].running.as_ref().and_then(|rx| rx.domain) {\n            let reports = self.rx[k].running.as_mut().map(|rx| std::mem::take(&mut rx.reports)).unwrap_or_default();\n            for (kf, cause, _) in reports { self.emit_overflow(k, ezsdr_radio::payloads::RxOverflowPayload { cause, lost: 0 }, TimePoint::new(domain, kf))?; }\n        }\n        if self.rx[k].running.as_ref().is_some_and(|rx| rx.ended) { self.rx[k].running = None; }\n",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_20_a_fault_at_a_loss_s_instant_removes_nothing"
- },
- {
   "id": "F21",
   "name": "the precheck restored: the loss reported before the step's Actions and loop",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
@@ -335,10 +325,10 @@
  },
  {
   "id": "F43",
-  "name": "MockRadio emits one RX_OVERFLOW per report, not per block",
+  "name": "MockRadio emits the block's RX_OVERFLOW twice, as if one per report, not once per block",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&causes, reported) {\n            let at = reports.iter().map(|(kf, _, _)| *kf).min().expect(\"a reported loss\");\n            self.emit_overflow(k, payload, TimePoint::new(domain, at))?;\n        }\n",
-  "new": "        for (at, cause, _) in reports {\n            let payload = ezsdr_radio::payloads::RxOverflowPayload { cause, lost: lost.unwrap_or(0) };\n            self.emit_overflow(k, payload, TimePoint::new(domain, at))?;\n        }\n",
+  "old": "self.emit_overflow(k, payload, TimePoint::new(domain, at))?;",
+  "new": "self.emit_overflow(k, payload, TimePoint::new(domain, at))?; self.emit_overflow(k, payload, TimePoint::new(domain, at))?;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_21_overrun_shape"
@@ -347,28 +337,8 @@
   "id": "F44",
   "name": "MockRadio carries old reports into the next block",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        let reports = self.rx[k].running.as_mut().map(|rx| std::mem::take(&mut rx.reports)).unwrap_or_default();",
-  "new": "        let reports = self.rx[k].running.as_ref().map(|rx| rx.reports.clone()).unwrap_or_default();",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_21_overrun_shape"
- },
- {
-  "id": "F45",
-  "name": "MockRadio defers a back-pressure event to the shared report path",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                self.emit_rx_overflow(k, domain, next, next_sample - next)?;",
-  "new": "                if let Some(rx) = self.rx[k].running.as_mut() { rx.reports.push((next, ezsdr_radio::payloads::RxOverflowCause::Overrun, (next_sample - next) as u64)); }",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_19_a_fault_overflow_and_repeated_backpressure_are_counted_once"
- },
- {
-  "id": "F46",
-  "name": "MockRadio's summary counts again the loss back-pressure already reported",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        let reported: Option<u64> = lost.map(|_| reports.iter().map(|(_, _, lost)| lost).sum());",
-  "new": "        let reported: Option<u64> = lost;",
+  "old": "let report = self.rx[k].running.as_mut().and_then(|rx| rx.report.take());",
+  "new": "let report = self.rx[k].running.as_ref().and_then(|rx| rx.report);",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_21_overrun_shape"
@@ -4808,8 +4778,8 @@
    "id": "P216",
    "name": "a receive stop issued on stream 0 whatever stream it names (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        let streamer = st.rx.get_mut(&stream).expect(\"checked\");\n        streamer.then = None;",
-   "new": "        let streamer = st.rx.get_mut(&0).expect(\"checked\");\n        streamer.then = None;",
+   "old": "        let streamer = st.rx.get_mut(&stream).expect(\"checked\");\n        if std::mem::take(&mut streamer.restart) {",
+   "new": "        let streamer = st.rx.get_mut(&0).expect(\"checked\");\n        if std::mem::take(&mut streamer.restart) {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_33_two_receive_streamers_keep_their_own_channels"
@@ -5149,8 +5119,8 @@
   "id": "P270",
    "name": "uhd-rx holds the line lock across the untimed stop of a cut (UR-25, D15)",
    "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "let result = self.core.device.rx_stop(self.k);",
-  "new": "let result = { let _streams = lock(&self.core.streams); self.core.device.rx_stop(self.k) };",
+  "old": "let result = self.core.rx_stop_admitted(self.k, \"rx_first_stop_before_gate\");",
+  "new": "let result = { let _streams = lock(&self.core.streams); self.core.rx_stop_admitted(self.k, \"rx_first_stop_before_gate\") };",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_the_line_lock_is_free_inside_every_receive_device_call"
@@ -7999,7 +7969,7 @@
    "new": "if maximum.is_none_or(|(_, current)| gap_ns < current) { maximum = Some((*rate, gap_ns)); }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-    "filter": "overflow_summary_keeps_observations_and_the_key_is_not_a_record_value"
+    "filter": "an_overflow_summary_makes_one_lower_bound_row_or_says_why_not"
    },
    {
     "id": "P782",
@@ -8130,7 +8100,7 @@
    "new": "if rate_restart_maximum.is_none_or(|current| restart_ns < current) { rate_restart_maximum = Some(restart_ns); }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "overflow_summary_keeps_observations_and_the_key_is_not_a_record_value"
+   "filter": "an_overflow_summary_makes_one_lower_bound_row_or_says_why_not"
   },
   {
    "id": "P798",
@@ -8140,7 +8110,7 @@
    "new": "if maximum_restart.is_none_or(|(_, current)| restart_ns < current) { maximum_restart = Some((*rate, restart_ns)); }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "overflow_summary_keeps_observations_and_the_key_is_not_a_record_value"
+   "filter": "an_overflow_summary_makes_one_lower_bound_row_or_says_why_not"
   },
   {
    "id": "P799",
@@ -8150,17 +8120,17 @@
    "new": "for trial in trials {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "overflow_summary_keeps_observations_and_the_key_is_not_a_record_value"
+   "filter": "an_overflow_summary_makes_one_lower_bound_row_or_says_why_not"
   },
   {
    "id": "P800",
-   "name": "overflow measurement emits a comparable value row",
+   "name": "the overflow group emits no value row (S21)",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "conditions, values: vec![],\n        observations: vec![observation(\"provider_overflow_restart_gap\"",
-   "new": "conditions, values: vec![ValueRecord::Unmeasured { key: Key::parse(\"radio.timing.overflow_restart_gap_ns\").unwrap(), reason: \"mutation\".to_owned() }],\n        observations: vec![observation(\"provider_overflow_restart_gap\"",
+   "old": "values: vec![overflow_value(&summary)?],",
+   "new": "values: vec![],",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
+   "filter": "an_overflow_group_with_synthetic_evidence"
   },
   {
    "id": "P801",
@@ -10726,8 +10696,8 @@
         "id": "P1295",
         "name": "ordinary RX checks loss under the chain lock before receiving (L1 fix 2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "        let (one_packet, lost) = {\n            let chain = self.core.rx_chain[self.k].lock();\n            (chain.cut().is_some_and(|cut| self.core.now() >= cut), self.core.is_lost() || matches!(chain.device(), RxDevice::Lost))\n        };\n        if lost {",
-        "new": "        let (one_packet, lost) = {\n            let chain = self.core.rx_chain[self.k].lock();\n            (chain.cut().is_some_and(|cut| self.core.now() >= cut), false)\n        };\n        if lost {",
+        "old": "        let (one_packet, lost) = {\n            let chain = self.core.rx_chain[self.k].lock();\n            (chain.cut().is_some_and(|cut| self.core.now() >= cut), self.core.is_lost() || matches!(chain.device(), RxDevice::Lost))\n        };",
+        "new": "        let (one_packet, lost) = {\n            let chain = self.core.rx_chain[self.k].lock();\n            (chain.cut().is_some_and(|cut| self.core.now() >= cut), false)\n        };",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_a_loss_published_before_rx_recv_skips_the_device_call"
@@ -11606,8 +11576,8 @@
       "id": "P1290",
       "name": "a late RX restart calls the device after loss (L1 fix 1)",
       "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-      "old": "                    if self.core.is_lost() || chain.device() == RxDevice::Lost {\n                        None\n                    } else {\n                        Some(chain.restart_result(restart, self.core.device.rx_start(self.k, restart)))\n                    }",
-      "new": "                    Some(chain.restart_result(restart, self.core.device.rx_start(self.k, restart)))",
+      "old": "if self.core.is_lost() || chain.device() == RxDevice::Lost { None } else { self.core.rx_start_admitted(self.k, restart).map(|started| chain.restart_result(restart, started)) }",
+      "new": "Some(chain.restart_result(restart, self.core.device.rx_start(self.k, restart)))",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_24_a_missed_start_after_a_loss_makes_no_restart_call"
@@ -11726,8 +11696,8 @@
       "id": "P1397",
       "name": "uhd-rx never ends its SampleClock at the cut (RM-16, UR-17)",
       "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-      "old": "(&stream.handle, cut)",
-      "new": "(&stream.handle, cut.filter(|_| false))",
+      "old": "(&stream.handle, end)",
+      "new": "(&stream.handle, end.filter(|_| false))",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_17_a_finite_segment_delivers_through_its_cut"
@@ -11956,8 +11926,8 @@
       "id": "N47S3-21",
       "name": "a failed receive stop is labelled as an update",
       "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-      "old": "Err(error) => self.core.device_failed(None, \"stop\", &error),",
-      "new": "Err(error) => self.core.device_failed(None, \"update_parameter\", &error),",
+      "old": "Some(Err(error)) => self.core.device_failed(None, \"stop\", &error),",
+      "new": "Some(Err(error)) => self.core.device_failed(None, \"update_parameter\", &error),",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_24_nonloss_rx_stop_failure_leaves_the_chain_uncertain"
@@ -23017,8 +22987,8 @@
   "id": "N67F-10",
   "name": "uhd-rx stops a lost device's queued start (UR-29, #67)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "if self.core.is_lost() || matches!(chain.device(), RxDevice::Lost) { chain.lose(); self.finish_locked(&mut chain); return; }",
-  "new": "if false { chain.lose(); self.finish_locked(&mut chain); return; }",
+  "old": "if self.core.is_lost() || matches!(chain.device(), RxDevice::Lost) { chain.lose(); self.finish_locked(&mut chain, end); return; }",
+  "new": "if false { chain.lose(); self.finish_locked(&mut chain, end); return; }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_29_a_loss_found_before_the_stop_of_a_queued_start_makes_no_stop_call"
@@ -23027,8 +22997,8 @@
   "id": "N67F-11",
   "name": "uhd-rx swallows the error of a queued start's stop (UR-29, #67)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "Err(error) => self.core.device_failed(None, \"stop\", &error),",
-  "new": "Err(_error) => {}",
+  "old": "Some(Err(error)) => self.core.device_failed(None, \"stop\", &error),",
+  "new": "Some(Err(_error)) => {}",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_29_a_stop_of_a_queued_start_that_finds_the_loss_publishes_it_once"
@@ -23197,8 +23167,8 @@
   "id": "N67F-28",
   "name": "the orphan of a start behind a tail loses its rate (the `then` start keeps no ratio)",
   "file": "crates/ezsdr-radio-uhd/src/device.rs",
-  "old": ".then = Some((at, ratio)),",
-  "new": ".then = Some((at, 1)),",
+  "old": "None if st.rx[&stream].end.is_some() => st.rx.get_mut(&stream).expect(\"checked\").then = Some((at, ratio)),",
+  "new": "None if st.rx[&stream].end.is_some() => st.rx.get_mut(&stream).expect(\"checked\").then = Some((at, 1)),",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_33_a_start_queued_behind_an_unread_tail_survives_a_close_and_reopen"
@@ -23258,8 +23228,8 @@
   "id": "S4B-04",
   "name": "bench 2026-11-15 stage-4 tools: D5's bound excludes the value itself (s4_decisions)",
   "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
-  "old": "max <= S4_D5_VALUE_NS",
-  "new": "max < S4_D5_VALUE_NS",
+  "old": "max <= bound",
+  "new": "max < bound",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "s4_decisions_state_the_spread_the_bound_and_the_stall_figures"
@@ -23268,7 +23238,7 @@
   "id": "S4B-05",
   "name": "bench 2026-11-15 stage-4 tools: an S4 trial counts without a restart-after-resume time (S4Trial::complete)",
   "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
-  "old": "self.class == TrialClass::Success && self.restart_ns.is_some()",
+  "old": "measurement::overflow_trial_complete(self.class, self.restart_ns)",
   "new": "self.class == TrialClass::Success",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
@@ -23509,8 +23479,8 @@
   "id": "S4B-29",
   "name": "bench 2026-11-15 stage-4 tools: D5's bound ignores an incomplete rate cell (s4_decisions)",
   "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
-  "old": "let complete = rate_cells.iter().all(",
-  "new": "let complete = rate_cells.iter().any(",
+  "old": "let complete = cells.iter().all(",
+  "new": "let complete = cells.iter().any(",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "d5s_bound_is_inconclusive_while_a_rate_cell_is_incomplete"
@@ -26887,76 +26857,6 @@
   "filter": "rxz_a_trial_is_within_the_bound_at_n_and_fails_at_n_plus_one"
  },
  {
-  "id": "S4A-48",
-  "name": "layer 3 excuses a late start whose gap is any earlier overrun's, not the previous segment's (#108)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": "hits[index - 1].iter().any(|(f, fault)| *fault == Fault::Overrun",
-  "new": "hits.iter().flatten().any(|(f, fault)| *fault == Fault::Overrun",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_a_late_start_is_excused_only_by_an_overrun_the_previous_segment_ran_through"
- },
- {
-  "id": "S4A-49",
-  "name": "layer 3 excuses a late start after a sequence error's gap too (#108)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": "*fault == Fault::Overrun && (*f..*f + GAP).contains(&cut)",
-  "new": "(*f..*f + GAP).contains(&cut)",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_a_late_start_is_excused_only_by_an_overrun_the_previous_segment_ran_through"
- },
- {
-  "id": "S4A-51",
-  "name": "an excused segment's first block may lose another count than its first sample (#108)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": "|| lost != Some(first as u64)",
-  "new": "",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_an_excused_segment_is_checked_on_its_own"
- },
- {
-  "id": "S4A-52",
-  "name": "an excused segment's later blocks may differ from the plan's: a hole or a flag (#108)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": "got[1..] != rest[..n]",
-  "new": "false",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_an_excused_segment_is_checked_on_its_own"
- },
- {
-  "id": "S4A-53",
-  "name": "an excused segment may end before the plan's end without a loss or an abort (#108)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": "|| (!cutoff && n != rest.len())",
-  "new": "",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_an_excused_segment_is_checked_on_its_own"
- },
- {
-  "id": "S4A-54",
-  "name": "an excused segment's first block may be another than the guard's (#108)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": "if (first, len) != (full[kept].0, full[kept].1) {",
-  "new": "if false {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_an_excused_segment_is_checked_on_its_own"
- },
- {
-  "id": "S4A-55",
-  "name": "an excused segment's first block is expected `RESTARTED`, as an overrun's (#108)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": "flags != BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY",
-  "new": "flags != BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_the_timeline_against_uhd_rx"
- },
- {
   "id": "S4A-56",
   "name": "MockRadio counts the head in each block, not from the start of the segment (MR-35, stage 4a)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
@@ -27025,46 +26925,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_75_the_owner_s_mid_run_open_confirms_its_flush_or_refuses"
- },
- {
-  "id": "S4A-64",
-  "name": "uhd-rx drops the packets before the stop's device lead 3 ms later (#108: the excused start is pinned to the guard)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "self.last_stop = Some(self.core.now() + self.core.ticks(DEVICE_LEAD_NS)).or(self.last_stop);",
-  "new": "self.last_stop = Some(self.core.now() + self.core.ticks(DEVICE_LEAD_NS + 3_000_000)).or(self.last_stop);",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_the_timeline_against_uhd_rx"
- },
- {
-  "id": "S4A-65",
-  "name": "the excused segment's blocks are read from another clock (#108 comparison)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": ".position(|(o, _)| *o == origin).map(|clock| observed.blocks.iter().filter(|(c, _)| *c == clock)",
-  "new": ".position(|(o, _)| *o == origin).map(|clock| observed.blocks.iter().filter(|(c, _)| *c != clock)",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_the_timeline_against_uhd_rx"
- },
- {
-  "id": "S4A-66",
-  "name": "the excused segment's blocks are never compared (#108)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": "excused_blocks(&got, &full, guard, cutoff)",
-  "new": "None::<String>",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_compare_judges_the_excused_segment_it_finds"
- },
- {
-  "id": "S4A-67",
-  "name": "the guard of the excused segment ignores the device lead (#108)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": "sample_at_or_after(at + (DEVICE_LEAD_NS + 4) / 5)",
-  "new": "sample_at_or_after(at)",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_the_timeline_against_uhd_rx"
  },
  {
   "id": "S4A-70",
@@ -27145,16 +27005,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_the_stop_s_device_lead_guard_is_exact"
- },
- {
-  "id": "S4A-78",
-  "name": "the excused-segment check accepts a guard at sample 0",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
-  "old": "if guard <= 0 {",
-  "new": "if guard < 0 {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_an_excused_segment_is_checked_on_its_own"
  },
  {
   "id": "S4A-79",
@@ -27431,5 +27281,1839 @@
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_46_a_rejected_coercion_of_a_sink_records_its_params_value_at_prepare"
+ },
+ {
+  "id": "N108-01",
+  "name": "the receive wait with no cut pending is the full 100 ms again (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "None => span,",
+  "new": "None => i128::from(self.core.mcr) / 10,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_the_receive_wait_without_a_cut_is_one_block_plus_the_allowance"
+ },
+ {
+  "id": "N108-01b",
+  "name": "a Stop and Start booked during a no-cut receive are seen only after the full 100 ms (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "None => span,",
+  "new": "None => i128::from(self.core.mcr) / 10,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_stop_and_start_booked_during_a_no_cut_receive_start_at_their_origin"
+ },
+ {
+  "id": "N108-03",
+  "name": "the no-cut receive wait loses the delivery allowance (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "stream.clock.n + core.ticks(DELIVERY_ALLOWANCE_NS)",
+  "new": "stream.clock.n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_the_receive_wait_without_a_cut_is_one_block_plus_the_allowance"
+ },
+ {
+  "id": "N108-04",
+  "name": "the rig's host clock stays still while its device time moves (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "self.host.advance(t - self.now)",
+  "new": "()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_rig_s_host_clock_"
+ },
+ {
+  "id": "N108-05",
+  "name": "the rig's timeline comparison runs with a host clock that never follows its device time (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "self.host.advance(t - self.now)",
+  "new": "()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "N108-02",
+  "name": "the receive wait with no cut pending is the full 100 ms again, seen by the rig (#108)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "None => span,",
+  "new": "None => i128::from(self.core.mcr) / 10,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "N108-10",
+  "name": "the x3xx profile's overflow restart gap is 50 ms again (stage 4b)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "overflow_restart_gap_ns: 140_000_000,",
+  "new": "overflow_restart_gap_ns: 50_000_000,",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "s4a_x3xx_values_are_the_measured_ones"
+ },
+ {
+  "id": "N108-11",
+  "name": "FakeDevice's scripted overflow skips 50 ms again (UR-33, stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "let skip = (self.restart_gap_ticks() + ratio - 1) / ratio * ratio;",
+  "new": "let skip = (self.ticks_of(Duration::from_millis(50)) + ratio - 1) / ratio * ratio;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fakes_overflow_restart_begins_with_the_head"
+ },
+ {
+  "id": "N108-15",
+  "name": "the same 50 ms scripted skip, seen by the parity run: the reported overrun misses the block jump (VH-8, stage 4b; the parity kill of N108-11)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "let skip = (self.restart_gap_ticks() + ratio - 1) / ratio * ratio;",
+  "new": "let skip = (self.ticks_of(Duration::from_millis(50)) + ratio - 1) / ratio * ratio;",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "vh_8_a_reported_overrun_matches_the_block_jump"
+ },
+ {
+  "id": "N108-12",
+  "name": "FakeDevice's behind-reader restart has no gap (UR-33, stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "let restart = next + ((now + gap_ticks - next + ratio - 1) / ratio) * ratio;",
+  "new": "let restart = next + ((now - next) / ratio + 1) * ratio;",
+  "old2": "let gap_ticks = self.restart_gap_ticks();",
+  "new2": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_the_fakes_overflow_restart_begins_with_the_head"
+ },
+ {
+  "id": "N108-16",
+  "name": "S4's bound reads the receive start lead instead of the overflow restart gap (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "ezsdr_radio::x3xx::timing().overflow_restart_gap_ns as u64",
+  "new": "ezsdr_radio::x3xx::timing().rx_start_lead_ns as u64",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_decisions_state_the_spread_the_bound_and_the_stall_figures"
+ },
+ {
+  "id": "N108-06",
+  "name": "the rig's host clock over-advances: one device tick is ten host nanoseconds (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "ticks as u64 * 5",
+  "new": "ticks as u64 * 10",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_rig_s_host_clock_moves_with_its_device_time"
+ },
+ {
+  "id": "N108-20",
+  "name": "uhd-rx emits no tail for a segment cut before a block carried its report (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.emit_tail(&stream, &loss_causes(&stream.pending), end);",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_restart_packet_past_the_cut_is_dropped_and_the_tail_is_emitted_once"
+ },
+ {
+  "id": "N108-21",
+  "name": "uhd-rx's tail measures `lost` from sample 0, not from the first sample not delivered (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "(stream.clock.at_or_after(end) - stream.expected).max(0) as u64",
+  "new": "stream.clock.at_or_after(end).max(0) as u64",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_an_orderly_stop_in_the_gap_emits_the_tail_to_its_cut"
+ },
+ {
+  "id": "N108-22",
+  "name": "uhd-rx's tail is emitted with no loss report pending (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "ezsdr_radio::payloads::rx_overflow_payload(causes, Some(lost))",
+  "new": "ezsdr_radio::payloads::rx_overflow_payload(&[RxOverflowCause::Overrun], Some(lost))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_silent_end_with_no_report_makes_no_tail"
+ },
+ {
+  "id": "N108-24",
+  "name": "uhd-rx's tail takes the first pending report's cause, not RM-17's (an overrun beats a sequence error) (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "ezsdr_radio::payloads::rx_overflow_payload(causes, Some(lost))",
+  "new": "ezsdr_radio::payloads::rx_overflow_payload(&causes[..causes.len().min(1)], Some(lost))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_tail_names_the_overrun_over_the_sequence_error"
+ },
+ {
+  "id": "N108-25",
+  "name": "uhd-rx's tail is always stamped in the segment's SampleClock, registered or not (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let at = if stream.handle.is_none() {",
+  "new": "let at = if true {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_tail_with_no_block_published_is_stamped_in_the_primary_root"
+ },
+ {
+  "id": "N108-26",
+  "name": "uhd-rx's tail is always stamped in the primary root, never in the segment's SampleClock (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let at = if stream.handle.is_none() {",
+  "new": "let at = if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_an_orderly_stop_in_the_gap_emits_the_tail_to_its_cut"
+ },
+ {
+  "id": "N108-38",
+  "name": "uhd-rx counts an alignment report as a loss for the tail (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "Pending::Alignment | Pending::MissedStart => None,",
+  "new": "Pending::Alignment => Some(RxOverflowCause::Sequence),\n            Pending::MissedStart => None,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_19_an_alignment_report_with_no_following_block_makes_no_event_and_no_tail"
+ },
+ {
+  "id": "N108-35",
+  "name": "uhd-rx ends a segment with a loss report pending at the chain's cut, not the plan's: a Stop's cut does not survive a later abort (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if loss_causes(&stream.pending).is_empty() { cut } else { self.planned_end(stream).or(cut) }",
+  "new": "cut",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_reached_stop_cut_survives_a_later_abort_while_a_loss_is_pending"
+ },
+ {
+  "id": "N108-35b",
+  "name": "uhd-rx ends a segment at the plan's cut even with no loss report pending (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if loss_causes(&stream.pending).is_empty() { cut } else { self.planned_end(stream).or(cut) }",
+  "new": "self.planned_end(stream).or(cut)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stop_cut_with_no_loss_report_does_not_survive_an_abort_and_a_plain_abort_has_no_tail"
+ },
+ {
+  "id": "N108-35c",
+  "name": "an abort published by `Provider::stop` no longer lowers what a receive in flight delivers: delivery follows the plan's cut (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if matches!(streams.stop, Some((_, StopMode::Abort))) {",
+  "new": "if false && matches!(streams.stop, Some((_, StopMode::Abort))) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_reached_stop_cut_survives_a_later_abort_while_a_loss_is_pending"
+ },
+ {
+  "id": "N108-35d",
+  "name": "uhd-rx's plan cut counts only once its instant has passed: an off-lattice Stop is not reached (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "Some(stream.clock.instant(planned.max(stream.expected)))",
+  "new": "Some(stream.clock.instant(planned.max(stream.expected))).filter(|end| *end <= self.core.now())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_reached_stop_cut_survives_a_later_abort_while_a_loss_is_pending"
+ },
+ {
+  "id": "N108-36",
+  "name": "uhd-rx attaches a report that reaches a successor before its origin: the origin gate removed (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let before_origin = self.successor && now < stream.clock.origin;",
+  "new": "let before_origin = false;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_late_overflow_before_the_next_stream_s_first_block_makes_no_event"
+ },
+ {
+  "id": "N108-66",
+  "name": "uhd-rx gates the first stream's reports before its origin too (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.successor && now < stream.clock.origin",
+  "new": "now < stream.clock.origin",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_genuine_overflow_is_kept"
+ },
+ {
+  "id": "N108-67",
+  "name": "uhd-rx's origin gate drops a report at the origin itself (`<=`) (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.successor && now < stream.clock.origin",
+  "new": "self.successor && now <= stream.clock.origin",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_the_origin_gate_is_strict"
+ },
+ {
+  "id": "N108-68",
+  "name": "uhd-rx marks a stream a successor only when its previous stop gave a lead guard (`not_before`), not when an owner ended a stream (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let before_origin = self.successor && now < stream.clock.origin;",
+  "new": "let before_origin = stream.not_before != i64::MIN && now < stream.clock.origin;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_failed_stop_does_not_stop_the_gate"
+ },
+ {
+  "id": "N108-69",
+  "name": "uhd-rx's origin gate covers an `Overflow` only, not a bad packet or an alignment report (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "RxRecv::Overflow { .. } | RxRecv::BadPacket | RxRecv::Alignment if before_origin => {",
+  "new": "RxRecv::Overflow { .. } if before_origin => {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_the_origin_gate_covers_every_report_class"
+ },
+ {
+  "id": "N108-76",
+  "name": "uhd-rx marks the next stream a successor when `finish_locked` took no stream (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let stream = self.stream.take();",
+  "new": "let stream = self.stream.take();\n        self.successor = true;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_first_stream_after_an_empty_finish_is_not_a_successor"
+ },
+ {
+  "id": "N108-77",
+  "name": "uhd-rx's origin gate does not count a gated overflow in `rx_overflows` (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if !matches!(result, RxRecv::Alignment) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_the_origin_gate_covers_every_report_class"
+ },
+ {
+  "id": "N108-78",
+  "name": "uhd-rx's origin gate leaves no `rx_report_before_origin` timing row (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.timing(json!({ \"what\": \"rx_report_before_origin\", \"origin\": stream.clock.origin, \"at\": now }));",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_late_overflow_before_the_next_stream_s_first_block_makes_no_event"
+ },
+ {
+  "id": "N108-30",
+  "name": "the Mock emits no tail for a segment a cut ends before a block carried its report (stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "self.rx_tail(k, cut)?;",
+  "new": "",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_21_overrun_shape"
+ },
+ {
+  "id": "N108-31",
+  "name": "the Mock's tail `lost` is the reports' sum, not the cut's distance from the first sample not delivered (stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "Some((cut - undelivered).max(0) as u64)",
+  "new": "Some(rx.lost.unwrap_or(0))",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_21_a_second_overrun_in_a_gap_then_a_cut_reports_the_cut_not_the_sum"
+ },
+ {
+  "id": "N108-48",
+  "name": "the Mock's tail takes the sequence cause over an overrun (a later overrun loses to the sequence error) (stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if cause == ezsdr_radio::payloads::RxOverflowCause::Overrun {",
+  "new": "if cause == ezsdr_radio::payloads::RxOverflowCause::Sequence {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_21_a_sequence_error_then_an_overrun_before_one_cut_make_one_tail"
+ },
+ {
+  "id": "N108-48b",
+  "name": "the Mock's tail takes the last pending report's cause (an overrun loses to a later sequence error) (stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if cause == ezsdr_radio::payloads::RxOverflowCause::Overrun {",
+  "new": "if cause == ezsdr_radio::payloads::RxOverflowCause::Sequence {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_21_an_overrun_then_a_sequence_error_before_one_cut_make_one_tail"
+ },
+ {
+  "id": "N108-33",
+  "name": "the Mock's abort floor reads the next sample again, which an overrun moves to the restart (stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "stream.running.as_ref().filter(|_| abort).map(|rx| rx.undelivered)",
+  "new": "stream.running.as_ref().filter(|_| abort).map(|rx| rx.next)",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_25_an_abort_in_a_gap_cuts_at_the_first_undelivered_sample"
+ },
+ {
+  "id": "N108-34",
+  "name": "the Mock's first sample not delivered is moved by a fault (stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "rx.next = kg;",
+  "new": "rx.next = kg;\n            rx.undelivered = kg;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_25_an_abort_in_a_gap_cuts_at_the_first_undelivered_sample"
+ },
+ {
+  "id": "N108-27",
+  "name": "the Mock's tail is always stamped in the primary root, never in the segment's SampleClock (stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let at = match domain {\n            Some(domain) => TimePoint::new(domain, undelivered),",
+  "new": "let at = match None::<ClockDomainId> {\n            Some(domain) => TimePoint::new(domain, undelivered),",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_21_overrun_shape"
+ },
+ {
+  "id": "N108-28",
+  "name": "the Mock's root-time tail reads the sample index as a root tick (stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "time::v_of(origin, ratio, undelivered).ok_or_else(|| self.reject(\"MR-12: receive cut overflow\"))?",
+  "new": "undelivered",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "parity",
+  "filter": "vh_8_an_overrun_cut_before_its_restart_emits_the_tail_on_both_providers"
+ },
+ {
+  "id": "N108-37",
+  "name": "RM-17's payload makes an event for a loss of 0 (stage 4b)",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "let lost = lost.filter(|lost| *lost > 0)?;",
+  "new": "let lost = lost?;",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_17_reported_losses_make_one_payload_for_the_block_jump"
+ },
+ {
+  "id": "N108-37b",
+  "name": "RM-17's payload makes an event for a loss of 0, seen by the Mock: a cut at the first sample not delivered emits one (stage 4b)",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "let lost = lost.filter(|lost| *lost > 0)?;",
+  "new": "let lost = lost?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_a_fault_at_a_loss_s_instant_removes_nothing"
+ },
+ {
+  "id": "N108-40",
+  "name": "the second stop that clears an overrun's queued restart is not made (UR-17, S18; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    self.core.rx_stop_admitted(self.k, \"rx_stop_before_gate\").or(Some(Ok(())))",
+  "new": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    Some(Ok(()))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_restart_that_overtakes_the_stop_is_cleared_by_the_second_stop"
+ },
+ {
+  "id": "N108-40b",
+  "name": "the same missing second stop, seen by the timeline rig: the queued restart survives every stop (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    self.core.rx_stop_admitted(self.k, \"rx_stop_before_gate\").or(Some(Ok(())))",
+  "new": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    Some(Ok(()))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "N108-40c",
+  "name": "the same missing second stop under an abort or a two-channel stop: the queued restart survives (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    self.core.rx_stop_admitted(self.k, \"rx_stop_before_gate\").or(Some(Ok(())))",
+  "new": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    Some(Ok(()))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_restart_that_overtakes_an_abort_or_a_two_channel_stop_is_cleared_by_the_second_stop"
+ },
+ {
+  "id": "N108-41",
+  "name": "the second stop is unconditional: a stop after any stop, overrun or not (UR-26, S18g; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "Some(Ok(())) if overrun =>",
+  "new": "Some(Ok(())) =>",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_second_stop_follows_only_an_unanswered_overrun_report"
+ },
+ {
+  "id": "N108-41b",
+  "name": "the same unconditional second stop, seen by the rig: a second stop where no report is unanswered (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "Some(Ok(())) if overrun =>",
+  "new": "Some(Ok(())) =>",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "N108-41c",
+  "name": "the second stop follows an overrun the segment ever counted, not one no block has carried (stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let overrun = stream.pending.contains(&Pending::Overrun) || stream.stale_overrun;",
+  "new": "let overrun = lock(&self.core.rec).stats.get(\"rx_overflows\").copied().unwrap_or(0) > 0;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_second_stop_follows_only_an_unanswered_overrun_report"
+ },
+ {
+  "id": "N108-42",
+  "name": "a second stop after a failed first stop: the pair follows any result (UR-26, S18b; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "Some(Ok(())) if overrun =>",
+  "new": "_ if overrun =>",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_failed_first_stop_makes_no_second"
+ },
+ {
+  "id": "N108-43",
+  "name": "the second stop's failure is dropped: the first stop's result is the stop's (UR-26, S18d; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    self.core.rx_stop_admitted(self.k, \"rx_stop_before_gate\").or(Some(Ok(())))",
+  "new": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    { let _ = self.core.rx_stop_admitted(self.k, \"rx_stop_before_gate\"); Some(Ok(())) }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_failing_second_stop_is_the_stops_failure"
+ },
+ {
+  "id": "N108-44",
+  "name": "the stop pair records an `applied` row per call: two rows for one stop (UR-26, S18a; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));",
+  "new": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    lock(&self.core.rec).applied.push(json!({ \"key\": \"rx_stop\", \"at\": self.core.at(cut), \"issued\": self.core.at(now) }));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_second_stop_follows_only_an_unanswered_overrun_report"
+ },
+ {
+  "id": "N108-44b",
+  "name": "the second stop is made under the line lock (UR-25, S18; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    self.core.rx_stop_admitted(self.k, \"rx_stop_before_gate\").or(Some(Ok(())))",
+  "new": "self.core.timing(json!({ \"what\": \"rx_stop_overrun_clear\", \"at\": self.core.now() }));\n                    { let _streams = lock(&self.core.streams); self.core.rx_stop_admitted(self.k, \"rx_stop_before_gate\") }.or(Some(Ok(())))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_second_stop_follows_only_an_unanswered_overrun_report"
+ },
+ {
+  "id": "N108-46",
+  "name": "a timeout spends the pending overrun, so the second stop reads the last result instead (UR-26, S18g; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if matches!(&result, RxRecv::Timeout) { self.timeout(now); return; }",
+  "new": "if matches!(&result, RxRecv::Timeout) { if let Some(stream) = self.stream.as_mut() { stream.pending.retain(|pending| *pending != Pending::Overrun); } self.timeout(now); return; }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_second_stop_follows_only_an_unanswered_overrun_report"
+ },
+ {
+  "id": "N108-79",
+  "name": "the stop's `applied` row names the chain's cut, not the end a pending report fixed (UR-26, P5; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "\"at\": self.core.at(cut)",
+  "new": "\"at\": self.core.at(chain.cut().unwrap_or(cut))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_reached_stop_cut_survives_a_later_abort_while_a_loss_is_pending"
+ },
+ {
+  "id": "N108-80",
+  "name": "the FakeDevice's restart knob is never armed by an overrun (UR-33; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.next = Some(next + skip);\n                    streamer.restart = true;",
+  "new": "streamer.next = Some(next + skip);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_restart_that_overtakes_the_first_stop_survives_it_and_the_second_clears_it"
+ },
+ {
+  "id": "N108-81",
+  "name": "the FakeDevice's restart is not spent by returned samples (UR-33; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.last = Some(next);\n            streamer.restart = false;",
+  "new": "streamer.last = Some(next);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_restart_that_overtakes_the_first_stop_survives_it_and_the_second_clears_it"
+ },
+ {
+  "id": "N108-82",
+  "name": "the FakeDevice does not queue a start behind a surviving restart (UR-33; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "None if st.rx[&stream].survivor => st.rx.get_mut(&stream).expect(\"checked\").then = Some((at, ratio)),",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_restart_that_overtakes_the_first_stop_survives_it_and_the_second_clears_it"
+ },
+ {
+  "id": "N108-83",
+  "name": "the FakeDevice's second stop leaves the survivor flag set (UR-33; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.survivor = false;\n        streamer.then = None;",
+  "new": "streamer.then = None;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_restart_that_overtakes_the_first_stop_survives_it_and_the_second_clears_it"
+ },
+ {
+  "id": "N108-84",
+  "name": "the rig's device never leaves a restart streaming after a stop (UR-33, S20; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "if world.survive && std::mem::take(&mut world.restart) {",
+  "new": "if false && world.survive && std::mem::take(&mut world.restart) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "N108-85",
+  "name": "uhd-rx's end does not read the origin gate's arming (UR-17, UR-18; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let overrun = stream.pending.contains(&Pending::Overrun) || stream.stale_overrun;",
+  "new": "let overrun = stream.pending.contains(&Pending::Overrun);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_gated_overrun_arms_the_successor_s_second_stop"
+ },
+ {
+  "id": "N108-86",
+  "name": "uhd-rx's origin gate does not arm the end for an overrun it drops (UR-18; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if matches!(result, RxRecv::Overflow { out_of_sequence: false }) {\n                    stream.stale_overrun = true;\n                }",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_gated_overrun_arms_the_successor_s_second_stop"
+ },
+ {
+  "id": "N108-87",
+  "name": "uhd-rx's origin gate arms the end for a sequence error too (UR-18; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "matches!(result, RxRecv::Overflow { out_of_sequence: false })",
+  "new": "matches!(result, RxRecv::Overflow { .. })",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_gated_overrun_arms_the_successor_s_second_stop"
+ },
+ {
+  "id": "N108-88",
+  "name": "a published block does not end the origin gate's arming (UR-17, UR-18; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "stream.stale_overrun = false;",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_block_ends_the_successor_s_gated_arming"
+ },
+ {
+  "id": "N108-89",
+  "name": "uhd-rx stops a lost device's overrun stream once (UR-29, #67; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if self.core.is_lost() || matches!(chain.device(), RxDevice::Lost) { chain.lose(); self.finish_locked(&mut chain, end); return; }",
+  "new": "if false { chain.lose(); self.finish_locked(&mut chain, end); return; }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_found_before_the_stop_of_an_overrun_stream_makes_no_stop_call"
+ },
+ {
+  "id": "N108-90",
+  "name": "the FakeDevice's behind overflow does not arm the restart knob (UR-33; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.next = Some(restart);\n            streamer.restart = true;",
+  "new": "streamer.next = Some(restart);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_restart_that_overtakes_the_first_stop_survives_it_and_the_second_clears_it"
+ },
+ {
+  "id": "N108-91",
+  "name": "the FakeDevice's time reset keeps a pending restart (UR-33; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.then = None;\n            streamer.restart = false;\n            streamer.survivor = false;",
+  "new": "streamer.then = None;\n            streamer.survivor = false;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_restart_that_overtakes_the_first_stop_survives_it_and_the_second_clears_it"
+ },
+ {
+  "id": "N108-92",
+  "name": "the FakeDevice's time reset keeps the survivor flag (UR-33; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "streamer.restart = false;\n            streamer.survivor = false;\n            streamer.late = None;",
+  "new": "streamer.restart = false;\n            streamer.late = None;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_33_a_restart_that_overtakes_the_first_stop_survives_it_and_the_second_clears_it"
+ },
+ {
+  "id": "N108-93",
+  "name": "the rig does not allow a second stop after a gated report (UR-18, S20; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "unanswered(origin) || gated(origin)",
+  "new": "unanswered(origin)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_rx"
+ },
+ {
+  "id": "N108-50",
+  "name": "a refused publish consumes the pending reports (MR-19; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if !full {",
+  "new": "if true {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_fault_report_survives_a_refused_publish"
+ },
+ {
+  "id": "N108-98",
+  "name": "a refused publish consumes the pending reports, seen at a repeated refusal (MR-19; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if !full {",
+  "new": "if true {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_repeated_refusals_are_one_overrun_with_the_first_block_a_link_accepts"
+ },
+ {
+  "id": "N108-51",
+  "name": "the refusal emits its event at once again, in place of the report (MR-19; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "rx.note(next, ezsdr_radio::payloads::RxOverflowCause::Overrun);",
+  "new": "{ let domain = self.rx_register(k)?; let payload = ezsdr_radio::payloads::RxOverflowPayload { cause: ezsdr_radio::payloads::RxOverflowCause::Overrun, lost: (next_sample - next) as u64 }; self.emit_overflow(k, payload, TimePoint::new(domain, next))?; }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_backpressure_is_an_overrun"
+ },
+ {
+  "id": "N108-97",
+  "name": "the refusal emits its event at once again, in place of the report, seen with a fault in the gap (MR-19; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "rx.note(next, ezsdr_radio::payloads::RxOverflowCause::Overrun);",
+  "new": "{ let domain = self.rx_register(k)?; let payload = ezsdr_radio::payloads::RxOverflowPayload { cause: ezsdr_radio::payloads::RxOverflowCause::Overrun, lost: (next_sample - next) as u64 }; self.emit_overflow(k, payload, TimePoint::new(domain, next))?; }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_fault_inside_a_refusal_s_gap_then_a_stop_counts_the_stretch_once"
+ },
+ {
+  "id": "N108-52",
+  "name": "`undelivered` is set to the refused block's end at a refused publish (MR-19; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "rx.lost = Some(lost_total);",
+  "new": "rx.lost = Some(lost_total); rx.undelivered = stop;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_an_abort_after_a_refusal_loses_nothing_before_its_cut"
+ },
+ {
+  "id": "N108-53",
+  "name": "the tail after a refusal is measured from the restart sample (MR-19; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "rx.lost = Some(lost_total);",
+  "new": "rx.lost = Some(lost_total); rx.undelivered = next_sample;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_stop_before_acceptance_emits_the_tail_from_the_refused_block"
+ },
+ {
+  "id": "N108-96",
+  "name": "the Mock's tail is stamped in the primary root even when a refused first block registered the clock (MR-19; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let at = match domain {\n            Some(domain) => TimePoint::new(domain, undelivered),",
+  "new": "let at = match None::<ClockDomainId> {\n            Some(domain) => TimePoint::new(domain, undelivered),",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_refused_first_block_registers_the_clock_and_its_tail_is_timed_in_it"
+ },
+ {
+  "id": "N108-94",
+  "name": "uhd-rx's origin gate arms the end for a gated `Alignment` (UR-18; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "matches!(result, RxRecv::Overflow { out_of_sequence: false })",
+  "new": "matches!(result, RxRecv::Overflow { out_of_sequence: false } | RxRecv::Alignment)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_gated_overrun_arms_the_successor_s_second_stop"
+ },
+ {
+  "id": "N108-95",
+  "name": "uhd-rx's origin gate arms the end for a gated `BadPacket` (UR-18; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "matches!(result, RxRecv::Overflow { out_of_sequence: false })",
+  "new": "matches!(result, RxRecv::Overflow { out_of_sequence: false } | RxRecv::BadPacket)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_gated_overrun_arms_the_successor_s_second_stop"
+ },
+ {
+  "id": "N108-99",
+  "name": "an abort at a refused first block leaves its registered clock open (MR-19, RM-25; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if let Some(domain) = registered {",
+  "new": "if let Some(domain) = None::<ClockDomainId> {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_an_abort_at_a_refused_first_block_ends_its_clock_at_the_origin"
+ },
+ {
+  "id": "N108-60",
+  "name": "the overflow value row takes the wrong figure (S21)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "if let (Some(ns), Some(rate)) = (summary.maximum_restart_after_resume_ns, summary.maximum_restart_rate_hz)",
+  "new": "if let (Some(ns), Some(rate)) = (summary.worst_gap_ns, summary.maximum_restart_rate_hz)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "an_overflow_summary_makes_one_lower_bound_row_or_says_why_not"
+ },
+ {
+  "id": "N108-61",
+  "name": "the overflow completeness predicate loses its estimate test (S21)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "class == TrialClass::Success && restart_ns.is_some()",
+  "new": "class == TrialClass::Success",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "an_overflow_summary_with_a_missing_estimate_is_unmeasured"
+ },
+ {
+  "id": "N108-70",
+  "name": "the overflow value row names the worst-gap rate, not the worst-restart rate (S21)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "condition: rate_condition(rate)",
+  "new": "condition: rate_condition(summary.limiting_rate_hz.unwrap_or(rate))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "an_overflow_summary_makes_one_lower_bound_row_or_says_why_not"
+ },
+ {
+  "id": "N108-71",
+  "name": "an incomplete overflow cell still yields a measured row (S21)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "if let Some(reason) = &summary.unmeasured_reason",
+  "new": "if let Some(reason) = None::<&String>",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "an_overflow_summary_with_a_missing_estimate_is_unmeasured"
+ },
+ {
+  "id": "N108-74",
+  "name": "the sweep cells are left out of D5's bound line again (S22)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "if run.cells.iter().any(|(cell, _)| cell.sweep) {",
+  "new": "if false && run.cells.iter().any(|(cell, _)| cell.sweep) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_decisions_report_a_sweep_cell_above_the_bound"
+ },
+ {
+  "id": "N108-62",
+  "name": "S9: an equal pre-stamp counts as certainly after the overflow result",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if pre_stamp_ns > result.after {",
+  "new": "if pre_stamp_ns >= result.after {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-62b",
+  "name": "S9: a dropped probe row no longer makes the trace inconclusive",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if !rows_complete {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-62c",
+  "name": "S9: a foreign row is read as a receive row",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if row[\"call\"] != \"rx_recv\" {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-62d",
+  "name": "S9: a trace without a stall gap is classified from its first pair",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "let resume = (1..rows.len()).find(|&index| is_resume(rows[index - 1].after, rows[index].before, stall_ns)).ok_or(\"no gap of the stall's length in the trace\")?;",
+  "new": "let resume = (1..rows.len()).next().ok_or(\"no gap of the stall's length in the trace\")?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-62e",
+  "name": "S9: a sequence-error overflow counts as the overflow result",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "row.kind == \"overflow\" && !row.out_of_sequence",
+  "new": "row.kind == \"overflow\"",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-62f",
+  "name": "S9: an overflow before the resume counts as the result",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "rows[resume..].iter().position(is_result)",
+  "new": "rows.iter().position(is_result)",
+  "old2": "Ok((resume, resume + result))",
+  "new2": "Ok((resume, result))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-62g",
+  "name": "S9: an equal post-stamp counts as inside the backlog",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if post_stamp_ns < result.before && backlog {",
+  "new": "if post_stamp_ns <= result.before && backlog {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-62h",
+  "name": "S9: a pre-stall samples row counts as the backlog the reader returned",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "let backlog = recvs[resume..].iter().any(|row| row.kind == \"samples\" && row.after < pre_stamp_ns);",
+  "new": "let backlog = recvs.iter().any(|row| row.kind == \"samples\" && row.after < pre_stamp_ns);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-62i",
+  "name": "S9: cell B is decided by the backlog alone, without the post-stamp",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if post_stamp_ns < result.before && backlog {",
+  "new": "if backlog {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-62j",
+  "name": "S9 verdict: a missing successor sample is not a failure",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if !trial.sample_seen {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-62k",
+  "name": "S9 verdict: more than one tail is not a failure",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if trial.tails.len() > 1 {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-62l",
+  "name": "S9 verdict: a wrong tail lost is not a failure",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "&& expected != *tail",
+  "new": "&& false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-62m",
+  "name": "S9 verdict: a sequence-error overflow is not a failure",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if trial.sequence_overflows > 0 {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-62n",
+  "name": "S9 verdict: a report before the successor's origin is not a failure",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if trial.rx_before_origin > 0 {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-62o",
+  "name": "S9 verdict: cell A passes with its first block late",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if block.index != 0 {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-62p",
+  "name": "S9 verdict: cell A passes with a LATE_COMMAND",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if trial.late_command > 0 {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-62q",
+  "name": "S9 verdict: cell B fails even when the missed start was reported",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "trial.late_command == 0",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-62r",
+  "name": "S9 verdict: one tail with no expectation passes instead of staying open",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if trial.tails.len() == 1 && trial.expected_tail.is_none() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-62s",
+  "name": "S9 decision: a FAIL is counted as a pass",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "Verdict::Fail(reason) => failures.push(reason),",
+  "new": "Verdict::Fail(_) => pass += 1,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_decision_counts_classes_and_verdicts"
+ },
+ {
+  "id": "N108-62t",
+  "name": "S9: a booking after the stream resumed is still cell A",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "row.kind == \"samples\" && row.before < resumed_before",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-62u",
+  "name": "S9: a resumed row beginning exactly at the post-stamp counts as resumed",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "row.before < resumed_before",
+  "new": "row.before <= resumed_before",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-63",
+  "name": "S9 verdict: cell B fails on a reported late start",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "trial.late_command == 0",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-72",
+  "name": "S9: cell B is decided by the post-stamp alone",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if post_stamp_ns < result.before && backlog {",
+  "new": "if post_stamp_ns < result.before {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-73",
+  "name": "S9 verdict: cell A passes with the tail absent",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if trial.tails.is_empty() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-75",
+  "name": "S9: a gap of exactly the stall's length is not a resume",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "before >= previous_after.saturating_add(stall_ns)",
+  "new": "before > previous_after.saturating_add(stall_ns)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-54",
+  "name": "S10b: the Module ends a past-cut stream at the first timeout after the overflow result instead of once it is quiet for the span (UR-17)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let ended = cut.is_some_and(|cut| quiet && i128::from(now) >= i128::from(cut) + i128::from(span));",
+  "new": "let ended = cut.is_some_and(|cut| i128::from(now) >= i128::from(cut) + i128::from(span));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_restart_booked_while_the_backlog_is_read_is_a_reported_missed_start"
+ },
+ {
+  "id": "N108-100",
+  "name": "S9: the expected tail counts one sample too many",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "end_index.checked_sub(first)",
+  "new": "(end_index + 1).checked_sub(first)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_rehearses_on_the_fake_cell_a_and_the_inconclusive_path"
+ },
+ {
+  "id": "N108-101",
+  "name": "S9 watch: a samples row before the resume sets the backlog",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if self.resumed && recv.kind == \"samples\" {",
+  "new": "if recv.kind == \"samples\" {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_watch_agrees_with_the_classifier_on_a_trace_fed_in_pieces"
+ },
+ {
+  "id": "N108-102",
+  "name": "S9 cells: the retuned half of every rate cell is missing",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "for retune in [false, true] {",
+  "new": "for retune in [false] {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_cells_are_the_two_rates_by_retune_by_target"
+ },
+ {
+  "id": "N108-103",
+  "name": "S9 the successor's start is read as the first stream's own start",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "let start_index = probe.count(\"rx_start\");",
+  "new": "let start_index = 0;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_rehearses_on_the_fake_cell_a_and_the_inconclusive_path"
+ },
+ {
+  "id": "N108-104",
+  "name": "S9: a second overflow in the trace is not open",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": ".filter(|row| is_result(row)).count() > 1",
+  "new": ".filter(|row| is_result(row)).count() > 2",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-105",
+  "name": "S9: a booking at the window's bound counts as A",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "post_stamp_ns < result.before.saturating_add(window_ns)",
+  "new": "post_stamp_ns <= result.before.saturating_add(window_ns)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-106",
+  "name": "S9: the window is measured from the result's after stamp",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "result.before.saturating_add(window_ns)",
+  "new": "result.after.saturating_add(window_ns)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-107",
+  "name": "S9: the booking window is ignored and every post-result booking is A",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "return if post_stamp_ns < result.before.saturating_add(window_ns) && stop_end < result.before.saturating_add(restart_after_ns).saturating_sub(S9_RESTART_MARGIN_NS) { Cell::A } else { Cell::Inconclusive(S9_NEAR_RESTART) };",
+  "new": "return Cell::A;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-108",
+  "name": "S9: the booking window keeps no margin",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "restart_after_ns.saturating_sub(span_ns).saturating_sub(S9_RESTART_MARGIN_NS)",
+  "new": "restart_after_ns.saturating_sub(span_ns)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_window_and_span_come_from_the_block_the_rate_and_the_restart_delay"
+ },
+ {
+  "id": "N108-109",
+  "name": "S9: the booking window keeps no receive wait",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "restart_after_ns.saturating_sub(span_ns).saturating_sub(S9_RESTART_MARGIN_NS)",
+  "new": "restart_after_ns.saturating_sub(S9_RESTART_MARGIN_NS)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_window_and_span_come_from_the_block_the_rate_and_the_restart_delay"
+ },
+ {
+  "id": "N108-110",
+  "name": "S9: the receive span drops the delivery allowance",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "block_len.saturating_mul(1_000_000_000).div_ceil(rate_hz.max(1)).saturating_add(ezsdr_radio_uhd::profile::DELIVERY_ALLOWANCE_NS.unsigned_abs())",
+  "new": "block_len.saturating_mul(1_000_000_000).div_ceil(rate_hz.max(1))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_window_and_span_come_from_the_block_the_rate_and_the_restart_delay"
+ },
+ {
+  "id": "N108-111",
+  "name": "S9 verdict: cell B passes a shifted first block reported as START_LEAD_SHORT",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "trial.late_command == 0",
+  "new": "trial.late_command + trial.start_lead_short == 0",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_verdicts_need_the_successor_block_and_the_tail"
+ },
+ {
+  "id": "N108-112",
+  "name": "S9: the successor's start is not capped at the post-stamp",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "start.min(bound)",
+  "new": "bound",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-113",
+  "name": "S9: any start, even one before the booking, is read as the successor's",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "find(|&before| before >= pre_stamp_ns)",
+  "new": "find(|&before| before >= 0)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-114",
+  "name": "S9: the resumed check reads the row's after stamp",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "row.kind == \"samples\" && row.before < resumed_before",
+  "new": "row.kind == \"samples\" && row.after < resumed_before",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-115",
+  "name": "S9: the backlog check reads the row's before stamp",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "row.kind == \"samples\" && row.after < pre_stamp_ns",
+  "new": "row.kind == \"samples\" && row.before < pre_stamp_ns",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-116",
+  "name": "S9: a rx_recv row without host stamps is skipped",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if rows.iter().any(|row| row[\"call\"] == \"rx_recv\" && recv_row(row).is_none()) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_classifies_a_booking_by_its_stamps_and_the_overflow_result"
+ },
+ {
+  "id": "N108-117",
+  "name": "S9: the result stamps are printed the wrong way round",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "Some((rows[result].before, rows[result].after))",
+  "new": "Some((rows[result].after, rows[result].before))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_result_stamps_are_the_result_rows_before_and_after"
+ },
+ {
+  "id": "N108-118",
+  "name": "S9: the retune target is above the 1 GHz edge",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "measurement::RX_START_LEAD_RETUNE_HZ.0",
+  "new": "measurement::RX_START_LEAD_RETUNE_HZ.1",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_retune_target_crosses_the_one_gigahertz_edge_from_the_default"
+ },
+ {
+  "id": "N108-119",
+  "name": "S9: the trial row prints the result's after stamp as its before",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "outcome.result_ns.map(|(before, _)| before)",
+  "new": "outcome.result_ns.map(|(_, after)| after)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_trial_row_prints_the_result_stamps_and_the_window"
+ },
+ {
+  "id": "N108-120",
+  "name": "S9 run: the latch is not consulted",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if let Some(reason) = latched() {",
+  "new": "if let Some(reason) = None::<String> {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_run_rehearses_the_runner_the_decision_lines_and_the_target_b_exit_on_the_fake"
+ },
+ {
+  "id": "N108-121",
+  "name": "S9 decisions: the stop suffix is never printed",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "&& outcomes.len() < *planned",
+  "new": "&& false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_run_rehearses_the_runner_the_decision_lines_and_the_target_b_exit_on_the_fake"
+ },
+ {
+  "id": "N108-122",
+  "name": "S9 trial: the unreached booking state is reported as cell A",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "cell: Cell::Inconclusive(reason),",
+  "new": "cell: Cell::A,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_run_rehearses_the_runner_the_decision_lines_and_the_target_b_exit_on_the_fake"
+ },
+ {
+  "id": "N108-123",
+  "name": "S4: with_block_len drops the block length",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "selector[\"block_len\"] = json!(block_len);",
+  "new": "let _ = block_len;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "with_block_len_keeps_the_layout_pin"
+ },
+ {
+  "id": "N108-124",
+  "name": "S4: s4_block_len ignores whether the name is present",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "values.contains_key(\"EZSDR_S4_BLOCK_LEN\")",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_block_len_is_optional_and_positive"
+ },
+ {
+  "id": "N108-125",
+  "name": "S9 split: the old segment's domain is not excluded",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "Some(time.domain()) != old",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_sequence_event_counts_only_at_the_successors_first_block"
+ },
+ {
+  "id": "N108-126",
+  "name": "S9 split: a later successor block counts as the first block",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "time.ticks_in(time.domain()).is_ok_and(|ticks| ticks == 0)",
+  "new": "time.ticks_in(time.domain()).is_ok_and(|ticks| ticks >= 0)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_sequence_event_counts_only_at_the_successors_first_block"
+ },
+ {
+  "id": "N108-127",
+  "name": "S9 split: an overrun at a foreign domain's tick 0 counts as a sequence event",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "*cause == RxOverflowCause::Sequence && Some(time.domain()) != old",
+  "new": "Some(time.domain()) != old",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_sequence_event_counts_only_at_the_successors_first_block"
+ },
+ {
+  "id": "N108-128",
+  "name": "S9: the restart margin is 1 ms",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "pub const S9_RESTART_MARGIN_NS: u64 = 2_000_000;",
+  "new": "pub const S9_RESTART_MARGIN_NS: u64 = 1_000_000;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_window_and_span_come_from_the_block_the_rate_and_the_restart_delay"
+ },
+ {
+  "id": "N108-129",
+  "name": "S9 initial: a frequency is booked at connect",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "&[(\"radio.rx.s0.sample_rate_hz\", rate)]",
+  "new": "&[(\"radio.rx.s0.sample_rate_hz\", rate.clone()), (\"radio.rx.c0.frequency_hz\", rate)]",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_initial_requests_carry_the_stream_and_the_rate_and_no_frequency"
+ },
+ {
+  "id": "N108-130",
+  "name": "S9 trial row: sequence_events prints the first-block count",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "\"sequence_events\": outcome.trial.sequence_events,",
+  "new": "\"sequence_events\": outcome.trial.sequence_overflows,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_trial_row_prints_the_result_stamps_and_the_window"
+ },
+ {
+  "id": "N108-131",
+  "name": "S9: every sequence event is the race again",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "trial.sequence_overflows = split.first_block_sequences;",
+  "new": "trial.sequence_overflows = split.sequence_events;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_host_drop_before_the_stall_is_reported_and_is_not_the_cascade_race_on_the_fake"
+ },
+ {
+  "id": "N108-132",
+  "name": "S9: the trial's sequence_events is the first-block count",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "trial.sequence_events = split.sequence_events;",
+  "new": "trial.sequence_events = split.first_block_sequences;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_host_drop_before_the_stall_is_reported_and_is_not_the_cascade_race_on_the_fake"
+ },
+ {
+  "id": "N108-133",
+  "name": "the silence call asks for a whole block again (UR-17, #108; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let one_packet = one_packet || self.stream.as_ref().is_some_and(|stream| stream.one_packet);",
+  "new": "let one_packet = one_packet;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_an_overrun_silence_receive_returns_at_its_first_packet"
+ },
+ {
+  "id": "N108-134",
+  "name": "every pending report makes the call one-packet (UR-17; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "is_some_and(|stream| stream.one_packet)",
+  "new": "is_some_and(|stream| !stream.pending.is_empty())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_only_an_overrun_report_makes_the_next_receive_one_packet"
+ },
+ {
+  "id": "N108-135",
+  "name": "an admitted receive call (the first stop, the second stop, the restart) is made without the device gate (UR-17, UR-29; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "self.probe(before_gate, None);\n        let _device_gate = self.lock_device_gate();",
+  "new": "self.probe(before_gate, None);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_publication_waits_for_the_second_stop_in_the_device"
+ },
+ {
+  "id": "N108-174",
+  "name": "a loss at the second stop's gate drops the first stop's result instead of keeping it as the pair's (UR-29; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.rx_stop_admitted(self.k, \"rx_stop_before_gate\").or(Some(Ok(())))",
+  "new": "self.core.rx_stop_admitted(self.k, \"rx_stop_before_gate\")",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_published_just_before_the_second_stop_s_gate_makes_no_call"
+ },
+ {
+  "id": "N108-136",
+  "name": "an admitted receive call does not re-check the loss under the device gate (UR-17, UR-29; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "(!self.is_lost()).then(call)",
+  "new": "Some(call())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_published_just_before_"
+ },
+ {
+  "id": "N108-137",
+  "name": "S9: the published block index is floored, not the nearest sample",
+  "file": "crates/ezsdr-radio-uhd/src/lib.rs",
+  "old": "(offset + n / 2).div_euclid(n)",
+  "new": "offset.div_euclid(n)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_first_index_is_the_lattice_index_the_provider_publishes"
+ },
+ {
+  "id": "N108-138",
+  "name": "S9: the successor's first index is floored, not the Provider's lattice",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "ezsdr_radio_uhd::lattice_index(first_tick - origin, ticks_per_sample)",
+  "new": "(first_tick - origin).div_euclid(ticks_per_sample)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_first_index_is_the_lattice_index_the_provider_publishes"
+ },
+ {
+  "id": "N108-139",
+  "name": "S9: the stop pair's end is not compared with the restart",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "&& stop_end < result.before.saturating_add(restart_after_ns).saturating_sub(S9_RESTART_MARGIN_NS)",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_stop_pair_that_ends_after_the_restart_is_inconclusive_not_a_cascade_fail"
+ },
+ {
+  "id": "N108-140",
+  "name": "S9: the resumed check ignores where the stop pair ended",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "post_stamp_ns.max(stop_end)",
+  "new": "post_stamp_ns",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_samples_call_begun_before_the_stop_pair_ended_is_the_restart_resuming"
+ },
+ {
+  "id": "N108-141",
+  "name": "S9: a missing stop pair makes no difference",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "let Some(stop_end) = stop_end else { return Cell::Inconclusive(S9_NO_STOP) };",
+  "new": "let stop_end = stop_end.unwrap_or(0);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_trace_without_a_stop_pair_after_the_booking_is_inconclusive"
+ },
+ {
+  "id": "N108-142",
+  "name": "S9 tail: the event's clock is not compared with the old stream's",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if tail.domain() != old.domain {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_tail_on_the_successor_s_clock_is_a_fault"
+ },
+ {
+  "id": "N108-143",
+  "name": "S9 tail: the event's tick is not compared with the first undelivered sample",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if let Some(first) = first_undelivered && u64::try_from(tail.ticks_in(old.domain).unwrap_or(-1)).ok() != Some(first) { return TailJudgement { expected, fault: Some(\"the tail is not at the old stream's first undelivered sample\"), cut_verified }; }",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_tail_on_the_successor_s_clock_is_a_fault"
+ },
+ {
+  "id": "N108-144",
+  "name": "S9 tail: the old clock's end is not compared with the applied stop's cut",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if let Some(cut) = applied_cut && old.end != Some(cut) { return TailJudgement { expected, fault: Some(\"the old clock's end is not the applied stop's cut\"), cut_verified }; }",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_tail_on_the_successor_s_clock_is_a_fault"
+ },
+ {
+  "id": "N108-145",
+  "name": "S9 verdict: the tail fault is not reported",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if let Some(fault) = trial.tail_fault { failures.push(fault.to_owned()); }",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_tail_fault_is_a_verdict_failure"
+ },
+ {
+  "id": "N108-146",
+  "name": "S9 first undelivered: the first samples call before the result, not the last",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": ".iter().rev().find(|row| row.kind == \"samples\")",
+  "new": ".iter().find(|row| row.kind == \"samples\")",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_first_undelivered_reads_the_last_samples_call_before_the_overflow_result"
+ },
+ {
+  "id": "N108-147",
+  "name": "S4 overflow evidence: the event's domain need not agree with the capture map's",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "let same_domain = time.domain() == domain;",
+  "new": "let same_domain = true;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "overflow_evidence_requires_the_event_and_the_gap_to_agree"
+ },
+ {
+  "id": "N108-148",
+  "name": "S4 overflow evidence: the event's tick need not be the gap's first lost sample",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "let tick_agrees = time.ticks_in(time.domain()).ok() == gap.start_sample;",
+  "new": "let tick_agrees = true;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "overflow_evidence_requires_the_event_and_the_gap_to_agree"
+ },
+ {
+  "id": "N108-149",
+  "name": "S4 overflow evidence: an event without a timestamp still completes a trial",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "let Some(time) = serde_json::from_value::<TimePoint>(event[\"time\"].clone()).ok() else { return false };",
+  "new": "let Some(time) = serde_json::from_value::<TimePoint>(event[\"time\"].clone()).ok().or_else(|| Some(TimePoint::new(domain, gap.start_sample.unwrap_or_default()))) else { return false };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "overflow_evidence_requires_the_event_and_the_gap_to_agree"
+ },
+ {
+  "id": "N108-150",
+  "name": "S4 sweep bound: the shared rate cell is left out of the sweep set again",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s4bench.rs",
+  "old": "let sweep: Vec<_> = run.cells.iter().filter(|(cell, _)| cell.rate_hz == sweep_rate_hz).collect();",
+  "new": "let sweep: Vec<_> = run.cells.iter().filter(|(cell, _)| cell.sweep).collect();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s4_decisions_sweep_bound_counts_the_shared_rate_cell"
+ },
+ {
+  "id": "N108-151",
+  "name": "VH-8 coverage: block_after_gap is true without a published RESTARTED block",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "let block_after_gap = observed.blocks.iter().any(|(_, (_, _, flags, _))| flags.contains(BlockFlags::RESTARTED));",
+  "new": "let block_after_gap = true || observed.blocks.iter().any(|(_, (_, _, flags, _))| flags.contains(BlockFlags::RESTARTED));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_coverage_shapes_come_from_the_observed_run"
+ },
+ {
+  "id": "N108-152",
+  "name": "VH-8 coverage: cut_in_gap is true without an observed overrun tail",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+  "old": "let cut_in_gap = observed.overruns.iter().any(|(clock, tick)| {",
+  "new": "let cut_in_gap = true || observed.overruns.iter().any(|(clock, tick)| {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_coverage_shapes_come_from_the_observed_run"
+ },
+ {
+  "id": "N108-153",
+  "name": "the pending report takes the later first sample (`min` becomes `max`) (S9; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "report.first = report.first.min(first);",
+  "new": "report.first = report.first.max(first);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_37_pending_reports_keep_the_first_sample_and_the_causes_not_a_list"
+ },
+ {
+  "id": "N108-154",
+  "name": "a later overrun report does not make the pending cause overrun (S9; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "report.cause = cause;",
+  "new": "",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_37_pending_reports_keep_the_first_sample_and_the_causes_not_a_list"
+ },
+ {
+  "id": "N108-155",
+  "name": "the pending report's sequence cause is ignored, so a sequence-only report gives no event (S9; stage 4b)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "let report = rx.report.take();",
+  "new": "let report = rx.report.take().filter(|report| report.cause == ezsdr_radio::payloads::RxOverflowCause::Overrun);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_22_a_cut_inside_a_sequence_error_s_skip_emits_the_tail"
+ },
+ {
+  "id": "N108-156",
+  "name": "the one-packet mode never ends: a pending overrun keeps every call one-packet after a packet came back (UR-17; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "stream.one_packet = false;",
+  "new": ";",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_the_one_packet_receive_ends_after_one_packet_returned_published_or_not"
+ },
+ {
+  "id": "N108-157",
+  "name": "the first stop is made without the device gate (UR-17, UR-29; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.rx_stop_admitted(self.k, \"rx_first_stop_before_gate\")",
+  "new": "Some(self.core.device.rx_stop(self.k))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_publication_waits_for_the_first_stop_in_the_device"
+ },
+ {
+  "id": "N108-158",
+  "name": "the same ungated first stop, seen before its gate (UR-17, UR-29; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.rx_stop_admitted(self.k, \"rx_first_stop_before_gate\")",
+  "new": "Some(self.core.device.rx_stop(self.k))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_published_just_before_the_first_stop_s_gate_makes_no_call"
+ },
+ {
+  "id": "N108-159",
+  "name": "the restart after a missed start is made without the device gate (UR-17, UR-29; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.rx_start_admitted(self.k, restart)",
+  "new": "Some(self.core.device.rx_start(self.k, restart))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_published_just_before_the_restart_start_s_gate_makes_no_call"
+ },
+ {
+  "id": "N108-160",
+  "name": "S9: a failed stop row is accepted as the booking's stop pair (S5; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if pair.iter().any(|row| !row[\"result\"].is_null()) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_failed_stop_of_the_pair_is_not_the_cell_a_premise"
+ },
+ {
+  "id": "N108-161",
+  "name": "S9: only the last row of the stop pair's result is checked (S5; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "pair.iter().any(|row| !row[\"result\"].is_null())",
+  "new": "pair.last().is_some_and(|row| !row[\"result\"].is_null())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_failed_stop_of_the_pair_is_not_the_cell_a_premise"
+ },
+ {
+  "id": "N108-162",
+  "name": "S9: cell A passes a published first block with an index other than 0 (S3; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if block.index != 0 {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_published_first_block_must_be_on_time_and_gapless_in_cell_a"
+ },
+ {
+  "id": "N108-163",
+  "name": "S9: cell A passes a published first block carrying GAP_BEFORE (S3; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if block.gap_before {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_published_first_block_must_be_on_time_and_gapless_in_cell_a"
+ },
+ {
+  "id": "N108-164",
+  "name": "S9: cell A passes a published first block carrying SEQ_DISCONTINUITY (S3; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if block.seq_discontinuity {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_published_first_block_must_be_on_time_and_gapless_in_cell_a"
+ },
+ {
+  "id": "N108-165",
+  "name": "S9: a successor block the link never saw passes (S3; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if trial.sample_seen && trial.first_block.is_none() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_successor_block_the_link_never_saw_is_inconclusive_not_a_pass"
+ },
+ {
+  "id": "N108-166",
+  "name": "S9: the recording link keeps the last block of a clock instead of the first (S3; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "entry(domain).or_insert(FirstBlock {",
+  "new": "insert(domain, FirstBlock {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_the_link_records_the_first_published_block_of_each_clock"
+ },
+ {
+  "id": "N108-167",
+  "name": "S9: an unverified cut is accepted (S4; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "if trial.tails.len() == 1 && !trial.cut_verified {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_a_trial_with_an_unverified_cut_is_inconclusive_not_a_pass"
+ },
+ {
+  "id": "N108-168",
+  "name": "S9 tail: a cut before the booked Stop's instant is not a fault (S4; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "end < booked",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_tail_judgement_checks_the_cut_against_the_booked_stop"
+ },
+ {
+  "id": "N108-169",
+  "name": "S9 tail: an end equal to the booked Stop's instant is unverified (S4; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "end >= booked",
+  "new": "end > booked",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_tail_judgement_checks_the_cut_against_the_booked_stop"
+ },
+ {
+  "id": "N108-170",
+  "name": "S4 overflow evidence: the event's source need not be the clock's stream (S6; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "tick_agrees && source_agrees",
+  "new": "tick_agrees",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "overflow_evidence_requires_the_event_and_the_gap_to_agree"
+ },
+ {
+  "id": "N108-171",
+  "name": "S9: a start before the booking is read as the successor's booked origin (S3; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": ".as_u64().is_some_and(|before| before >= pre_stamp_ns)",
+  "new": ".as_u64().is_some()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_successor_origin_is_the_booked_rx_starts_at"
+ },
+ {
+  "id": "N108-172",
+  "name": "S9 tail: the cut is verified without the applied stop's cut (S4; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "applied_cut == Some(end) && booked_at.is_some_and(|booked| end >= booked)",
+  "new": "booked_at.is_some_and(|booked| end >= booked)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_tail_judgement_checks_the_cut_against_the_booked_stop"
+ },
+ {
+  "id": "N108-173",
+  "name": "S9 tail: the cut is verified without the booked Stop's instant (S4; stage 4b)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/s9bench.rs",
+  "old": "booked_at.is_some_and(|booked| end >= booked)",
+  "new": "true",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "s9_tail_judgement_checks_the_cut_against_the_booked_stop"
  }
 ]

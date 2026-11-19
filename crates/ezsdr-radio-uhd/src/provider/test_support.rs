@@ -334,6 +334,12 @@ fn family(name: &str) -> Option<Dir> {
     }
 }
 
+/// A one-shot answer a test scripts for `rx_recv`.
+type RxHook = Box<dyn FnOnce(Wall) -> RxRecv + Send>;
+
+/// A one-shot answer a test scripts for `rx_stop`: it sees the call's result (the injected refusal or the device's) and returns the one the caller gets; it may publish a loss from inside the call.
+type RxStopHook = Box<dyn FnOnce(Result<(), DeviceError>) -> Result<(), DeviceError> + Send>;
+
 /// A `FakeDevice` that fails its test when a device call is made under the Provider's line
 /// lock (UR-25, design 33 D15): the test build counts the caller's own guards, so a line
 /// another thread holds is not mistaken for the caller's. It counts each call, so a test can
@@ -345,6 +351,9 @@ pub(super) struct LockSpy {
     order: Mutex<Vec<&'static str>>,
     rx_requests: Mutex<Vec<usize>>,
     rx_one_packet: Mutex<Vec<bool>>,
+    rx_timeouts: Mutex<Vec<Wall>>,
+    rx_hooks: Mutex<VecDeque<RxHook>>,
+    rx_stop_hooks: Mutex<VecDeque<RxStopHook>>,
     rx_packet_max: Mutex<Option<usize>>,
     hosts: Mutex<Vec<bool>>,
     before: Mutex<BTreeMap<&'static str, Hold>>,
@@ -365,6 +374,9 @@ impl LockSpy {
             order: Mutex::new(Vec::new()),
             rx_requests: Mutex::new(Vec::new()),
             rx_one_packet: Mutex::new(Vec::new()),
+            rx_timeouts: Mutex::new(Vec::new()),
+            rx_hooks: Mutex::new(VecDeque::new()),
+            rx_stop_hooks: Mutex::new(VecDeque::new()),
             rx_packet_max: Mutex::new(None),
             hosts: Mutex::new(Vec::new()),
             before: Mutex::new(BTreeMap::new()),
@@ -398,6 +410,21 @@ impl LockSpy {
 
     pub fn rx_packet_modes(&self) -> Vec<bool> {
         self.rx_one_packet.lock().unwrap().clone()
+    }
+
+    /// The timeout each receive call was given, in order.
+    pub fn rx_timeouts(&self) -> Vec<Wall> {
+        self.rx_timeouts.lock().unwrap().clone()
+    }
+
+    /// Answers the next receive call with `hook`, in place of the inner device.
+    pub fn script_rx_recv(&self, hook: impl FnOnce(Wall) -> RxRecv + Send + 'static) {
+        self.rx_hooks.lock().unwrap().push_back(Box::new(hook));
+    }
+
+    /// Answers the next stop with `hook`, which sees the call's result, in place of the inner device's.
+    pub fn script_rx_stop(&self, hook: impl FnOnce(Result<(), DeviceError>) -> Result<(), DeviceError> + Send + 'static) {
+        self.rx_stop_hooks.lock().unwrap().push_back(Box::new(hook));
     }
 
     pub fn report_rx_packet_max(&self, samples: usize) {
@@ -538,15 +565,29 @@ impl Device for LockSpy {
         self.call("rx_packet_samples", || self.rx_packet_max.lock().unwrap().unwrap_or_else(|| self.inner.rx_packet_samples(stream)))
     }
     fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
-        self.call("rx_stop", || match self.rx_stop_error.lock().unwrap().take() {
-            Some(error) => Err(error),
-            None => self.inner.rx_stop(stream),
+        self.call("rx_stop", || {
+            let result = match self.rx_stop_error.lock().unwrap().take() {
+                Some(error) => Err(error),
+                None => self.inner.rx_stop(stream),
+            };
+            let hook = self.rx_stop_hooks.lock().unwrap().pop_front();
+            match hook {
+                Some(hook) => hook(result),
+                None => result,
+            }
         })
     }
     fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv {
         self.rx_requests.lock().unwrap().push(n);
         self.rx_one_packet.lock().unwrap().push(one_packet);
-        self.call("rx_recv", || self.inner.rx_recv(stream, n, timeout, one_packet))
+        self.rx_timeouts.lock().unwrap().push(timeout);
+        self.call("rx_recv", || {
+            let hook = self.rx_hooks.lock().unwrap().pop_front();
+            match hook {
+                Some(hook) => hook(timeout),
+                None => self.inner.rx_recv(stream, n, timeout, one_packet),
+            }
+        })
     }
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         self.call("tx_open", || self.inner.tx_open(stream, channels))
@@ -1116,5 +1157,64 @@ mod tests {
         std::thread::sleep(Wall::from_millis(100));
         assert_eq!(clock.now(), held, "the clock ran while the thread that holds it did not wait on it");
         drop(guard);
+    }
+
+    #[test]
+    fn a_one_shot_rx_recv_hook_runs_outside_its_queue_lock() {
+        // The first hook scripts the second from inside its own call: a hook run under the
+        // queue's guard would deadlock here. The third call has no hook and reaches the fake.
+        let spy = Arc::new(LockSpy::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (script, again) = (spy.clone(), ran.clone());
+        spy.script_rx_recv(move |_| {
+            again.lock().unwrap().push(1);
+            let (script, again) = (script.clone(), again.clone());
+            script.script_rx_recv(move |_| {
+                again.lock().unwrap().push(2);
+                RxRecv::Timeout
+            });
+            RxRecv::Timeout
+        });
+
+        assert!(matches!(spy.rx_recv(0, 1, Wall::from_millis(1), false), RxRecv::Timeout));
+        assert!(matches!(spy.rx_recv(0, 1, Wall::from_millis(2), false), RxRecv::Timeout));
+        assert_eq!(*ran.lock().unwrap(), [1, 2], "both hooks ran, in order, once each");
+        let plain = spy.rx_recv(0, 1, Wall::ZERO, false);
+        assert!(matches!(plain, RxRecv::Failed(_)), "the third call goes to the fake: {plain:?}");
+        assert_eq!(spy.rx_timeouts(), [Wall::from_millis(1), Wall::from_millis(2), Wall::ZERO], "every call records its timeout");
+        assert_eq!(spy.seen("rx_recv"), 3);
+    }
+
+    #[test]
+    fn a_one_shot_rx_stop_hook_runs_outside_its_queue_lock() {
+        // The first hook scripts the second from inside its own call: a hook run under the
+        // queue's guard would deadlock here. The third call has no hook and reaches the fake;
+        // the fourth's hook turns the device's answer into the caller's.
+        let spy = Arc::new(LockSpy::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        spy.rx_open(0, &[0]).unwrap();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (script, again) = (spy.clone(), ran.clone());
+        spy.script_rx_stop(move |result| {
+            assert_eq!(result, Ok(()), "the first hook sees the device's result");
+            again.lock().unwrap().push(1);
+            let (script, again) = (script.clone(), again.clone());
+            script.script_rx_stop(move |result| {
+                assert_eq!(result, Ok(()), "the second hook sees the device's result");
+                again.lock().unwrap().push(2);
+                Ok(())
+            });
+            Err(DeviceError::failed("scripted from the hook"))
+        });
+
+        assert_eq!(spy.rx_stop(0), Err(DeviceError::failed("scripted from the hook")), "the first hook's answer reaches the caller");
+        assert_eq!(spy.rx_stop(0), Ok(()), "the second hook's answer");
+        assert_eq!(*ran.lock().unwrap(), [1, 2], "both hooks ran, in order, once each");
+        assert_eq!(spy.rx_stop(0), Ok(()), "the third call goes to the fake");
+        spy.script_rx_stop(|result| {
+            assert_eq!(result, Ok(()), "the fourth hook sees the device's result");
+            Err(DeviceError::failed("refused by the hook"))
+        });
+        assert_eq!(spy.rx_stop(0), Err(DeviceError::failed("refused by the hook")), "a hook's Err is the caller's");
+        assert_eq!(spy.seen("rx_stop"), 4);
     }
 }

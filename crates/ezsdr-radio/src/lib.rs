@@ -644,9 +644,9 @@ pub mod payloads {
     }
 
     /// The single `RX_OVERFLOW` for a block carrying one or more reported losses, `lost` the
-    /// part of its jump no earlier event reported (RM-17).
+    /// part of its jump no earlier event reported (RM-17). A loss of 0 produces none.
     pub fn rx_overflow_payload(reports: &[RxOverflowCause], lost: Option<u64>) -> Option<RxOverflowPayload> {
-        let lost = lost?;
+        let lost = lost.filter(|lost| *lost > 0)?;
         let cause = if reports.contains(&RxOverflowCause::Overrun) {
             RxOverflowCause::Overrun
         } else if reports.contains(&RxOverflowCause::Sequence) {

@@ -640,8 +640,8 @@
   "id": "U26",
   "name": "RX_OVERFLOW emitted with emit_control",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "if let Err(error) = self.core.events.emit(self.core.overflow(self.k), at, Severity::Warning, &payload.to_hot()) {",
-  "new": "if let Err(error) = self.core.events.emit_control(ezsdr_kernel::event::Event { source: ezsdr_kernel::event::EventSource::Node { node: self.core.stream_node(Dir::Rx, self.k) }, time: at, severity: Severity::Warning, kind: ezsdr_kernel::event::EventKind::parse(kinds::RX_OVERFLOW).expect(\"a kind\"), payload: serde_json::to_value(&payload).expect(\"a payload\") }) {",
+  "old": "if let Err(error) = core.events.emit(core.overflow(k), at, Severity::Warning, &payload.to_hot()) {",
+  "new": "if let Err(error) = core.events.emit_control(ezsdr_kernel::event::Event { source: ezsdr_kernel::event::EventSource::Node { node: core.stream_node(Dir::Rx, k) }, time: at, severity: Severity::Warning, kind: ezsdr_kernel::event::EventKind::parse(kinds::RX_OVERFLOW).expect(\"a kind\"), payload: serde_json::to_value(&payload).expect(\"a payload\") }) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_19_reports_before_one_block_keep_each_kind"
@@ -892,8 +892,8 @@
   "id": "R13",
   "name": "UR-25's untimed stop at the cut removed (P1-3; §11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-    "old": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = self.core.device.rx_stop(self.k);",
-    "new": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = Ok(());",
+    "old": "let result = self.core.rx_stop_admitted(self.k, \"rx_first_stop_before_gate\");",
+    "new": "let result = Some(Ok(()));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
