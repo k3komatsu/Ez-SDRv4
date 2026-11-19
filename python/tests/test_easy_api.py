@@ -140,6 +140,37 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(sdr.tx_channels[0].frequency, 2.45e9, "the rejected value was never applied")
         self.assertEqual(sdr.manifest["action_log"][-1], raised.exception.entry)
 
+    def test_ea_16_a_lone_surrogate_fails_before_a_request_and_the_session_stays(self) -> None:
+        # A str that is not Unicode text cannot go on the wire; escaped as "\ud800" it ended the server (#112).
+        def strings(value: object) -> list:
+            """Every string key and value in ``value``, at any depth."""
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, dict):
+                return [text for key, item in value.items() for text in strings(key) + strings(item)]
+            if isinstance(value, list):
+                return [text for item in value for text in strings(item)]
+            return []
+
+        with self.connect() as sdr:
+            for value in ["\ud800", {"\udfff": 1}]:
+                try:
+                    sdr.set("radio", "radio.rx.c0.gain_db", value)
+                except Exception as caught:
+                    self.assertIsInstance(caught, UnicodeEncodeError)
+                else:
+                    self.fail(f"a lone surrogate in {value!r} was sent")
+            with self.assertRaises(ezsdr.Rejected):  # a non-ASCII key is Unicode text: it reaches the Kernel and is logged
+                sdr.set("radio", "radio.rx.c0.gain_db", {"é": 1})
+            sdr.sleep(0.001)  # the Session still answers
+        log = sdr.manifest["action_log"]
+        self.assertEqual(len(log), 1, f"only the Unicode-keyed set was sent and logged; the advance is no SessionAction: {log}")
+        self.assertEqual(log[0]["action"]["kind"], "set_parameter")
+        self.assertEqual(log[0]["action"]["value"], {"é": 1}, "the set that reached the Kernel is the non-ASCII one")
+        self.assertEqual(log[0]["outcome"]["kind"], "rejected")
+        for text in strings(log):
+            self.assertFalse(any(0xD800 <= ord(ch) <= 0xDFFF for ch in text), f"a lone surrogate reached the Manifest: {text!r}")
+
     # -- Vision §3's second snippet
 
     def test_v3_parameters_through_attributes(self) -> None:
@@ -1795,6 +1826,26 @@ class Departure(unittest.TestCase):
         self.assertTrue(stdin.closed and stdout.closed, "both pipes are closed when the call ends")
         with self.assertRaises(ezsdr.ProtocolError):
             sdr.events()
+        manifest = sdr.close()
+        self.assertEqual(manifest["termination"]["reason"], {"kind": "stopped", "cause": {"kind": "client_disconnect"}})
+        self.assertEqual(Path(sdr.manifest_path), Path(sdr.dir) / "manifest.json")
+        self.assertEqual(sdr._connection._process.returncode, 0)
+        self.assertEqual(sdr.close(), manifest, "close() is repeatable after an abandon")
+
+    def test_ea_16_a_lone_surrogate_after_an_abandoned_exchange_raises_protocol_error(self) -> None:
+        # After the departure the connection is closed, so a later call is refused before anything is encoded
+        # (EA-16); the lone surrogate must not be reported as UnicodeEncodeError (#112 review F2).
+        sdr = self.connect()
+        stdin, stdout = sdr._connection._process.stdin, self.interrupt(sdr, "stdout", "readline")
+        with self.assertRaises(KeyboardInterrupt):
+            sdr.sleep(10**6)
+        self.assertTrue(stdin.closed and stdout.closed, "both pipes are closed when the call ends")
+        try:
+            sdr.set("radio", "radio.rx.c0.gain_db", "\ud800")
+        except Exception as caught:
+            self.assertIsInstance(caught, ezsdr.ProtocolError)
+        else:
+            self.fail("a call after the departure was not refused")
         manifest = sdr.close()
         self.assertEqual(manifest["termination"]["reason"], {"kind": "stopped", "cause": {"kind": "client_disconnect"}})
         self.assertEqual(Path(sdr.manifest_path), Path(sdr.dir) / "manifest.json")

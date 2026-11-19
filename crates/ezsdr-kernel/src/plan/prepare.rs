@@ -102,14 +102,13 @@ pub(super) fn collect_prepare(
         // only the keys the bound node declares and the request names, so an
         // Executor's or Sink's report, or a Provider's key that is neither, was
         // unchecked (P1, P3).
-        let request = spec.resources.get(fragment);
         let mut report_kind = |check: &str, key: &Key, value: &Value| {
             if let Some(error) = super::coercion::reported_kind_error(registry, key, value) {
                 kind_refused = true;
                 violations.push(Violation {
                     check: Namespace::parse(check).expect("a valid literal"),
                     key: Some(key.clone()),
-                    requested: super::coercion::exact_request(request, key),
+                    requested: super::coercion::fragment_request(spec, fragment, key),
                     reason: format!("SB-6: {fragment}'s report has {error}: {value:?}"),
                 });
             }
@@ -131,8 +130,8 @@ pub(super) fn collect_prepare(
                 violations.push(Violation {
                     check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
                     key: Some(stray.key.clone()),
-                    requested: Some(stray.requested.clone()),
-                    reason: format!("SB-44: {} reports a coercion of {}, which its request does not name", fragment, stray.key),
+                    requested: None,
+                    reason: format!("SB-44: {} reports a coercion of {} ({:?} to {:?}), which its request does not name", fragment, stray.key, stray.requested, stray.applied),
                 });
             }
         }
@@ -145,7 +144,7 @@ pub(super) fn collect_prepare(
                 Err(_) => violations.push(Violation {
                     check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
                     key: Some(c.key.clone()),
-                    requested: Some(c.requested.clone()),
+                    requested: super::coercion::fragment_request(spec, fragment, &c.key),
                     reason: format!("SB-46: coercion to {:?} rejected at prepare", c.applied),
                 }),
             }
@@ -190,7 +189,12 @@ pub(super) fn collect_prepare(
                 None => Err(ModuleError::rejected("MA-12: a capability's `effective` value is a scalar".to_owned())),
             };
             if let Err(e) = narrows {
-                violations.push(Violation { check: Namespace::parse("ezsdr.effective").expect("a valid literal"), key: Some(key.clone()), requested: Some(applied.clone()), reason: e.message });
+                violations.push(Violation {
+                    check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
+                    key: Some(key.clone()),
+                    requested: super::coercion::exact_request(Some(req), key),
+                    reason: format!("{} ({name}'s effective {key} is {applied:?})", e.message),
+                });
             }
         }
         for (key, constraint) in &req.requires {
@@ -222,7 +226,7 @@ pub(super) fn collect_prepare(
                         violations.push(Violation {
                             check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
                             key: Some(key.clone()),
-                            requested: Some(applied.clone()),
+                            requested: super::coercion::exact_request(Some(req), key),
                             reason: format!(
                                 "SB-44: {name}'s effective {key} is {applied:?}, and `coerce` \
                                  returned {:?} for it at validate",
@@ -241,9 +245,9 @@ pub(super) fn collect_prepare(
                 violations.push(Violation {
                     check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
                     key: Some(key.clone()),
-                    requested: Some(applied.clone()),
+                    requested: super::coercion::exact_request(Some(req), key),
                     reason: format!(
-                        "MA-12 (re-match): {name}'s effective {key} does not satisfy the \
+                        "MA-12 (re-match): {name}'s effective {key} is {applied:?}, which does not satisfy the \
                          Spec's constraint"
                     ),
                 });

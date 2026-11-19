@@ -169,11 +169,11 @@ pub(super) fn match_constraints(name: &Ident, req: &ResourceReq, node: &Resource
         out.violations.push(Violation {
             check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
             key: Some(stray.key.clone()),
-            requested: Some(stray.requested.clone()),
+            requested: None,
             reason: format!(
-                "SB-44: {name}'s Provider reports a coercion of {}, which its request does \
+                "SB-44: {name}'s Provider reports a coercion of {} ({:?} to {:?}), which its request does \
                  not name",
-                stray.key
+                stray.key, stray.requested, stray.applied
             ),
         });
     }

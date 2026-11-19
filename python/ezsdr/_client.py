@@ -76,15 +76,18 @@ class Connection:
 
     def call(self, request: dict, body: bytes = b"") -> Tuple[dict, bytes]:
         """Sends one request and returns the result and the reply's body."""
-        header = json.dumps(
-            {"request": request, "body_bytes": len(body)}, separators=(",", ":"), allow_nan=False
-        )
         stdin, stdout = self._process.stdin, self._process.stdout
         if stdin is None or stdout is None or stdin.closed:
             raise ProtocolError("protocol", "the connection is closed", {})
+        # Encoded after the closed check (a later call raises ProtocolError, EA-16) and before the exchange: a string
+        # that is not Unicode text (a lone surrogate) raises UnicodeEncodeError here and the Session stays; escaped,
+        # it would end the server (#112).
+        header = json.dumps(
+            {"request": request, "body_bytes": len(body)}, separators=(",", ":"), allow_nan=False, ensure_ascii=False
+        ).encode("utf-8")
         try:
             try:
-                stdin.write(header.encode("utf-8") + b"\n" + body)
+                stdin.write(header + b"\n" + body)
                 stdin.flush()
             except BrokenPipeError:
                 raise ProtocolError("protocol", "the server has exited", {}) from None

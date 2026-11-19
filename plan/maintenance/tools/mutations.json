@@ -3355,7 +3355,7 @@
   "id": "T10",
   "name": "SB-44: a report's coercion of a key the request does not name is not refused at prepare",
   "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
-  "old": "        if let Some(req) = spec.resources.get(fragment) {\n            if let Some(stray) = r\n                .coercions\n                .iter()\n                .find(|c| !req.requires.contains_key(&c.key))\n            {\n                violations.push(Violation {\n                    check: Namespace::parse(\"ezsdr.coercion\").expect(\"a valid literal\"),\n                    key: Some(stray.key.clone()),\n                    requested: Some(stray.requested.clone()),\n                    reason: format!(\n                        \"SB-44: {} reports a coercion of {}, which its request does not name\",\n                        fragment, stray.key\n                    ),\n                });\n            }\n        }\n",
+  "old": "if let Some(req) = spec.resources.get(fragment) { if let Some(stray) = r.coercions.iter().find(|c| !req.requires.contains_key(&c.key)) { violations.push(Violation { check: Namespace::parse(\"ezsdr.coercion\").expect(\"a valid literal\"), key: Some(stray.key.clone()), requested: None, reason: format!(\"SB-44: {} reports a coercion of {} ({:?} to {:?}), which its request does not name\", fragment, stray.key, stray.requested, stray.applied), }); } }",
   "new": "",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
@@ -17023,8 +17023,8 @@
   "id": "C89-3-04",
   "name": "#89 (EA-16): the abandoned region begins after the write of the request",
   "file": "python/ezsdr/_client.py",
-  "old": "        try:\n            try:\n                stdin.write(header.encode(\"utf-8\") + b\"\\n\" + body)\n                stdin.flush()\n            except BrokenPipeError:\n                raise ProtocolError(\"protocol\", \"the server has exited\", {}) from None\n            line = stdout.readline()",
-  "new": "        try:\n            stdin.write(header.encode(\"utf-8\") + b\"\\n\" + body)\n            stdin.flush()\n        except BrokenPipeError:\n            raise ProtocolError(\"protocol\", \"the server has exited\", {}) from None\n        try:\n            line = stdout.readline()",
+  "old": "        try:\n            try:\n                stdin.write(header + b\"\\n\" + body)\n                stdin.flush()\n            except BrokenPipeError:\n                raise ProtocolError(\"protocol\", \"the server has exited\", {}) from None\n            line = stdout.readline()",
+  "new": "        try:\n            stdin.write(header + b\"\\n\" + body)\n            stdin.flush()\n        except BrokenPipeError:\n            raise ProtocolError(\"protocol\", \"the server has exited\", {}) from None\n        try:\n            line = stdout.readline()",
   "python": "test_easy_api.Departure.test_ea_16_an_exception_while_the_request_is_written_abandons_too"
  },
  {
@@ -27300,7 +27300,7 @@
   "id": "W9A-7",
   "name": "SB-6: a prepare violation names the reported value as `requested` instead of the Spec's request (F2)",
   "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
-  "old": "requested: super::coercion::exact_request(request, key),",
+  "old": "requested: super::coercion::fragment_request(spec, fragment, key),",
   "new": "requested: Some(value.clone()),",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
@@ -27325,5 +27325,111 @@
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "kf_03_rs_25a_refusals"
+ },
+ {
+  "id": "N112-1",
+  "name": "#112 (EA-16): the header is escaped to ASCII again, so a lone surrogate reaches the server and ends it",
+  "file": "python/ezsdr/_client.py",
+  "old": "allow_nan=False, ensure_ascii=False",
+  "new": "allow_nan=False",
+  "python": "test_easy_api.EasyApi.test_ea_16_a_lone_surrogate_fails_before_a_request_and_the_session_stays"
+ },
+ {
+  "id": "N112-2",
+  "name": "#112 (EA-16): the header is encoded before the closed-connection check, so a call after the departure reports UnicodeEncodeError",
+  "file": "python/ezsdr/_client.py",
+  "old": "        stdin, stdout = self._process.stdin, self._process.stdout\n        if stdin is None or stdout is None or stdin.closed:\n            raise ProtocolError(\"protocol\", \"the connection is closed\", {})\n        # Encoded after the closed check (a later call raises ProtocolError, EA-16) and before the exchange: a string\n        # that is not Unicode text (a lone surrogate) raises UnicodeEncodeError here and the Session stays; escaped,\n        # it would end the server (#112).\n        header = json.dumps(\n            {\"request\": request, \"body_bytes\": len(body)}, separators=(\",\", \":\"), allow_nan=False, ensure_ascii=False\n        ).encode(\"utf-8\")",
+  "new": "        # Encoded before the closed check: a string that is not Unicode text (a lone surrogate) raises\n        # UnicodeEncodeError here and the Session stays (EA-16); escaped, it would end the server (#112).\n        header = json.dumps(\n            {\"request\": request, \"body_bytes\": len(body)}, separators=(\",\", \":\"), allow_nan=False, ensure_ascii=False\n        ).encode(\"utf-8\")\n        stdin, stdout = self._process.stdin, self._process.stdout\n        if stdin is None or stdout is None or stdin.closed:\n            raise ProtocolError(\"protocol\", \"the connection is closed\", {})",
+  "python": "test_easy_api.Departure.test_ea_16_a_lone_surrogate_after_an_abandoned_exchange_raises_protocol_error"
+ },
+ {
+  "id": "N114-1",
+  "name": "MA-12: a prepare narrowing violation names the reported value as `requested` instead of the Spec's request",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "if let Err(e) = narrows { violations.push(Violation { check: Namespace::parse(\"ezsdr.effective\").expect(\"a valid literal\"), key: Some(key.clone()), requested: super::coercion::exact_request(Some(req), key),",
+  "new": "if let Err(e) = narrows { violations.push(Violation { check: Namespace::parse(\"ezsdr.effective\").expect(\"a valid literal\"), key: Some(key.clone()), requested: Some(applied.clone()),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_12_a_narrowing_violation_records_the_specs_request_and_the_reported_value"
+ },
+ {
+  "id": "N114-2",
+  "name": "MA-12: a prepare re-match violation names the reported value as `requested` instead of the Spec's request",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "if !satisfied { violations.push(Violation { check: Namespace::parse(\"ezsdr.effective\").expect(\"a valid literal\"), key: Some(key.clone()), requested: super::coercion::exact_request(Some(req), key),",
+  "new": "if !satisfied { violations.push(Violation { check: Namespace::parse(\"ezsdr.effective\").expect(\"a valid literal\"), key: Some(key.clone()), requested: Some(applied.clone()),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_12_a_rematch_violation_records_the_specs_request_and_the_reported_value"
+ },
+ {
+  "id": "N114-3",
+  "name": "SB-44: a prepare preview mismatch names the reported value as `requested` instead of the Spec's request",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "if *applied != preview.applied { violations.push(Violation { check: Namespace::parse(\"ezsdr.effective\").expect(\"a valid literal\"), key: Some(key.clone()), requested: super::coercion::exact_request(Some(req), key),",
+  "new": "if *applied != preview.applied { violations.push(Violation { check: Namespace::parse(\"ezsdr.effective\").expect(\"a valid literal\"), key: Some(key.clone()), requested: Some(applied.clone()),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_preview_mismatch_records_the_specs_request_and_the_reported_value"
+ },
+ {
+  "id": "N114-4",
+  "name": "SB-44: a validate stray coercion names the Provider's reported value as `requested` instead of no request",
+  "file": "crates/ezsdr-kernel/src/plan/matching.rs",
+  "old": "key: Some(stray.key.clone()), requested: None,",
+  "new": "key: Some(stray.key.clone()), requested: Some(stray.requested.clone()),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_of_an_unrequested_key_is_refused_at_validate"
+ },
+ {
+  "id": "N114-5",
+  "name": "SB-44: a prepare stray coercion names the Provider's reported value as `requested` instead of no request",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "key: Some(stray.key.clone()), requested: None,",
+  "new": "key: Some(stray.key.clone()), requested: Some(stray.requested.clone()),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_of_an_unrequested_key_is_refused_at_prepare"
+ },
+ {
+  "id": "N114-6",
+  "name": "SB-46: a validate rejected coercion names the Module's reported value as `requested` instead of the Spec's request",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "key: Some(c.key.clone()), requested: super::coercion::exact_request(spec.resources.get(&previewed.resource), &c.key),",
+  "new": "key: Some(c.key.clone()), requested: Some(c.requested.clone()),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_46_a_rejected_coercion_records_the_specs_request_at_validate"
+ },
+ {
+  "id": "N114-7",
+  "name": "SB-46: a prepare rejected coercion names the Module's reported value as `requested` instead of the Spec's request",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "key: Some(c.key.clone()), requested: super::coercion::fragment_request(spec, fragment, &c.key),",
+  "new": "key: Some(c.key.clone()), requested: Some(c.requested.clone()),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_46_a_rejected_coercion_records_the_specs_request_at_prepare"
+ },
+ {
+  "id": "N114-8",
+  "name": "SB-6: a Sink's prepare kind refusal takes the Provider's exact request instead of the output's params",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "requested: super::coercion::fragment_request(spec, fragment, key),",
+  "new": "requested: super::coercion::exact_request(spec.resources.get(fragment), key),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_6_a_sink_kind_refusal_at_prepare_records_its_params_value"
+ },
+ {
+  "id": "N114-9",
+  "name": "SB-46: a Sink's rejected coercion takes the Provider's exact request instead of the output's params",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "requested: super::coercion::fragment_request(spec, fragment, &c.key),",
+  "new": "requested: super::coercion::exact_request(spec.resources.get(fragment), &c.key),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_46_a_rejected_coercion_of_a_sink_records_its_params_value_at_prepare"
  }
 ]

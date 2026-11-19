@@ -116,7 +116,7 @@ pub(super) fn validate(spec: &ExperimentSpec, profile: &BindingProfile, inputs: 
             Err(_) => out.violations.push(Violation {
                 check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
                 key: Some(c.key.clone()),
-                requested: Some(c.requested.clone()),
+                requested: super::coercion::exact_request(spec.resources.get(&previewed.resource), &c.key),
                 reason: format!("SB-46: coercion to {:?} rejected", c.applied),
             }),
         }

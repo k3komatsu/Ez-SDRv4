@@ -1960,6 +1960,31 @@ fn sb_46_validate_applies_the_coercion_policy() {
 }
 
 #[test]
+fn sb_46_a_rejected_coercion_records_the_specs_request_at_validate() {
+    // SB-46 refuses a previewed coercion under `reject`. `requested` is what the
+    // experimenter asked — the Spec's `Eq` value (19.5) — never the 7.0 the Module's
+    // report claims, which this double makes different so the two are distinguishable
+    // (SB-6, SB-44).
+    let mut req = resource("test.device", &[]);
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
+    let spec = spec_with([(id("radio"), req)].into_iter().collect());
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new(); // `test.grid`'s KeyDecl defaults to `reject`
+    let p = TestProvider::new("radio", 2).with_grid(20.0).with_reported_requested(Value::num(7.0).unwrap());
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
+    let rejected: Vec<_> = admission.violations.iter().filter(|v| v.check == ns("ezsdr.coercion") && v.reason.starts_with("SB-46: ")).collect();
+    assert_eq!(rejected.len(), 1, "only the rejected coercion is SB-46's: {:?}", admission.violations);
+    let rejected = rejected[0];
+    assert_eq!(rejected.check, ns("ezsdr.coercion"));
+    assert_eq!(rejected.key, Some(key("test.grid")));
+    assert_eq!(rejected.requested, Some(Value::num(19.5).unwrap()), "the Spec's request, not the report's 7.0");
+    assert!(rejected.reason.contains("Num(Finite(20.0))"), "{rejected:?}");
+    // No non-`Eq` case: `TestProvider::coerce` only applies an `Eq` request, so a
+    // range or set on `test.grid` previews nothing for SB-46 to reject.
+}
+
+#[test]
 fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     // SB-30's second point: a coercion can move an applied value outside a limit the
     // requested value respected, and `collect_prepare` is where that is caught.
@@ -2026,6 +2051,83 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     let reports = prepared(vec![(id("radio"), Ok(coercing))], &as_session, &defaulted, &bare, &providers).expect("a Session warns rather than refusing");
     assert_eq!(reports[&id("radio")].warnings.len(), 1, "SB-46's warning is on the report");
     assert_eq!(reports[&id("radio")].coercions.len(), 1, "and the coercion is still recorded");
+}
+
+#[test]
+fn sb_46_a_rejected_coercion_records_the_specs_request_at_prepare() {
+    // SB-46 at `prepare`: `requested` is the Spec's own `Eq` value, never the
+    // Module's reported one. The hand-built report claims 7.0. The Spec asks 20.0,
+    // which the node satisfies directly, so `validate` previews nothing and the
+    // policy loop here is the first stage to judge the report (SB-6, SB-44).
+    // An `Eq` request of 19.5 cannot reach this arm: the same default `reject`
+    // refuses the preview at `validate`, and `collect_prepare` returns that
+    // admission's violations instead of running this loop.
+    let fx = Fixture::new();
+    let profile = profile_binding(&["radio"]);
+    let p = TestProvider::new("radio", 2).with_grid(20.0);
+    let providers = one_provider("radio", &p);
+    let prepared_with = |constraint: Constraint| {
+        let mut req = resource("test.device", &[]);
+        req.requires.insert(key("test.grid"), constraint);
+        let spec = spec_with([(id("radio"), req)].into_iter().collect());
+        let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
+        assert!(admission.is_admitted(), "{admission:?}");
+        let report = PrepareReport {
+            effective: [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
+            coercions: vec![ezsdr_kernel::spec::Coercion { key: key("test.grid"), requested: Value::num(7.0).unwrap(), applied: Value::num(20.0).unwrap(), reason: "snapped".to_owned() }],
+            warnings: Vec::new(),
+        };
+        collect_prepare(vec![(id("radio"), Ok(report))], &spec, &profile, &fx.inputs(&providers), &admission)
+    };
+    let failed = prepared_with(Constraint::Eq { value: Scalar::try_from(20.0).unwrap() }).expect_err("`test.grid` defaults to `reject`");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 1, "the rejected coercion is the only violation: {v:?}");
+    assert_eq!(v[0].check, ns("ezsdr.coercion"));
+    assert_eq!(v[0].key, Some(key("test.grid")));
+    assert_eq!(v[0].requested, Some(Value::num(20.0).unwrap()), "the Spec's request, not the report's 7.0");
+    assert!(v[0].reason.contains("Num(Finite(20.0))"), "{v:?}");
+
+    // A `Min` asks no one value, so a rejected coercion of it records `None`. The
+    // report names a key the request does, so SB-44's stray check does not fire and
+    // the policy loop is what refuses it.
+    let failed = prepared_with(Constraint::Min { value: Scalar::try_from(20.0).unwrap() }).expect_err("`test.grid` defaults to `reject`");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 1, "the rejected coercion is the only violation: {v:?}");
+    assert_eq!(v[0].check, ns("ezsdr.coercion"));
+    assert_eq!(v[0].key, Some(key("test.grid")));
+    assert_eq!(v[0].requested, None, "a range asks no one value, not the report's 7.0");
+    assert!(v[0].reason.contains("Num(Finite(20.0))"), "{v:?}");
+}
+
+#[test]
+fn sb_46_a_rejected_coercion_of_a_sink_records_its_params_value_at_prepare() {
+    // SB-46 at `prepare` for a Sink fragment: its requested configuration is the
+    // output's own `params` (SB-30), so `requested` is that 40.0 — never the Module's
+    // reported 7.0, and never `None` because the Spec has no resource named `rec`.
+    let mut spec = minimal_spec();
+    let mut rec = output("rec");
+    rec.params.insert(key("test.grid"), Value::num(40.0).unwrap());
+    spec.outputs.push(rec);
+    let mut profile = profile_binding(&["radio"]);
+    profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
+    let sink = cf32_sink();
+    let mut fx = Fixture::new();
+    fx.sinks.insert(id("rec"), &sink);
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let empty = || PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() };
+    let coercion = ezsdr_kernel::spec::Coercion { key: key("test.grid"), requested: Value::num(7.0).unwrap(), applied: Value::num(20.0).unwrap(), reason: "snapped".to_owned() };
+    let rec_report = PrepareReport { effective: BTreeMap::new(), coercions: vec![coercion], warnings: Vec::new() };
+    let failed = prepared(vec![(id("radio"), Ok(empty())), (id("rec"), Ok(rec_report))], &fx, &spec, &profile, &providers).expect_err("`test.grid` defaults to `reject`");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 1, "the Sink's rejected coercion is the only violation, so the Provider's report is fine: {v:?}");
+    let refused: Vec<_> = v.iter().filter(|x| x.check == ns("ezsdr.coercion") && x.reason.starts_with("SB-46: ")).collect();
+    assert_eq!(refused.len(), 1, "{v:?}");
+    assert_eq!(refused[0].check, ns("ezsdr.coercion"));
+    assert_eq!(refused[0].key, Some(key("test.grid")));
+    assert_eq!(refused[0].requested, Some(Value::num(40.0).unwrap()), "the output's own param, not the report's 7.0");
+    assert!(refused[0].reason.starts_with("SB-46: "), "{v:?}");
+    assert!(refused[0].reason.contains("Num(Finite(20.0))"), "the reason keeps the applied value: {v:?}");
 }
 
 #[test]
@@ -2306,6 +2408,84 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
 }
 
 #[test]
+fn ma_12_a_narrowing_violation_records_the_specs_request_and_the_reported_value() {
+    // MA-12's first sentence: `effective` may narrow a declared capability and must
+    // not widen one. `requested` is what the Spec asked of the key — the `Eq` value it
+    // named, or nothing when it does not name the key at all — never the value the
+    // Module reported (the same rule SB-6's prepare refusal follows).
+    let fx = Fixture::new();
+    let profile = profile_binding(&["radio"]);
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let report = |effective: &[(&str, Value)]| PrepareReport { effective: effective.iter().map(|(k, v)| (key(k), v.clone())).collect(), coercions: Vec::new(), warnings: Vec::new() };
+
+    // The Spec asks `Eq(2)`, so both halves fire: the widening, and the constraint the
+    // reported 7 no longer satisfies. The narrowing half is selected by its own prefix.
+    let mut req = resource("test.device", &[]);
+    req.requires.insert(key("test.count"), Constraint::Eq { value: Scalar::from(2) });
+    let spec = spec_with([(id("radio"), req)].into_iter().collect());
+    let failed = prepared(vec![(id("radio"), Ok(report(&[("test.count", Value::from(7))])))], &fx, &spec, &profile, &providers).expect_err("a widening is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 2, "the narrowing half and the re-match half both fire: {v:?}");
+    let narrowing = v.iter().find(|x| x.reason.starts_with("MA-12: ")).unwrap_or_else(|| panic!("no narrowing violation: {v:?}"));
+    assert_eq!(narrowing.check, ns("ezsdr.effective"));
+    assert_eq!(narrowing.key, Some(key("test.count")));
+    assert_eq!(narrowing.requested, Some(Value::from(2)), "the Spec's request, not the reported value");
+    assert!(narrowing.reason.contains("Int(7)"), "{narrowing:?}");
+
+    // A key the Spec does not name asks no one value, so `requested` is `None` even
+    // though the node declares it and the report widens it.
+    let unnamed = spec_with([(id("radio"), resource("test.device", &[]))].into_iter().collect());
+    let failed = prepared(vec![(id("radio"), Ok(report(&[("test.count", Value::from(7))])))], &fx, &unnamed, &profile, &providers).expect_err("a widening is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 1, "no constraint is re-matched for a key the Spec does not name: {v:?}");
+    let narrowing = v.iter().find(|x| x.reason.starts_with("MA-12: ")).unwrap_or_else(|| panic!("no narrowing violation: {v:?}"));
+    assert_eq!(narrowing.check, ns("ezsdr.effective"));
+    assert_eq!(narrowing.key, Some(key("test.count")));
+    assert_eq!(narrowing.requested, None, "a key the Spec does not name asks no one value, not the reported value");
+    assert!(narrowing.reason.contains("Int(7)"), "{narrowing:?}");
+}
+
+#[test]
+fn ma_12_a_rematch_violation_records_the_specs_request_and_the_reported_value() {
+    // MA-12's second sentence re-matches the Spec's own constraint against the
+    // report's `effective`. `requested` is the Spec's `Eq` value, or nothing for a
+    // range, never the reported value the Module applied.
+    let fx = Fixture::new();
+    let profile = profile_binding(&["radio"]);
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let report = |effective: &[(&str, Value)]| PrepareReport { effective: effective.iter().map(|(k, v)| (key(k), v.clone())).collect(), coercions: Vec::new(), warnings: Vec::new() };
+
+    // `Eq(2)`: both halves fire, and the re-match is selected by its own prefix.
+    let mut req = resource("test.device", &[]);
+    req.requires.insert(key("test.count"), Constraint::Eq { value: Scalar::from(2) });
+    let spec = spec_with([(id("radio"), req)].into_iter().collect());
+    let failed = prepared(vec![(id("radio"), Ok(report(&[("test.count", Value::from(7))])))], &fx, &spec, &profile, &providers).expect_err("a constraint the report does not satisfy is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 2, "the narrowing half and the re-match half both fire: {v:?}");
+    let rematch = v.iter().find(|x| x.reason.starts_with("MA-12 (re-match)")).unwrap_or_else(|| panic!("no re-match violation: {v:?}"));
+    assert_eq!(rematch.check, ns("ezsdr.effective"));
+    assert_eq!(rematch.key, Some(key("test.count")));
+    assert_eq!(rematch.requested, Some(Value::from(2)), "the Spec's request, not the reported value");
+    assert!(rematch.reason.contains("Int(7)"), "{rematch:?}");
+
+    // `Min(2)` is satisfied directly by the declared `One(2)`, so the request reaches
+    // `prepare` with no preview; a report of 1 violates it and asks no one value.
+    let mut lower = resource("test.device", &[]);
+    lower.requires.insert(key("test.count"), Constraint::Min { value: Scalar::from(2) });
+    let lower_spec = spec_with([(id("radio"), lower)].into_iter().collect());
+    let failed = prepared(vec![(id("radio"), Ok(report(&[("test.count", Value::from(1))])))], &fx, &lower_spec, &profile, &providers).expect_err("a lower bound the report breaks is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 2, "the narrowing half and the re-match half both fire: {v:?}");
+    let rematch = v.iter().find(|x| x.reason.starts_with("MA-12 (re-match)")).unwrap_or_else(|| panic!("no re-match violation: {v:?}"));
+    assert_eq!(rematch.check, ns("ezsdr.effective"));
+    assert_eq!(rematch.key, Some(key("test.count")));
+    assert_eq!(rematch.requested, None, "a lower bound asks no one value, not the reported value");
+    assert!(rematch.reason.contains("Int(1)"), "{rematch:?}");
+}
+
+#[test]
 fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
     // Two resources name one key, each asking its own line's declared count. Judged
     // against one value of that key — what a merged map, keeping a later fragment's
@@ -2459,6 +2639,47 @@ fn sb_6_a_prepare_kind_refusal_records_the_specs_request_and_not_the_reported_va
 }
 
 #[test]
+fn sb_6_a_sink_kind_refusal_at_prepare_records_its_params_value() {
+    // SB-6 at `prepare` for a Sink fragment: `requested` is the output's own `params`
+    // value for the key (SB-30), not the reported value and not `None` because no
+    // resource carries the Sink's name.
+    let mut spec = minimal_spec();
+    let mut rec = output("rec");
+    rec.params.insert(key("test.grid"), Value::num(40.0).unwrap());
+    spec.outputs.push(rec);
+    let mut profile = profile_binding(&["radio"]);
+    profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
+    let sink = cf32_sink();
+    let mut fx = Fixture::new();
+    fx.sinks.insert(id("rec"), &sink);
+    let p = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &p);
+    let empty = || PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() };
+    let report = |effective: &[(&str, Value)]| PrepareReport { effective: effective.iter().map(|(k, v)| (key(k), v.clone())).collect(), coercions: Vec::new(), warnings: Vec::new() };
+    let failed =
+        prepared(vec![(id("radio"), Ok(empty())), (id("rec"), Ok(report(&[("test.grid", Value::from("twenty"))])))], &fx, &spec, &profile, &providers).expect_err("a wrong-kind effective is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    let refused: Vec<_> = v.iter().filter(|x| x.check == ns("ezsdr.effective") && x.reason.starts_with("SB-6: ")).collect();
+    assert_eq!(refused.len(), 1, "{v:?}");
+    assert_eq!(refused[0].check, ns("ezsdr.effective"));
+    assert_eq!(refused[0].key, Some(key("test.grid")));
+    assert_eq!(refused[0].requested, Some(Value::num(40.0).unwrap()), "the output's own param, not the reported value");
+    assert!(refused[0].reason.starts_with("SB-6: "), "{v:?}");
+    assert!(refused[0].reason.contains("twenty"), "{v:?}");
+
+    // A key the output's params do not name asks no one value.
+    let failed = prepared(vec![(id("radio"), Ok(empty())), (id("rec"), Ok(report(&[("test.gain", Value::from("loud"))])))], &fx, &spec, &profile, &providers)
+        .expect_err("an undeclared key's wrong-kind value is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    let gain = v.iter().find(|x| x.key == Some(key("test.gain"))).unwrap_or_else(|| panic!("no test.gain violation: {v:?}"));
+    assert_eq!(gain.check, ns("ezsdr.effective"));
+    assert_eq!(gain.key, Some(key("test.gain")));
+    assert_eq!(gain.requested, None, "a key the output's params do not name asks no one value");
+    assert!(gain.reason.starts_with("SB-6: "), "{gain:?}");
+    assert!(gain.reason.contains("loud"), "{gain:?}");
+}
+
+#[test]
 fn sb_6_a_prepare_kind_refusal_is_returned_before_a_registered_check_runs() {
     // F1: the SB-6 violation was recorded but the rejected configuration still
     // reached `checks.run`, so a check that reads the key as its declared kind
@@ -2602,6 +2823,43 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
     // begins "MA-12", so the looser assertion stayed green with the constraint
     // re-match deleted.
     assert!(v.iter().any(|x| x.reason.contains("MA-12 (re-match)")), "{v:?}");
+}
+
+#[test]
+fn sb_44_a_preview_mismatch_records_the_specs_request_and_the_reported_value() {
+    // SB-44: the value a report applies is the one `coerce` returned at validate.
+    // `requested` is what the Spec asked (19.5), never the 40.0 the report applied.
+    let mut req = resource("test.device", &[]);
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
+    let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
+    spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
+    let profile = profile_binding(&["radio"]);
+    let fx = Fixture::new();
+    let p = TestProvider::new("radio", 2).with_grid(20.0);
+    let providers = one_provider("radio", &p);
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
+    assert_eq!(admission.coercions_preview.len(), 1, "the Kernel previewed 20.0 for 19.5");
+    let report = PrepareReport {
+        effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
+        // A declaration cannot exempt the key: the exclusion is the Kernel's preview.
+        coercions: vec![ezsdr_kernel::spec::Coercion {
+            key: key("test.grid"),
+            requested: Value::num(19.5).unwrap(),
+            applied: Value::num(20.0).unwrap(),
+            reason: "claims 20 and applies 40".to_owned(),
+        }],
+        warnings: Vec::new(),
+    };
+    let failed = collect_prepare(vec![(id("radio"), Ok(report))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("the applied value is not the one `coerce` returned");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert_eq!(v.len(), 1, "the 40.0 is in the declared grid, so only SB-44 fires: {v:?}");
+    let mismatch = v.iter().find(|x| x.reason.starts_with("SB-44: ") && x.reason.contains("`coerce` returned")).unwrap_or_else(|| panic!("no preview-mismatch violation: {v:?}"));
+    assert_eq!(mismatch.check, ns("ezsdr.effective"));
+    assert_eq!(mismatch.key, Some(key("test.grid")));
+    assert_eq!(mismatch.requested, Some(Value::num(19.5).unwrap()), "the Spec's request, not the reported value");
+    assert!(mismatch.reason.contains("Num(Finite(40.0))"), "{mismatch:?}");
+    // No non-`Eq` case: `TestProvider::coerce` only applies an `Eq` request, so a
+    // range or set on `test.grid` previews nothing for SB-44 to compare.
 }
 
 #[test]
@@ -3179,6 +3437,16 @@ fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_validate() {
     let admission = validate(&with_grid, &profile, &fx.inputs(&providers)).expect("runs");
     assert!(!admission.is_admitted(), "a malformed report is refused");
     assert!(admission.violations.iter().any(|v| v.reason.contains("SB-44") && v.reason.contains("test.flag") && v.reason.contains("does not name")), "{:?}", admission.violations);
+    // `requested` is what the experimenter asked. A key the request does not name
+    // asks no one value, so the Provider's reported `false` is not it (SB-6, SB-44).
+    let strays: Vec<_> = admission.violations.iter().filter(|v| v.check == ns("ezsdr.coercion") && v.reason.starts_with("SB-44: ") && v.key == Some(key("test.flag"))).collect();
+    assert_eq!(strays.len(), 1, "no other violation is SB-44's: {:?}", admission.violations);
+    let stray = strays[0];
+    assert_eq!(stray.check, ns("ezsdr.coercion"));
+    assert_eq!(stray.key, Some(key("test.flag")));
+    assert_eq!(stray.requested, None, "a key the request does not name asks no one value, not the Provider's reported false");
+    assert!(stray.reason.contains("test.flag") && stray.reason.contains("does not name"), "{stray:?}");
+    assert!(stray.reason.contains("Bool(false)") && stray.reason.contains("Bool(true)"), "the reason keeps the reported coercion: {stray:?}");
     // And it is not recorded. `coercions_preview` reaches the Manifest through the
     // `AdmissionResult` (SB-38): recording the stray there kept both harms the refusal
     // exists to prevent — a substitution of a value nobody requested in the document,
@@ -3213,6 +3481,18 @@ fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_prepare() {
     let err = collect_prepare(vec![(id("radio"), Ok(stray))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a coercion of a key the request does not name");
     let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
     assert!(v.iter().any(|x| x.check == ns("ezsdr.coercion") && x.reason.contains("SB-44") && x.reason.contains("test.flag") && x.reason.contains("does not name")), "{v:?}");
+    // The `prepare`-stage twin: the report names `test.flag`, which the request does
+    // not, so `requested` is `None` rather than the reported `false` (SB-6, SB-44).
+    let strays: Vec<_> = v.iter().filter(|x| x.check == ns("ezsdr.coercion") && x.reason.starts_with("SB-44: ") && x.key == Some(key("test.flag"))).collect();
+    assert_eq!(v.len(), 1, "the stray is the only violation: {v:?}");
+    assert_eq!(strays.len(), 1, "{v:?}");
+    let stray = strays[0];
+    assert_eq!(stray.check, ns("ezsdr.coercion"));
+    assert_eq!(stray.key, Some(key("test.flag")));
+    assert_eq!(stray.requested, None, "a key the request does not name asks no one value, not the Provider's reported false");
+    assert!(stray.reason.starts_with("SB-44: "), "{v:?}");
+    assert!(stray.reason.contains("test.flag") && stray.reason.contains("does not name"), "{v:?}");
+    assert!(stray.reason.contains("Bool(false)") && stray.reason.contains("Bool(true)"), "the reason keeps the reported coercion: {v:?}");
 }
 
 #[test]

@@ -313,6 +313,9 @@ pub struct TestProvider {
     pub wrong_applied_grid: Option<Value>,
     /// A wrong-kind value `coerce` reports for `test.grid`'s coercion in `coercions` (SB-6).
     pub wrong_coercion_grid: Option<Value>,
+    /// A value `coerce` reports as the `requested` of `test.grid`'s coercion, so a
+    /// test can tell the Spec's request from the Module's report (SB-6, SB-46).
+    pub reported_requested: Option<Value>,
 }
 
 impl TestProvider {
@@ -388,6 +391,7 @@ impl TestProvider {
             effective: BTreeMap::new(),
             wrong_applied_grid: None,
             wrong_coercion_grid: None,
+            reported_requested: None,
         }
     }
 
@@ -513,6 +517,13 @@ impl TestProvider {
     /// leaving the `applied` map entry as it was (SB-6).
     pub fn with_wrong_coercion_grid(mut self, value: Value) -> TestProvider {
         self.wrong_coercion_grid = Some(value);
+        self
+    }
+
+    /// Makes `coerce` report the `requested` of `test.grid`'s coercion as `value`,
+    /// leaving the applied value as it was (SB-6, SB-46).
+    pub fn with_reported_requested(mut self, value: Value) -> TestProvider {
+        self.reported_requested = Some(value);
         self
     }
 
@@ -703,6 +714,11 @@ impl Provider for TestProvider {
         if let Some(value) = &self.wrong_coercion_grid {
             for c in report.coercions.iter_mut().filter(|c| c.key == key("test.grid")) {
                 c.applied = value.clone();
+            }
+        }
+        if let Some(value) = &self.reported_requested {
+            for c in report.coercions.iter_mut().filter(|c| c.key == key("test.grid")) {
+                c.requested = value.clone();
             }
         }
         Ok(report)

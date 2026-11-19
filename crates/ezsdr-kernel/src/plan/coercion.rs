@@ -1,7 +1,7 @@
 //! Resolves and applies the Spec's coercion policy (SB-45, SB-46).
 
 use crate::module_api::ModuleRegistry;
-use crate::spec::{Coercion, CoercionPolicy, Constraint, Key, KeyDecl, Namespace, ResourceReq, SpecError, Value, Warning};
+use crate::spec::{Coercion, CoercionPolicy, Constraint, ExperimentSpec, Ident, Key, KeyDecl, Namespace, ResourceReq, SpecError, Value, Warning};
 
 /// SB-2, SB-6: why `value` is not of the kind `key`'s declaration gives it, `None` for a value of that kind and for a key with no declaration (an `ext.` key has none, MA-34).
 pub(super) fn reported_kind_error(registry: &ModuleRegistry, key: &Key, value: &Value) -> Option<SpecError> {
@@ -16,6 +16,14 @@ pub(super) fn exact_request(req: Option<&ResourceReq>, key: &Key) -> Option<Valu
     match req?.requires.get(key)? {
         Constraint::Eq { value } => Some(Value::Scalar(value.clone())),
         _ => None,
+    }
+}
+
+/// SB-6: what the Spec asked of `key` for a fragment at `prepare`: a Provider fragment's `Eq` value (`exact_request`), a Sink fragment's own `params` value, which is its requested configuration (SB-30); a fragment the Spec does not request for, none.
+pub(super) fn fragment_request(spec: &ExperimentSpec, fragment: &Ident, key: &Key) -> Option<Value> {
+    match spec.outputs.iter().find(|output| output.id == *fragment) {
+        Some(output) => output.params.get(key).cloned(),
+        None => exact_request(spec.resources.get(fragment), key),
     }
 }
 
