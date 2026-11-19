@@ -40,7 +40,7 @@ pub(super) fn admit_with(
         return Err(vec![violation("ezsdr.dispatch", "RS-6: dispatch is frozen")]);
     }
     // 2. for a Session or Module origin, the Run is Running (RS-18)
-    if origin != Origin::Schedule && lock(&shared.machine).check_running().is_err() {
+    if origin != Origin::Schedule && shared.lock_machine().check_running().is_err() {
         return Err(vec![violation("ezsdr.run_state", "RS-18: the Run is not Running")]);
     }
     // 3. the target resolves in its own role (KC-23), and a Module's `Stop { target:

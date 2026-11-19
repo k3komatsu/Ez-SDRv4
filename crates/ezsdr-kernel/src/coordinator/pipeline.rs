@@ -14,7 +14,7 @@ use crate::session::{ControlOp, Outcome, SessionAction, SessionLog};
 use crate::spec::{ExperimentSpec, Ident, Namespace};
 use crate::time::{AbsoluteDeadline, ClockDomainKind, Duration, RelativeBudget, TimeAuthority, TimePoint};
 
-use super::state::{Context, ExecutorSlot, FailedTime, Inst, ProviderSlot, Queue, Routing, Shared, SinkSlot, TimeScheduleError, contain, contain_all, lock};
+use super::state::{Context, ExecutorSlot, FailedTime, Inst, ProviderSlot, Queue, Routing, Serial, Shared, SinkSlot, TimeScheduleError, contain, contain_all, lock};
 use super::{Assembly, DEFAULT_HOST_BUDGET_NS, EVENT_RING_DEPTH, RunHandle};
 
 pub(super) fn assemble(kind: RunKind, spec: ExperimentSpec, spec_section: SpecSection, profile: BindingProfile, binding_section: BindingSection, mut assembly: Assembly, lease: Lease) -> RunHandle {
@@ -151,7 +151,7 @@ pub(super) fn assemble(kind: RunKind, spec: ExperimentSpec, spec_section: SpecSe
         primary,
         last_now: std::sync::atomic::AtomicI64::new(0),
         routing: OnceLock::new(),
-        machine: Mutex::new(machine),
+        machine: Serial::new(machine),
         collector: OnceLock::new(),
         policy: OnceLock::new(),
         configuration: Mutex::new(BTreeMap::new()),
@@ -173,13 +173,16 @@ pub(super) fn assemble(kind: RunKind, spec: ExperimentSpec, spec_section: SpecSe
         scheduled: Mutex::new(Vec::new()),
         cleanup_failures: Mutex::new(Vec::new()),
         store: Arc::new(Mutex::new(assembly.inputs.into_iter().map(|(hash, bytes)| (hash, Arc::from(bytes))).collect())),
-        admission: Mutex::new(()),
+        admission: Serial::new(()),
         data: Mutex::new(None),
         wake_pending: Arc::new(AtomicU64::new(0)),
         wake_next: AtomicU64::new(0),
         wake_handle: Mutex::new(None),
         lease_deadline: Mutex::new(None),
         stopped_early: AtomicBool::new(false),
+        freeze_gate: Serial::new(()),
+        #[cfg(feature = "testing")]
+        freeze_hook: Mutex::new(None),
     });
     RunHandle {
         shared,
@@ -330,7 +333,7 @@ impl RunHandle {
         }
         let transition = self.shared.sample_transition();
         // KC-24a: taken after `start_instances` (a submission from `start` is refused at KC-24 step 2 and must not meet the lock) and held from the publication of `Running` through the batch's last dispatch.
-        let admission = lock(&self.shared.admission);
+        let admission = self.shared.lock_admission();
         #[cfg(feature = "testing")]
         super::start_probe::reach(&self.shared, super::start_probe::Point::BeforePublish);
         self.shared.publish(RunState::Running {}, transition);
@@ -1008,7 +1011,7 @@ pub(super) fn submit(run: &mut RunHandle, action: SessionAction, waveform: Optio
     run.sync_lease();
     // KC-24a: from the first admission through the last dispatch.
     let admission_lock = run.shared.clone();
-    let admission_guard = lock(&admission_lock.admission);
+    let admission_guard = admission_lock.lock_admission();
     let mut configuration = lock(&run.shared.configuration).clone();
     let mut admitted = Vec::with_capacity(compiled.items.len());
     let mut violations = Vec::new();
@@ -1217,7 +1220,7 @@ impl ActionSubmitter for Submitter {
             return Ok(id);
         }
         // KC-24a; no KC-21a wait: the submitting step is still running (MA-14a).
-        let _admission = lock(&shared.admission);
+        let _admission = shared.lock_admission();
         super::admission::admit(&shared, action, super::state::Origin::Module).map(|admitted| super::admission::dispatch(&shared, admitted).0)
     }
 }

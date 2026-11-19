@@ -163,6 +163,21 @@ pub(super) struct Routing {
     pub(super) reverse: Vec<Ident>,
 }
 
+/// One of the coordinator's serialising locks (KC-24a: admission, machine, freeze gate). The mutex is private to this module, so it is taken only through `Shared`'s recording helpers; `is_held` is the one non-blocking observation a probe may make.
+pub(super) struct Serial<T>(Mutex<T>);
+
+impl<T> Serial<T> {
+    pub(super) fn new(value: T) -> Serial<T> {
+        Serial(Mutex::new(value))
+    }
+
+    /// Whether some thread holds the lock, by a `try_lock` that records nothing and never blocks.
+    #[cfg(feature = "testing")]
+    pub(super) fn is_held(&self) -> bool {
+        matches!(self.0.try_lock(), Err(TryLockError::WouldBlock))
+    }
+}
+
 /// Everything a cleanup step can touch (spec 06 §3).
 pub(super) struct Shared {
     pub(super) ctx: Context,
@@ -174,7 +189,7 @@ pub(super) struct Shared {
     pub(super) primary: ClockDomainId,
     pub(super) last_now: AtomicI64,
     pub(super) routing: OnceLock<Routing>,
-    pub(super) machine: Mutex<RunStateMachine>,
+    pub(super) machine: Serial<RunStateMachine>,
     pub(super) collector: OnceLock<Arc<EventCollector>>,
     pub(super) policy: OnceLock<Policy>,
     pub(super) configuration: Mutex<BTreeMap<Ident, BTreeMap<Key, Value>>>,
@@ -201,7 +216,12 @@ pub(super) struct Shared {
     /// admission reads it for a Module's burst too, from inside a round (KE-2).
     pub(super) store: Arc<Mutex<BTreeMap<crate::hash::ContentHash, Arc<[u8]>>>>,
     /// Serializes admission with dispatch and with the freeze (KC-24a).
-    pub(super) admission: Mutex<()>,
+    pub(super) admission: Serial<()>,
+    /// Serialises the performances of RS-6 step 1, the data thread's Provider stops of its early stop (KC-46b) and the control loop's withdrawal of its horizon (KC-24a). Taken before `admission`, and never by a Module's thread.
+    pub(super) freeze_gate: Serial<()>,
+    /// The hook a test installs to watch a performance of RS-6 step 1 (testing builds only).
+    #[cfg(feature = "testing")]
+    pub(super) freeze_hook: Mutex<Option<super::start_probe::FreezeHook>>,
     /// The device-paced data thread, while it runs (KC-46).
     pub(super) data: Mutex<Option<super::paced::DataThread>>,
     /// The generation of the wake not yet fired, 0 for none, and the last one
@@ -243,6 +263,28 @@ pub(super) fn try_slot<T: ?Sized>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     }
 }
 
+/// Which serialising lock a recording guard counts (KC-24a). Only testing builds record it.
+#[derive(Clone, Copy)]
+pub(super) enum Which {
+    Admission,
+    Machine,
+    Freeze,
+}
+
+#[cfg(feature = "testing")]
+pub(super) type Guard<'a, T> = super::lock_record::Recorded<'a, T>;
+#[cfg(not(feature = "testing"))]
+pub(super) type Guard<'a, T> = MutexGuard<'a, T>;
+
+#[cfg(feature = "testing")]
+fn recorded<T>(guard: MutexGuard<'_, T>, which: Which) -> Guard<'_, T> {
+    super::lock_record::Recorded::new(guard, which)
+}
+#[cfg(not(feature = "testing"))]
+fn recorded<T>(guard: MutexGuard<'_, T>, _which: Which) -> Guard<'_, T> {
+    guard
+}
+
 /// `d` rescaled into `to`, rounded up to a whole tick (KC-15, KC-24, RS-19).
 pub(super) fn ceil_rescale(clocks: &ClockRegistry, d: Duration, to: ClockDomainId) -> Result<i64, TimeError> {
     Ok(match clocks.rescale(d, to)? {
@@ -270,6 +312,28 @@ pub(super) fn manifest_failure(fragment: Option<Ident>, reason: impl Into<String
 }
 
 impl Shared {
+    /// The admission lock (KC-24a), through the recording guard.
+    pub(super) fn lock_admission(&self) -> Guard<'_, ()> {
+        recorded(lock(&self.admission.0), Which::Admission)
+    }
+
+    /// The Run state machine's lock, through the recording guard.
+    pub(super) fn lock_machine(&self) -> Guard<'_, RunStateMachine> {
+        recorded(lock(&self.machine.0), Which::Machine)
+    }
+
+    /// The freeze gate (KC-24a), through the recording guard.
+    pub(super) fn lock_freeze(&self) -> Guard<'_, ()> {
+        #[cfg(feature = "testing")]
+        super::start_probe::reach_freeze(self, super::start_probe::FreezePoint::Serialise);
+        recorded(lock(&self.freeze_gate.0), Which::Freeze)
+    }
+
+    /// The freeze gate, or `None` when another performance holds it; a poisoned gate is taken like `try_slot`.
+    pub(super) fn try_lock_freeze(&self) -> Option<Guard<'_, ()>> {
+        try_slot(&self.freeze_gate.0).map(|guard| recorded(guard, Which::Freeze))
+    }
+
     pub(super) fn now(&self) -> TimePoint {
         TimePoint::new(self.primary, self.now_ticks())
     }
@@ -290,7 +354,7 @@ impl Shared {
     }
 
     fn time_failure(&self, reason: &str) -> i64 {
-        let state = lock(&self.machine).state().clone();
+        let state = self.lock_machine().state().clone();
         match state {
             RunState::Stopping { .. } | RunState::CleanedUp { .. } => {
                 lock(&self.cleanup_failures).push(manifest_failure(None, reason));
@@ -390,7 +454,7 @@ impl Shared {
 
     /// Records a transition with the reads `sample_transition` took: the machine lock only, no callback.
     pub(super) fn publish(&self, state: RunState, transition: Transition) {
-        let result = lock(&self.machine).move_to_at(state, transition.at, transition.utc);
+        let result = self.lock_machine().move_to_at(state, transition.at, transition.utc);
         debug_assert!(result.is_ok(), "coordinator attempted an illegal state transition: {result:?}");
     }
 

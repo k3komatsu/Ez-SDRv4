@@ -369,7 +369,13 @@ impl RunHandle {
                 super::ending::request(&self.shared, Termination::Completed {}, CleanupMode::Orderly);
                 break;
             }
-            let _admission = lock(&self.shared.admission);
+            #[cfg(feature = "testing")]
+            super::start_probe::reach(&self.shared, super::start_probe::Point::BeforeAgendaLock { index });
+            let _admission = self.shared.lock_admission();
+            // KC-20: an item whose turn comes after RS-6 step 1 froze dispatch is not admitted, and that is no failure. `frozen` is set under this lock, so the check and the admission cannot be separated by a freeze.
+            if self.shared.frozen.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
             match super::admission::admit(&self.shared, action, super::state::Origin::Schedule) {
                 Ok(admitted) => {
                     dispatched.push(super::admission::dispatch(&self.shared, admitted).1);
@@ -409,15 +415,31 @@ impl RunHandle {
                 return self.ended_result();
             }
         };
+        #[cfg(feature = "testing")]
+        super::start_probe::reach(&self.shared, super::start_probe::Point::Scheduled);
         lock(&self.shared.scheduled).push(handle);
         self.run_loop(Some(t), Some(stop));
         // Returned early at `stop`: the no-op at `t` is withdrawn, so no later round runs
         // at an instant an earlier wait's horizon chose (KC-29b; Phase 6 Review H, P1-3).
         let live = lock(&self.shared.end).is_none() && matches!(self.state(), RunState::Running {});
+        #[cfg(feature = "testing")]
+        super::start_probe::reach(&self.shared, super::start_probe::Point::Withdrawal);
         if live && self.shared.now().try_cmp(t).is_ok_and(|o| o.is_lt()) {
-            lock(&self.shared.scheduled).retain(|pending| *pending != handle);
-            if self.shared.cancel(handle).is_err() {
-                super::ending::request(&self.shared, Termination::Failed { stage: Stage::Run, reason: "KC-30: a Module panicked during run: Authority cancel()".to_owned() }, CleanupMode::Abort);
+            // KC-24a, KC-29b: removed and cancelled under the freeze gate, so a freeze never takes Provider stop while this cancel is outstanding. A freeze that holds the gate drains and cancels this handle itself, so the withdrawal has nothing to do then, and it does not wait (a wait here would sit outside RS-8a).
+            #[cfg(feature = "testing")]
+            super::start_probe::reach(&self.shared, super::start_probe::Point::BeforeWithdrawalGate);
+            if let Some(_gate) = self.shared.try_lock_freeze() {
+                let removed = {
+                    let mut scheduled = lock(&self.shared.scheduled);
+                    let before = scheduled.len();
+                    scheduled.retain(|pending| *pending != handle);
+                    scheduled.len() < before
+                };
+                #[cfg(feature = "testing")]
+                super::start_probe::reach(&self.shared, super::start_probe::Point::Withdrawn);
+                if removed && self.shared.cancel(handle).is_err() {
+                    super::ending::request(&self.shared, Termination::Failed { stage: Stage::Run, reason: "KC-30: a Module panicked during run: Authority cancel()".to_owned() }, CleanupMode::Abort);
+                }
             }
         }
         self.settle();

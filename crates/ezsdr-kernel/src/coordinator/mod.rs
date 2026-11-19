@@ -12,7 +12,7 @@ pub mod start_probe {
 
     use std::cell::RefCell;
     use std::sync::atomic::Ordering;
-    use std::sync::{Arc, TryLockError, Weak};
+    use std::sync::{Arc, Weak};
 
     use super::state::Shared;
 
@@ -32,18 +32,62 @@ pub mod start_probe {
         },
         /// Right after the lock was dropped, before the wait and the round.
         Released,
+        /// `advance_to_with`, after the early-return decision is taken and before the instant is read.
+        Withdrawal,
+        /// `advance_to_with`, with the withdrawal decided and the freeze gate not yet tried; the horizon's handle is still in `scheduled`.
+        BeforeWithdrawalGate,
+        /// `advance_to_with`, with the freeze gate held, after the horizon's handle left `scheduled` and before it is cancelled.
+        Withdrawn,
+        /// `advance_to_with`, after the horizon's `schedule` returned and before the handle is pushed to `scheduled`.
+        Scheduled,
+        /// `dispatch_agenda`, before the admission lock is taken for the agenda item `index`.
+        BeforeAgendaLock {
+            /// The item's schedule index.
+            index: usize,
+        },
     }
 
     /// What a hook can read without blocking.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct Reading {
-        /// The admission lock is held by some thread (a `try_lock` that would block).
+        /// The admission lock is held by some thread (a `try_lock` that would block); `lock_record::Held::admission` is the calling thread's own.
         pub admission_held: bool,
         /// An end has been requested.
         pub end_requested: bool,
         /// Dispatch is frozen (RS-6 step 1).
         pub dispatch_frozen: bool,
     }
+
+    /// Where a performance of RS-6 step 1 is (KC-24a).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum FreezePoint {
+        /// Before the freeze gate is taken.
+        Serialise,
+        /// The freeze gate is held, the admission lock is not yet.
+        Serialised,
+        /// `frozen` is set and the queues are cleared; the admission lock is still held.
+        BeforeDrop,
+        /// The admission lock is dropped; the wake handle is about to be taken (the hook is inside the take).
+        BeforeWakeTake,
+        /// Every handle is cancelled; the gate is still held.
+        Done,
+        /// The data thread's Provider stop of one fragment is about to start (KC-46b): after its performance of step 1, with the freeze gate held.
+        BeforeStop,
+    }
+
+    /// What the freeze hook sees at a [`FreezePoint`], on the thread that performs the step.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct FreezeReading {
+        /// The coordinator locks the performing thread holds.
+        pub held: super::lock_record::Held,
+        /// Dispatch is frozen.
+        pub dispatch_frozen: bool,
+        /// The performing thread.
+        pub thread: std::thread::ThreadId,
+    }
+
+    /// A hook for [`Probe::on_freeze`].
+    pub type FreezeHook = Arc<dyn Fn(FreezePoint, FreezeReading) + Send + Sync>;
 
     /// A weak handle on the Run's shared state; reading it never keeps the Run alive.
     #[derive(Clone)]
@@ -53,10 +97,17 @@ pub mod start_probe {
         /// A reading, or `None` once the Run is gone. Non-blocking except for a brief lock of `end`.
         pub fn read(&self) -> Option<Reading> {
             let shared = self.0.upgrade()?;
-            let admission_held = matches!(shared.admission.try_lock(), Err(TryLockError::WouldBlock));
+            let admission_held = shared.admission.is_held();
             let end_requested = super::state::lock(&shared.end).is_some();
             let dispatch_frozen = shared.frozen.load(Ordering::Acquire);
             Some(Reading { admission_held, end_requested, dispatch_frozen })
+        }
+
+        /// Installs the hook every performance of RS-6 step 1 calls at each [`FreezePoint`], on whichever thread performs it (the data thread, a cleanup step thread). It may park its thread; the Run holds no lock of the hook's while it runs.
+        pub fn on_freeze(&self, hook: impl Fn(FreezePoint, FreezeReading) + Send + Sync + 'static) {
+            if let Some(shared) = self.0.upgrade() {
+                *super::state::lock(&shared.freeze_hook) = Some(Arc::new(hook));
+            }
         }
     }
 
@@ -93,6 +144,106 @@ pub mod start_probe {
         let Some(mut hook) = HOOK.with(|slot| slot.borrow_mut().take()) else { return };
         hook(point, &Probe(Arc::downgrade(shared)));
         HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+
+    pub(super) fn reach_freeze(shared: &Shared, point: FreezePoint) {
+        // The Arc is cloned out of the slot first, so a hook that parks never holds the slot's lock.
+        let hook = super::state::lock(&shared.freeze_hook).clone();
+        if let Some(hook) = hook {
+            hook(point, FreezeReading { held: super::lock_record::held(), dispatch_frozen: shared.frozen.load(Ordering::Acquire), thread: std::thread::current().id() });
+        }
+    }
+}
+
+#[cfg(feature = "testing")]
+pub mod lock_record {
+    //! Which of the coordinator's serialising locks the calling thread holds, kept by `Shared`'s lock helpers (KC-24a). A test double reads it at each supplied call. Compiled only with the `testing` feature.
+
+    use std::cell::Cell;
+    use std::ops::{Deref, DerefMut};
+    use std::sync::MutexGuard;
+
+    use super::state::Which;
+
+    /// Which locks the calling thread holds.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    pub struct Held {
+        /// The admission lock.
+        pub admission: bool,
+        /// The Run state machine's lock.
+        pub machine: bool,
+        /// The freeze gate (RS-6 step 1's serialisation).
+        pub freeze: bool,
+    }
+
+    thread_local! {
+        static COUNTS: Cell<[u32; 3]> = const { Cell::new([0; 3]) };
+    }
+
+    /// The locks the calling thread holds now.
+    pub fn held() -> Held {
+        let [admission, machine, freeze] = COUNTS.with(Cell::get);
+        Held { admission: admission > 0, machine: machine > 0, freeze: freeze > 0 }
+    }
+
+    /// A guard that counts itself in the acquiring thread's record until it drops. `MutexGuard` is not `Send`, so neither is this.
+    pub(super) struct Recorded<'a, T> {
+        guard: MutexGuard<'a, T>,
+        which: Which,
+    }
+
+    impl<'a, T> Recorded<'a, T> {
+        pub(super) fn new(guard: MutexGuard<'a, T>, which: Which) -> Recorded<'a, T> {
+            COUNTS.with(|counts| {
+                let mut n = counts.get();
+                n[which as usize] += 1;
+                counts.set(n);
+            });
+            Recorded { guard, which }
+        }
+    }
+
+    impl<T> Deref for Recorded<'_, T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            &self.guard
+        }
+    }
+
+    impl<T> DerefMut for Recorded<'_, T> {
+        fn deref_mut(&mut self) -> &mut T {
+            &mut self.guard
+        }
+    }
+
+    impl<T> Drop for Recorded<'_, T> {
+        fn drop(&mut self) {
+            COUNTS.with(|counts| {
+                let mut n = counts.get();
+                n[self.which as usize] -= 1;
+                counts.set(n);
+            });
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn held_records_the_calling_threads_guards() {
+            let admission_lock = std::sync::Mutex::new(());
+            let machine_lock = std::sync::Mutex::new(());
+            let admission = Recorded::new(admission_lock.lock().unwrap(), Which::Admission);
+            assert!(held().admission);
+            assert!(!held().machine);
+            let machine = Recorded::new(machine_lock.lock().unwrap(), Which::Machine);
+            assert!(held().admission && held().machine);
+            drop(machine);
+            assert!(held().admission && !held().machine);
+            drop(admission);
+            assert_eq!(held(), Held::default());
+        }
     }
 }
 
@@ -293,7 +444,7 @@ impl RunHandle {
 
     /// The current lifecycle state (KC-7).
     pub fn state(&self) -> RunState {
-        state::lock(&self.shared.machine).state().clone()
+        self.shared.lock_machine().state().clone()
     }
 
     /// The Authority's current instant in its primary root (KC-3).

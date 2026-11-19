@@ -7,13 +7,14 @@ use crate::manifest::{ClocksSection, EventsSection, LinkRecord, Manifest, Module
 use crate::module_api::{Fidelity, ModuleRef, ProfileRef, Provider, StopMode};
 use crate::run::{CleanupFailure, CleanupMode, CleanupOps, CleanupStep, RunState, StopCause, Termination, run_cleanup};
 use crate::spec::{Ident, Namespace};
+use crate::time::ScheduleHandle;
 
 use super::RunHandle;
 use super::state::{Inst, Shared, contain, contain_all, lock, manifest_failure, try_slot};
 
 impl RunHandle {
     pub(super) fn settle(&mut self) {
-        if lock(&self.shared.end).is_some() && !matches!(lock(&self.shared.machine).state(), RunState::CleanedUp { .. }) {
+        if lock(&self.shared.end).is_some() && !matches!(self.shared.lock_machine().state(), RunState::CleanedUp { .. }) {
             self.cleanup();
         }
     }
@@ -26,9 +27,8 @@ impl RunHandle {
         if matches!(current, RunState::CleanedUp { .. }) {
             return;
         }
-        let at = Some(self.shared.now());
-        let result = lock(&self.shared.machine).begin_stopping(request.mode, at, &*self.shared.ctx.host_clock);
-        debug_assert!(result.is_ok(), "coordinator failed to enter Stopping: {result:?}");
+        let transition = self.shared.sample_transition();
+        self.shared.publish(RunState::Stopping { mode: request.mode }, transition);
         let order = self.shared.routing().map(|routing| routing.reverse.clone()).unwrap_or_default();
         let outcome = run_cleanup(Arc::new(Ops { shared: self.shared.clone() }), &order, request.mode, &|| {
             lock(&self.shared.end).as_ref().is_some_and(|end| end.mode == CleanupMode::Abort).then_some(CleanupMode::Abort)
@@ -38,9 +38,8 @@ impl RunHandle {
         self.shared.closing.store(true, Ordering::Release);
         self.lease.released = true;
         let termination = lock(&self.shared.end).as_ref().map(|e| e.termination.clone()).unwrap_or(request.termination);
-        let at = Some(self.shared.now());
-        let result = lock(&self.shared.machine).finish(termination.clone(), at, &*self.shared.ctx.host_clock);
-        debug_assert!(result.is_ok(), "coordinator failed to enter CleanedUp: {result:?}");
+        let transition = self.shared.sample_transition();
+        self.shared.publish(RunState::CleanedUp { termination: termination.clone() }, transition);
         self.manifest = Some(self.assemble_manifest(termination, outcome.failures));
         lock(&self.shared.links).clear();
         self.links_by_ref.clear();
@@ -80,7 +79,7 @@ impl RunHandle {
             parent: self.parent.clone(),
             execution_class: self.shared.routing().map(|routing| routing.plan.class),
             fidelity,
-            transitions: lock(&self.shared.machine).transitions().to_vec(),
+            transitions: self.shared.lock_machine().transitions().to_vec(),
             deterministic: self.shared.routing().is_some_and(|routing| routing.plan.class == crate::module_api::ExecutionClass::Simulation),
             children: self.children.clone(),
         };
@@ -247,6 +246,51 @@ impl Ops {
         }
         self.shared.routing().and_then(|routing| routing.fragment_of.get(fragment).copied())
     }
+
+    /// RS-6 step 1 with the freeze gate held by the caller: the cleanup's `FreezeDispatch` and the data thread's early stop, which keeps the gate for its Provider stops (KC-24a, KC-46b).
+    pub(super) fn freeze_held(&self) -> Result<(), crate::module_api::ModuleError> {
+        #[cfg(feature = "testing")]
+        super::start_probe::reach_freeze(&self.shared, super::start_probe::FreezePoint::Serialised);
+        // KC-24a: no Action admitted before the freeze is dispatched after it.
+        let admission = self.shared.lock_admission();
+        self.shared.frozen.store(true, Ordering::Release);
+        // RS-16: what the queues held was admitted and never delivered.
+        let mut undelivered: Vec<_> = self
+            .shared
+            .providers
+            .iter()
+            .map(|slot| &slot.queue)
+            .chain(self.shared.sinks.iter().map(|slot| &slot.queue))
+            .chain(self.shared.executors.iter().map(|slot| &slot.queue))
+            .flat_map(|queue| queue.clear())
+            .collect();
+        undelivered.sort();
+        lock(&self.shared.undelivered).extend(undelivered);
+        #[cfg(feature = "testing")]
+        super::start_probe::reach_freeze(&self.shared, super::start_probe::FreezePoint::BeforeDrop);
+        // The admission lock is released before any Authority call: a `cancel` that waits for a lock a Module's thread holds while it submits must not meet it.
+        drop(admission);
+        let wake = self.take_wake_handle();
+        let pending: Vec<_> = lock(&self.shared.scheduled).drain(..).chain(wake).collect();
+        // Every handle is tried: `scheduled` is already drained, so stopping at
+        // one panic would leave the rest neither cancelled nor kept. The panics
+        // are reported together (F25).
+        let total = pending.len();
+        let panicked = pending.into_iter().filter(|handle| self.shared.cancel(*handle).is_err()).count();
+        #[cfg(feature = "testing")]
+        super::start_probe::reach_freeze(&self.shared, super::start_probe::FreezePoint::Done);
+        if panicked > 0 {
+            return Err(crate::module_api::ModuleError::rejected(format!("KC-30: a Module panicked during cleanup: Authority cancel(), {panicked} of {total} handles")));
+        }
+        Ok(())
+    }
+
+    /// The pending wake's handle (KC-46a), under the lock a wake holds across `schedule`. The `BeforeWakeTake` hook sits in front of this wait, so a test reads which locks the freeze holds when it may have to wait for a wake's `schedule`.
+    fn take_wake_handle(&self) -> Option<ScheduleHandle> {
+        #[cfg(feature = "testing")]
+        super::start_probe::reach_freeze(&self.shared, super::start_probe::FreezePoint::BeforeWakeTake);
+        lock(&self.shared.wake_handle).take()
+    }
 }
 
 impl CleanupOps for Ops {
@@ -289,32 +333,9 @@ impl CleanupOps for Ops {
                 Ok(())
             }
             CleanupStep::FreezeDispatch => {
-                // KC-24a: no Action admitted before the freeze is dispatched after it.
-                let _admission = lock(&self.shared.admission);
-                self.shared.frozen.store(true, Ordering::Release);
-                // RS-16: what the queues held was admitted and never delivered.
-                let mut undelivered: Vec<_> = self
-                    .shared
-                    .providers
-                    .iter()
-                    .map(|slot| &slot.queue)
-                    .chain(self.shared.sinks.iter().map(|slot| &slot.queue))
-                    .chain(self.shared.executors.iter().map(|slot| &slot.queue))
-                    .flat_map(|queue| queue.clear())
-                    .collect();
-                undelivered.sort();
-                lock(&self.shared.undelivered).extend(undelivered);
-                let wake = lock(&self.shared.wake_handle).take();
-                let pending: Vec<_> = lock(&self.shared.scheduled).drain(..).chain(wake).collect();
-                // Every handle is tried: `scheduled` is already drained, so stopping at
-                // one panic would leave the rest neither cancelled nor kept. The panics
-                // are reported together (F25).
-                let total = pending.len();
-                let panicked = pending.into_iter().filter(|handle| self.shared.cancel(*handle).is_err()).count();
-                if panicked > 0 {
-                    return Err(crate::module_api::ModuleError::rejected(format!("KC-30: a Module panicked during cleanup: Authority cancel(), {panicked} of {total} handles")));
-                }
-                Ok(())
+                // KC-24a: the gate serialises this step with its other performances, with the data thread's stops and with the control loop's withdrawal; no Module's thread takes it.
+                let _gate = self.shared.lock_freeze();
+                self.freeze_held()
             }
             CleanupStep::RestoreBaseline => {
                 let Some(instance) = self.routed(fragment) else {

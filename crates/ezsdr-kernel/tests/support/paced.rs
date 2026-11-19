@@ -390,6 +390,7 @@ pub struct ThreadedProvider {
     stop_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
     deaf: bool,
     drain_after_stop: Option<std::time::Duration>,
+    record_stop_mode: bool,
     ctx: Option<Arc<ThreadedCtx>>,
     rx_clock: Option<SampleClockHandle>,
     next_index: Arc<AtomicU64>,
@@ -417,6 +418,7 @@ impl ThreadedProvider {
             stop_gate: None,
             deaf: false,
             drain_after_stop: None,
+            record_stop_mode: false,
             ctx: None,
             rx_clock: None,
             next_index: Arc::new(AtomicU64::new(0)),
@@ -507,6 +509,13 @@ impl ThreadedProvider {
     /// Keeps calling `recv()` for `d` after `stop` began, recording what it receives.
     pub fn draining_after_stop(mut self, d: std::time::Duration) -> Self {
         self.drain_after_stop = Some(d);
+        self
+    }
+
+    /// `stop` also records the mode on a second line, `<name>:stop_mode:<mode:?>`, right
+    /// after the unchanged `<name>:stop` line, which existing tests compare exactly.
+    pub fn recording_stop_mode(mut self) -> Self {
+        self.record_stop_mode = true;
         self
     }
 
@@ -648,8 +657,11 @@ impl Provider for ThreadedProvider {
         Ok(())
     }
 
-    fn stop(&mut self, _mode: StopMode) -> Result<(), ModuleError> {
+    fn stop(&mut self, mode: StopMode) -> Result<(), ModuleError> {
         self.record("stop");
+        if self.record_stop_mode {
+            self.record(format!("stop_mode:{mode:?}"));
+        }
         if let Some(gate) = &self.stop_gate {
             let mut open = gate.0.lock().unwrap_or_else(|e| e.into_inner());
             while !*open {

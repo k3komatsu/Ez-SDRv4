@@ -2,6 +2,7 @@ mod support;
 
 use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ezsdr_kernel::binding::BindingProfile;
@@ -11,11 +12,13 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::RunKind;
 use ezsdr_kernel::module_api::{ActionSubmitter, Pacing, UpdateClass};
-use ezsdr_kernel::run::{Lease, LeaseMode, RunState, Stage, StopCause, Termination};
+use ezsdr_kernel::run::{CleanupMode, Lease, LeaseMode, RunState, Stage, StopCause, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{ExperimentSpec, Ident, Key, SpecError, Value};
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, TimePoint};
-use support::start_window::{ClockEvent, ClockLog, StartTrace, WatchedAuthority, WatchedClock, seen_for, start_on_worker, with_seen};
+use support::start_window::{
+    Call, CallKind, ClockLog, Hooks, LogEvent, OpenOnDrop, StartTrace, WatchedAuthority, WatchedClock, far_future_stop, gate, infra, open, seen_for, start_on_worker, sweep, wait, with_seen,
+};
 use support::{
     FakeHostClock, FinishChecked, Probe, ProbeExecutor, RecordingSink, ScalarOnlyCheck, SimAuthority, SteppedProvider, TestLimitsCheck, TestLinkModule, TestProvider, mref, ns, run_checks, run_kinds,
     run_registry, run_registry_classed, run_registry_non_namespace_provider,
@@ -4429,61 +4432,590 @@ fn kc_24a_start_a_simulation_first_step_follows_the_batch() {
 
 #[test]
 fn kc_24a_start_reads_the_transition_clocks_outside_the_lock() {
-    // KC-24a: the two reads a transition records are taken before the admission
-    // lock is held, so no Module holds a lock those callbacks need while it waits.
-    // Each callback is observed on its own, and their order and samples are pinned:
-    // the Authority's now() first, then the host clock's UTC, both before the lock.
+    // KC-24a: every supplied call the start makes is made with neither the admission
+    // lock nor the machine lock held, so no Module waits on a lock a callback needs.
+    // The Running transition's pair is pinned: the Authority's now() first, then the
+    // host clock's UTC, both before the admission lock.
+    // Deschedule: only the start worker makes the recorded calls; the test thread
+    // waits for it to return (10 s backstop), so a late worker delays the assertions
+    // but cannot flip them.
     let probe = Probe::new();
     let mut rig = rig(Pacing::FreeRunning);
     let (authority, root) = SimAuthority::new(&rig.clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
     rig.root = root;
     rig.manual = authority.manual();
     let log = ClockLog::default();
-    let (clock, slot) = WatchedClock::new(rig.host.clone(), log.clone());
-    rig.assembly.authority = Box::new(WatchedAuthority::new(Box::new(authority), slot.clone(), log.clone()));
+    let clock = WatchedClock::new(rig.host.clone(), log.clone());
+    rig.assembly.authority = Box::new(WatchedAuthority::new(Box::new(authority), log.clone()));
     rig.assembly.host_clock = Arc::new(clock);
     rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
     let primary = rig.root;
     let trace = StartTrace::default();
     let recorded = trace.clone();
-    let hook_slot = slot.clone();
     let hook_log = log.clone();
     let started = start_on_worker(
         &probe,
         move |point, probe| {
             let reading = probe.read().expect("the Run is alive");
             recorded.push(point, reading);
-            hook_log.push(ClockEvent::Point(point));
-            if point == start_probe::Point::Entered {
-                *hook_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe.clone());
-            }
+            hook_log.push_point(point);
         },
         move || start_spec_run(&spec_one(), &profile_one(), rig.assembly),
     );
     let run = started.finish();
-    let manifest = run.finish_checked();
+    // Everything the log holds now is the start's; cleanup's own calls (T7's subject) come later.
     let events = log.events();
-    for event in &events {
-        match event {
-            ClockEvent::Now { held, .. } => assert!(!held, "KC-24a: TimeAuthority::now ran under the admission lock; events: {events:?}"),
-            ClockEvent::Utc { held, .. } => assert!(!held, "KC-24a: HostClock::utc_nanos ran under the admission lock; events: {events:?}"),
-            ClockEvent::Point(_) => {}
-        }
+    for call in log.calls() {
+        assert!(
+            !call.held.admission && !call.held.machine,
+            "KC-24a: {:?} on {:?} ran under a coordinator lock (admission {}, machine {}); events: {events:?}",
+            call.kind,
+            call.thread,
+            call.held.admission,
+            call.held.machine
+        );
     }
-    let bp = events.iter().position(|event| *event == ClockEvent::Point(start_probe::Point::BeforePublish)).expect("the start reached BeforePublish");
+    let bp = events.iter().position(|event| matches!(event, LogEvent::Point(start_probe::Point::BeforePublish))).expect("the start reached BeforePublish");
     assert!(bp >= 2, "KC-24a: no clock reads were logged before BeforePublish; events: {events:?}");
-    let now_sample = match events[bp - 2] {
-        ClockEvent::Now { sample, .. } => sample,
-        ref other => panic!("KC-24a: the event before the UTC read is {other:?}, not the Authority's now"),
+    let now_sample = match &events[bp - 2] {
+        LogEvent::Call(Call { kind: CallKind::Now, sample: Some(sample), .. }) => *sample,
+        other => panic!("KC-24a: the event before the UTC read is {other:?}, not the Authority's now"),
     };
-    let utc_sample = match events[bp - 1] {
-        ClockEvent::Utc { sample, .. } => sample,
-        ref other => panic!("KC-24a: the event before the publication is {other:?}, not the host clock's UTC read"),
+    let utc_sample = match &events[bp - 1] {
+        LogEvent::Call(Call { kind: CallKind::Utc, sample: Some(sample), .. }) => *sample,
+        other => panic!("KC-24a: the event before the publication is {other:?}, not the host clock's UTC read"),
     };
+    let manifest = run.finish_checked();
     let row = manifest.run.transitions.iter().find(|row| matches!(row.state, RunState::Running {})).expect("the Run recorded Running");
     assert_eq!(row.host_utc_nanos, utc_sample, "the recorded UTC is not the sampled one; events: {events:?}");
     let at = row.at.expect("Running carries its runtime instant");
     assert_eq!(at.ticks_in(primary).expect("on the primary root"), now_sample, "the recorded instant is not the sampled one; events: {events:?}");
+}
+
+#[test]
+fn kc_24a_cleanup_reads_the_stopping_and_cleaned_up_clocks_outside_the_machine_lock() {
+    // KC-24a, KC-43: every transition's two reads are sampled before a lock is taken
+    // and published with them, so neither the Authority's now() nor the host clock's
+    // UTC runs under the machine lock. Every read of the two clocks in the run is
+    // checked, and every transition after Created is pinned to its two samples.
+    // Deschedule: one control thread runs the start and the cleanup in a Simulation
+    // Run, and the log is read after `finish` returned; nothing can interleave.
+    let probe = Probe::new();
+    let mut rig = rig(Pacing::FreeRunning);
+    let (authority, root) = SimAuthority::new(&rig.clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+    rig.root = root;
+    rig.manual = authority.manual();
+    let log = ClockLog::default();
+    let clock = WatchedClock::new(rig.host.clone(), log.clone());
+    rig.assembly.authority = Box::new(WatchedAuthority::new(Box::new(authority), log.clone()));
+    rig.assembly.host_clock = Arc::new(clock);
+    rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+    let primary = rig.root;
+    let run = start_spec_run(&spec_one(), &profile_one(), rig.assembly).expect("the fixture Run starts");
+    let manifest = run.finish_checked();
+    let calls = log.calls();
+    let transitions = &manifest.run.transitions;
+    assert!(matches!(transitions.first().map(|row| &row.state), Some(RunState::Created {})), "the first transition is not Created: {transitions:?}");
+    assert!(transitions.iter().any(|row| matches!(row.state, RunState::Running {})), "the Run recorded no Running transition: {transitions:?}");
+    assert!(transitions.iter().any(|row| matches!(row.state, RunState::Stopping { .. })), "the Run recorded no Stopping transition: {transitions:?}");
+    assert!(transitions.iter().any(|row| matches!(row.state, RunState::CleanedUp { .. })), "the Run recorded no CleanedUp transition: {transitions:?}");
+    let utc: Vec<&Call> = calls.iter().filter(|call| call.kind == CallKind::Utc).collect();
+    assert_eq!(utc.len(), transitions.len(), "KC-43: the UTC reads are not one per transition; calls: {calls:?}");
+    for (call, row) in utc.iter().zip(transitions) {
+        assert_eq!(call.sample, Some(row.host_utc_nanos), "KC-43: the {:?} transition's UTC is not the sampled one; calls: {calls:?}", row.state);
+    }
+    // KC-24a: neither clock is read under the admission lock or the machine lock
+    // anywhere in the run. This is checked before the pairs below, because a read
+    // taken before its partner (N111-8's and N111-10's shape) leaves the pairs
+    // intact whenever an earlier call of the same thread precedes the UTC read.
+    for call in calls.iter().filter(|call| matches!(call.kind, CallKind::Now | CallKind::Utc)) {
+        assert!(
+            !call.held.machine && !call.held.admission,
+            "KC-24a: {:?} on {:?} ran under a coordinator lock (admission {}, machine {}); calls: {calls:?}",
+            call.kind,
+            call.thread,
+            call.held.admission,
+            call.held.machine
+        );
+    }
+    for row in transitions.iter().skip(1) {
+        let position = calls.iter().position(|call| call.kind == CallKind::Utc && call.sample == Some(row.host_utc_nanos)).expect("the transition has its UTC read");
+        let utc_call = &calls[position];
+        assert!(
+            !utc_call.held.machine && !utc_call.held.admission,
+            "KC-24a: the {:?} transition's UTC read ran under a coordinator lock (admission {}, machine {}): {utc_call:?}; calls: {calls:?}",
+            row.state,
+            utc_call.held.admission,
+            utc_call.held.machine
+        );
+        let now_call = calls[..position]
+            .iter()
+            .rev()
+            .find(|call| call.thread == utc_call.thread)
+            .unwrap_or_else(|| panic!("KC-43: the {:?} transition's UTC read has no earlier call on its thread; calls: {calls:?}", row.state));
+        assert_eq!(now_call.kind, CallKind::Now, "KC-43: the call before the {:?} transition's UTC read is {now_call:?}, not the Authority's now; calls: {calls:?}", row.state);
+        let at = row.at.expect("a transition after Created carries its runtime instant");
+        assert_eq!(now_call.sample, Some(at.ticks_in(primary).expect("on the primary root")), "KC-43: the {:?} transition's instant is not the sampled one; calls: {calls:?}", row.state);
+        assert!(
+            !now_call.held.machine && !now_call.held.admission,
+            "KC-24a: the {:?} transition's now read ran under a coordinator lock (admission {}, machine {}): {now_call:?}; calls: {calls:?}",
+            row.state,
+            now_call.held.admission,
+            now_call.held.machine
+        );
+    }
+    let cleaned_up = transitions.iter().find(|row| matches!(row.state, RunState::CleanedUp { .. })).expect("the Run recorded CleanedUp");
+    assert_eq!(manifest.termination.at, cleaned_up.at, "KC-43: the termination's instant is not the CleanedUp transition's");
+    assert_eq!(manifest.termination.host_utc_nanos, cleaned_up.host_utc_nanos, "KC-43: the termination's UTC is not the CleanedUp transition's");
+}
+
+#[test]
+fn kc_24a_freeze_runs_cancels_outside_the_admission_lock() {
+    // #111: RS-6 step 1 sets `frozen` and empties the queues under the admission
+    // lock, drops it, and only then takes and cancels the handles -- all under the
+    // freeze gate, which no Module's thread takes.
+    // Deschedule: the start worker only builds the Run before `finish_checked()`; if it
+    // is descheduled the test waits for it (10 s backstop) and reads the same values.
+    // The freeze itself runs on the cleanup thread inside `finish_checked()` on this
+    // thread, the one that waits there, so nothing the test does can interleave with
+    // its points.
+    let mut spec = spec_one();
+    add_schedule(&mut spec, "radio", 1_000_000_000_000, serde_json::json!({ "kind": "stop", "target": null }));
+    let mut second = spec["schedule"][0].clone();
+    second["at"]["offset_ticks"] = serde_json::json!(2_000_000_000_000i64);
+    spec["schedule"].as_array_mut().expect("the fixture schedule is an array").push(second);
+
+    let probe = Probe::new();
+    let mut rig = rig(Pacing::FreeRunning);
+    let (authority, root) = SimAuthority::new(&rig.clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+    rig.root = root;
+    rig.manual = authority.manual();
+    let log = ClockLog::default();
+    let clock = WatchedClock::new(rig.host.clone(), log.clone());
+    rig.assembly.authority = Box::new(WatchedAuthority::new(Box::new(authority), log.clone()));
+    rig.assembly.host_clock = Arc::new(clock);
+    rig.assembly
+        .providers
+        .insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 10, 1).registering_at_arm("radio/rx")));
+    let freezes = Arc::new(Mutex::new(Vec::<(start_probe::FreezePoint, start_probe::FreezeReading)>::new()));
+    let recorded = freezes.clone();
+    let started = start_on_worker(
+        &probe,
+        move |point, probe| {
+            if point == start_probe::Point::Entered {
+                let recorded = recorded.clone();
+                probe.on_freeze(move |point, reading| recorded.lock().unwrap_or_else(|e| e.into_inner()).push((point, reading)));
+            }
+        },
+        move || start_spec_run(&spec, &profile_one(), rig.assembly),
+    );
+    let run = started.finish();
+    let manifest = run.finish_checked();
+
+    // The two far-future stop entries are the two latest schedules; their handles are
+    // what the freeze cancels.
+    let calls = log.calls();
+    let mut latest: Vec<Call> = calls.iter().filter(|call| call.kind == CallKind::Schedule).cloned().collect();
+    latest.sort_by_key(|call| std::cmp::Reverse(call.sample));
+    assert!(latest.len() >= 2, "RS-6 step 1: the two stop entries were not scheduled; calls: {calls:?}");
+    let handles: Vec<_> = latest[..2].iter().map(|call| call.handle.expect("the schedule returned its handle")).collect();
+
+    let cancels: Vec<&Call> = calls.iter().filter(|call| call.kind == CallKind::Cancel).collect();
+    assert_eq!(cancels.len(), 2, "RS-6 step 1 cancels each held handle exactly once; calls: {calls:?}");
+    for handle in &handles {
+        let count = cancels.iter().filter(|call| call.handle == Some(*handle)).count();
+        assert_eq!(count, 1, "RS-6 step 1 does not cancel {handle:?} exactly once; calls: {calls:?}");
+    }
+    for call in &cancels {
+        assert_eq!(call.returned, Some(true), "RS-6 step 1: the cancel did not return; calls: {calls:?}");
+        assert!(!call.held.admission, "KC-24a: the cancel ran under the admission lock; calls: {calls:?}");
+        assert!(!call.held.machine, "KC-24a: the cancel ran under the machine lock; calls: {calls:?}");
+        assert!(call.held.freeze, "KC-24a: the cancel ran outside the freeze gate; calls: {calls:?}");
+    }
+
+    let readings = freezes.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let points: Vec<start_probe::FreezePoint> = readings.iter().map(|(point, _)| *point).collect();
+    assert_eq!(
+        points,
+        [start_probe::FreezePoint::Serialise, start_probe::FreezePoint::Serialised, start_probe::FreezePoint::BeforeDrop, start_probe::FreezePoint::BeforeWakeTake, start_probe::FreezePoint::Done,],
+        "one performance of RS-6 step 1 reaches each point once, in order: {readings:?}"
+    );
+    let thread = readings[0].1.thread;
+    assert!(readings.iter().all(|(_, reading)| reading.thread == thread), "RS-6 step 1's points are on one thread: {readings:?}");
+    let at = |point| readings.iter().find(|(reached, _)| *reached == point).expect("the point was recorded").1;
+    let serialise = at(start_probe::FreezePoint::Serialise);
+    assert!(!serialise.held.freeze, "KC-24a: the freeze gate was already held at Serialise: {serialise:?}");
+    let serialised = at(start_probe::FreezePoint::Serialised);
+    assert!(serialised.held.freeze && !serialised.held.admission, "KC-24a: Serialised is not between the gate and the admission lock: {serialised:?}");
+    let before_drop = at(start_probe::FreezePoint::BeforeDrop);
+    assert!(before_drop.held.freeze && before_drop.held.admission && before_drop.dispatch_frozen, "KC-24a: BeforeDrop is not under both locks with dispatch frozen: {before_drop:?}");
+    let before_wake = at(start_probe::FreezePoint::BeforeWakeTake);
+    assert!(before_wake.held.freeze && !before_wake.held.admission && before_wake.dispatch_frozen, "KC-24a: the wake handle is taken under the admission lock: {before_wake:?}");
+    let done = at(start_probe::FreezePoint::Done);
+    assert!(done.held.freeze && !done.held.admission, "KC-24a: Done is not under the gate alone: {done:?}");
+
+    assert!(manifest.termination.cleanup_failures.is_empty(), "the cleanup recorded failures: {:?}", manifest.termination.cleanup_failures);
+    assert!(manifest.termination.undelivered.is_empty(), "RS-16: the freeze discarded Actions: {:?}", manifest.termination.undelivered);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }, "RS-10: the first end request fixes the reason");
+}
+
+#[test]
+fn kc_24a_an_abort_in_the_unlocked_cleanup_window_escalates_the_remaining_steps() {
+    // KC-24a, RS-10, KC-39: the Stopping entry samples its clocks before the machine
+    // lock, so an Abort submitted in that window reaches the end while the cleanup's
+    // steps run: they escalate, and the Stopping mode stays the orderly one the
+    // cleanup began with.
+    // Deschedule: W_f parks in the Stopping sample until the test has submitted the
+    // Abort and opened `release`, so the Abort always lands in that window; a test
+    // thread descheduled after it sees the parked line leaves W_f parked and changes
+    // nothing, and W_f descheduled before now() makes the 10 s wait an infra failure.
+    let (spec, profile) = executor_docs();
+    let probe = Probe::new();
+    let rig = rig(Pacing::FreeRunning);
+    let worker = Arc::new(Mutex::new(None::<std::thread::ThreadId>));
+    let taken = Arc::new(AtomicBool::new(false));
+    let release = gate();
+    let on_now = {
+        let probe = probe.clone();
+        let worker = worker.clone();
+        let taken = taken.clone();
+        let release = release.clone();
+        move |call: &Call| {
+            let Some(worker) = *worker.lock().unwrap_or_else(|e| e.into_inner()) else {
+                return;
+            };
+            if call.thread != worker || taken.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            probe.record("finish:now:parked");
+            wait(&release);
+        }
+    };
+    let mut assembly = rig.assembly;
+    assembly.authority = Box::new(WatchedAuthority::new(assembly.authority, ClockLog::default()).with_hooks(Hooks { on_now: Some(Arc::new(on_now)), ..Hooks::default() }));
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe)));
+    let slot: Arc<Mutex<Option<Arc<dyn ActionSubmitter>>>> = Arc::new(Mutex::new(None));
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe).sharing_submitter(slot.clone())));
+    let run = start_spec_run(&spec, &profile, assembly).expect("the fixture Run starts");
+    let submitter = slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = {
+        let worker = worker.clone();
+        std::thread::spawn(move || {
+            *worker.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
+            let _ = tx.send(run.finish());
+        })
+    };
+    assert!(probe.wait_for("finish:now:parked", std::time::Duration::from_secs(10)), "{}", infra("W_f did not reach the Stopping sample within 10 s"));
+    let id = submitter.submit(Action::Abort { cause: StopCause::Abort { message: "test".to_owned() } });
+    assert!(id.is_ok(), "KC-24: an Abort is accepted in the cleanup window: {id:?}");
+    open(&release);
+    let manifest = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(manifest) => manifest,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            handle.join().expect("W_f does not panic");
+            panic!("W_f returned no Manifest");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("{}", infra("W_f did not return a Manifest within 10 s")),
+    };
+    handle.join().expect("W_f does not panic");
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }, "RS-10: the first end request fixes the reason");
+    assert_eq!(manifest.termination.also, vec![Termination::Stopped { cause: StopCause::Abort { message: "test".to_owned() } }], "RS-10: the Abort is not recorded beside the first request");
+    let stopping = manifest.run.transitions.iter().find(|row| matches!(row.state, RunState::Stopping { .. })).expect("the Run recorded Stopping");
+    assert!(matches!(stopping.state, RunState::Stopping { mode: CleanupMode::Orderly }), "KC-43: the Stopping transition records {stopping:?}, not the orderly mode read before the Abort");
+    assert_eq!(probe.with_prefix("p:stop"), vec!["p:stop:Abort".to_owned()], "KC-39: the Provider was not stopped with the escalated mode; lines: {:?}", probe.lines());
+    assert!(manifest.termination.cleanup_failures.is_empty(), "the cleanup recorded failures: {:?}", manifest.termination.cleanup_failures);
+}
+
+#[test]
+fn kc_24a_freeze_a_provider_holding_what_cancel_needs_while_it_submits_does_not_deadlock() {
+    // #111: RS-6 step 1 drops the admission lock before it cancels, so a Module thread
+    // that holds a lock the Authority's cancel waits for and then submits meets no lock
+    // the freeze holds: its submission is refused at RS-6 and the cancel completes.
+    // Additional killer for N111-1, whose row names T1.
+    // Deschedule: W is gated by the cancel itself (the gate opens only inside the hook)
+    // and M is held until W releases it, so no descheduling flips the order. If W is
+    // descheduled after the gate opens, the cancel waits for M with a bounded try_lock
+    // loop and fails as infra at 10 s, never with an unbounded lock.
+    let (mut spec, profile) = executor_docs();
+    add_schedule(&mut spec, "radio", 1_000_000_000_000, serde_json::json!({ "kind": "stop", "target": null }));
+    let probe = Probe::new();
+    let mut rig = rig(Pacing::FreeRunning);
+    let (authority, root) = SimAuthority::new(&rig.clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+    rig.root = root;
+    rig.manual = authority.manual();
+    let log = ClockLog::default();
+    let cancel_gate = gate();
+    let _release = OpenOnDrop(cancel_gate.clone());
+    let held_by_w = Arc::new(Mutex::new(()));
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let on_cancel = {
+        let probe = probe.clone();
+        let gate = cancel_gate.clone();
+        let held_by_w = held_by_w.clone();
+        let timed_out = timed_out.clone();
+        move |call: &Call| {
+            probe.record(format!("cancel:entered:admission={}:machine={}:freeze={}", call.held.admission, call.held.machine, call.held.freeze));
+            open(&gate);
+            if call.held.admission {
+                // The mutant's freeze still holds the lock: return without M, so the kill
+                // is the held assertion below and never a deadlock.
+                return;
+            }
+            let begun = std::time::Instant::now();
+            loop {
+                match held_by_w.try_lock() {
+                    Ok(guard) => {
+                        drop(guard);
+                        probe.record("cancel:done");
+                        return;
+                    }
+                    Err(std::sync::TryLockError::Poisoned(guard)) => {
+                        drop(guard.into_inner());
+                        probe.record("cancel:done");
+                        return;
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        if begun.elapsed() >= std::time::Duration::from_secs(10) {
+                            timed_out.store(true, Ordering::SeqCst);
+                            probe.record("cancel:timeout");
+                            return;
+                        }
+                        std::thread::yield_now();
+                    }
+                }
+            }
+        }
+    };
+    rig.assembly.authority = Box::new(WatchedAuthority::new(Box::new(authority), log.clone()).with_hooks(Hooks { on_cancel: Some(Arc::new(on_cancel)), ..Hooks::default() }));
+    rig.assembly
+        .providers
+        .insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 10, 1).registering_at_arm("radio/rx")));
+    let slot: Arc<Mutex<Option<Arc<dyn ActionSubmitter>>>> = Arc::new(Mutex::new(None));
+    rig.assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe).sharing_submitter(slot.clone())));
+    let run = start_spec_run(&spec, &profile, rig.assembly).expect("the fixture Run starts");
+    let start = run.start_instant().expect("the Run was armed").ticks_in(rig.root).expect("the start is on the primary root");
+    let (handle, _instant) = far_future_stop(&log.calls(), start);
+    let submitter = slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
+    let action = Action::UpdateParameter { target: support::target("radio"), key: Key::parse("test.gain").unwrap(), value: Value::num(2.0).unwrap(), class: UpdateClass::HardwareTimed, at: None };
+    let id = submitter.submit(action.clone()).expect("KC-24: the submission is admitted while the Run is Running");
+    // W takes M (what the Authority's cancel needs), submits through the Run's own
+    // submitter, then records its release while it still holds M.
+    let worker = {
+        let probe = probe.clone();
+        let gate = cancel_gate.clone();
+        let held_by_w = held_by_w.clone();
+        std::thread::spawn(move || {
+            let guard = held_by_w.lock().unwrap_or_else(|e| e.into_inner());
+            probe.record("w:holds_m");
+            wait(&gate);
+            let line = match submitter.submit(action) {
+                Ok(id) => format!("w:submit:Ok({id:?})"),
+                Err(violations) => format!("w:submit:Err({}:{})", violations[0].check.as_str(), violations[0].reason),
+            };
+            probe.record(line);
+            probe.record("w:releasing_m");
+            drop(guard);
+        })
+    };
+    assert!(probe.wait_for("w:holds_m", std::time::Duration::from_secs(10)), "{}", infra("W did not take M within 10 s"));
+    let (manifest_tx, manifest_rx) = std::sync::mpsc::channel();
+    let finisher = std::thread::spawn(move || {
+        let _ = manifest_tx.send(run.finish());
+    });
+    let manifest = match manifest_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(manifest) => manifest,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            finisher.join().expect("W_f does not panic");
+            panic!("W_f returned no Manifest");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("{}", infra("W_f did not return a Manifest within 10 s")),
+    };
+    finisher.join().expect("W_f does not panic");
+    worker.join().expect("W does not panic");
+    assert!(!timed_out.load(Ordering::SeqCst), "{}", infra("the cancel waited more than 10 s for M"));
+    let calls = log.calls();
+    let cancels: Vec<&Call> = calls.iter().filter(|call| call.kind == CallKind::Cancel && call.handle == Some(handle)).collect();
+    assert_eq!(cancels.len(), 1, "RS-6 step 1 cancels H once; calls: {calls:?}");
+    assert!(!cancels[0].held.admission, "KC-24a: the freeze's cancel ran under the admission lock; calls: {calls:?}");
+    assert!(cancels[0].held.freeze, "KC-24a: the freeze's cancel ran outside the freeze gate; calls: {calls:?}");
+    assert_eq!(cancels[0].returned, Some(true), "RS-6 step 1: the cancel did not return; calls: {calls:?}");
+    let lines = probe.lines();
+    let submitted = lines.iter().find(|line| line.starts_with("w:submit:")).expect("W's submission returned");
+    assert!(submitted.starts_with("w:submit:Err(ezsdr.dispatch:RS-6: dispatch is frozen)"), "KC-24a: the submission during the freeze was not refused at RS-6; lines: {lines:?}");
+    assert_eq!(manifest.termination.undelivered, vec![id], "RS-16: the freeze discards exactly the Action the first submission was given; lines: {lines:?}");
+    assert!(manifest.termination.cleanup_failures.is_empty(), "the cleanup recorded failures: {:?}", manifest.termination.cleanup_failures);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }, "RS-10: the first end request fixes the reason");
+    let at = |line: &str| lines.iter().position(|observed| observed == line).unwrap_or_else(|| panic!("the line {line} is missing; lines: {lines:?}"));
+    let entered = lines.iter().position(|line| line.starts_with("cancel:entered")).expect("the cancel entered");
+    assert!(
+        at("w:holds_m") < entered
+            && entered < at("w:submit:Err(ezsdr.dispatch:RS-6: dispatch is frozen)")
+            && at("w:submit:Err(ezsdr.dispatch:RS-6: dispatch is frozen)") < at("w:releasing_m")
+            && at("w:releasing_m") < at("cancel:done"),
+        "KC-24a: the freeze's cancel and W's submission did not interleave in the observed order; lines: {lines:?}"
+    );
+}
+
+#[test]
+fn kc_24a_freeze_a_handle_fired_before_its_cancel_is_not_a_failure() {
+    // KC-30, RS-6 step 1: a handle whose callback fired before the freeze cancels it
+    // makes `cancel` return false, which is not a failure. The cancel hook fires H's
+    // callback itself, so the count and the outcome are deterministic.
+    // Deschedule: the start and `finish_checked` run on this thread, and the hook runs
+    // on the freeze's step thread inside the latter; nothing interleaves with the count.
+    let mut spec = spec_one();
+    add_schedule(&mut spec, "radio", 1_000_000_000_000, serde_json::json!({ "kind": "stop", "target": null }));
+    let probe = Probe::new();
+    let mut rig = rig(Pacing::FreeRunning);
+    let (authority, root) = SimAuthority::new(&rig.clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+    rig.root = root;
+    rig.manual = authority.manual();
+    let log = ClockLog::default();
+    let instant = Arc::new(std::sync::atomic::AtomicI64::new(i64::MIN));
+    let fired = Arc::new(Mutex::new(None::<Result<usize, String>>));
+    let first = Arc::new(AtomicBool::new(false));
+    let on_cancel = {
+        let manual = rig.manual.clone();
+        let fired = fired.clone();
+        let instant = instant.clone();
+        let first = first.clone();
+        move |_call: &Call| {
+            if first.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let at = instant.load(Ordering::SeqCst);
+            let result = manual.advance_to(TimePoint::new(root, at)).map_err(|error| format!("{error:?}"));
+            *fired.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+        }
+    };
+    rig.assembly.authority = Box::new(WatchedAuthority::new(Box::new(authority), log.clone()).with_hooks(Hooks { on_cancel: Some(Arc::new(on_cancel)), ..Hooks::default() }));
+    rig.assembly
+        .providers
+        .insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 10, 1).registering_at_arm("radio/rx")));
+    let run = start_spec_run(&spec, &profile_one(), rig.assembly).expect("the fixture Run starts");
+    let start = run.start_instant().expect("the Run was armed").ticks_in(rig.root).expect("the start is on the primary root");
+    let calls = log.calls();
+    assert_eq!(calls.iter().filter(|call| call.kind == CallKind::Schedule).count(), 1, "the fixture schedules one handle; calls: {calls:?}");
+    let (handle, ticks) = far_future_stop(&calls, start);
+    instant.store(ticks, Ordering::SeqCst);
+    let manifest = run.finish_checked();
+    let fired = fired.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert_eq!(fired, Some(Ok(1)), "KC-30: the Authority did not fire the handle's one callback before the freeze's cancel; calls: {:?}", log.calls());
+    let calls = log.calls();
+    let cancel = calls.iter().find(|call| call.kind == CallKind::Cancel && call.handle == Some(handle)).expect("RS-6 step 1 cancels the handle");
+    assert_eq!(cancel.returned, Some(false), "KC-30: cancelling a handle that already fired did not return false; calls: {calls:?}");
+    assert!(manifest.termination.cleanup_failures.is_empty(), "KC-30: a handle fired before its cancel is a cleanup failure: {:?}", manifest.termination.cleanup_failures);
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }, "RS-10: the first end request fixes the reason");
+    assert!(manifest.termination.also.is_empty(), "RS-10: no other request is recorded; {:?}", manifest.termination.also);
+    assert!(manifest.termination.undelivered.is_empty(), "RS-16: the fixture queued no Action; {:?}", manifest.termination.undelivered);
+}
+
+/// T11/T12's fixture: `executor_docs()` with a timed `test.gain = 1.0` entry at offset 0
+/// and H, the far-future untimed `stop`, and the Executor's first step submitting
+/// `test.gain = 2.0` once the Run is Running (the same shared submitter the test thread
+/// uses afterwards).
+fn sweep_simulation_docs() -> (serde_json::Value, serde_json::Value) {
+    let (mut spec, profile) = executor_docs();
+    spec["schedule"] = serde_json::json!([
+        {
+            "at": { "clock": "radio", "offset_ticks": 0 },
+            "action": { "kind": "update_parameter", "target": serde_json::to_value(support::target("radio")).unwrap(), "key": "test.gain", "value": 1.0 }
+        },
+        { "at": { "clock": "radio", "offset_ticks": 1_000_000_000_000i64 }, "action": { "kind": "stop", "target": null } }
+    ]);
+    (spec, profile)
+}
+
+/// The Module update the Executor submits in its first step (T11, T12).
+fn sweep_module_update() -> Action {
+    Action::UpdateParameter { target: support::target("radio"), key: Key::parse("test.gain").unwrap(), value: Value::num(2.0).unwrap(), class: UpdateClass::HardwareTimed, at: None }
+}
+
+#[test]
+fn kc_24a_sweep_an_orderly_run_makes_no_supplied_call_under_a_lock() {
+    // KC-24a (#111, #119): over the whole log of an orderly Simulation Run -- a timed
+    // Action dispatched in the start batch, a Module Action submitted while Running, and
+    // `finish` -- no supplied call (now, UTC, monotonic, schedule, cancel, wait_until,
+    // next_wakeup, relations) is made under the admission or the machine lock; H is
+    // scheduled in the Armed window and cancelled once in the Stopping window.
+    // Deschedule: a Simulation Run's whole control path (the start's round, the test
+    // thread's submission and `finish_checked`) runs on this thread, and no other thread
+    // makes a watched call, so a descheduled thread only delays the log's last entry.
+    let (spec, profile) = sweep_simulation_docs();
+    let probe = Probe::new();
+    let mut rig = rig(Pacing::FreeRunning);
+    let log = ClockLog::default();
+    let clock = WatchedClock::new(rig.host.clone(), log.clone());
+    rig.assembly.authority = Box::new(WatchedAuthority::new(rig.assembly.authority, log.clone()));
+    rig.assembly.host_clock = Arc::new(clock);
+    rig.assembly
+        .providers
+        .insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 10, 1).registering_at_arm("radio/rx")));
+    let slot: Arc<Mutex<Option<Arc<dyn ActionSubmitter>>>> = Arc::new(Mutex::new(None));
+    rig.assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe).sharing_submitter(slot.clone()).submitting(sweep_module_update())));
+    let run = start_spec_run(&spec, &profile, rig.assembly).expect("the fixture Run starts");
+    let start = run.start_instant().expect("the Run was armed").ticks_in(rig.root).expect("the start is on the primary root");
+    let submitter = slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
+    let id = submitter.submit(sweep_module_update()).expect("KC-24: a Module update is admitted while the Run is Running");
+    // The clock advances, so the Stopping and CleanedUp transitions' Now samples are not all 0.
+    rig.manual.advance_to(TimePoint::new(rig.root, 500)).expect("the manual clock advances");
+    let manifest = run.finish_checked();
+    let calls = log.calls();
+    let phases = sweep(&calls, &manifest.run.transitions, rig.root);
+    let (handle, _instant) = far_future_stop(&calls, start);
+    let (scheduled, _) = calls.iter().enumerate().find(|(_, call)| call.kind == CallKind::Schedule && call.handle == Some(handle)).expect("KC-20: H was scheduled");
+    assert!(phases.armed.contains(&scheduled), "KC-20: H's Schedule is not in the Armed window; phases: {phases:?}; calls: {calls:?}");
+    let cancels: Vec<(usize, &Call)> = calls.iter().enumerate().filter(|(_, call)| call.kind == CallKind::Cancel && call.handle == Some(handle)).collect();
+    assert_eq!(cancels.len(), 1, "RS-6 step 1: H is cancelled exactly once; calls: {calls:?}");
+    assert!(phases.stopping.contains(&cancels[0].0), "KC-24a: the Cancel of H is not in the Stopping window; phases: {phases:?}; calls: {calls:?}");
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line == "p:update:test.gain=1.0"), "the timed Action did not reach the Provider; lines: {lines:?}");
+    assert!(lines.iter().any(|line| line == "x:submit:ok:2"), "the Executor's Module update was not admitted; lines: {lines:?}");
+    assert_eq!(id.0, 3, "the test thread's Module update did not take the next id; lines: {lines:?}");
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }, "RS-10: the orderly finish fixes the reason");
+}
+
+#[test]
+fn kc_24a_sweep_an_abort_run_makes_no_supplied_call_under_a_lock() {
+    // KC-24a (#111, #119): the same sweep for a Run ended by a Module `Action::Abort`
+    // submitted while Running (no `finish` request first): the Stopping transition keeps
+    // the abort mode and the Termination the Abort's cause.
+    // Deschedule: as T11, every control-path step runs on this thread.
+    let (spec, profile) = sweep_simulation_docs();
+    let probe = Probe::new();
+    let mut rig = rig(Pacing::FreeRunning);
+    let log = ClockLog::default();
+    let clock = WatchedClock::new(rig.host.clone(), log.clone());
+    rig.assembly.authority = Box::new(WatchedAuthority::new(rig.assembly.authority, log.clone()));
+    rig.assembly.host_clock = Arc::new(clock);
+    rig.assembly
+        .providers
+        .insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/rx", 10, 1).registering_at_arm("radio/rx")));
+    let slot: Arc<Mutex<Option<Arc<dyn ActionSubmitter>>>> = Arc::new(Mutex::new(None));
+    rig.assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe).sharing_submitter(slot.clone()).submitting(sweep_module_update())));
+    let run = start_spec_run(&spec, &profile, rig.assembly).expect("the fixture Run starts");
+    let start = run.start_instant().expect("the Run was armed").ticks_in(rig.root).expect("the start is on the primary root");
+    let submitter = slot.lock().unwrap_or_else(|e| e.into_inner()).clone().expect("the Executor was prepared");
+    submitter.submit(Action::Abort { cause: StopCause::Abort { message: "sweep".to_owned() } }).expect("KC-24: an Abort is accepted while Running");
+    // The clock advances, so the Stopping and CleanedUp transitions' Now samples are not all 0.
+    rig.manual.advance_to(TimePoint::new(rig.root, 500)).expect("the manual clock advances");
+    let manifest = run.finish_checked();
+    let calls = log.calls();
+    let phases = sweep(&calls, &manifest.run.transitions, rig.root);
+    let (handle, _instant) = far_future_stop(&calls, start);
+    let (scheduled, _) = calls.iter().enumerate().find(|(_, call)| call.kind == CallKind::Schedule && call.handle == Some(handle)).expect("KC-20: H was scheduled");
+    assert!(phases.armed.contains(&scheduled), "KC-20: H's Schedule is not in the Armed window; phases: {phases:?}; calls: {calls:?}");
+    let cancels: Vec<(usize, &Call)> = calls.iter().enumerate().filter(|(_, call)| call.kind == CallKind::Cancel && call.handle == Some(handle)).collect();
+    assert_eq!(cancels.len(), 1, "RS-6 step 1: H is cancelled exactly once; calls: {calls:?}");
+    assert!(phases.stopping.contains(&cancels[0].0), "KC-24a: the Cancel of H is not in the Stopping window; phases: {phases:?}; calls: {calls:?}");
+    let lines = probe.lines();
+    assert!(lines.iter().any(|line| line == "p:update:test.gain=1.0"), "the timed Action did not reach the Provider; lines: {lines:?}");
+    assert!(lines.iter().any(|line| line == "x:submit:ok:2"), "the Executor's Module update was not admitted; lines: {lines:?}");
+    let stopping = manifest.run.transitions.iter().find(|row| matches!(row.state, RunState::Stopping { .. })).expect("the Run recorded Stopping");
+    assert_eq!(stopping.state, RunState::Stopping { mode: CleanupMode::Abort }, "KC-43: the Stopping transition does not carry the abort mode: {stopping:?}");
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Abort { message: "sweep".to_owned() } }, "RS-10: the Abort's cause is not the reason");
+    assert!(manifest.termination.also.is_empty(), "RS-10: the finish's own request is dropped; {:?}", manifest.termination.also);
 }
 
 #[test]

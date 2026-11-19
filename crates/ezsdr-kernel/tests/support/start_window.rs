@@ -12,7 +12,7 @@ use ezsdr_kernel::coordinator::start_probe::{self, Point, Reading};
 use ezsdr_kernel::coordinator::{Assembly, RunHandle};
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::module_api::{ActionSubmitter, Authority, AuthorityDescriptor, Pacing};
-use ezsdr_kernel::run::HostClock;
+use ezsdr_kernel::run::{HostClock, RunState, TransitionRecord};
 use ezsdr_kernel::spec::{Ident, Key, SpecError, Value};
 use ezsdr_kernel::time::{ClockRelation, ScheduleHandle, TimeAuthority, TimeError, TimePoint};
 
@@ -86,6 +86,7 @@ impl StartTrace {
                     assert!(!reading.dispatch_frozen, "KC-24a: dispatch is frozen at {point:?}; trace: {points:?}");
                 }
                 Point::Released => {}
+                _ => {}
             }
         }
         for wanted in required {
@@ -229,90 +230,249 @@ pub fn with_seen(assembly: &mut Assembly, profile: &mut serde_json::Value) -> Se
     log
 }
 
-/// One clock observation the doubles recorded, with whether the admission lock was
-/// held at that call.
+/// Which of the coordinator's serialising locks the calling thread held, and the
+/// reading of it, from the Kernel's own per-thread record (KC-24a).
+pub use ezsdr_kernel::coordinator::lock_record::{Held, held};
+
+/// The supplied call a [`Call`] records.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ClockEvent {
-    /// A `TimeAuthority::now` call and its returned primary-root tick.
-    Now {
-        /// The admission lock was held at the call.
-        held: bool,
-        /// The returned sample.
-        sample: i64,
-    },
-    /// A `HostClock::utc_nanos` call and its returned value.
-    Utc {
-        /// The admission lock was held at the call.
-        held: bool,
-        /// The returned sample.
-        sample: i64,
-    },
-    /// A `start_probe` point the hook reached.
+pub enum CallKind {
+    /// `TimeAuthority::now`.
+    Now,
+    /// `HostClock::utc_nanos`.
+    Utc,
+    /// `HostClock::monotonic_millis`.
+    Monotonic,
+    /// `TimeAuthority::schedule`.
+    Schedule,
+    /// `TimeAuthority::cancel`.
+    Cancel,
+    /// `TimeAuthority::wait_until`.
+    WaitUntil,
+    /// `Authority::next_wakeup`.
+    NextWakeup,
+    /// `Authority::relations`.
+    Relations,
+}
+
+/// One supplied call, recorded at entry; [`ClockLog::fill`] sets the result slots once
+/// the inner call returned.
+#[derive(Clone, Debug)]
+pub struct Call {
+    /// Which supplied method.
+    pub kind: CallKind,
+    /// Which of the coordinator's locks the calling thread held at entry.
+    pub held: Held,
+    /// The thread that made the call.
+    pub thread: std::thread::ThreadId,
+    /// `Now`, `Utc`: the returned sample; `Schedule`, `WaitUntil`: the requested ticks in the primary root.
+    pub sample: Option<i64>,
+    /// `Schedule`: the handle returned; `Cancel`: the argument.
+    pub handle: Option<ScheduleHandle>,
+    /// `Cancel`: what the inner authority returned; `None` until it returned.
+    pub returned: Option<bool>,
+}
+
+/// One event of the log: a supplied call, or a `start_probe` point a hook reached.
+#[derive(Clone, Debug)]
+pub enum LogEvent {
+    /// A supplied call.
+    Call(Call),
+    /// A `start_probe` point.
     Point(Point),
 }
 
-/// The ordered events a [`WatchedClock`] and a [`WatchedAuthority`] record.
+/// The ordered events a [`WatchedClock`] and a [`WatchedAuthority`] record, so that a
+/// call and a `start_probe` point keep their order.
 #[derive(Clone, Default)]
-pub struct ClockLog(Arc<Mutex<Vec<ClockEvent>>>);
+pub struct ClockLog(Arc<Mutex<Vec<LogEvent>>>);
 
 impl ClockLog {
-    /// Appends one event.
-    pub fn push(&self, event: ClockEvent) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+    /// Appends one call at entry and returns its index, which [`fill`](Self::fill) takes.
+    pub fn push_call(&self, call: Call) -> usize {
+        let mut events = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        events.push(LogEvent::Call(call));
+        events.len() - 1
+    }
+
+    /// Sets the result slots of the call at `index`, after the inner call returned.
+    pub fn fill(&self, index: usize, set: impl FnOnce(&mut Call)) {
+        let mut events = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match &mut events[index] {
+            LogEvent::Call(call) => set(call),
+            LogEvent::Point(point) => panic!("KC-24a: {point:?} is not a call"),
+        }
+    }
+
+    /// Appends one `start_probe` point, keeping the calls' order around it.
+    pub fn push_point(&self, point: Point) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(LogEvent::Point(point));
     }
 
     /// Copies every event; the mutex is never held across an assert.
-    pub fn events(&self) -> Vec<ClockEvent> {
+    pub fn events(&self) -> Vec<LogEvent> {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Copies every call in order; the mutex is never held across an assert.
+    pub fn calls(&self) -> Vec<Call> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|event| match event {
+                LogEvent::Call(call) => Some(call.clone()),
+                LogEvent::Point(_) => None,
+            })
+            .collect()
     }
 }
 
-/// A HostClock that forwards to a `FakeHostClock` and records, once a probe is in its
-/// slot, whether the admission lock was held at each `utc_nanos`, with a distinct
-/// sample per call.
+/// `H`, the far-future untimed `stop` entry's handle (KC-20): the one `Schedule` call
+/// whose instant is at least an hour after the Run's start, `start` in primary-root
+/// ticks, with that instant. Fails when the fixture did not schedule exactly one.
+pub fn far_future_stop(calls: &[Call], start: i64) -> (ScheduleHandle, i64) {
+    const HOUR: i64 = 3_600_000_000_000;
+    let far: Vec<&Call> = calls.iter().filter(|call| call.kind == CallKind::Schedule && call.sample.is_some_and(|sample| sample >= start.saturating_add(HOUR))).collect();
+    assert_eq!(far.len(), 1, "RS-6 step 1: the Run scheduled one far-future handle; calls: {calls:?}");
+    (far[0].handle.expect("the schedule returned its handle"), far[0].sample.expect("the schedule recorded its instant"))
+}
+
+/// The index windows of a Run's ordered [`Call`]s, delimited by its transitions' `Utc`
+/// calls (KC-24a): a test requires what it needs to have seen in which window.
+#[derive(Clone, Debug)]
+pub struct Phases {
+    /// The calls after the Armed transition's `Utc` and before Running's.
+    pub armed: std::ops::Range<usize>,
+    /// The calls after the Running transition's `Utc` and before Stopping's.
+    pub running: std::ops::Range<usize>,
+    /// The calls after the Stopping transition's `Utc` and before CleanedUp's.
+    pub stopping: std::ops::Range<usize>,
+}
+
+/// KC-24a's rule over a whole Run made with the watched doubles (T11..T14): no supplied
+/// call was made with the admission or the machine lock held; every transition after
+/// Created has its `Now` sample immediately before its `Utc` sample on one thread; and
+/// the Armed, Running and Stopping windows are returned for the test's own requirements.
+/// When the Authority never advances, every `Now` sample is 0 and the sample equality is
+/// vacuous -- the pair's presence and thread are still checked.
+///
+/// What the sweep cannot see: locks other than `admission` and `machine` (`end`, `also`,
+/// `delivered`, `links`, the `wake_handle` held across `schedule`, slot locks); paths no
+/// Run drives; supplied objects other than the Authority's time handle and the
+/// HostClock; guards that bypass the recording helpers (T15 covers the text only); and
+/// the deadlock itself -- it checks the deadlock's precondition.
+pub fn sweep(calls: &[Call], transitions: &[TransitionRecord], primary: ClockDomainId) -> Phases {
+    for call in calls {
+        assert!(
+            !call.held.admission && !call.held.machine,
+            "KC-24a: {:?} on {:?} ran under a coordinator lock (admission {}, machine {}); calls: {calls:?}",
+            call.kind,
+            call.thread,
+            call.held.admission,
+            call.held.machine
+        );
+    }
+    let utc: Vec<(usize, &Call)> = calls.iter().enumerate().filter(|(_, call)| call.kind == CallKind::Utc).collect();
+    assert_eq!(utc.len(), transitions.len(), "KC-43: the UTC reads are not one per transition; calls: {calls:?}");
+    let mut positions = [None; 4];
+    for (row, (position, call)) in transitions.iter().zip(&utc) {
+        assert_eq!(call.sample, Some(row.host_utc_nanos), "KC-43: the {:?} transition's UTC is not the sampled one; calls: {calls:?}", row.state);
+        if !matches!(row.state, RunState::Created {}) {
+            let at = row.at.expect("a transition after Created carries its runtime instant");
+            let ticks = at.ticks_in(primary).expect("the transition's instant is on the primary root");
+            let previous = calls[..*position]
+                .iter()
+                .rev()
+                .find(|earlier| earlier.thread == call.thread)
+                .unwrap_or_else(|| panic!("KC-43: the {:?} transition's UTC read has no earlier call on its thread; calls: {calls:?}", row.state));
+            assert_eq!(previous.kind, CallKind::Now, "KC-43: the call before the {:?} transition's UTC read is {previous:?}, not the Authority's now; calls: {calls:?}", row.state);
+            assert_eq!(previous.sample, Some(ticks), "KC-43: the {:?} transition's instant is not the sampled one; calls: {calls:?}", row.state);
+        }
+        match &row.state {
+            RunState::Armed {} => positions[0] = Some(*position),
+            RunState::Running {} => positions[1] = Some(*position),
+            RunState::Stopping { .. } => positions[2] = Some(*position),
+            RunState::CleanedUp { .. } => positions[3] = Some(*position),
+            _ => {}
+        }
+    }
+    let [Some(armed), Some(running), Some(stopping), Some(cleaned_up)] = positions else {
+        panic!("KC-24a: the Run did not record Armed, Running, Stopping and CleanedUp: {positions:?}; calls: {calls:?}");
+    };
+    assert!(armed < running && running < stopping && stopping < cleaned_up, "KC-43: the transitions are not in order: {transitions:?}");
+    Phases { armed: armed + 1..running, running: running + 1..stopping, stopping: stopping + 1..cleaned_up }
+}
+
+/// A hook body: it records into a probe or a log, or parks on a gate, on the calling
+/// thread; assertions run on the test thread.
+pub type CallHook = Arc<dyn Fn(&Call) + Send + Sync>;
+
+/// Hooks a test installs on the watched `Authority` and the `TimeAuthority` it hands
+/// out. Each runs on the calling thread, after its call was logged (so the entry and
+/// its `held` are visible) and before it is forwarded, and only records or parks:
+/// assertions run on the test thread.
+#[derive(Clone, Default)]
+pub struct Hooks {
+    /// Runs at each `TimeAuthority::now` entry.
+    pub on_now: Option<CallHook>,
+    /// Runs at each `TimeAuthority::schedule` entry.
+    pub on_schedule: Option<CallHook>,
+    /// Runs at each `TimeAuthority::cancel` entry.
+    pub on_cancel: Option<CallHook>,
+    /// Runs at each `TimeAuthority::cancel` after the inner call returned and its result slot is filled.
+    pub on_cancel_return: Option<CallHook>,
+    /// Runs after `Authority::next_wakeup` returned, with its result.
+    pub on_next_wakeup_return: Option<Arc<dyn Fn(Option<TimePoint>) + Send + Sync>>,
+}
+
+/// A `HostClock` that forwards to a `FakeHostClock` and records every call with the
+/// locks its thread held, and a distinct sample per `utc_nanos` call.
 pub struct WatchedClock {
     inner: Arc<FakeHostClock>,
-    probe: ProbeSlot,
     log: ClockLog,
     calls: AtomicI64,
 }
 
 impl WatchedClock {
-    /// A forwarding clock and the cell its probe goes through.
-    pub fn new(inner: Arc<FakeHostClock>, log: ClockLog) -> (WatchedClock, ProbeSlot) {
-        let probe = Arc::new(Mutex::new(None));
-        (WatchedClock { inner, probe: probe.clone(), log, calls: AtomicI64::new(0) }, probe)
+    /// A forwarding clock that records into `log`.
+    pub fn new(inner: Arc<FakeHostClock>, log: ClockLog) -> WatchedClock {
+        WatchedClock { inner, log, calls: AtomicI64::new(0) }
     }
 }
 
 impl HostClock for WatchedClock {
     fn monotonic_millis(&self) -> u64 {
+        self.log.push_call(Call { kind: CallKind::Monotonic, held: held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None });
         self.inner.monotonic_millis()
     }
 
     fn utc_nanos(&self) -> i64 {
+        let index = self.log.push_call(Call { kind: CallKind::Utc, held: held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None });
         let sample = self.inner.utc_nanos() + self.calls.fetch_add(1, Ordering::SeqCst);
-        let probe = self.probe.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(probe) = probe {
-            if let Some(reading) = probe.read() {
-                self.log.push(ClockEvent::Utc { held: reading.admission_held, sample });
-            }
-        }
+        self.log.fill(index, |call| call.sample = Some(sample));
         sample
     }
 }
 
-/// An Authority that forwards to `inner` and hands out a [`WatchedTime`].
+/// An Authority that forwards to `inner` and hands out a [`WatchedTime`]; both record
+/// into the same log.
 pub struct WatchedAuthority {
     inner: Box<dyn Authority>,
-    probe: ProbeSlot,
     log: ClockLog,
+    hooks: Hooks,
 }
 
 impl WatchedAuthority {
-    /// A forwarding Authority with the cell its `now` readings go through.
-    pub fn new(inner: Box<dyn Authority>, probe: ProbeSlot, log: ClockLog) -> WatchedAuthority {
-        WatchedAuthority { inner, probe, log }
+    /// A forwarding Authority that records into `log`.
+    pub fn new(inner: Box<dyn Authority>, log: ClockLog) -> WatchedAuthority {
+        WatchedAuthority { inner, log, hooks: Hooks::default() }
+    }
+
+    /// Installs `hooks`; the [`WatchedTime`] handles this Authority hands out share them.
+    pub fn with_hooks(mut self, hooks: Hooks) -> WatchedAuthority {
+        self.hooks = hooks;
+        self
     }
 }
 
@@ -322,24 +482,30 @@ impl Authority for WatchedAuthority {
     }
 
     fn time(&self) -> Arc<dyn TimeAuthority> {
-        Arc::new(WatchedTime { inner: self.inner.time(), probe: self.probe.clone(), log: self.log.clone() })
+        Arc::new(WatchedTime { inner: self.inner.time(), log: self.log.clone(), hooks: self.hooks.clone() })
     }
 
     fn next_wakeup(&self) -> Option<TimePoint> {
-        self.inner.next_wakeup()
+        self.log.push_call(Call { kind: CallKind::NextWakeup, held: held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None });
+        let result = self.inner.next_wakeup();
+        if let Some(hook) = &self.hooks.on_next_wakeup_return {
+            hook(result);
+        }
+        result
     }
 
     fn relations(&self) -> Vec<ClockRelation> {
+        self.log.push_call(Call { kind: CallKind::Relations, held: held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None });
         self.inner.relations()
     }
 }
 
-/// A TimeAuthority that forwards to `inner` and records, once a probe is in its slot,
-/// whether the admission lock was held at each `now`, with the returned sample.
+/// A TimeAuthority that forwards to `inner` and records every watched call with the
+/// locks its thread held at entry and the result it needed.
 pub struct WatchedTime {
     inner: Arc<dyn TimeAuthority>,
-    probe: ProbeSlot,
     log: ClockLog,
+    hooks: Hooks,
 }
 
 impl TimeAuthority for WatchedTime {
@@ -356,29 +522,55 @@ impl TimeAuthority for WatchedTime {
     }
 
     fn now(&self, domain: ClockDomainId) -> Result<TimePoint, TimeError> {
+        let call = Call { kind: CallKind::Now, held: held(), thread: std::thread::current().id(), sample: None, handle: None, returned: None };
+        let index = self.log.push_call(call.clone());
+        if let Some(hook) = &self.hooks.on_now {
+            hook(&call);
+        }
         let result = self.inner.now(domain);
         if let Ok(t) = &result {
             if let Ok(ticks) = t.ticks_in(domain) {
-                let probe = self.probe.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if let Some(probe) = probe {
-                    if let Some(reading) = probe.read() {
-                        self.log.push(ClockEvent::Now { held: reading.admission_held, sample: ticks });
-                    }
-                }
+                self.log.fill(index, |call| call.sample = Some(ticks));
             }
         }
         result
     }
 
     fn wait_until(&self, t: TimePoint) -> Result<(), TimeError> {
+        let held = held();
+        let thread = std::thread::current().id();
+        let sample = t.ticks_in(self.inner.primary_root()).ok();
+        self.log.push_call(Call { kind: CallKind::WaitUntil, held, thread, sample, handle: None, returned: None });
         self.inner.wait_until(t)
     }
 
     fn schedule(&self, t: TimePoint, f: Box<dyn FnOnce(TimePoint) + Send>) -> Result<ScheduleHandle, TimeError> {
-        self.inner.schedule(t, f)
+        let held = held();
+        let thread = std::thread::current().id();
+        let sample = t.ticks_in(self.inner.primary_root()).ok();
+        let call = Call { kind: CallKind::Schedule, held, thread, sample, handle: None, returned: None };
+        let index = self.log.push_call(call.clone());
+        if let Some(hook) = &self.hooks.on_schedule {
+            hook(&call);
+        }
+        let result = self.inner.schedule(t, f);
+        if let Ok(handle) = &result {
+            self.log.fill(index, |call| call.handle = Some(*handle));
+        }
+        result
     }
 
     fn cancel(&self, h: ScheduleHandle) -> bool {
-        self.inner.cancel(h)
+        let call = Call { kind: CallKind::Cancel, held: held(), thread: std::thread::current().id(), sample: None, handle: Some(h), returned: None };
+        let index = self.log.push_call(call.clone());
+        if let Some(hook) = &self.hooks.on_cancel {
+            hook(&call);
+        }
+        let returned = self.inner.cancel(h);
+        self.log.fill(index, |call| call.returned = Some(returned));
+        if let Some(hook) = &self.hooks.on_cancel_return {
+            hook(&Call { returned: Some(returned), ..call });
+        }
+        returned
     }
 }

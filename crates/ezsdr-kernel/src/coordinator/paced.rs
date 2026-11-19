@@ -130,21 +130,28 @@ fn step(shared: &Shared, inst: Inst, t: TimePoint) -> Result<StepOutcome, Module
     }
 }
 
-/// RS-6 steps 1 and 2 on the data thread, once, after it requested an end (KC-46b).
+/// RS-6 steps 1 and 2 on the data thread, once, after it requested an end (KC-46b), under one hold of the freeze gate.
 fn stop_early(shared: &Arc<Shared>) {
     let ops = super::ending::Ops::new(shared.clone());
     let mode = end_mode(shared).unwrap_or(CleanupMode::Orderly);
-    let record = |step: CleanupStep, fragment: Option<&crate::spec::Ident>| {
-        if let Err(error) = ops.perform(step, fragment, mode) {
+    let record = |step: CleanupStep, fragment: Option<&crate::spec::Ident>, result: Result<(), crate::module_api::ModuleError>| {
+        if let Err(error) = result {
             lock(&shared.cleanup_failures).push(CleanupFailure { step, fragment: fragment.cloned(), reason: error.message, timed_out: false });
         }
     };
-    record(CleanupStep::FreezeDispatch, None);
+    // RS-6, KC-24a: the gate is held from the freeze through the last Provider stop, so no cancel another performance makes (the cleanup's freeze of a handle published after this freeze's drain, a withdrawal) is outstanding when a stop starts. A cleanup's freeze that already ran left nothing to drain, and this performance then only stops.
+    let gate = shared.lock_freeze();
+    if !shared.frozen.load(Ordering::Acquire) {
+        record(CleanupStep::FreezeDispatch, None, ops.freeze_held());
+    }
     if let Some(routing) = shared.routing() {
         for fragment in &routing.reverse {
-            record(CleanupStep::StopProviders, Some(fragment));
+            #[cfg(feature = "testing")]
+            super::start_probe::reach_freeze(shared, super::start_probe::FreezePoint::BeforeStop);
+            record(CleanupStep::StopProviders, Some(fragment), ops.perform(CleanupStep::StopProviders, Some(fragment), mode));
         }
     }
+    drop(gate);
     wake(shared, true);
 }
 
