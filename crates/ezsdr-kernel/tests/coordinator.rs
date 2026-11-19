@@ -3963,6 +3963,85 @@ fn kc_24_a_check_refuses_a_non_provider_update_with_its_proposed_value() {
     assert!(manifest.termination.cleanup_failures.is_empty());
 }
 
+/// A check that refuses `test.grid` with a violation naming another key, `test.count`:
+/// the Kernel records the Action's own value for the key the violation names, and the
+/// Action asked nothing of `test.count` (KC-24 step 12).
+struct RefuseOtherKey(ezsdr_kernel::spec::Namespace);
+
+impl RefuseOtherKey {
+    fn new() -> RefuseOtherKey {
+        RefuseOtherKey(ns("test.other"))
+    }
+}
+
+impl ezsdr_kernel::binding::AdmissionCheck for RefuseOtherKey {
+    fn section(&self) -> &ezsdr_kernel::spec::Namespace {
+        &self.0
+    }
+    fn stages(&self) -> &[ezsdr_kernel::binding::CheckStage] {
+        &[ezsdr_kernel::binding::CheckStage::Runtime]
+    }
+    fn check(
+        &self,
+        _section: &serde_json::Value,
+        _effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        _stage: ezsdr_kernel::binding::CheckStage,
+    ) -> Vec<ezsdr_kernel::binding::Violation> {
+        proposed
+            .values()
+            .any(|values| values.contains_key(&Key::parse("test.grid").unwrap()))
+            .then(|| ezsdr_kernel::binding::Violation {
+                check: ns("test.other"),
+                key: Some(Key::parse("test.count").unwrap()),
+                requested: Some(Value::num(1.0).unwrap()),
+                reason: "test.other: test.count is refused".to_owned(),
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
+#[test]
+fn kc_24_a_registered_check_s_violation_records_what_the_action_asked() {
+    // KC-24 step 12: a registered check sees `proposed` after step 10's coercion, so
+    // `test.limits` judges the snapped 20.0 — but the violation's `requested` is what the
+    // Action asked (19.5), not the value the check saw. A violation of another key records
+    // none: the Action asked nothing of it.
+    let mut profile = profile_one();
+    profile["environment"] = serde_json::json!({ "test.limits": { "max_grid": 19.9 } });
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_classed();
+    assembly.checks = run_checks(true);
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2).with_grid(20.0)));
+    let mut run = connect(&profile, &Default::default(), assembly, Lease::attached()).expect("valid Session entry");
+    let entry = run.submit(SessionAction::SetParameter { target: support::target("radio"), key: Key::parse("test.grid").unwrap(), value: Value::num(19.5).unwrap() }, None).unwrap();
+    let Outcome::Rejected { violations } = &entry.outcome else { panic!("the coerced value is outside the ceiling: {:?}", entry.outcome) };
+    assert_eq!(violations.len(), 1, "the ceiling is the only refusal: {violations:?}");
+    let violation = &violations[0];
+    assert_eq!(violation.check, ns("test.limits"));
+    assert_eq!(violation.key, Some(Key::parse("test.grid").unwrap()));
+    assert_eq!(violation.requested, Some(Value::num(19.5).unwrap()), "the Action's value, not the coerced 20.0");
+    assert!(violation.reason.contains("test.grid 20 exceeds the declared ceiling 19.9"), "the check judged the coerced value: {violation:?}");
+    let _ = run.finish_checked();
+
+    let mut profile = profile_one();
+    profile["environment"] = serde_json::json!({ "test.other": {} });
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.registry = run_registry_classed();
+    assembly.checks = run_checks(false);
+    assembly.checks.register(Arc::new(RefuseOtherKey::new()));
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
+    let mut run = connect(&profile, &Default::default(), assembly, Lease::attached()).expect("valid Session entry");
+    let entry = run.submit(SessionAction::SetParameter { target: support::target("radio"), key: Key::parse("test.grid").unwrap(), value: Value::num(25.0).unwrap() }, None).unwrap();
+    let Outcome::Rejected { violations } = &entry.outcome else { panic!("the check refuses the update: {:?}", entry.outcome) };
+    assert_eq!(violations.len(), 1, "the check's refusal is the only one: {violations:?}");
+    assert_eq!(violations[0].check, ns("test.other"));
+    assert_eq!(violations[0].key, Some(Key::parse("test.count").unwrap()));
+    assert_eq!(violations[0].requested, None, "the Action asked nothing of test.count");
+    let _ = run.finish_checked();
+}
+
 /// A Provider double whose `coerce` applies `test.gain` as a `List` — a value outside
 /// that `Num` declaration — and every other request as itself. It is how a test
 /// reaches KC-24's step 11, the one refusal a conforming Provider would not produce,

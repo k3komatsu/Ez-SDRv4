@@ -27244,13 +27244,13 @@
  },
  {
   "id": "N114-6",
-  "name": "SB-46: a validate rejected coercion names the Module's reported value as `requested` instead of the Spec's request",
+  "name": "SB-46: a validate rejected coercion of a non-`Eq` key names the Module's reported value as `requested` instead of none",
   "file": "crates/ezsdr-kernel/src/plan/validation.rs",
   "old": "key: Some(c.key.clone()), requested: super::coercion::exact_request(spec.resources.get(&previewed.resource), &c.key),",
   "new": "key: Some(c.key.clone()), requested: Some(c.requested.clone()),",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
-  "filter": "sb_46_a_rejected_coercion_records_the_specs_request_at_validate"
+  "filter": "sb_46_a_rejected_coercion_of_a_key_with_no_exact_request_records_none_at_validate"
  },
  {
   "id": "N114-7",
@@ -29115,5 +29115,195 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "s9_tail_judgement_checks_the_cut_against_the_booked_stop"
+ },
+ {
+  "id": "N115-1",
+  "name": "SB-44: a validate false `requested` records no violation (the push is deleted)",
+  "file": "crates/ezsdr-kernel/src/plan/matching.rs",
+  "old": "out.violations.push(violation);",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_with_a_false_requested_is_refused_at_validate"
+ },
+ {
+  "id": "N115-2",
+  "name": "SB-44: a validate false `requested` is refused and still enters `coercions_preview`",
+  "file": "crates/ezsdr-kernel/src/plan/matching.rs",
+  "old": "!wrong_kind.contains(&coercion.key) && !false_request.contains(&coercion.key)",
+  "new": "!wrong_kind.contains(&coercion.key)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_with_a_false_requested_is_refused_at_validate"
+ },
+ {
+  "id": "N115-3",
+  "name": "SB-44: a prepare false `requested` is not checked (every key is asked for nothing)",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "super::coercion::false_request(super::coercion::fragment_request(spec, fragment, &c.key), c, &fragment.to_string())",
+  "new": "super::coercion::false_request(None, c, &fragment.to_string())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_with_a_false_requested_is_refused_at_prepare"
+ },
+ {
+  "id": "N115-4",
+  "name": "SB-44: a prepare false `requested` is also judged by SB-46's policy (the loop does not continue)",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "violations.push(violation); continue;",
+  "new": "violations.push(violation);",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_with_a_false_requested_is_refused_at_prepare"
+ },
+ {
+  "id": "N115-5",
+  "name": "SB-44: a Sink's false `requested` takes the Provider's exact request instead of the output's params",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "super::coercion::false_request(super::coercion::fragment_request(spec, fragment, &c.key), c, &fragment.to_string())",
+  "new": "super::coercion::false_request(super::coercion::exact_request(spec.resources.get(fragment), &c.key), c, &fragment.to_string())",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_of_a_sink_with_a_false_requested_is_refused_at_prepare"
+ },
+ {
+  "id": "N115-6",
+  "name": "SB-44: a coercion of a key with no exact request is checked against a substituted value",
+  "file": "crates/ezsdr-kernel/src/plan/coercion.rs",
+  "old": "let asked = asked.filter(|asked| *asked != c.requested)?;",
+  "new": "let asked = match asked { Some(asked) => if asked == c.requested { return None } else { asked }, None => Value::from(false) };",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_of_a_key_with_no_exact_request_is_not_checked"
+ },
+ {
+  "id": "N115-7",
+  "name": "SB-44: a false `requested` is treated as the one that matches (the comparison is flipped)",
+  "file": "crates/ezsdr-kernel/src/plan/coercion.rs",
+  "old": "let asked = asked.filter(|asked| *asked != c.requested)?;",
+  "new": "let asked = asked.filter(|asked| *asked == c.requested)?;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_with_a_false_requested_is_refused_at_validate"
+ },
+ {
+  "id": "N115F-1",
+  "name": "KC-24 step 12: a runtime violation keeps the check's coerced value as `requested` (the Kernel's overwrite is deleted)",
+  "file": "crates/ezsdr-kernel/src/session.rs",
+  "old": "violation.requested = violation.key.as_ref().and_then(|key| asked.get(key)).cloned();",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_registered_check_s_violation_records_what_the_action_asked"
+ },
+ {
+  "id": "N115F-2",
+  "name": "KC-24 step 12: the runtime admission passes no `asked` map (the check's coerced value is kept)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "Some(&asked)",
+  "new": "None",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_registered_check_s_violation_records_what_the_action_asked"
+ },
+ {
+  "id": "N115F-3",
+  "name": "KC-24 step 12: a violation of another key keeps the check's `requested` instead of none",
+  "file": "crates/ezsdr-kernel/src/session.rs",
+  "old": "violation.requested = violation.key.as_ref().and_then(|key| asked.get(key)).cloned();",
+  "new": "violation.requested = violation.key.as_ref().and_then(|key| asked.get(key)).cloned().or(violation.requested.take());",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_24_a_registered_check_s_violation_records_what_the_action_asked"
+ },
+ {
+  "id": "N115F-4",
+  "name": "KC-24 step 12: the acceptance Session's runtime admission passes no `asked` map (the check's coerced value is kept)",
+  "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+  "old": "Some(&asked)",
+  "new": "None",
+  "crate": "ezsdr-acceptance",
+  "test_bin": "v58",
+  "filter": "v58_16_a_runtime_refusal_records_what_the_action_asked_not_the_coerced_value"
+ },
+ {
+  "id": "N116-1",
+  "name": "RM-19: a `prepare` violation records the reported configuration as `requested` (the stage is ignored)",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "CheckStage::Prepare => BTreeMap::new(),",
+  "new": "CheckStage::Prepare => configuration.clone(),",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_19_a_prepare_violation_records_no_requested_and_names_the_reported_value"
+ },
+ {
+  "id": "N116-2",
+  "name": "RM-19: a `validate` violation records no `requested` (the Spec's own value is dropped)",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "CheckStage::Validate => configuration.clone(),",
+  "new": "CheckStage::Validate => BTreeMap::new(),",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_19_a_validate_violation_records_the_specs_value"
+ },
+ {
+  "id": "N116-3",
+  "name": "RM-19: a `runtime` violation records the applied configuration as `requested` (the Action's value is dropped)",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "CheckStage::Runtime => proposed.get(&fragment).cloned().unwrap_or_default(),",
+  "new": "CheckStage::Runtime => configuration.clone(),",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_19_a_runtime_violation_records_only_what_the_action_asked"
+ },
+ {
+  "id": "N116-4",
+  "name": "RM-19: a violated key records no `requested` (the asked value is dropped)",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "requested: asked.get(key).cloned(),",
+  "new": "requested: None,",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_19_a_validate_violation_records_the_specs_value"
+ },
+ {
+  "id": "N116-5",
+  "name": "RM-19: a frequency of another kind does not name the reported value",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "format!(\"radio.tx.c{number}.frequency_hz is not a number: {value:?}\")",
+  "new": "format!(\"radio.tx.c{number}.frequency_hz is not a number\")",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_19_a_prepare_violation_records_no_requested_and_names_the_reported_value"
+ },
+ {
+  "id": "N116-6",
+  "name": "RM-19: a gain of another kind does not name the reported value",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "format!(\"radio.tx.c{number}.gain_db is not a number: {value:?}\")",
+  "new": "format!(\"radio.tx.c{number}.gain_db is not a number\")",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_19_a_prepare_violation_records_no_requested_and_names_the_reported_value"
+ },
+ {
+  "id": "N116-7",
+  "name": "RM-19: an antenna of another kind does not name the reported value",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "format!(\"radio.{} antenna is not a string: {value:?}\", if is_rx { \"rx\" } else { \"tx\" })",
+  "new": "format!(\"radio.{} antenna is not a string\", if is_rx { \"rx\" } else { \"tx\" })",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_19_a_prepare_violation_records_no_requested_and_names_the_reported_value"
+ },
+ {
+  "id": "N116-8",
+  "name": "RM-19: a disabled channel's reason does not name its stream",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "format!(\"transmit channel c{number} is not enabled (its stream is {stream:?})\")",
+  "new": "format!(\"transmit channel c{number} is not enabled\")",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_19_a_prepare_violation_records_no_requested_and_names_the_reported_value"
  }
 ]

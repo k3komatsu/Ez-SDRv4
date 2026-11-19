@@ -285,7 +285,7 @@ impl AdmissionCheck for RfEnvelopeCheck {
         CHECK_STAGES
     }
 
-    fn check(&self, section: &serde_json::Value, effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, _stage: CheckStage) -> Vec<Violation> {
+    fn check(&self, section: &serde_json::Value, effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, stage: CheckStage) -> Vec<Violation> {
         let envelope: RfEnvelope = match serde_json::from_value(section.clone()) {
             Ok(envelope) => envelope,
             Err(error) => {
@@ -303,7 +303,13 @@ impl AdmissionCheck for RfEnvelopeCheck {
             if let Some(updates) = proposed.get(&fragment) {
                 configuration.extend(updates.clone());
             }
-            check_numbered_configuration(&configuration, &envelope, &fragment, self, &mut violations);
+            // `requested` is what was asked (RM-19): at `validate` the configuration is the Spec's request, at `runtime` the Action's value is, and at `prepare` the check sees only what a Module reported, so it records none.
+            let asked = match stage {
+                CheckStage::Validate => configuration.clone(),
+                CheckStage::Prepare => BTreeMap::new(),
+                CheckStage::Runtime => proposed.get(&fragment).cloned().unwrap_or_default(),
+            };
+            check_numbered_configuration(&configuration, &asked, &envelope, &fragment, self, &mut violations);
         }
         violations
     }
@@ -416,7 +422,7 @@ pub fn addressed(device: &ezsdr_kernel::id::ResourceId, node: Option<&ezsdr_kern
 }
 
 /// RM-33's per-channel judgement of a configuration that holds RM-27 channel keys.
-fn check_numbered_configuration(configuration: &BTreeMap<Key, Value>, envelope: &RfEnvelope, fragment: &Ident, check: &RfEnvelopeCheck, violations: &mut Vec<Violation>) {
+fn check_numbered_configuration(configuration: &BTreeMap<Key, Value>, asked: &BTreeMap<Key, Value>, envelope: &RfEnvelope, fragment: &Ident, check: &RfEnvelopeCheck, violations: &mut Vec<Violation>) {
     let mut channels: BTreeMap<(bool, i64), BTreeMap<&str, &Value>> = BTreeMap::new();
     for (key, value) in configuration {
         if let Some(Concrete::Channel { rx: is_rx, number, leaf }) = concrete(key) {
@@ -436,10 +442,10 @@ fn check_numbered_configuration(configuration: &BTreeMap<Key, Value>, envelope: 
                 match numeric(value) {
                     Some(frequency) => {
                         if !envelope.allowed_bands.iter().any(|band| band.lo_hz <= frequency && frequency <= band.hi_hz) {
-                            push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("{frequency} Hz is in no allowed band"));
+                            push_numbered_violation(violations, check, fragment, &key, asked, format!("{frequency} Hz is in no allowed band"));
                         }
                     }
-                    None => push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("radio.tx.c{number}.frequency_hz is not a number")),
+                    None => push_numbered_violation(violations, check, fragment, &key, asked, format!("radio.tx.c{number}.frequency_hz is not a number: {value:?}")),
                 }
             }
             if let Some(value) = values.get("gain_db") {
@@ -447,10 +453,10 @@ fn check_numbered_configuration(configuration: &BTreeMap<Key, Value>, envelope: 
                 match numeric(value) {
                     Some(gain) => {
                         if let Some(maximum) = envelope.max_gain_db.filter(|maximum| gain > *maximum) {
-                            push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("gain {gain} dB exceeds {maximum}"));
+                            push_numbered_violation(violations, check, fragment, &key, asked, format!("gain {gain} dB exceeds {maximum}"));
                         }
                     }
-                    None => push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("radio.tx.c{number}.gain_db is not a number")),
+                    None => push_numbered_violation(violations, check, fragment, &key, asked, format!("radio.tx.c{number}.gain_db is not a number: {value:?}")),
                 }
             }
             let enabled = match &envelope.tx_enabled {
@@ -459,31 +465,35 @@ fn check_numbered_configuration(configuration: &BTreeMap<Key, Value>, envelope: 
                 Some(TxEnabled::PerChannel(list)) => usize::try_from(*number).ok().and_then(|index| list.get(index)).copied().unwrap_or(false),
             };
             if !enabled {
-                push_numbered_violation(
-                    violations,
-                    check,
-                    fragment,
-                    &channel_key(false, *number, "stream"),
-                    values.get("stream").map(|value| (*value).clone()),
-                    format!("transmit channel c{number} is not enabled"),
-                );
+                let stream = values.get("stream").expect("a channel judged has a stream");
+                push_numbered_violation(violations, check, fragment, &channel_key(false, *number, "stream"), asked, format!("transmit channel c{number} is not enabled (its stream is {stream:?})"));
             }
         }
-        check_channel_antenna(values, envelope, fragment, check, *is_rx, *number, violations);
+        check_channel_antenna(values, asked, envelope, fragment, check, (*is_rx, *number), violations);
     }
 }
 
-fn check_channel_antenna(values: &BTreeMap<&str, &Value>, envelope: &RfEnvelope, fragment: &Ident, check: &RfEnvelopeCheck, is_rx: bool, number: i64, violations: &mut Vec<Violation>) {
+/// `channel` is the channel's direction (`true` for receive) and number.
+fn check_channel_antenna(
+    values: &BTreeMap<&str, &Value>,
+    asked: &BTreeMap<Key, Value>,
+    envelope: &RfEnvelope,
+    fragment: &Ident,
+    check: &RfEnvelopeCheck,
+    channel: (bool, i64),
+    violations: &mut Vec<Violation>,
+) {
+    let (is_rx, number) = channel;
     let Some(value) = values.get("antenna") else {
         return;
     };
     let key = channel_key(is_rx, number, "antenna");
     let Some(antenna) = value.as_scalar().and_then(text) else {
-        push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("radio.{} antenna is not a string", if is_rx { "rx" } else { "tx" }));
+        push_numbered_violation(violations, check, fragment, &key, asked, format!("radio.{} antenna is not a string: {value:?}", if is_rx { "rx" } else { "tx" }));
         return;
     };
     if envelope.antenna_ports.as_ref().is_some_and(|ports| !ports.iter().any(|port| port == antenna)) {
-        push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("antenna {antenna} is not allowed"));
+        push_numbered_violation(violations, check, fragment, &key, asked, format!("antenna {antenna} is not allowed"));
     }
 }
 
@@ -493,8 +503,8 @@ fn channel_key(is_rx: bool, number: i64, leaf: &str) -> Key {
     Key::parse(&keys::channel(direction, u32::try_from(number).expect("a parsed channel number"), leaf)).expect("a declared Radio Model key is valid")
 }
 
-fn push_numbered_violation(violations: &mut Vec<Violation>, check: &RfEnvelopeCheck, fragment: &Ident, key: &Key, requested: Option<Value>, detail: String) {
-    violations.push(Violation { check: check.section().clone(), requested, key: Some(key.clone()), reason: format!("RM-19: {fragment}: {detail}") });
+fn push_numbered_violation(violations: &mut Vec<Violation>, check: &RfEnvelopeCheck, fragment: &Ident, key: &Key, asked: &BTreeMap<Key, Value>, detail: String) {
+    violations.push(Violation { check: check.section().clone(), requested: asked.get(key).cloned(), key: Some(key.clone()), reason: format!("RM-19: {fragment}: {detail}") });
 }
 
 fn numeric(value: &Value) -> Option<f64> {

@@ -177,11 +177,21 @@ pub(super) fn match_constraints(name: &Ident, req: &ResourceReq, node: &Resource
             ),
         });
     }
+    // SB-44: a coercion whose `requested` is not the Spec's request for its key is a false report; it is refused and, like a stray, **not recorded**.
+    let mut false_request: BTreeSet<Key> = BTreeSet::new();
+    for c in previewed.iter().filter(|c| !wrong_kind.contains(&c.key)) {
+        if let Some(violation) = super::coercion::false_request(super::coercion::exact_request(Some(req), &c.key), c, &format!("{name}'s Provider")) {
+            out.violations.push(violation);
+            false_request.insert(c.key.clone());
+        }
+    }
     // A stray is refused above and **not recorded**: `coercions_preview` reaches the
     // Manifest through `AdmissionResult` (SB-38), and leaving it there both recorded a
     // substitution of a value nobody requested and fired that key's own policy default
     // — the two harms the refusal exists to prevent.
-    out.coercions_preview.extend(previewed.into_iter().filter(|coercion| !wrong_kind.contains(&coercion.key)).map(|coercion| PreviewedCoercion { resource: name.clone(), coercion }));
+    out.coercions_preview.extend(
+        previewed.into_iter().filter(|coercion| !wrong_kind.contains(&coercion.key) && !false_request.contains(&coercion.key)).map(|coercion| PreviewedCoercion { resource: name.clone(), coercion }),
+    );
     out.warnings.extend(report.warnings);
     Ok(())
 }

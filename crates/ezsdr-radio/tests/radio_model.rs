@@ -295,6 +295,129 @@ fn rm_19_the_proposed_value_is_judged() {
 }
 
 #[test]
+fn rm_19_a_prepare_violation_records_no_requested_and_names_the_reported_value() {
+    let empty = BTreeMap::new();
+    let out_of_band = radio_configuration(&tx_values(1, 2_600_000_000.0, 10.0));
+
+    // The stage is the whole difference: at `validate` the configuration is the Spec's
+    // request, while at `prepare` the check sees only a Module's report and records none.
+    let violations = run_check(base_rf_envelope(), &out_of_band, &empty, CheckStage::Validate);
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.frequency_hz");
+    assert_eq!(value_json(&violations[0].requested), json!(2_600_000_000.0));
+
+    let violations = run_check(base_rf_envelope(), &out_of_band, &empty, CheckStage::Prepare);
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.frequency_hz");
+    assert!(violations[0].requested.is_none(), "{violations:?}");
+    assert!(violations[0].reason.contains("2600000000 Hz is in no allowed band"), "{}", violations[0].reason);
+
+    let high_gain = radio_configuration(&tx_values(1, 2_450_000_000.0, 25.0));
+    let violations = run_check(base_rf_envelope(), &high_gain, &empty, CheckStage::Prepare);
+    assert_eq!(violations.len(), 1);
+    assert!(violations[0].requested.is_none(), "{violations:?}");
+    assert!(violations[0].reason.contains("gain 25 dB exceeds 20"), "{}", violations[0].reason);
+
+    let mut bad_antenna = tx_values(1, 2_450_000_000.0, 10.0);
+    bad_antenna[3].1 = Value::from("J1".to_owned());
+    let violations = run_check(base_rf_envelope(), &radio_configuration(&bad_antenna), &empty, CheckStage::Prepare);
+    assert_eq!(violations.len(), 1);
+    assert!(violations[0].requested.is_none(), "{violations:?}");
+    assert!(violations[0].reason.contains("antenna J1 is not allowed"), "{}", violations[0].reason);
+
+    let string_frequency = radio_configuration(&[("radio.tx.c0.stream", Value::from(0_i64)), ("radio.tx.c0.frequency_hz", Value::from("2.45 GHz"))]);
+    let violations = run_check(base_rf_envelope(), &string_frequency, &empty, CheckStage::Prepare);
+    assert_eq!(violations.len(), 1);
+    assert!(violations[0].requested.is_none(), "{violations:?}");
+    assert!(violations[0].reason.contains(r#"Scalar(Str("2.45 GHz"))"#), "{}", violations[0].reason);
+
+    let string_gain = radio_configuration(&[("radio.tx.c0.stream", Value::from(0_i64)), ("radio.tx.c0.gain_db", Value::from("10 dB"))]);
+    let violations = run_check(base_rf_envelope(), &string_gain, &empty, CheckStage::Prepare);
+    assert_eq!(violations.len(), 1);
+    assert!(violations[0].requested.is_none(), "{violations:?}");
+    assert!(violations[0].reason.contains(r#"Scalar(Str("10 dB"))"#), "{}", violations[0].reason);
+
+    let non_string_tx_antenna = radio_configuration(&[("radio.tx.c0.stream", Value::from(0_i64)), ("radio.tx.c0.antenna", Value::from(0_i64))]);
+    let violations = run_check(base_rf_envelope(), &non_string_tx_antenna, &empty, CheckStage::Prepare);
+    assert_eq!(violations.len(), 1);
+    assert!(violations[0].requested.is_none(), "{violations:?}");
+    assert!(violations[0].reason.contains("radio.tx antenna is not a string: Scalar(Int(0))"), "{}", violations[0].reason);
+
+    let non_string_rx_antenna = radio_configuration(&[("radio.rx.c0.stream", Value::from(0_i64)), ("radio.rx.c0.antenna", Value::from(0_i64))]);
+    let violations = run_check(base_rf_envelope(), &non_string_rx_antenna, &empty, CheckStage::Prepare);
+    assert_eq!(violations.len(), 1);
+    assert!(violations[0].requested.is_none(), "{violations:?}");
+    assert!(violations[0].reason.contains("radio.rx antenna is not a string: Scalar(Int(0))"), "{}", violations[0].reason);
+
+    let mut short_channel_envelope = base_rf_envelope();
+    short_channel_envelope["tx_enabled"] = json!([true]);
+    let violations = run_check(short_channel_envelope, &radio_configuration(&tx_values(2, 2_450_000_000.0, 10.0)), &empty, CheckStage::Prepare);
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c1.stream");
+    assert!(violations[0].requested.is_none(), "{violations:?}");
+    assert!(violations[0].reason.contains("its stream is Scalar(Int(0))"), "{}", violations[0].reason);
+}
+
+#[test]
+fn rm_19_a_validate_violation_records_the_specs_value() {
+    let empty = BTreeMap::new();
+    let out_of_band = radio_configuration(&tx_values(1, 2_600_000_000.0, 10.0));
+    let high_gain = radio_configuration(&tx_values(1, 2_450_000_000.0, 25.0));
+    let mut bad_antenna = tx_values(1, 2_450_000_000.0, 10.0);
+    bad_antenna[3].1 = Value::from("J1".to_owned());
+    let bad_antenna = radio_configuration(&bad_antenna);
+    let string_frequency = radio_configuration(&[("radio.tx.c0.stream", Value::from(0_i64)), ("radio.tx.c0.frequency_hz", Value::from("2.45 GHz"))]);
+    let mut two_channels = tx_values(2, 2_450_000_000.0, 10.0);
+    two_channels[4].1 = Value::from(1_i64); // c1's stream
+    let two_channels = radio_configuration(&two_channels);
+    let mut short_channel_envelope = base_rf_envelope();
+    short_channel_envelope["tx_enabled"] = json!([true]);
+    let cases = [
+        (out_of_band, base_rf_envelope(), "radio.tx.c0.frequency_hz", json!(2_600_000_000.0)),
+        (high_gain, base_rf_envelope(), "radio.tx.c0.gain_db", json!(25.0)),
+        (bad_antenna, base_rf_envelope(), "radio.tx.c0.antenna", json!("J1")),
+        (string_frequency, base_rf_envelope(), "radio.tx.c0.frequency_hz", json!("2.45 GHz")),
+        (two_channels, short_channel_envelope, "radio.tx.c1.stream", json!(1)),
+    ];
+    for (configuration, envelope, key, asked) in cases {
+        let violations = run_check(envelope, &configuration, &empty, CheckStage::Validate);
+        assert_eq!(violations.len(), 1, "{key}: {violations:?}");
+        assert_eq!(violations[0].key.as_ref().unwrap().as_str(), key);
+        assert_eq!(value_json(&violations[0].requested), asked, "{key}: {violations:?}");
+    }
+}
+
+#[test]
+fn rm_19_a_runtime_violation_records_only_what_the_action_asked() {
+    let effective = radio_configuration(&tx_values(1, 2_450_000_000.0, 10.0));
+    let proposed = radio_configuration(&[("radio.tx.c0.frequency_hz", Value::num(2_600_000_000.0).unwrap())]);
+    let violations = run_check(base_rf_envelope(), &effective, &proposed, CheckStage::Runtime);
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.frequency_hz");
+    assert_eq!(value_json(&violations[0].requested), json!(2_600_000_000.0));
+
+    // The Action asks for c0 only: c1 is judged on the applied configuration and records no request.
+    let effective = radio_configuration(&tx_values(2, 2_600_000_000.0, 10.0));
+    let proposed = radio_configuration(&[("radio.tx.c0.frequency_hz", Value::num(2_700_000_000.0).unwrap())]);
+    let mut both_enabled = base_rf_envelope();
+    both_enabled["tx_enabled"] = json!([true, true]);
+    let violations = run_check(both_enabled, &effective, &proposed, CheckStage::Runtime);
+    assert_eq!(violations.len(), 2, "{violations:?}");
+    let c0 = violations.iter().find(|violation| violation.key.as_ref().unwrap().as_str() == "radio.tx.c0.frequency_hz").expect("c0's frequency is judged");
+    let c1 = violations.iter().find(|violation| violation.key.as_ref().unwrap().as_str() == "radio.tx.c1.frequency_hz").expect("c1's frequency is judged");
+    assert_eq!(value_json(&c0.requested), json!(2_700_000_000.0));
+    assert!(c1.requested.is_none(), "{violations:?}");
+
+    // The Action asks for c0's gain only: c1's enable violation comes from the applied configuration.
+    let effective = radio_configuration(&tx_values(2, 2_450_000_000.0, 10.0));
+    let proposed = radio_configuration(&[("radio.tx.c0.gain_db", Value::num(10.0).unwrap())]);
+    let violations = run_check(base_rf_envelope(), &effective, &proposed, CheckStage::Runtime);
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c1.stream");
+    assert!(violations[0].requested.is_none(), "{violations:?}");
+}
+
+#[test]
 fn rm_20_a_timing_document_with_a_removed_key_is_refused() {
     let timing = json!({
         "min_timed_command_lead_ns": 5_000_000,

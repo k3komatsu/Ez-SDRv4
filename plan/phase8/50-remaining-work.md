@@ -45,6 +45,7 @@
 | 5 | #75 の残り（**閉じた** 2026-11-19：棚卸しの結果，issue の項目は 79f55e1 と f8c9e2bf ですべて済．残りのコードの項目は無かった） | (3) 以外のコードの項目．着手の前に issue を棚卸しする | 中（INFERRED） | 危険な段，Sol |
 | 6 | admission-per-origin の設計メモ（**済** 2026-11-19，`reviews/sb9a-*`．#104 で三振の 4 件目） | canonicaliser を全体にし（UTF-16 の key 順），SB-9a と 12 の入口の検査を撤回（owner D1），EA-5 の `malformed` を削除（owner D2）．報告された値の種類の検査を validate と prepare に（5 件目） | 中：Kernel の入口 | step 0 の設計（Opus 下書き，Fable），Sol |
 | 7 | #112・#114（**済** 2026-11-19，`reviews/n112-*`） | Python から対でないサロゲートを送ると Session が終わる（クライアントで送る前に止める，owner）；`Violation.requested` に Module の報告値が入る（7 か所） | 低 | Sonnet が DeepSeek を率いる，Sol |
+| 8 | #115・#116（**済** 2026-11-19，`reviews/n115-*`） | Module が偽って報告した `Coercion.requested` を SB-44 で拒否；RF 範囲の検査と Run 中の登録された検査の `requested` は実験者・Action の値 | 低〜中 | Sonnet が DeepSeek を率いる，Sol，Opus と Terra の再確認 |
 
 ### 二つの流れの決まり
 

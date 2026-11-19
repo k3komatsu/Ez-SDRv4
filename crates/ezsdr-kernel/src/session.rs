@@ -213,8 +213,27 @@ impl Admitter<'_> {
         coercions: &[Coercion],
         stage: CheckStage,
     ) -> Result<Admitted, Vec<Violation>> {
+        self.admit_asked(effective, proposed, coercions, stage, None)
+    }
+
+    /// As [`admit`](Admitter::admit), for an Action whose own values are `asked` (KC-24 step 12): each registered check's violation then records as `requested` the Action's value for the key it names, and none for another key, whatever the check put there. `proposed` may hold the value after a Provider's coercion, which is not what the Action asked.
+    ///
+    /// Rule: KC-24, SB-30.
+    pub fn admit_asked(
+        &self,
+        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+        coercions: &[Coercion],
+        stage: CheckStage,
+        asked: Option<&BTreeMap<Key, Value>>,
+    ) -> Result<Admitted, Vec<Violation>> {
         // 1. the registered admission checks (SB-30)
-        let violations = self.checks.run(self.environment, effective, proposed, stage);
+        let mut violations = self.checks.run(self.environment, effective, proposed, stage);
+        if let Some(asked) = asked {
+            for violation in &mut violations {
+                violation.requested = violation.key.as_ref().and_then(|key| asked.get(key)).cloned();
+            }
+        }
         if !violations.is_empty() {
             return Err(violations);
         }

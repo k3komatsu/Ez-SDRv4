@@ -1,5 +1,6 @@
 //! Resolves and applies the Spec's coercion policy (SB-45, SB-46).
 
+use crate::binding::Violation;
 use crate::module_api::ModuleRegistry;
 use crate::spec::{Coercion, CoercionPolicy, Constraint, ExperimentSpec, Ident, Key, KeyDecl, Namespace, ResourceReq, SpecError, Value, Warning};
 
@@ -25,6 +26,17 @@ pub(super) fn fragment_request(spec: &ExperimentSpec, fragment: &Ident, key: &Ke
         Some(output) => output.params.get(key).cloned(),
         None => exact_request(spec.resources.get(fragment), key),
     }
+}
+
+/// SB-44: the violation for a reported coercion whose `requested` is not what the experimenter asked for its key, `None` when it is. `asked` is `exact_request` or `fragment_request`; a key with no exact request is not checked, and `whose` names the reporting Module in the reason.
+pub(super) fn false_request(asked: Option<Value>, c: &Coercion, whose: &str) -> Option<Violation> {
+    let asked = asked.filter(|asked| *asked != c.requested)?;
+    Some(Violation {
+        check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
+        key: Some(c.key.clone()),
+        reason: format!("SB-44: {whose} reports a coercion of {} whose requested value is {:?}, but the Spec asked {:?}", c.key, c.requested, asked),
+        requested: Some(asked),
+    })
 }
 
 pub(super) fn coercion_policy(spec_override: Option<CoercionPolicy>, is_session: bool, decl: Option<&KeyDecl>) -> CoercionPolicy {

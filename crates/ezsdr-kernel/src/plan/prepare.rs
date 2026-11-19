@@ -137,6 +137,11 @@ pub(super) fn collect_prepare(
         }
         let mut warned = Vec::new();
         for c in &r.coercions {
+            // SB-44: a report whose `requested` is not the Spec's request for the key is refused before the policy reads it.
+            if let Some(violation) = super::coercion::false_request(super::coercion::fragment_request(spec, fragment, &c.key), c, &fragment.to_string()) {
+                violations.push(violation);
+                continue;
+            }
             let policy = super::coercion::coercion_policy(spec_coercion.get(&c.key).copied(), is_session, registry.key_decl(&c.key));
             match super::coercion::apply_coercion(policy, c) {
                 Ok(None) => {}

@@ -641,6 +641,39 @@ fn v58_16_a_transmit_value_outside_the_rf_envelope_is_refused_on_an_empty_stream
 }
 
 #[test]
+fn v58_16_a_runtime_refusal_records_what_the_action_asked_not_the_coerced_value() {
+    // #116: the RF-envelope check judges `proposed` after the Provider's `coerce` (KC-24 step 10),
+    // so the value it sees can differ from the Action's. `requested` is what the experimenter
+    // asked (2.9), while the reason names the coerced value the check actually judged (3.0, the
+    // nearest 0.5 dB grid value).
+    let temp = rig::TempDir::new("v58-16-tx-rf-asked");
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 2.4e9, "hi_hz": 2.5e9 }], "max_gain_db": 2.95 } }));
+    let assembly = rig::assemble(&profile, BTreeMap::new());
+    let initial = asking(
+        "radio",
+        &[
+            ("radio.tx.c0.stream", Scalar::Int(0)),
+            ("radio.tx.c0.frequency_hz", Scalar::Num(ezsdr_kernel::spec::Finite::new(2.45e9).unwrap())),
+            ("radio.tx.c0.gain_db", Scalar::Num(ezsdr_kernel::spec::Finite::new(0.0).unwrap())),
+        ],
+    );
+    let mut run = ezsdr_kernel::coordinator::connect(&profile, &initial, assembly, ezsdr_kernel::run::Lease::attached()).expect("an initial gain inside the envelope connects");
+    let clock = root(&run);
+    run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
+    let gain = Key::parse("radio.tx.c0.gain_db").unwrap();
+    let refused = run.submit(SessionAction::SetParameter { target: resource("radio"), key: gain.clone(), value: Value::num(2.9).unwrap() }, None).unwrap();
+    let Outcome::Rejected { violations } = &refused.outcome else { panic!("a gain outside the envelope was admitted: {:?}", refused.outcome) };
+    assert_eq!(violations.len(), 1, "the envelope is the only refusal: {violations:?}");
+    let violation = &violations[0];
+    assert_eq!(violation.check.as_str(), "radio.rf_envelope");
+    assert_eq!(violation.key, Some(gain.clone()));
+    assert_eq!(violation.requested, Some(Value::num(2.9).unwrap()), "the Action's value, not the coerced 3.0");
+    assert!(violation.reason.contains("gain 3 dB exceeds 2.95"), "the check judged the coerced value: {violation:?}");
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&gain], Value::num(0.0).unwrap(), "the refused value was never admitted");
+    let _ = end_session(run, clock, T0 + 5_000_000);
+}
+
+#[test]
 fn v58_16_a_receive_antenna_outside_the_rf_envelope_is_refused_on_a_stopped_stream() {
     // Note 47 stage 3, §58 #16 in its envelope form: on a stopped receive stream a value outside the RF envelope is refused at admission,
     // logged, and never dispatched (RM-19, RM-21); a value inside it, or one a Provider's `coerce` refuses, is judged by those.

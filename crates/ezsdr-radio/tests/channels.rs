@@ -864,7 +864,7 @@ fn rm_33_rm_19_per_channel_cases() {
     ];
     let violations = check(&values, envelope.clone());
     assert_eq!(violation_keys(&violations), ["radio.tx.c1.stream"], "{violations:?}");
-    assert_eq!(violations[0].reason, "RM-19: radio: transmit channel c1 is not enabled");
+    assert_eq!(violations[0].reason, "RM-19: radio: transmit channel c1 is not enabled (its stream is Scalar(Int(0)))");
     // `[false, true]` enables c1 and says nothing about the idle c0.
     let mut enabled = envelope.clone();
     enabled["tx_enabled"] = json!([false, true]);

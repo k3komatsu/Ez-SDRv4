@@ -138,6 +138,11 @@ pub(super) fn admit_with(
     // (SB-5), the matched Provider (KC-23), the coerce (KC-26) and the coerced
     // value's kind.
     let mut coercions = incoming.to_vec();
+    // What the Action itself asked, before step 10's coercion replaces its value (a registered check's `requested`, step 12).
+    let asked: BTreeMap<Key, Value> = match &action {
+        Action::UpdateParameter { key, value, .. } => BTreeMap::from([(key.clone(), value.clone())]),
+        _ => BTreeMap::new(),
+    };
     if let (Action::UpdateParameter { key, value, .. }, Inst::Provider(index)) = (&mut action, inst) {
         if origin != Origin::Module {
             coerce_provider(shared, index, &fragment, key, value, &mut coercions, configuration)?;
@@ -152,7 +157,7 @@ pub(super) fn admit_with(
         proposed.insert(fragment.clone(), BTreeMap::from([(key.clone(), value.clone())]));
     }
     // 13. the registered checks and the coercion policy (SB-30, SB-45).
-    let admitted = shared.admitter().admit(configuration, &proposed, &coercions, CheckStage::Runtime)?;
+    let admitted = shared.admitter().admit_asked(configuration, &proposed, &coercions, CheckStage::Runtime, Some(&asked))?;
     Ok(AdmittedAction { action, node, inst, fragment, coercions: admitted.coercions, warnings: admitted.warnings, untimed })
 }
 
