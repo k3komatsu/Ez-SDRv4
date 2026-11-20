@@ -126,7 +126,7 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
                 key: key("test.list"),
                 indexed: None,
                 kind: ValueKind::List,
-                coercible: false,
+                coercible: true,
                 coercion_default: CoercionPolicy::Reject,
                 update_class: Some(ezsdr_kernel::module_api::UpdateClass::HardwareTimed),
             },
@@ -316,6 +316,8 @@ pub struct TestProvider {
     /// A value `coerce` reports as the `requested` of `test.grid`'s coercion, so a
     /// test can tell the Spec's request from the Module's report (SB-6, SB-46).
     pub reported_requested: Option<Value>,
+    /// Values `coerce` adds to `applied` whatever the request asks, with no coercion entry (MA-12's re-match).
+    pub extra_applied: BTreeMap<Key, Value>,
 }
 
 impl TestProvider {
@@ -392,6 +394,7 @@ impl TestProvider {
             wrong_applied_grid: None,
             wrong_coercion_grid: None,
             reported_requested: None,
+            extra_applied: BTreeMap::new(),
         }
     }
 
@@ -425,6 +428,16 @@ impl TestProvider {
             memory_domains: Vec::new(),
             shareable: false,
         });
+        self
+    }
+
+    /// Declares `name` as the integer range `min..=max` on the device root and both `test.line` sub-resources.
+    pub fn with_range_capability(mut self, name: &str, min: i64, max: i64) -> TestProvider {
+        let capability = CapabilityValue::Range { min: Scalar::from(min), max: Scalar::from(max) };
+        self.instance.tree.capabilities.insert(key(name), capability.clone());
+        for line in &mut self.instance.tree.children {
+            line.capabilities.insert(key(name), capability.clone());
+        }
         self
     }
 
@@ -489,6 +502,12 @@ impl TestProvider {
     /// Makes the instance use the stepping interface (MA-15).
     pub fn stepped(mut self) -> TestProvider {
         self.instance.driving.stepped = true;
+        self
+    }
+
+    /// Makes `coerce` report `key_name` as applied to `value`, with no coercion entry.
+    pub fn with_applied(mut self, key_name: &str, value: Value) -> TestProvider {
+        self.extra_applied.insert(key(key_name), value);
         self
     }
 
@@ -705,6 +724,7 @@ impl Provider for TestProvider {
         if self.stray_rejection {
             report.rejected.push(RejectedRequest { key: key("test.flag"), requested: Constraint::Present {}, reason: "a key the request does not name".to_owned() });
         }
+        report.applied.extend(self.extra_applied.iter().map(|(k, v)| (k.clone(), v.clone())));
         if let Some(key) = &self.omit_applied {
             report.applied.remove(key);
         }

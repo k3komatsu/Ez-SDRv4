@@ -1655,14 +1655,14 @@
  },
  {
   "id": "J160",
-  "name": "MA-12: a list `effective` value passes the re-match",
+  "name": "MA-12: a list `effective` value for an undeclared coercible key passes the re-match",
   "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
   "old": "is_some_and",
   "new": "is_none_or",
   "scope": "fn collect_prepare",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
-  "filter": "ma_12_a_widening_effective_is_refused_at_prepare"
+  "filter": "ma_12_a_list_effective_for_an_undeclared_coercible_key_is_refused_by_the_rematch"
  },
  {
   "id": "J161",
@@ -3325,7 +3325,7 @@
   "id": "T10",
   "name": "SB-44: a report's coercion of a key the request does not name is not refused at prepare",
   "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
-  "old": "if let Some(req) = spec.resources.get(fragment) { if let Some(stray) = r.coercions.iter().find(|c| !req.requires.contains_key(&c.key)) { violations.push(Violation { check: Namespace::parse(\"ezsdr.coercion\").expect(\"a valid literal\"), key: Some(stray.key.clone()), requested: None, reason: format!(\"SB-44: {} reports a coercion of {} ({:?} to {:?}), which its request does not name\", fragment, stray.key, stray.requested, stray.applied), }); } }",
+  "old": "if let Some(req) = spec.resources.get(fragment) { for stray in r.coercions.iter().filter(|c| !req.requires.contains_key(&c.key)) { if !refused.insert((fragment.clone(), stray.key.clone())) { continue; } violations.push(Violation { check: Namespace::parse(\"ezsdr.coercion\").expect(\"a valid literal\"), key: Some(stray.key.clone()), requested: None, reason: format!(\"SB-44: {} reports a coercion of {} ({:?} to {:?}), which its request does not name\", fragment, stray.key, stray.requested, stray.applied), }); } }",
   "new": "",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
@@ -27100,8 +27100,8 @@
   "id": "W9A-5",
   "name": "SB-6: a wrong-kind prepare report is still passed to the registered prepare checks (F1)",
   "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
-  "old": "if kind_refused {",
-  "new": "if false && kind_refused {",
+  "old": "if !kind_refused {",
+  "new": "if true {",
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "sb_6_a_wrong_kind_report_ends_the_run_with_the_sb_6_violation_not_a_check_panic"
@@ -27226,8 +27226,8 @@
   "id": "N114-7",
   "name": "SB-46: a prepare rejected coercion names the Module's reported value as `requested` instead of the Spec's request",
   "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
-  "old": "key: Some(c.key.clone()), requested: super::coercion::fragment_request(spec, fragment, &c.key),",
-  "new": "key: Some(c.key.clone()), requested: Some(c.requested.clone()),",
+  "old": "requested: super::coercion::fragment_request(spec, fragment, &c.key), reason: format!(\"SB-46: coercion to {:?} rejected at prepare\", c.applied)",
+  "new": "requested: Some(c.requested.clone()), reason: format!(\"SB-46: coercion to {:?} rejected at prepare\", c.applied)",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_46_a_rejected_coercion_records_the_specs_request_at_prepare"
@@ -27246,8 +27246,8 @@
   "id": "N114-9",
   "name": "SB-46: a Sink's rejected coercion takes the Provider's exact request instead of the output's params",
   "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
-  "old": "requested: super::coercion::fragment_request(spec, fragment, &c.key),",
-  "new": "requested: super::coercion::exact_request(spec.resources.get(fragment), &c.key),",
+  "old": "requested: super::coercion::fragment_request(spec, fragment, &c.key), reason: format!(\"SB-46: coercion to {:?} rejected at prepare\", c.applied)",
+  "new": "requested: super::coercion::exact_request(spec.resources.get(fragment), &c.key), reason: format!(\"SB-46: coercion to {:?} rejected at prepare\", c.applied)",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_46_a_rejected_coercion_of_a_sink_records_its_params_value_at_prepare"
@@ -29120,8 +29120,8 @@
   "id": "N115-4",
   "name": "SB-44: a prepare false `requested` is also judged by SB-46's policy (the loop does not continue)",
   "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
-  "old": "violations.push(violation); continue;",
-  "new": "violations.push(violation);",
+  "old": "violations.push(violation); refused.insert(at); continue;",
+  "new": "violations.push(violation); refused.insert(at.clone());",
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_44_a_coercion_with_a_false_requested_is_refused_at_prepare"
@@ -29525,5 +29525,165 @@
   "crate": "ezsdr-kernel",
   "test_bin": "device_paced",
   "filter": "kc_24a_start_an_end_between_two_pushes_records_both_ids"
+ },
+ {
+  "id": "N118-1",
+  "name": "SB-44a: the prepare coercion's applied is not compared with the preview (none is found)",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "preview_for(admission, fragment, &c.key).map(|p| (&p.applied, \"`coerce` returned\"))",
+  "new": "None",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_that_applies_another_value_than_coerce_returned_is_refused_at_prepare"
+ },
+ {
+  "id": "N118-2",
+  "name": "SB-44a: without a preview the coercion's applied is not compared with the report's effective",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": ".or(effective.map(|v| (v, \"its effective is\")))",
+  "new": ".or(None)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_with_no_preview_applies_the_reports_effective_value"
+ },
+ {
+  "id": "N118-3",
+  "name": "SB-44a: a coercion is refused when its applied equals the expected value instead of when it differs",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "*expected != c.applied",
+  "new": "*expected == c.applied",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_that_applies_another_value_than_coerce_returned_is_refused_at_prepare"
+ },
+ {
+  "id": "N118-4",
+  "name": "SB-44a: a prepare coercion refused for its applied value is also judged by SB-46's policy (the loop does not continue)",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "refused.insert(at); continue; } let policy",
+  "new": "refused.insert(at.clone()); } let policy",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_with_no_preview_applies_the_reports_effective_value"
+ },
+ {
+  "id": "N118-5",
+  "name": "SB-44a, MA-12: the preview lookup ignores the resource (a key alone names it)",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "p.resource == *resource && p.coercion.key == *key",
+  "new": "p.coercion.key == *key",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_preview_is_looked_up_per_resource_and_key_by_both_callers"
+ },
+ {
+  "id": "N118-6",
+  "name": "SB-44a: a key SB-6 refuses for its kind is not recorded as refused, so later checks refuse it as well",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "kind_refused = true; if !refused.insert((fragment.clone(), key.clone())) { return; }",
+  "new": "kind_refused = true;",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_the_first_check_that_refuses_a_key_wins"
+ },
+ {
+  "id": "N118-7",
+  "name": "SB-44a: a stray key is not recorded as refused, so later checks refuse it as well",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "!refused.insert((fragment.clone(), stray.key.clone()))",
+  "new": "false",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_the_first_check_that_refuses_a_key_wins"
+ },
+ {
+  "id": "N118-8",
+  "name": "SB-44a, MA-12: the re-match loop does not skip a key already refused",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "!refused.contains(&(name.clone(), (*key).clone()))",
+  "new": "true",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_the_first_check_that_refuses_a_key_wins"
+ },
+ {
+  "id": "N118-9",
+  "name": "SB-44a: a coercion with no preview and no effective value for its key is not refused",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "None => Some(\"but its report carries no effective value for it\".to_owned())",
+  "new": "None => None",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_coercion_whose_key_the_report_has_no_effective_for_is_refused_at_prepare"
+ },
+ {
+  "id": "N118-10",
+  "name": "SB-44a, MA-12: the narrowing loop does not skip a key already refused",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": ".filter(|_| !refused.contains(&(name.clone(), key.clone())))",
+  "new": ".filter(|_| true)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_kind_refusal_in_one_fragment_leaves_another_fragments_mismatch_refused"
+ },
+ {
+  "id": "N118-11",
+  "name": "SB-44a: the coercion loop does not skip a key an earlier check refused (it goes on to the policy)",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "if refused.contains(&at) { continue; }",
+  "new": "if false { continue; }",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_the_first_check_that_refuses_a_key_wins"
+ },
+ {
+  "id": "N118-12",
+  "name": "SB-46: a policy refusal is not recorded as refused, so MA-12 refuses the key as well",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "reason: format!(\"SB-46: coercion to {:?} rejected at prepare\", c.applied), }); refused.insert(at);",
+  "new": "reason: format!(\"SB-46: coercion to {:?} rejected at prepare\", c.applied), });",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_the_first_check_that_refuses_a_key_wins"
+ },
+ {
+  "id": "N118-13",
+  "name": "SB-44a: a refusal of the applied value is not recorded as refused, so MA-12 refuses the key as well",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "refused.insert(at); continue; } let policy",
+  "new": "continue; } let policy",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_the_first_check_that_refuses_a_key_wins"
+ },
+ {
+  "id": "N118-14",
+  "name": "SB-6: MA-12 does not run on a report set with a kind refusal",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "for (name, req) in &spec.resources { let Some(node_id) = admission.matched.get(name) else {",
+  "new": "for (name, req) in &spec.resources { if kind_refused { return Err(PrepareError::Violations(violations)); } let Some(node_id) = admission.matched.get(name) else {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_kind_refusal_in_one_fragment_leaves_another_fragments_mismatch_refused"
+ },
+ {
+  "id": "N118-15",
+  "name": "SB-6, SB-44a: a key wrong-kind in effective and in a coercion's applied gets two violations",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "if !refused.insert((fragment.clone(), key.clone())) { return; }",
+  "new": "refused.insert((fragment.clone(), key.clone()));",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_the_first_check_that_refuses_a_key_wins"
+ },
+ {
+  "id": "N118-16",
+  "name": "SB-44a, MA-12: a narrowing refusal is not recorded as refused, so the re-match refuses the key as well",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "refused.insert((name.clone(), key.clone()));",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "ma_12_a_narrowing_violation_records_the_specs_request_and_the_reported_value"
  }
 ]

@@ -29,6 +29,11 @@ pub(super) fn check_effective_narrows(declared: &CapabilityValue, effective: &Ca
     if narrows { Ok(()) } else { Err(ModuleError::rejected("MA-12: `effective` may narrow a declared capability and must not widen one".to_owned())) }
 }
 
+/// The coercion `coerce` returned for `key` on `resource` at `validate`: the Kernel's preview (SB-44a, MA-12). Scoped to the resource, since one key may be constrained on two devices.
+fn preview_for<'a>(admission: &'a AdmissionResult, resource: &Ident, key: &Key) -> Option<&'a crate::spec::Coercion> {
+    admission.coercions_preview.iter().find(|p| p.resource == *resource && p.coercion.key == *key).map(|p| &p.coercion)
+}
+
 pub(super) fn collect_prepare(
     reports: Vec<(Ident, Result<PrepareReport, ModuleError>)>,
     spec: &ExperimentSpec,
@@ -96,6 +101,8 @@ pub(super) fn collect_prepare(
     // nothing. The warning goes on the fragment's own report, which already carries a
     // `warnings` field and is already in the schema.
     let mut kind_refused = false;
+    // One bad key, one violation (SB-44a): the first check that refuses a (fragment, key) wins, and every later check skips that key.
+    let mut refused: BTreeSet<(Ident, Key)> = BTreeSet::new();
     for (fragment, r) in &mut ok {
         // SB-2 and SB-6: a value a Module *reports* is a value a key carries, so a
         // declared key must have its declaration's kind. MA-12's loop below judges
@@ -105,6 +112,9 @@ pub(super) fn collect_prepare(
         let mut report_kind = |check: &str, key: &Key, value: &Value| {
             if let Some(error) = super::coercion::reported_kind_error(registry, key, value) {
                 kind_refused = true;
+                if !refused.insert((fragment.clone(), key.clone())) {
+                    return;
+                }
                 violations.push(Violation {
                     check: Namespace::parse(check).expect("a valid literal"),
                     key: Some(key.clone()),
@@ -126,7 +136,10 @@ pub(super) fn collect_prepare(
         // key nobody named, and the Manifest recorded a "coercion" of a value nobody
         // asked for (SB-42, SB-46).
         if let Some(req) = spec.resources.get(fragment) {
-            if let Some(stray) = r.coercions.iter().find(|c| !req.requires.contains_key(&c.key)) {
+            for stray in r.coercions.iter().filter(|c| !req.requires.contains_key(&c.key)) {
+                if !refused.insert((fragment.clone(), stray.key.clone())) {
+                    continue;
+                }
                 violations.push(Violation {
                     check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
                     key: Some(stray.key.clone()),
@@ -137,32 +150,55 @@ pub(super) fn collect_prepare(
         }
         let mut warned = Vec::new();
         for c in &r.coercions {
+            let at = (fragment.clone(), c.key.clone());
+            if refused.contains(&at) {
+                continue;
+            }
             // SB-44: a report whose `requested` is not the Spec's request for the key is refused before the policy reads it.
             if let Some(violation) = super::coercion::false_request(super::coercion::fragment_request(spec, fragment, &c.key), c, &fragment.to_string()) {
                 violations.push(violation);
+                refused.insert(at);
+                continue;
+            }
+            // SB-44a: the value a reported coercion applies is the one `coerce` returned for the key at `validate`, or, for a key with no preview (a Sink's), the report's own `effective` value for it, which a coercion's report must carry.
+            let effective = r.effective.get(&c.key);
+            let wrong = match preview_for(admission, fragment, &c.key).map(|p| (&p.applied, "`coerce` returned")).or(effective.map(|v| (v, "its effective is"))) {
+                Some((expected, source)) => (*expected != c.applied).then(|| format!("but {source} {expected:?} for it")),
+                None => Some("but its report carries no effective value for it".to_owned()),
+            };
+            if let Some(wrong) = wrong {
+                violations.push(Violation {
+                    check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
+                    key: Some(c.key.clone()),
+                    requested: super::coercion::fragment_request(spec, fragment, &c.key),
+                    reason: format!("SB-44a: {fragment} reports a coercion of {} that applies {:?}, {wrong}", c.key, c.applied),
+                });
+                refused.insert(at);
                 continue;
             }
             let policy = super::coercion::coercion_policy(spec_coercion.get(&c.key).copied(), is_session, registry.key_decl(&c.key));
             match super::coercion::apply_coercion(policy, c) {
                 Ok(None) => {}
                 Ok(Some(w)) => warned.push(w),
-                Err(_) => violations.push(Violation {
-                    check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
-                    key: Some(c.key.clone()),
-                    requested: super::coercion::fragment_request(spec, fragment, &c.key),
-                    reason: format!("SB-46: coercion to {:?} rejected at prepare", c.applied),
-                }),
+                Err(_) => {
+                    violations.push(Violation {
+                        check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
+                        key: Some(c.key.clone()),
+                        requested: super::coercion::fragment_request(spec, fragment, &c.key),
+                        reason: format!("SB-46: coercion to {:?} rejected at prepare", c.applied),
+                    });
+                    refused.insert(at);
+                }
             }
         }
         r.warnings.extend(warned);
     }
-    // SB-6: a report whose value is not of its key's kind is refused before a registered check reads it, which may take the value for the kind the declaration gives.
-    if kind_refused {
-        return Err(PrepareError::Violations(violations));
+    // SB-6: a report whose value is not of its key's kind is refused before a registered check reads it, which may take the value for the kind the declaration gives. MA-12 below still runs, and skips the refused keys.
+    if !kind_refused {
+        // SB-30's second point, per fragment (KA-4): each report's own `effective`.
+        let per_fragment: BTreeMap<Ident, BTreeMap<crate::spec::Key, Value>> = ok.iter().map(|(fragment, r)| (fragment.clone(), r.effective.clone())).collect();
+        violations.extend(checks.run(environment, &per_fragment, &BTreeMap::new(), CheckStage::Prepare));
     }
-    // SB-30's second point, per fragment (KA-4): each report's own `effective`.
-    let per_fragment: BTreeMap<Ident, BTreeMap<crate::spec::Key, Value>> = ok.iter().map(|(fragment, r)| (fragment.clone(), r.effective.clone())).collect();
-    violations.extend(checks.run(environment, &per_fragment, &BTreeMap::new(), CheckStage::Prepare));
 
     // MA-12's second sentence, both halves. `effective` may **narrow** a declared
     // capability and must not widen one, and the Spec's own constraints are re-matched
@@ -186,7 +222,7 @@ pub(super) fn collect_prepare(
         // (spec 20, KH-1). A Provider fragment's id is the resource name.
         let report = ok.get(name).expect("SB-41 checked every lifecycle fragment's report");
         for (key, declared) in &node.capabilities {
-            let Some(applied) = report.effective.get(key) else {
+            let Some(applied) = report.effective.get(key).filter(|_| !refused.contains(&(name.clone(), key.clone()))) else {
                 continue;
             };
             let narrows = match applied.as_scalar() {
@@ -200,9 +236,10 @@ pub(super) fn collect_prepare(
                     requested: super::coercion::exact_request(Some(req), key),
                     reason: format!("{} ({name}'s effective {key} is {applied:?})", e.message),
                 });
+                refused.insert((name.clone(), key.clone()));
             }
         }
-        for (key, constraint) in &req.requires {
+        for (key, constraint) in req.requires.iter().filter(|(key, _)| !refused.contains(&(name.clone(), (*key).clone()))) {
             // SB-46: a coercion the **Kernel** admitted at `validate` was already
             // judged by the policy loop above, and a coercion is by definition a key
             // whose applied value does not satisfy what was requested — so
@@ -225,7 +262,7 @@ pub(super) fn collect_prepare(
             // coercion to `b`, so `b` — satisfied directly, never passed to `coerce` —
             // was refused for not applying a value nobody computed for it. That is the
             // ordinary two-channel Spec whenever one channel coerces.
-            if let Some(preview) = admission.coercions_preview.iter().filter(|p| p.resource == *name).map(|p| &p.coercion).find(|c| c.key == *key) {
+            if let Some(preview) = preview_for(admission, name, key) {
                 if let Some(applied) = report.effective.get(key) {
                     if *applied != preview.applied {
                         violations.push(Violation {
