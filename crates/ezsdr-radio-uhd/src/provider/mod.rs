@@ -73,6 +73,39 @@ fn description_surfaces(description: &channels::Description, id: &ResourceId) ->
 
 const JOIN_BOUND: Wall = Wall::from_secs(1);
 
+/// A point in `stop`'s stages that a unit test hooks (nothing outside the test build); `finished` reads whether a thread of the stage has ended.
+#[cfg(test)]
+enum JoinPoint<'a> {
+    /// Before the `Shutdown`s of `dir` are sent.
+    Sending { dir: Dir },
+    /// After every `Shutdown` of `dir` was sent, before its stage begins.
+    Enqueued { dir: Dir },
+    /// A stage of `names` (those present) begins.
+    Begun { names: &'a [String], finished: &'a dyn Fn(&str) -> bool },
+    /// The stage found a thread unfinished before its bound ended, and is about to wait.
+    Polled { names: &'a [String], round: usize, finished: &'a dyn Fn(&str) -> bool },
+    /// `name` was recorded as not joined.
+    Noted { names: &'a [String], name: &'a str, finished: &'a dyn Fn(&str) -> bool },
+}
+
+/// Whether the stage's thread `name` has ended (a thread already joined has); a name the stage was not given is a test's mistake.
+#[cfg(test)]
+fn stage_finished(stage: &[(String, Option<JoinHandle<()>>)], name: &str) -> bool {
+    let (_, handle) = stage.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("{name} is not in this stage"));
+    handle.as_ref().is_none_or(JoinHandle::is_finished)
+}
+
+#[cfg(test)]
+type JoinHook = dyn for<'a> Fn(&JoinPoint<'a>) + Send + Sync;
+
+/// The test build's clock and points for the join stages: both unset is production.
+#[cfg(test)]
+#[derive(Default)]
+struct JoinSeam {
+    now: Option<Arc<dyn Fn() -> Instant + Send + Sync>>,
+    at: Option<Arc<JoinHook>>,
+}
+
 /// A receive stream's owner thread (UR-15, design 33 D15): one per declared stream, in
 /// both key sets.
 fn rx_name(k: usize) -> String {
@@ -193,6 +226,9 @@ pub struct UhdRadio {
     rx_stall: Option<(Wall, Wall)>,
     #[cfg(test)]
     fail_next_rx_spawn: bool,
+    /// The clock and the points a unit test drives the join stages with (nothing outside the test build).
+    #[cfg(test)]
+    join_seam: JoinSeam,
     /// The first open's error when the device was opened again on it (UR-7's reopen).
     reopened: Option<String>,
     prepare_called: bool,
@@ -334,6 +370,8 @@ impl UhdRadio {
             rx_stall: None,
             #[cfg(test)]
             fail_next_rx_spawn: false,
+            #[cfg(test)]
+            join_seam: JoinSeam::default(),
             reopened: None,
             prepare_called: false,
             prepared: None,
@@ -416,25 +454,69 @@ impl UhdRadio {
         Ok(())
     }
 
-    fn join(&mut self, core: &Core, name: &str) {
+    /// The instant a join stage's deadline and its expiry test read: real time (`Instant::now`) outside a unit test's seam.
+    fn join_now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = &self.join_seam.now {
+            return now();
+        }
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    fn join_point(&self, point: JoinPoint<'_>) {
+        if let Some(at) = &self.join_seam.at {
+            at(&point);
+        }
+    }
+
+    /// UR-16: the named threads that are present share one bound of real time from the stage's start; one sweep then decides which ended.
+    fn join_stage(&mut self, core: &Core, names: &[String]) {
         let Some(running) = self.running.as_mut() else { return };
-        let Some(position) = running.threads.iter().position(|(n, _)| n == name) else { return };
-        let (name, handle) = running.threads.remove(position);
-        let until = Instant::now() + JOIN_BOUND;
+        let mut stage: Vec<(String, Option<JoinHandle<()>>)> = Vec::new();
+        for name in names {
+            if let Some(position) = running.threads.iter().position(|(n, _)| n == name) {
+                let (name, handle) = running.threads.remove(position);
+                stage.push((name, Some(handle)));
+            }
+        }
+        if stage.is_empty() {
+            return;
+        }
+        let until = self.join_now() + JOIN_BOUND;
+        #[cfg(test)]
+        let present: Vec<String> = stage.iter().map(|(name, _)| name.clone()).collect();
+        #[cfg(test)]
+        self.join_point(JoinPoint::Begun { names: &present, finished: &|name| stage_finished(&stage, name) });
         let host = core.device.host();
+        #[cfg(test)]
+        let mut round = 0;
         loop {
             let seen = host.generation();
-            if handle.is_finished() || Instant::now() >= until {
+            if stage.iter().all(|(_, handle)| handle.as_ref().is_some_and(JoinHandle::is_finished)) || self.join_now() >= until {
                 break;
+            }
+            #[cfg(test)]
+            {
+                self.join_point(JoinPoint::Polled { names: &present, round, finished: &|name| stage_finished(&stage, name) });
+                round += 1;
             }
             host.wait(None, Some(Instant::now() + Wall::from_millis(1)), seen);
         }
-        if handle.is_finished() {
-            let _ = handle.join();
-        } else {
-            // UR-16: left detached; its streamer is not closed in cleanup.
-            core.reject_note(json!({ "thread": name, "reason": "did not join within 1 s; left detached" }));
-            self.detached.insert(name);
+        let ended: Vec<bool> = stage.iter().map(|(_, handle)| handle.as_ref().is_some_and(JoinHandle::is_finished)).collect();
+        for (i, ended) in ended.into_iter().enumerate() {
+            if ended {
+                if let Some(handle) = stage[i].1.take() {
+                    let _ = handle.join();
+                }
+            } else {
+                // UR-16: left detached; its streamer is not closed in cleanup.
+                let name = stage[i].0.clone();
+                core.reject_note(json!({ "thread": name, "reason": "did not join within 1 s; left detached" }));
+                self.detached.insert(name.clone());
+                #[cfg(test)]
+                self.join_point(JoinPoint::Noted { names: &present, name: &name, finished: &|n| stage_finished(&stage, n) });
+            }
         }
     }
 
@@ -737,7 +819,7 @@ impl Provider for UhdRadio {
             return Ok(());
         };
         // RM-16, VH-2: the streams end at the stop instant, booked at once, which uhd-rx and
-        // uhd-tx read at their next turn; then, once uhd-control is joined, `stop` records the plans (UR-30) if it ran.
+        // uhd-tx read at their next turn; then, after uhd-control's stage (joined or left detached), `stop` records the plans (UR-30) if it ran.
         let at = {
             let mut streams = lock(&core.streams);
             let at = core.now();
@@ -747,25 +829,29 @@ impl Provider for UhdRadio {
             at
         };
         let control_ran = self.running.as_ref().is_some_and(|r| r.threads.iter().any(|(n, _)| n == "uhd-control"));
-        self.join(&core, "uhd-control");
+        self.join_stage(&core, &["uhd-control".to_owned()]);
         if control_ran {
             let plan = lock(&core.streams).record();
             core.timing(plan);
         }
         // Transmit before receive (RM-16): every transmit stream's thread first, in its
         // stream's order.
+        #[cfg(test)]
+        self.join_point(JoinPoint::Sending { dir: Dir::Tx });
         for to_tx in &to_tx {
             let _ = to_tx.send(TxCmd::Shutdown);
         }
-        for k in 0..to_tx.len() {
-            self.join(&core, &tx_name(k));
-        }
+        #[cfg(test)]
+        self.join_point(JoinPoint::Enqueued { dir: Dir::Tx });
+        self.join_stage(&core, &(0..to_tx.len()).map(tx_name).collect::<Vec<_>>());
+        #[cfg(test)]
+        self.join_point(JoinPoint::Sending { dir: Dir::Rx });
         for to_rx in &to_rx {
             let _ = to_rx.send(RxCmd::Shutdown(mode));
         }
-        for k in 0..to_rx.len() {
-            self.join(&core, &rx_name(k));
-        }
+        #[cfg(test)]
+        self.join_point(JoinPoint::Enqueued { dir: Dir::Rx });
+        self.join_stage(&core, &(0..to_rx.len()).map(rx_name).collect::<Vec<_>>());
         core.timing(json!({ "what": "stop", "mode": format!("{mode:?}"), "at": at, "done": core.now() }));
         Ok(())
     }
@@ -799,6 +885,7 @@ mod tests {
     use crate::ClockMode;
     use crate::device::{FakeConfig, FakeDevice};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 
     struct NoActions;
     impl ActionReceiver for NoActions {
@@ -1674,53 +1761,64 @@ mod tests {
                 assert!(Instant::now() < deadline, "the thread entered its sleep");
                 std::thread::sleep(Wall::from_millis(1));
             }
-            radio.join(&core, "uhd-control");
+            radio.join_stage(&core, &["uhd-control".to_owned()]);
             assert_eq!(did_not_join(&core), 0, "{:?}", lock(&core.rec).rejected);
             assert!(radio.detached.is_empty());
         });
     }
 
-    #[test]
-    fn ur_16_the_join_bound_cuts_in_real_time_while_the_manual_clock_is_held() {
-        test_support::bounded("a join of a thread that holds the clock", Wall::from_secs(30), || {
-            let (core, host) = manual_core();
-            let mut radio = prepared_with(1, 1);
-            radio.running = Some(Running { to_tx: Vec::new(), to_rx: Vec::new(), threads: Vec::new() });
+    /// A stage of `threads` threads held on a channel, joined in real time (the seam unset) while the manual clock is held.
+    fn the_bound_cuts_in_real_time_while_the_clock_is_held(threads: usize) {
+        let (core, host) = manual_core();
+        let mut radio = prepared_with(1, 1);
+        radio.running = Some(Running { to_tx: Vec::new(), to_rx: Vec::new(), threads: Vec::new() });
+        let names: Vec<String> = (0..threads).map(tx_name).collect();
+        let mut releases = Vec::new();
+        for name in &names {
             let (release, released) = mpsc::channel::<()>();
+            releases.push(release);
             let handle = host
-                .spawn("uhd-control", move || {
+                .spawn(name, move || {
                     let _ = released.recv();
                 })
                 .unwrap();
-            radio.running.as_mut().unwrap().threads.push(("uhd-control".to_owned(), handle));
-            let (woken, woken_rx) = mpsc::channel();
-            let (go, gate) = mpsc::channel::<()>();
-            let joiner = {
-                let core = core.clone();
-                std::thread::spawn(move || {
-                    crate::host::pause_next_wake(woken, gate);
-                    let began = Instant::now();
-                    radio.join(&core, "uhd-control");
-                    (radio, began.elapsed())
-                })
-            };
-            if let Err(error) = woken_rx.recv_timeout(Wall::from_secs(10)) {
-                // A joiner that panicked before any wake drops the sender: a failure, not a bound.
-                assert!(matches!(error, std::sync::mpsc::RecvTimeoutError::Timeout), "the joiner ended before any clock wait: {error:?}");
-                test_support::infra("a clock wait of the join did not end on its own real deadline within 10 s while the clock was held");
-                panic!("a clock wait of the join ended on its own real deadline while the clock was held");
-            }
-            let _ = go.send(());
-            let (radio, elapsed) = joiner.join().unwrap();
-            assert!(elapsed >= JOIN_BOUND, "{elapsed:?}");
-            assert_eq!(did_not_join(&core), 1);
-            assert!(radio.detached.contains("uhd-control"));
-            drop(release);
+            radio.running.as_mut().unwrap().threads.push((name.clone(), handle));
+        }
+        let (woken, woken_rx) = mpsc::channel();
+        let (go, gate) = mpsc::channel::<()>();
+        let joiner = {
+            let (core, names) = (core.clone(), names.clone());
+            std::thread::spawn(move || {
+                crate::host::pause_next_wake(woken, gate);
+                let began = Instant::now();
+                radio.join_stage(&core, &names);
+                (radio, began.elapsed())
+            })
+        };
+        if let Err(error) = woken_rx.recv_timeout(Wall::from_secs(10)) {
+            // A joiner that panicked before any wake drops the sender: a failure, not a bound.
+            assert!(matches!(error, std::sync::mpsc::RecvTimeoutError::Timeout), "the joiner ended before any clock wait: {error:?}");
+            test_support::infra("a clock wait of the join did not end on its own real deadline within 10 s while the clock was held");
+            panic!("a clock wait of the join ended on its own real deadline while the clock was held");
+        }
+        let _ = go.send(());
+        let (radio, elapsed) = joiner.join().unwrap();
+        assert!(elapsed >= JOIN_BOUND, "{elapsed:?}");
+        assert_eq!(did_not_join(&core), threads);
+        assert!(names.iter().all(|name| radio.detached.contains(name)), "{:?}", radio.detached);
+        drop(releases);
+    }
+
+    #[test]
+    fn ur_16_the_join_bound_cuts_in_real_time_while_the_manual_clock_is_held() {
+        test_support::bounded("a join of threads that hold the clock", Wall::from_secs(30), || {
+            the_bound_cuts_in_real_time_while_the_clock_is_held(1);
+            the_bound_cuts_in_real_time_while_the_clock_is_held(2);
         });
     }
 
     /// UR-16's scenarios: a radio of two streams per direction whose threads the test spawns, with `running` set by hand (as `stop`
-    /// reads it), the device and event collector of its core, and nothing that waits on device time (the rig's clock is the real one).
+    /// reads it), the device and event collector of its core, and nothing that waits on device time (the rig's clock is manual).
     fn running_radio() -> (UhdRadio, Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::event::EventCollector>) {
         let (mut radio, _, device, events) = prepared_rig(2, 2);
         radio.running = Some(Running { to_tx: Vec::new(), to_rx: Vec::new(), threads: Vec::new() });
@@ -2060,6 +2158,560 @@ mod tests {
             assert_one_loss(&core, &device, &events, "a Provider thread panicked");
             assert_eq!(panic_rows(&core, "uhd-control"), 1);
             assert_one_plan_row(&core);
+        });
+    }
+
+    // The stages of `stop` (UR-16, UR-26; plan 8b-1, D-6). A stage's clock is the test's (`JoinSeam`): it moves only when a hook advances it,
+    // so no verdict below reads wall time.
+
+    /// The clock the join stages read in place of real time: it stands still until a hook advances it.
+    struct JoinClock {
+        base: Instant,
+        offset_ns: AtomicU64,
+        reads: AtomicUsize,
+    }
+
+    impl JoinClock {
+        fn new() -> Arc<JoinClock> {
+            Arc::new(JoinClock { base: Instant::now(), offset_ns: AtomicU64::new(0), reads: AtomicUsize::new(0) })
+        }
+
+        fn now(&self) -> Instant {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.base + self.elapsed()
+        }
+
+        fn advance(&self, by: Wall) {
+            self.offset_ns.fetch_add(by.as_nanos() as u64, Ordering::SeqCst);
+        }
+
+        fn elapsed(&self) -> Wall {
+            Wall::from_nanos(self.offset_ns.load(Ordering::SeqCst))
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    /// How far a poll of a stuck stage moves the clock: four polls make one `JOIN_BOUND`.
+    const POLL_STEP: Wall = Wall::from_millis(250);
+
+    const FIVE: [&str; 5] = ["uhd-control", "uhd-tx-s0", "uhd-tx-s1", "uhd-rx-s0", "uhd-rx-s1"];
+
+    fn stage_of(names: &[String]) -> &'static str {
+        match names.first().map(String::as_str) {
+            Some("uhd-control") => "control",
+            Some(name) if name.starts_with("uhd-tx-") => "tx",
+            Some(name) if name.starts_with("uhd-rx-") => "rx",
+            _ => "none",
+        }
+    }
+
+    fn label(point: &JoinPoint<'_>) -> String {
+        match point {
+            JoinPoint::Sending { dir } => format!("Sending {dir:?}"),
+            JoinPoint::Enqueued { dir } => format!("Enqueued {dir:?}"),
+            JoinPoint::Begun { names, .. } => format!("Begun {} {}", stage_of(names), names.join(",")),
+            JoinPoint::Polled { names, round, .. } => format!("Polled {} {round}", stage_of(names)),
+            JoinPoint::Noted { names, name, .. } => format!("Noted {} {name}", stage_of(names)),
+        }
+    }
+
+    /// A poll of a stage in `stages` moves the clock by `POLL_STEP`: virtual time passes only while the joiner polls, and only in stages whose
+    /// threads are all stuck, so a stage that is to end by itself keeps a frozen clock and cannot expire.
+    fn advance(clock: &JoinClock, stages: &[&str], point: &JoinPoint<'_>) {
+        if let JoinPoint::Polled { names, .. } = point
+            && stages.contains(&stage_of(names))
+        {
+            clock.advance(POLL_STEP);
+        }
+    }
+
+    /// A hook's wait for a released worker's handle to have ended. Only stub workers are waited for, never a thread that needs the clock.
+    fn wait_ended(finished: &dyn Fn(&str) -> bool, name: &str) {
+        let deadline = Instant::now() + Wall::from_secs(10);
+        while !finished(name) {
+            if Instant::now() >= deadline {
+                // A worker the OS did not run for 10 s is the machine's, not the code's.
+                test_support::infra(&format!("{name} did not end within 10 s of its release"));
+                panic!("{name} did not end within 10 s of its release");
+            }
+            std::thread::sleep(Wall::from_millis(1));
+        }
+    }
+
+    /// A worker held on a channel until `open` (or until its last holder is dropped).
+    #[derive(Clone)]
+    struct Hold(Arc<Mutex<Option<Sender<()>>>>);
+
+    impl Hold {
+        fn open(&self) {
+            drop(self.0.lock().unwrap().take());
+        }
+    }
+
+    /// The command queues of a `Running`, which no worker reads: a test inspects what was enqueued, at a stage boundary.
+    struct Queues {
+        tx: Mutex<Vec<mpsc::Receiver<TxCmd>>>,
+        rx: Mutex<Vec<mpsc::Receiver<RxCmd>>>,
+    }
+
+    impl Queues {
+        /// The `Shutdown`s each stream's queue held (and drains them).
+        fn shutdowns(&self, dir: Dir) -> Vec<usize> {
+            match dir {
+                Dir::Tx => self.tx.lock().unwrap().iter().map(|queue| queue.try_iter().count()).collect(),
+                Dir::Rx => self.rx.lock().unwrap().iter().map(|queue| queue.try_iter().count()).collect(),
+            }
+        }
+
+        fn rx_modes(&self) -> Vec<Vec<StopMode>> {
+            self.rx.lock().unwrap().iter().map(|queue| queue.try_iter().map(|RxCmd::Shutdown(mode)| mode).collect()).collect()
+        }
+    }
+
+    /// Two streams per direction, real command queues the test owns, and the seam's clock.
+    struct StageRig {
+        radio: UhdRadio,
+        core: Arc<Core>,
+        radio_device: Arc<FakeDevice>,
+        device: Arc<FakeDevice>,
+        events: Arc<ezsdr_kernel::event::EventCollector>,
+        clock: Arc<JoinClock>,
+        log: Arc<Mutex<Vec<String>>>,
+        queues: Arc<Queues>,
+    }
+
+    fn stage_rig() -> StageRig {
+        let (mut radio, radio_device, device, events) = prepared_rig(2, 2);
+        let ((tx0, rx_tx0), (tx1, rx_tx1)) = (mpsc::channel(), mpsc::channel());
+        let ((rx0, rx_rx0), (rx1, rx_rx1)) = (mpsc::channel(), mpsc::channel());
+        radio.running = Some(Running { to_tx: vec![tx0, tx1], to_rx: vec![rx0, rx1], threads: Vec::new() });
+        let clock = JoinClock::new();
+        let seam = clock.clone();
+        radio.join_seam.now = Some(Arc::new(move || seam.now()));
+        let core = radio.prepared.as_ref().unwrap().core.clone();
+        StageRig {
+            radio,
+            core,
+            radio_device,
+            device,
+            events,
+            clock,
+            log: Arc::new(Mutex::new(Vec::new())),
+            queues: Arc::new(Queues { tx: Mutex::new(vec![rx_tx0, rx_tx1]), rx: Mutex::new(vec![rx_rx0, rx_rx1]) }),
+        }
+    }
+
+    impl StageRig {
+        /// A worker that has ended before `stop` begins.
+        fn done(&mut self, name: &str) {
+            let core = self.core.clone();
+            self.radio.spawn(&core, name.to_owned(), || {}).unwrap();
+            wall_until(|| thread_finished(&self.radio, name));
+        }
+
+        /// `done` for every one of the five threads not in `except`.
+        fn done_except(&mut self, except: &[&str]) {
+            for name in FIVE.iter().filter(|name| !except.contains(name)) {
+                self.done(name);
+            }
+        }
+
+        /// A worker held on a channel: stuck until the test or a hook opens it, or the rig drops.
+        fn gated(&mut self, name: &str) -> Hold {
+            let (release, wait) = mpsc::channel::<()>();
+            let core = self.core.clone();
+            self.radio
+                .spawn(&core, name.to_owned(), move || {
+                    let _ = wait.recv();
+                })
+                .unwrap();
+            Hold(Arc::new(Mutex::new(Some(release))))
+        }
+
+        /// Installs `hook` after the log's own record of each point.
+        fn hook(&mut self, hook: impl Fn(&JoinPoint<'_>) + Send + Sync + 'static) {
+            let log = self.log.clone();
+            self.radio.join_seam.at = Some(Arc::new(move |point: &JoinPoint<'_>| {
+                log.lock().unwrap().push(label(point));
+                hook(point);
+            }));
+        }
+
+        /// A hook that only advances the clock in `stages`.
+        fn advance_in(&mut self, stages: &'static [&'static str]) {
+            let clock = self.clock.clone();
+            self.hook(move |point| advance(&clock, stages, point));
+        }
+
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+
+        fn detached(&self) -> Vec<String> {
+            self.radio.detached.iter().cloned().collect()
+        }
+
+        fn close_streams_calls(&self) -> usize {
+            self.radio_device.calls().iter().filter(|call| *call == "close_streams").count()
+        }
+    }
+
+    fn count(log: &[String], prefix: &str) -> usize {
+        log.iter().filter(|line| line.starts_with(prefix)).count()
+    }
+
+    /// The threads recorded as `did not join`, in the order they were recorded.
+    fn joined_notes(core: &Core) -> Vec<String> {
+        lock(&core.rec).rejected.iter().filter(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join"))).map(|row| row["thread"].as_str().unwrap().to_owned()).collect()
+    }
+
+    fn leaked_because(core: &Core) -> Vec<Vec<String>> {
+        let rows: Vec<Json> = lock(&core.rec).rejected.iter().filter(|row| row["leaked"] == "streamers").cloned().collect();
+        rows.iter().map(|row| row["because"].as_array().unwrap().iter().map(|name| name.as_str().unwrap().to_owned()).collect()).collect()
+    }
+
+    #[test]
+    fn ur_16_a_transmit_stage_of_stuck_threads_takes_one_bound() {
+        test_support::bounded("a transmit stage of stuck threads", Wall::from_secs(30), || {
+            let mut rig = stage_rig();
+            rig.done_except(&["uhd-tx-s0", "uhd-tx-s1"]);
+            let _stuck = [rig.gated("uhd-tx-s0"), rig.gated("uhd-tx-s1")];
+            rig.advance_in(&["tx"]);
+            rig.radio.stop(StopMode::Orderly).unwrap();
+            let log = rig.log();
+            assert_eq!(rig.clock.elapsed(), JOIN_BOUND, "{log:?}");
+            assert_eq!(count(&log, "Begun tx"), 1, "{log:?}");
+            assert!(log.contains(&"Begun tx uhd-tx-s0,uhd-tx-s1".to_owned()), "{log:?}");
+            assert_eq!(count(&log, "Polled tx"), 4, "{log:?}");
+            assert_eq!(joined_notes(&rig.core), ["uhd-tx-s0", "uhd-tx-s1"]);
+            assert_eq!(rig.detached(), ["uhd-tx-s0", "uhd-tx-s1"]);
+            assert_eq!(rig.queues.shutdowns(Dir::Rx), [1, 1], "the receive Shutdowns were enqueued");
+            assert!(rig.radio.running.as_ref().unwrap().threads.is_empty(), "the receive threads were joined");
+            assert_eq!(rows(&rig.core, "stop").len(), 1);
+        });
+    }
+
+    /// The last poll before a stage's bound ends: the clock then moves one `POLL_STEP` to the bound.
+    const LAST_POLL: usize = (JOIN_BOUND.as_millis() / POLL_STEP.as_millis()) as usize - 1;
+
+    /// `beside` ends during the stage's last poll before its bound ends (the hook moves the clock to the bound, then releases it and confirms its handle has ended),
+    /// `stuck` never does: the stage joins the one and names the other, as the sweep at the bound finds them, and every `Shutdown` of the
+    /// direction is in its queue before the stage begins.
+    fn a_stage_joins_the_thread_that_ends_beside_a_stuck_one(dir: Dir, stage: &'static str, stuck: &'static str, beside: &'static str) {
+        test_support::bounded("a stage with a thread that ends beside a stuck one", Wall::from_secs(30), move || {
+            let mut rig = stage_rig();
+            rig.done_except(&[stuck, beside]);
+            let _stuck = rig.gated(stuck);
+            let ends = rig.gated(beside);
+            let (clock, queues) = (rig.clock.clone(), rig.queues.clone());
+            let queued = Arc::new(Mutex::new(Vec::new()));
+            let seen = queued.clone();
+            rig.hook(move |point| {
+                advance(&clock, &[stage], point);
+                match point {
+                    JoinPoint::Enqueued { dir: at } if *at == dir => seen.lock().unwrap().push(queues.shutdowns(dir)),
+                    JoinPoint::Polled { names, round, finished } if stage_of(names) == stage && *round == LAST_POLL => {
+                        ends.open();
+                        wait_ended(*finished, beside);
+                    }
+                    _ => {}
+                }
+            });
+            rig.radio.stop(StopMode::Orderly).unwrap();
+            assert!(rig.log().contains(&format!("Polled {stage} {LAST_POLL}")), "{:?}", rig.log());
+            assert_eq!(*queued.lock().unwrap(), [vec![1, 1]], "both Shutdowns were queued when the stage was entered: {:?}", rig.log());
+            assert_eq!(joined_notes(&rig.core), [stuck]);
+            assert_eq!(rig.detached(), [stuck]);
+            assert!(rig.radio.running.as_ref().unwrap().threads.is_empty());
+        });
+    }
+
+    #[test]
+    fn ur_16_a_transmit_stage_joins_the_thread_that_ends_beside_a_stuck_one() {
+        a_stage_joins_the_thread_that_ends_beside_a_stuck_one(Dir::Tx, "tx", "uhd-tx-s0", "uhd-tx-s1");
+    }
+
+    #[test]
+    fn ur_16_a_receive_stage_joins_the_thread_that_ends_beside_a_stuck_one() {
+        a_stage_joins_the_thread_that_ends_beside_a_stuck_one(Dir::Rx, "rx", "uhd-rx-s0", "uhd-rx-s1");
+    }
+
+    /// `stuck` holds its previous `stage`s clock out; `held` ends the moment its own stage `to` polls first: the stage has a bound of its own.
+    fn a_stage_has_its_own_bound(before: &'static str, stuck: &'static str, to: &'static str, held: &'static str) {
+        test_support::bounded("a stage after a stuck one", Wall::from_secs(30), move || {
+            let mut rig = stage_rig();
+            rig.done_except(&[stuck, held]);
+            let _stuck = rig.gated(stuck);
+            let release = rig.gated(held);
+            let clock = rig.clock.clone();
+            rig.hook(move |point| {
+                advance(&clock, &[before], point);
+                if let JoinPoint::Polled { names, round: 0, finished } = point
+                    && stage_of(names) == to
+                {
+                    release.open();
+                    wait_ended(*finished, held);
+                }
+            });
+            rig.radio.stop(StopMode::Orderly).unwrap();
+            let log = rig.log();
+            assert!(log.iter().any(|line| line == &format!("Polled {to} 0")), "the stage began inside its own bound: {log:?}");
+            assert_eq!(joined_notes(&rig.core), [stuck], "{log:?}");
+            assert_eq!(rig.detached(), [stuck]);
+            if before == "control" {
+                assert_one_plan_row(&rig.core);
+            }
+            assert_eq!(rows(&rig.core, "stop").len(), 1);
+        });
+    }
+
+    #[test]
+    fn ur_16_the_transmit_stage_has_its_own_bound_after_a_stuck_control_stage() {
+        a_stage_has_its_own_bound("control", "uhd-control", "tx", "uhd-tx-s0");
+    }
+
+    #[test]
+    fn ur_16_the_receive_stage_has_its_own_bound_after_a_stuck_transmit_stage() {
+        a_stage_has_its_own_bound("tx", "uhd-tx-s0", "rx", "uhd-rx-s0");
+    }
+
+    /// `ends_late` ends only after the first note of its stage: the stage's decision was taken at its sweep, so it stays named and detached.
+    fn a_stage_detaches_a_thread_that_ends_after_its_decision(stage: &'static str, stuck: &'static str, ends_late: &'static str) {
+        test_support::bounded("a thread that ends after its stage's decision", Wall::from_secs(30), move || {
+            let mut rig = stage_rig();
+            rig.done_except(&[stuck, ends_late]);
+            let _stuck = rig.gated(stuck);
+            let late = rig.gated(ends_late);
+            let ended = Arc::new(AtomicBool::new(false));
+            let (clock, saw) = (rig.clock.clone(), ended.clone());
+            rig.hook(move |point| {
+                advance(&clock, &[stage], point);
+                if let JoinPoint::Noted { name, finished, .. } = point
+                    && *name == stuck
+                {
+                    late.open();
+                    wait_ended(*finished, ends_late);
+                    saw.store(true, Ordering::SeqCst);
+                }
+            });
+            rig.radio.stop(StopMode::Orderly).unwrap();
+            assert!(ended.load(Ordering::SeqCst), "the late thread had ended before the stage went on: {:?}", rig.log());
+            assert_eq!(joined_notes(&rig.core), [stuck, ends_late]);
+            assert_eq!(rig.detached(), [stuck, ends_late]);
+            rig.radio.cleanup();
+            assert_eq!(rig.close_streams_calls(), 0);
+            assert_eq!(leaked_because(&rig.core), [vec![stuck.to_owned(), ends_late.to_owned()]]);
+        });
+    }
+
+    #[test]
+    fn ur_16_a_transmit_stage_detaches_a_thread_that_ends_after_its_decision() {
+        a_stage_detaches_a_thread_that_ends_after_its_decision("tx", "uhd-tx-s0", "uhd-tx-s1");
+    }
+
+    #[test]
+    fn ur_16_a_receive_stage_detaches_a_thread_that_ends_after_its_decision() {
+        a_stage_detaches_a_thread_that_ends_after_its_decision("rx", "uhd-rx-s0", "uhd-rx-s1");
+    }
+
+    #[test]
+    fn ur_16_a_stop_of_stuck_threads_takes_three_bounds_of_virtual_time() {
+        test_support::bounded("a stop of five stuck threads", Wall::from_secs(30), || {
+            let mut rig = stage_rig();
+            let _stuck: Vec<Hold> = FIVE.iter().map(|name| rig.gated(name)).collect();
+            rig.advance_in(&["control", "tx", "rx"]);
+            rig.radio.stop(StopMode::Orderly).unwrap();
+            let log = rig.log();
+            assert_eq!(rig.clock.elapsed(), 3 * JOIN_BOUND, "{log:?}");
+            assert_eq!(count(&log, "Begun"), 3, "{log:?}");
+            assert_eq!(count(&log, "Polled"), 12, "{log:?}");
+            assert_eq!(joined_notes(&rig.core), FIVE);
+            assert_eq!(rig.detached(), ["uhd-control", "uhd-rx-s0", "uhd-rx-s1", "uhd-tx-s0", "uhd-tx-s1"]);
+            assert_one_plan_row(&rig.core);
+            assert_eq!(rows(&rig.core, "stop").len(), 1);
+            rig.radio.stop(StopMode::Orderly).unwrap();
+            assert_eq!(rig.log(), log, "a second stop passes no point");
+            assert_eq!(joined_notes(&rig.core), FIVE);
+            rig.radio.cleanup();
+            assert_eq!(rig.close_streams_calls(), 0);
+            assert_eq!(leaked_because(&rig.core).len(), 1);
+            assert_eq!(leaked_because(&rig.core)[0].len(), 5);
+        });
+    }
+
+    #[test]
+    fn ur_26_the_stages_enqueue_and_decide_in_order() {
+        test_support::bounded("the order of the stages", Wall::from_secs(30), || {
+            let mut rig = stage_rig();
+            let _stuck: Vec<Hold> = FIVE.iter().map(|name| rig.gated(name)).collect();
+            let (clock, queues, core) = (rig.clock.clone(), rig.queues.clone(), rig.core.clone());
+            rig.hook(move |point| {
+                advance(&clock, &["control", "tx", "rx"], point);
+                let notes = joined_notes(&core);
+                match point {
+                    JoinPoint::Begun { names, .. } if stage_of(names) == "control" => {
+                        assert!(notes.is_empty());
+                        assert!(rows(&core, "plan").is_empty());
+                    }
+                    // The plan row and the control note come before the first transmit send; no queue holds a Shutdown yet.
+                    JoinPoint::Sending { dir: Dir::Tx } => {
+                        assert_eq!(notes, ["uhd-control"]);
+                        assert_eq!(rows(&core, "plan").len(), 1);
+                        assert_eq!((queues.shutdowns(Dir::Tx), queues.shutdowns(Dir::Rx)), (vec![0, 0], vec![0, 0]));
+                    }
+                    JoinPoint::Enqueued { dir: Dir::Tx } => assert_eq!((queues.shutdowns(Dir::Tx), queues.shutdowns(Dir::Rx)), (vec![1, 1], vec![0, 0])),
+                    // At the transmit stage's decision no receive queue holds a Shutdown.
+                    JoinPoint::Begun { names, .. } | JoinPoint::Noted { names, .. } if stage_of(names) == "tx" => assert_eq!(queues.shutdowns(Dir::Rx), [0, 0]),
+                    JoinPoint::Sending { dir: Dir::Rx } => {
+                        assert_eq!(notes, ["uhd-control", "uhd-tx-s0", "uhd-tx-s1"]);
+                        assert_eq!(queues.shutdowns(Dir::Rx), [0, 0]);
+                    }
+                    JoinPoint::Enqueued { dir: Dir::Rx } => {
+                        assert_eq!(queues.shutdowns(Dir::Rx), [1, 1]);
+                        assert_eq!(notes.len(), 3);
+                    }
+                    _ => {}
+                }
+            });
+            rig.radio.stop(StopMode::Orderly).unwrap();
+            let events: Vec<String> = rig.log().into_iter().filter(|line| ["Begun", "Noted", "Enqueued"].iter().any(|kind| line.starts_with(kind))).collect();
+            assert_eq!(
+                events,
+                [
+                    "Begun control uhd-control",
+                    "Noted control uhd-control",
+                    "Enqueued Tx",
+                    "Begun tx uhd-tx-s0,uhd-tx-s1",
+                    "Noted tx uhd-tx-s0",
+                    "Noted tx uhd-tx-s1",
+                    "Enqueued Rx",
+                    "Begun rx uhd-rx-s0,uhd-rx-s1",
+                    "Noted rx uhd-rx-s0",
+                    "Noted rx uhd-rx-s1"
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn ur_16_a_stage_joins_two_threads_that_each_need_the_manual_clock() {
+        test_support::bounded("a stage of two threads that sleep on the held clock", Wall::from_secs(30), || {
+            let (core, host) = manual_core();
+            let mut radio = prepared_with(1, 1);
+            radio.running = Some(Running { to_tx: Vec::new(), to_rx: Vec::new(), threads: Vec::new() });
+            // The seam's clock never moves, so the stage never expires: only the threads' ending ends it, and a joiner that does not idle on the device clock waits for ever.
+            let frozen = JoinClock::new();
+            radio.join_seam.now = Some(Arc::new(move || frozen.now()));
+            // Registered before the threads exist: the clock stays held, and so the sleeps pending, until the join waits.
+            let _driver = host.drive();
+            let names = ["uhd-tx-s0".to_owned(), "uhd-tx-s1".to_owned()];
+            for (name, millis) in names.iter().zip([1, 50]) {
+                let h = host.clone();
+                let handle = host.spawn(name, move || h.sleep(Wall::from_millis(millis))).unwrap();
+                radio.running.as_mut().unwrap().threads.push((name.clone(), handle));
+            }
+            let deadline = Instant::now() + Wall::from_secs(10);
+            while host.blocked() < 2 {
+                if Instant::now() >= deadline {
+                    test_support::infra("the two threads did not enter their sleeps within 10 s");
+                    panic!("the threads entered their sleeps");
+                }
+                std::thread::sleep(Wall::from_millis(1));
+            }
+            radio.join_stage(&core, &names);
+            assert_eq!(did_not_join(&core), 0, "{:?}", lock(&core.rec).rejected);
+            assert!(radio.detached.is_empty());
+        });
+    }
+
+    #[test]
+    fn ur_16_a_stage_of_finished_threads_makes_no_poll() {
+        test_support::bounded("a stop of finished threads", Wall::from_secs(30), || {
+            let mut rig = stage_rig();
+            rig.done_except(&[]);
+            rig.advance_in(&["control", "tx", "rx"]);
+            rig.radio.stop(StopMode::Orderly).unwrap();
+            let log = rig.log();
+            assert_eq!(count(&log, "Polled"), 0, "{log:?}");
+            assert_eq!(rig.clock.elapsed(), Wall::ZERO);
+            assert!(joined_notes(&rig.core).is_empty());
+            assert!(rig.detached().is_empty());
+            assert!(rig.radio.running.as_ref().unwrap().threads.is_empty(), "every thread was joined");
+            rig.radio.cleanup();
+            assert_eq!(rig.close_streams_calls(), 1);
+        });
+    }
+
+    #[test]
+    fn ur_16_a_stage_with_one_thread_present_reads_the_clock_once_and_waits_for_nothing() {
+        test_support::bounded("a stop with only uhd-rx-s0 present", Wall::from_secs(30), || {
+            let mut rig = stage_rig();
+            rig.done("uhd-rx-s0");
+            let (clock, reads) = (rig.clock.clone(), Arc::new(Mutex::new(Vec::new())));
+            let seen = reads.clone();
+            rig.hook(move |point| {
+                if let JoinPoint::Begun { .. } = point {
+                    seen.lock().unwrap().push(clock.reads());
+                }
+            });
+            rig.radio.stop(StopMode::Abort).unwrap();
+            assert_eq!(rig.log(), ["Sending Tx", "Enqueued Tx", "Sending Rx", "Enqueued Rx", "Begun rx uhd-rx-s0"]);
+            assert_eq!(*reads.lock().unwrap(), [1], "the one stage read its deadline once; the empty stages read nothing");
+            assert_eq!(rig.clock.reads(), 1, "its single check found the thread ended and read no clock");
+            assert!(joined_notes(&rig.core).is_empty());
+            assert!(rig.detached().is_empty());
+            assert!(rig.radio.running.as_ref().unwrap().threads.is_empty(), "uhd-rx-s0 was joined");
+            assert!(rig.radio.stopped);
+        });
+    }
+
+    #[test]
+    fn ur_16_a_thread_that_panics_in_a_stage_is_joined_and_its_peers_are_judged_alone() {
+        test_support::bounded("a panic inside a stage", Wall::from_secs(30), || {
+            let mut rig = stage_rig();
+            rig.done_except(&["uhd-tx-s0", "uhd-tx-s1"]);
+            let core = rig.core.clone();
+            let panics = Hold(Arc::new(Mutex::new(Some(panics_when_released(&mut rig.radio, &core, "uhd-tx-s0")))));
+            let _stuck = rig.gated("uhd-tx-s1");
+            let clock = rig.clock.clone();
+            rig.hook(move |point| {
+                advance(&clock, &["tx"], point);
+                if let JoinPoint::Begun { names, finished } = point
+                    && stage_of(names) == "tx"
+                {
+                    panics.open();
+                    wait_ended(*finished, "uhd-tx-s0");
+                }
+            });
+            rig.radio.stop(StopMode::Orderly).unwrap();
+            assert_eq!(panic_rows(&rig.core, "uhd-tx-s0"), 1);
+            assert_one_loss(&rig.core, &rig.device, &rig.events, "a Provider thread panicked");
+            assert_eq!(joined_notes(&rig.core), ["uhd-tx-s1"], "the panicked thread is joined, not named");
+            assert_eq!(rig.detached(), ["uhd-tx-s1"]);
+            assert!(rig.log().contains(&"Enqueued Rx".to_owned()), "the receive stage still ran");
+            assert!(rig.radio.running.as_ref().unwrap().threads.is_empty());
+        });
+    }
+
+    #[test]
+    fn ur_16_cleanup_without_a_stop_takes_the_same_stages() {
+        test_support::bounded("cleanup of a radio that was never stopped", Wall::from_secs(30), || {
+            let mut rig = stage_rig();
+            rig.done_except(&["uhd-tx-s0", "uhd-tx-s1"]);
+            let _stuck = [rig.gated("uhd-tx-s0"), rig.gated("uhd-tx-s1")];
+            rig.advance_in(&["tx"]);
+            rig.radio.cleanup();
+            assert_eq!(rig.queues.rx_modes(), [[StopMode::Abort], [StopMode::Abort]]);
+            assert_eq!(joined_notes(&rig.core), ["uhd-tx-s0", "uhd-tx-s1"]);
+            assert_eq!(rig.detached(), ["uhd-tx-s0", "uhd-tx-s1"]);
+            assert_eq!(leaked_because(&rig.core), [vec!["uhd-tx-s0".to_owned(), "uhd-tx-s1".to_owned()]]);
+            assert_eq!(rig.close_streams_calls(), 0);
+            let log = rig.log();
+            rig.radio.stop(StopMode::Orderly).unwrap();
+            assert_eq!(rig.log(), log, "a stop after cleanup does nothing");
         });
     }
 }
