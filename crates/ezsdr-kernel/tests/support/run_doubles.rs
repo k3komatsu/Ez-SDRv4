@@ -310,6 +310,9 @@ pub struct SteppedProvider {
     pub declare: Vec<(String, u64, u64)>,
     pub register_at_arm: Vec<String>,
     pub emit: Option<(EventKind, Severity, i64)>,
+    /// The node below the instance's root the `emit` event comes from; `None` is the root
+    /// itself (RS-32's "any node below the root", RM-38's stream node).
+    pub emit_node: Option<String>,
     /// The domain the `emit` event's time is in; `None` is the round's primary-root
     /// instant (KC-42).
     pub emit_domain: Option<ClockDomainId>,
@@ -362,6 +365,7 @@ impl SteppedProvider {
             declare: Vec::new(),
             register_at_arm: Vec::new(),
             emit: None,
+            emit_node: None,
             emit_domain: None,
             stop_emit: None,
             panic_in_step: false,
@@ -435,6 +439,14 @@ impl SteppedProvider {
     /// Emits one control-path event at or after the given primary-root tick.
     pub fn emitting(mut self, kind: &str, severity: Severity, at: i64) -> SteppedProvider {
         self.emit = Some((EventKind::parse(kind).expect("the test event kind is valid"), severity, at));
+        self
+    }
+
+    /// Emits one control-path event from the node `suffix` below the instance's root, at or
+    /// after the given primary-root tick (RS-32; RM-38's event names the stream's node).
+    pub fn emitting_at(mut self, suffix: &str, kind: &str, severity: Severity, at: i64) -> SteppedProvider {
+        self.emit = Some((EventKind::parse(kind).expect("the test event kind is valid"), severity, at));
+        self.emit_node = Some(suffix.to_owned());
         self
     }
 
@@ -725,13 +737,15 @@ impl Provider for SteppedProvider {
         if !self.emitted {
             if let Some((kind, severity, at)) = &self.emit {
                 if u >= *at {
-                    let event = Event {
-                        source: self.source.clone().expect("prepared"),
-                        time: self.emit_domain.map_or(until, |domain| TimePoint::new(domain, *at)),
-                        severity: *severity,
-                        kind: kind.clone(),
-                        payload: serde_json::json!({}),
+                    let source = self.source.clone().expect("prepared");
+                    let source = match &self.emit_node {
+                        None => source,
+                        Some(suffix) => match source {
+                            EventSource::Node { node } => EventSource::Node { node: node.child(suffix).map_err(|error| ModuleError::rejected(format!("test: {error}")))? },
+                            other => panic!("test: a node suffix needs a node root: {other}"),
+                        },
                     };
+                    let event = Event { source, time: self.emit_domain.map_or(until, |domain| TimePoint::new(domain, *at)), severity: *severity, kind: kind.clone(), payload: serde_json::json!({}) };
                     let sink = self.events.as_ref().ok_or_else(|| ModuleError::rejected("test: no event sink"))?;
                     if let Some(n) = self.flood {
                         let noise = sink.resolve(&event.source, &EventKind::parse("test.custom").expect("a valid kind")).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
@@ -1381,6 +1395,8 @@ pub struct TestLinkModule {
     pub probe: Probe,
     pub panic_descriptor: bool,
     pub panic_drops: bool,
+    /// Every created link's `policy()` panics (KC-8, KC-30).
+    pub panic_policy: bool,
     pub seed_drop: bool,
     /// Narrow `seed_drop` to the link whose consumer is this component (SC-20).
     pub seed_drop_into: Option<Ident>,
@@ -1399,6 +1415,7 @@ impl TestLinkModule {
             probe: probe.clone(),
             panic_descriptor: false,
             panic_drops: false,
+            panic_policy: false,
             seed_drop: false,
             seed_drop_into: None,
             drops_log: None,
@@ -1422,6 +1439,13 @@ impl TestLinkModule {
     /// Returns a DataLink whose `drops()` panics during cleanup (KA-18).
     pub fn panicking_drops(mut self) -> TestLinkModule {
         self.panic_drops = true;
+        self
+    }
+
+    /// Returns DataLinks whose `policy()` panics: the Kernel's registration must read the
+    /// validated declaration, not the Link (KC-8, KC-30).
+    pub fn panicking_policy(mut self) -> TestLinkModule {
+        self.panic_policy = true;
         self
     }
 
@@ -1470,6 +1494,7 @@ impl Link for TestLinkModule {
         }
         let index = self.created.fetch_add(1, Ordering::SeqCst);
         let link: Arc<dyn DataLink> = if self.panic_drops { Arc::new(PanickingDropsLink(link)) } else { Arc::new(link) };
+        let link: Arc<dyn DataLink> = if self.panic_policy { Arc::new(PanickingPolicyLink { inner: link, probe: self.probe.clone() }) } else { link };
         match &self.drops_log {
             None => Ok(link),
             Some(log) => {
@@ -1530,6 +1555,32 @@ impl DataLink for PanickingDropsLink {
     }
     fn policy(&self) -> BackPressure {
         self.0.policy()
+    }
+}
+
+/// A DataLink whose `policy()` panics, so a test can tell whether the Kernel asked the
+/// Link instead of reading the validated declaration (KC-8, KC-30).
+struct PanickingPolicyLink {
+    inner: Arc<dyn DataLink>,
+    probe: Probe,
+}
+
+impl DataLink for PanickingPolicyLink {
+    fn publish(&self, block: BlockRef) -> PublishOutcome {
+        self.inner.publish(block)
+    }
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+        self.inner.receive()
+    }
+    fn drops(&self) -> u64 {
+        self.inner.drops()
+    }
+    fn take_drop_carry(&self) -> DropCarry {
+        self.inner.take_drop_carry()
+    }
+    fn policy(&self) -> BackPressure {
+        self.probe.record("link:policy");
+        panic!("test: panic in DataLink policy")
     }
 }
 

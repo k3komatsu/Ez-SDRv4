@@ -150,6 +150,7 @@ impl Records {
             "rx_off_lattice",
             "rx_overlapping",
             "rx_before_origin",
+            ezsdr_radio::rx_link::DISCARDED_STAT,
             "link_drops_seen",
             "tx_bursts",
             "tx_samples",

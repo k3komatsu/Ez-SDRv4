@@ -576,6 +576,14 @@ impl Streams {
         }
     }
 
+    /// RM-38, UR-17: the block uhd-rx wrote the floor for was discarded: the floor goes back to `back`, the first sample no accepted block carries. An end booked while the block was being published took a floor of its own (SC-20a): that floor stands.
+    pub fn undeliver(&mut self, stream: StreamKey, back: i64) {
+        let pinned = self.lines.line(stream).into_iter().flat_map(|line| line.items.iter()).filter(|item| matches!(item.kind, Kind::End { .. })).filter_map(|item| item.delivered).max();
+        if let Some(delivered) = self.stream_mut(stream).delivered.as_mut() {
+            delivered.2 = back.max(pinned.unwrap_or(i64::MIN));
+        }
+    }
+
     /// UR-17: the owner finishes its segment.
     pub fn finished(&mut self, stream: StreamKey) {
         self.stream_mut(stream).delivered = None;

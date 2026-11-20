@@ -3,16 +3,18 @@ use super::core::{Core, DEFAULT_RECORD_ROWS};
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, Iq, RxRecv, Settings, TxReport};
 use crate::host::{ClockMode, HostClock};
 use crate::profile::RESUME_MARGIN_NS;
-use ezsdr_kernel::event::{EventCollector, EventSink, EventSource, Target};
+use ezsdr_kernel::event::{Event, EventCollector, EventHandle, EventSink, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::ResourceId;
+use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{Fidelity, ModuleRegistry, Pacing};
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
+use ezsdr_kernel::run::RunError;
 use ezsdr_kernel::spec::{Ident, Scalar, Value};
+use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimeAuthority};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration as Wall;
@@ -104,6 +106,19 @@ fn rig_on_description_links_with_margin(
     description: ezsdr_radio::channels::Description,
     margin_ns: i64,
 ) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+    rig_on_description_links_with_sink(device, links, inputs, description, margin_ns, |collector| collector)
+}
+
+/// `rig_on_description_links_with_margin` whose `Core` is given `sink`'s view of the collector,
+/// so a test can tap the `EventSink` boundary (UR-20's order test).
+fn rig_on_description_links_with_sink(
+    device: Arc<dyn Device>,
+    links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>,
+    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+    description: ezsdr_radio::channels::Description,
+    margin_ns: i64,
+    sink: impl FnOnce(Arc<EventCollector>) -> Arc<dyn EventSink>,
+) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
     clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "uhd.test".to_owned() })).unwrap();
@@ -117,8 +132,21 @@ fn rig_on_description_links_with_margin(
         .flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k)))
         .collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
-    let core = core_on(device, clocks, time.clone(), events.clone(), inputs, links, description, margin_ns);
+    let core = core_on(device, clocks, time.clone(), sink(events.clone()), inputs, links, description, margin_ns);
     (core, time, events)
+}
+
+/// `rig_with_links` whose sink records every emission at the `EventSink` boundary into the
+/// returned log, in call order, which a link's publish hook shares (UR-20).
+#[allow(clippy::type_complexity)]
+pub(super) fn rig_with_links_tapped(links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>) -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>, Arc<Mutex<Vec<String>>>) {
+    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (core, time, events) = rig_on_description_links_with_sink(device.clone(), vec![links], BTreeMap::new(), default_description(2_000), RESUME_MARGIN_NS, {
+        let log = log.clone();
+        move |collector| -> Arc<dyn EventSink> { Arc::new(TapSink { inner: collector, log, kinds: Mutex::new(Vec::new()) }) }
+    });
+    (core, device, time, events, log)
 }
 
 /// A layout rig with `links` on receive stream `k` alone.
@@ -152,6 +180,152 @@ fn core_on(
         Core::new(device, ResourceId::parse("usrp").unwrap(), root, time, clocks, events, Arc::new(inputs), links, description, DEFAULT_RECORD_ROWS, margin_ns)
             .expect("the rx node is inside the instance root"),
     )
+}
+
+/// A sink that records every emission at the `EventSink` boundary into one shared log, then
+/// hands it to the collector: the point where `emit_overflow` and `Core::emit_at` hand an event
+/// over, in call order with a link's `publish` (UR-20). The hot-path rule's no-allocation
+/// ceiling does not apply to a test build.
+pub(super) struct TapSink {
+    inner: Arc<EventCollector>,
+    log: Arc<Mutex<Vec<String>>>,
+    /// The kind of every resolved handle, since `emit` names the event by handle only.
+    kinds: Mutex<Vec<(EventHandle, String)>>,
+}
+
+impl EventSink for TapSink {
+    fn resolve(&self, source: &EventSource, kind: &ezsdr_kernel::event::EventKind) -> Result<EventHandle, RunError> {
+        let handle = self.inner.resolve(source, kind)?;
+        self.kinds.lock().unwrap().push((handle, kind.as_str().to_owned()));
+        Ok(handle)
+    }
+
+    fn emit(&self, handle: EventHandle, time: ezsdr_kernel::time::TimePoint, severity: ezsdr_kernel::event::Severity, payload: &[u8]) -> Result<(), RunError> {
+        let kind = self.kinds.lock().unwrap().iter().find(|(resolved, _)| *resolved == handle).map(|(_, kind)| kind.clone()).unwrap_or_else(|| "?".to_owned());
+        self.log.lock().unwrap().push(format!("{kind}:{}", time.ticks_in(time.domain()).expect("an event's time is a tick of its own domain"))); // own domain: the tap logs the event's own sample index
+        self.inner.emit(handle, time, severity, payload)
+    }
+
+    fn emit_control(&self, event: Event) -> Result<(), RunError> {
+        self.log.lock().unwrap().push(format!("{}:{}", event.kind.as_str(), event.time.ticks_in(event.time.domain()).expect("an event's time is a tick of its own domain"))); // own domain: the tap logs the event's own sample index
+        self.inner.emit_control(event)
+    }
+}
+
+/// A hook a test runs inside `ScriptedLink::publish`, before the answer is returned.
+pub(super) type PublishHook = Box<dyn Fn(&BlockRef) + Send + Sync>;
+
+/// A receive link whose publish answers a test scripts by the block's first sample in its own
+/// SampleClock (RM-38): `Full` where a consumer has stopped taking blocks, a drop outcome for a
+/// drop-class test, `Accepted` everywhere else. It records what it refused and what it accepted,
+/// and panics on a second publish of one first sample of one clock: a block a Provider published
+/// twice is the Provider's defect, not the script's.
+pub(super) struct ScriptedLink {
+    policy: BackPressure,
+    /// `[from, to)` of the first sample, in that sample's own clock domain, and the answer.
+    answers: Mutex<Vec<(i64, i64, PublishOutcome)>>,
+    refused: Mutex<Vec<(i64, u32)>>,
+    accepted: Mutex<Vec<(i64, u32)>>,
+    queue: Mutex<VecDeque<BlockRef>>,
+    dropped: AtomicU64,
+    seen: Mutex<BTreeSet<(ClockDomainId, i64)>>,
+    hook: Mutex<Option<PublishHook>>,
+}
+
+impl ScriptedLink {
+    /// A link with `policy`: `Full` for the first sample of a block in one of `ranges` when it is
+    /// `Block`, the policy's drop outcome otherwise; every other block is accepted.
+    pub(super) fn new(policy: BackPressure, ranges: &[(i64, i64)]) -> ScriptedLink {
+        let answer = if policy == BackPressure::Block {
+            PublishOutcome::Full
+        } else if policy == BackPressure::DropOldest {
+            PublishOutcome::DroppedOldest
+        } else {
+            PublishOutcome::DroppedNewest
+        };
+        ScriptedLink {
+            policy,
+            answers: Mutex::new(ranges.iter().map(|&(from, to)| (from, to, answer)).collect()),
+            refused: Mutex::new(Vec::new()),
+            accepted: Mutex::new(Vec::new()),
+            queue: Mutex::new(VecDeque::new()),
+            dropped: AtomicU64::new(0),
+            seen: Mutex::new(BTreeSet::new()),
+            hook: Mutex::new(None),
+        }
+    }
+
+    /// Answers `outcome` for a block whose first sample lies in `[from, to)`, the first matching
+    /// answer winning; called before anything is published.
+    pub(super) fn answer(&self, from: i64, to: i64, outcome: PublishOutcome) {
+        self.answers.lock().unwrap().push((from, to, outcome));
+    }
+
+    /// Runs `f` inside `publish`, before the answer is returned (RM-38's order test).
+    pub(super) fn hook(&self, f: impl Fn(&BlockRef) + Send + Sync + 'static) {
+        *self.hook.lock().unwrap() = Some(Box::new(f));
+    }
+
+    /// The `(first sample, len)` of every block it answered `Full` for, in order.
+    pub(super) fn refused(&self) -> Vec<(i64, u32)> {
+        self.refused.lock().unwrap().clone()
+    }
+
+    /// The `(first sample, len)` of every block it accepted, in order.
+    pub(super) fn accepted(&self) -> Vec<(i64, u32)> {
+        self.accepted.lock().unwrap().clone()
+    }
+
+    /// The samples of every block it refused.
+    pub(super) fn refused_samples(&self) -> u64 {
+        self.refused().iter().map(|(_, len)| u64::from(*len)).sum()
+    }
+}
+
+impl DataLink for ScriptedLink {
+    fn publish(&self, b: BlockRef) -> PublishOutcome {
+        let header = b.header();
+        let first = header.first_sample_time;
+        let ticks = first.ticks_in(first.domain()).expect("a block's first sample is a tick of its own clock"); // own domain: the link answers by the block's own sample index
+        assert!(self.seen.lock().unwrap().insert((first.domain(), ticks)), "test link: first sample {ticks} was published twice");
+        if let Some(hook) = self.hook.lock().unwrap().as_ref() {
+            hook(&b);
+        }
+        let outcome = self.answers.lock().unwrap().iter().find(|(from, to, _)| (*from..*to).contains(&ticks)).map_or(PublishOutcome::Accepted, |(_, _, outcome)| *outcome);
+        match outcome {
+            PublishOutcome::Accepted => {
+                self.accepted.lock().unwrap().push((ticks, header.len));
+                self.queue.lock().unwrap().push_back(b);
+            }
+            PublishOutcome::Full => self.refused.lock().unwrap().push((ticks, header.len)),
+            PublishOutcome::DroppedOldest => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                let mut queue = self.queue.lock().unwrap();
+                queue.pop_front();
+                queue.push_back(b);
+            }
+            PublishOutcome::DroppedNewest => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        outcome
+    }
+
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+        self.queue.lock().unwrap().pop_front().map(|block| (block, DropCarry::default()))
+    }
+
+    fn drops(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    fn take_drop_carry(&self) -> DropCarry {
+        DropCarry::default()
+    }
+
+    fn policy(&self) -> BackPressure {
+        self.policy
+    }
 }
 
 /// A target the Kernel would resolve to `node` (KC-23): its first segment as the resource

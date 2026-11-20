@@ -10,12 +10,13 @@ use std::time::{Duration as Wall, Instant};
 
 use ezsdr_hostmem::{HOST_MEMORY, HostPool, write_cf32};
 use ezsdr_kernel::contract::DataContractId;
-use ezsdr_kernel::event::Severity;
+use ezsdr_kernel::event::{EventKind, Severity};
 use ezsdr_kernel::module_api::StopMode;
 use ezsdr_kernel::stream::{BlockFlags, BlockHeader, ChannelMask, Direction, PublishOutcome, SampleBlock};
 use ezsdr_kernel::time::{Rational, SampleClockHandle, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{AlignmentErrorPayload, LateCommandPayload, RxOverflowCause};
+use ezsdr_radio::rx_link::{self, LossReport};
 use ezsdr_radio::timeline::{Channels, Config, StreamKey};
 use serde_json::json;
 
@@ -50,13 +51,31 @@ enum Pending {
     MissedStart,
 }
 
+/// What the discarded blocks of one stretch yielded and no accepted block has carried yet (RM-38): the flags, the device loss and the alignment report of the device reports they were read with.
+#[derive(Default)]
+struct Carry {
+    flags: BlockFlags,
+    loss: Option<LossReport>,
+    /// The sample intervals `loss` sums, so that a cut clips it without counting the samples between two reports (RM-17).
+    gaps: Vec<(i64, i64)>,
+    /// The first sample and the samples an `ALIGNMENT_ERROR` states (UR-19).
+    alignment: Option<(i64, u64)>,
+}
+
 struct Stream {
     clock: Clock,
     /// Its clock's handle until the clock is registered, at its first block (RM-25).
     handle: Option<SampleClockHandle>,
     config: Config,
     channels: Channels,
+    /// The first sample no accepted block carries (RM-16): the abort floor, the header's `lost`, the tail's start.
     expected: i64,
+    /// The end of the last block the device returned, a discarded one included (RM-38): the overlap trim, the report qualification and the receive length read it. It differs from `expected` only while a discard is pending.
+    read: i64,
+    /// What the blocks read since `expected` yielded (RM-38).
+    carry: Carry,
+    /// RM-38's event is owed once per segment.
+    discards: rx_link::Discards,
     /// The distinct reports since the last block, in arrival order (UR-17…UR-19).
     pending: Vec<Pending>,
     /// An overrun the origin gate dropped: UHD requested a restart for it, so the stream's end stops once more until a block is published (UR-17, UR-18).
@@ -78,6 +97,9 @@ impl Stream {
             config: Config { channels, ratio: Rational::new(clock.n as u64, 1).expect("a positive ratio") },
             channels,
             expected: 0,
+            read: 0,
+            carry: Carry::default(),
+            discards: rx_link::Discards::default(),
             pending: Vec::new(),
             stale_overrun: false,
             one_packet: false,
@@ -191,7 +213,7 @@ impl Rx {
         let streams = lock(&self.core.streams);
         refresh_intent(&mut chain, &streams, key, stream);
         // UR-17 (#67): a cut at or before the first undelivered sample ends the stream at once, before the origin of a start the device holds too: the untimed stop cancels it.
-        let done = chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);
+        let done = chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read);
         let end_now = chain.end_now();
         drop(streams);
         drop(chain);
@@ -267,8 +289,9 @@ impl Rx {
             // RM-16: an abort ends the stream uhd-rx has at the first sample not yet delivered,
             // a segment still being delivered up to an earlier cut included.
             self.follow();
-            if let Some(stream) = self.stream.as_mut() {
-                self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(stream.expected));
+            if let Some(stream) = self.stream.as_ref() {
+                let floor = floor(&lock(&self.core.streams), stream_key(Dir::Rx, self.k), stream);
+                self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(floor));
             }
             self.core.rx_chain[self.k].lock().request_end_now();
             self.try_end();
@@ -331,7 +354,7 @@ impl Rx {
     /// The root tick the stream ends at (UR-17, UR-18): the chain's cut; with a loss report pending, the plan's cut, which a later abort does not lower.
     fn end_cut(&self, chain: &RxChain, stream: &Stream) -> Option<i64> {
         let cut = chain.cut();
-        if loss_causes(&stream.pending).is_empty() { cut } else { self.planned_end(stream).or(cut) }
+        if loss_causes(&stream.pending).is_empty() && stream.carry.loss.is_none() { cut } else { self.planned_end(stream).or(cut) }
     }
 
     fn finish(&mut self) {
@@ -356,7 +379,7 @@ impl Rx {
             self.successor = true;
             let key = stream_key(Dir::Rx, self.k);
             // RM-17, UR-18: the reports no block carried are one tail event, up to the end cut.
-            self.emit_tail(&stream, &loss_causes(&stream.pending), end);
+            self.emit_tail(&stream, end);
             let mut streams = lock(&self.core.streams);
             if let (None, Some(end)) = (&stream.handle, end) {
                 if let Err(error) = self.core.clocks.end(stream.clock.domain, self.core.at(end)) {
@@ -376,13 +399,23 @@ impl Rx {
         Some(stream.clock.instant(planned.max(stream.expected)))
     }
 
-    /// RM-17, UR-18: the loss the stream reported and no block carried, up to the end `end` it was cut at: one `RX_OVERFLOW` at the first sample not delivered, `lost` that distance (a loss of 0 makes none).
-    fn emit_tail(&self, stream: &Stream, causes: &[RxOverflowCause], end: Option<i64>) {
+    /// RM-17, UR-18: the device loss the stream reported and no block carried, up to the end `end` it was cut at: one `RX_OVERFLOW` at its first lost sample, `lost` the loss the discarded blocks' reports carry plus, with a loss report pending, the samples from the end of the last read to the end (a discard is no loss, RM-38; a loss of 0 makes none).
+    fn emit_tail(&self, stream: &Stream, end: Option<i64>) {
         let Some(end) = end else { return };
-        let lost = (stream.clock.at_or_after(end) - stream.expected).max(0) as u64;
-        let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(causes, Some(lost)) else { return };
+        // The carried loss counts to the cut only: an abort after a `Full` publish cuts before the discarded block's device loss (RM-17).
+        let cut = stream.clock.at_or_after(end);
+        let mut report = stream.carry.loss.map(|report| LossReport { lost: rx_link::lost_before(&stream.carry.gaps, cut), ..report });
+        if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&loss_causes(&stream.pending), Some((cut - stream.read).max(0) as u64)) {
+            let pending = LossReport { first: stream.read, lost: payload.lost, cause: payload.cause };
+            match report.as_mut() {
+                Some(carried) => carried.merge(&pending),
+                None => report = Some(pending),
+            }
+        }
+        let Some(report) = report else { return };
+        let Some(payload) = report.payload() else { return };
         // RM-11: in the segment's SampleClock once registered (a block was published), else in the primary root.
-        let at = if stream.handle.is_none() { TimePoint::new(stream.clock.domain, stream.expected) } else { self.core.at(stream.clock.instant(stream.expected)) };
+        let at = if stream.handle.is_none() { TimePoint::new(stream.clock.domain, report.first) } else { self.core.at(stream.clock.instant(report.first)) };
         emit_overflow(&self.core, self.k, at, &payload);
     }
 
@@ -505,7 +538,7 @@ impl Rx {
         let Some(stream) = self.stream.as_ref() else { return block };
         let chain = self.core.rx_chain[self.k].lock();
         let Some(cut) = chain.cut() else { return block };
-        let left = stream.clock.at_or_after(cut) - stream.expected;
+        let left = stream.clock.at_or_after(cut) - stream.read;
         left.clamp(1, block as i64) as usize
     }
 
@@ -646,14 +679,15 @@ impl Rx {
             len = (cut_k - k).max(0);
             ended = true;
         }
-        if k + len > stream.expected {
+        // RM-38: a block wholly behind what the device has returned is dropped below, so it writes no floor.
+        if k + len > stream.read {
             let delivered = cut.map_or(k + len, |cut| (k + len).min(clock.at_or_after(cut)));
             streams.delivered(stream_key(Dir::Rx, self.k), clock.origin, stream.config, delivered);
         }
         drop(streams);
         drop(chain);
-        if k < stream.expected {
-            let trim = stream.expected - k;
+        if k < stream.read {
+            let trim = stream.read - k;
             if trim >= len {
                 self.core.stat("rx_overlapping", 1);
                 if ended {
@@ -666,7 +700,7 @@ impl Rx {
                 channel.drain(..trim as usize);
             }
             len -= trim;
-            k = stream.expected;
+            k = stream.read;
         }
         if len > 0 {
             if let Some(handle) = stream.handle.take() {
@@ -675,20 +709,17 @@ impl Rx {
                     self.core.reject_note(json!({ "clock_not_registered": error.to_string() }));
                 }
             }
-            let expected = stream.expected;
+            let (expected, read) = (stream.expected, stream.read);
             let lost = (k > expected).then(|| (k - expected) as u64);
             let pending = std::mem::take(&mut stream.pending);
             stream.stale_overrun = false;
-            let mut flags = BlockFlags::NONE;
-            if lost.is_some() {
-                // Each report adds its flag; a jump no report announced is a sequence
-                // discontinuity (UR-18).
-                flags = flags | BlockFlags::GAP_BEFORE;
-                if pending.is_empty() {
-                    flags = flags | BlockFlags::SEQ_DISCONTINUITY;
-                }
+            // UR-17…UR-19, RM-38: the reports are qualified against this read, so a report never takes an earlier gap; what a discarded block yields waits in the carry for the block a link accepts.
+            let own = k - read;
+            if own > 0 {
+                // Each report adds its flag; a jump no report announced is a sequence discontinuity (UR-18).
+                stream.carry.flags = stream.carry.flags | BlockFlags::GAP_BEFORE | if pending.is_empty() { BlockFlags::SEQ_DISCONTINUITY } else { BlockFlags::NONE };
                 for cause in &pending {
-                    flags = flags
+                    stream.carry.flags = stream.carry.flags
                         | match cause {
                             Pending::Overrun => BlockFlags::RESTARTED,
                             Pending::MissedStart => BlockFlags::NONE,
@@ -696,26 +727,21 @@ impl Rx {
                             Pending::Alignment => BlockFlags::ALIGNMENT,
                         };
                 }
-            }
-            let channels = stream.channels.count().max(1) as usize;
-            stream.expected = k + len;
-            let at = TimePoint::new(clock.domain, expected);
-            let lost_n = lost.unwrap_or(0);
-            let reports = loss_causes(&pending);
-            if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&reports, lost) {
-                // UR-20: one hot-path event for the block's whole reported loss.
-                emit_overflow(&self.core, self.k, at, &payload);
-            }
-            for pending in pending {
-                match pending {
-                    Pending::Overrun | Pending::Sequence => {}
-                    Pending::Alignment => {
-                        let payload = serde_json::to_value(AlignmentErrorPayload { lost: lost_n }).expect("a payload");
-                        self.core.emit_at(&self.core.stream_node(Dir::Rx, self.k), kinds::ALIGNMENT_ERROR, Severity::Error, payload, at);
+                if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&loss_causes(&pending), Some(own as u64)) {
+                    let fresh = LossReport { first: read, lost: payload.lost, cause: payload.cause };
+                    match stream.carry.loss.as_mut() {
+                        Some(carried) => carried.merge(&fresh),
+                        None => stream.carry.loss = Some(fresh),
                     }
-                    Pending::MissedStart => {}
+                    stream.carry.gaps.push((read, k));
                 }
             }
+            if pending.contains(&Pending::Alignment) {
+                let (first, lost) = stream.carry.alignment.unwrap_or((read, 0));
+                stream.carry.alignment = Some((first.min(read), lost + own as u64));
+            }
+            let flags = if lost.is_some() { BlockFlags::GAP_BEFORE } else { BlockFlags::NONE } | stream.carry.flags;
+            let channels = stream.channels.count().max(1) as usize;
             let n = len as usize;
             let bytes = self.pool.fill(channels * n * 8, |buffer| {
                 for (c, channel) in samples.iter().take(channels).enumerate() {
@@ -734,18 +760,47 @@ impl Rx {
                 lost,
                 contract: DataContractId::parse("ezsdr.stream.cf32").expect("cf32"),
             };
+            // RM-38: a `Full` is a discard, not a drop; a block that could not be built is no discard either.
+            let mut full = false;
             match SampleBlock::new_host(header, HOST_MEMORY, bytes, 8) {
                 Ok(block) => {
                     let block = Arc::new(block);
                     for link in self.core.links(self.k) {
-                        if link.publish(block.clone()) != PublishOutcome::Accepted {
-                            self.core.stat("link_drops_seen", 1);
+                        match link.publish(block.clone()) {
+                            PublishOutcome::Accepted => {}
+                            PublishOutcome::Full => full = true,
+                            _ => self.core.stat("link_drops_seen", 1),
                         }
                     }
-                    self.core.stat("rx_blocks", 1);
-                    self.core.stat("rx_samples", len);
+                    if !full {
+                        self.core.stat("rx_blocks", 1);
+                        self.core.stat("rx_samples", len);
+                    }
                 }
                 Err(error) => self.core.timing(json!({ "what": "rx_block_refused", "error": error.to_string() })),
+            }
+            if full {
+                self.core.stat(rx_link::DISCARDED_STAT, len);
+                // The floor written before the publish goes back: the block carried nothing (SC-20a).
+                let mut streams = lock(&self.core.streams);
+                streams.undeliver(stream_key(Dir::Rx, self.k), stream.expected);
+                drop(streams);
+                stream.read = k + len;
+                if stream.discards.refuse(len as u64).raise_event {
+                    self.core.emit_at(&self.core.stream_node(Dir::Rx, self.k), EventKind::LINK_BACKPRESSURE, Severity::Warning, rx_link::event_payload(), TimePoint::new(clock.domain, k));
+                }
+            } else {
+                // RM-17, UR-20: the events of the reports this block carries, after its publish, once for the whole jump.
+                let carry = std::mem::take(&mut stream.carry);
+                stream.expected = k + len;
+                stream.read = k + len;
+                if let Some(payload) = carry.loss.and_then(|report| report.payload()) {
+                    emit_overflow(&self.core, self.k, TimePoint::new(clock.domain, carry.loss.expect("a loss report").first), &payload);
+                }
+                if let Some((first, lost)) = carry.alignment {
+                    let payload = serde_json::to_value(AlignmentErrorPayload { lost }).expect("a payload");
+                    self.core.emit_at(&self.core.stream_node(Dir::Rx, self.k), kinds::ALIGNMENT_ERROR, Severity::Error, payload, TimePoint::new(clock.domain, first));
+                }
             }
             if self.first {
                 self.first = false;
@@ -763,13 +818,18 @@ impl Rx {
     }
 }
 
+/// RM-16: the first sample no accepted block carries, as the bookings read it (`Streams`' floor), which a block being published and discarded may move (SC-20a).
+fn floor(streams: &super::core::Streams, key: StreamKey, stream: &Stream) -> i64 {
+    streams.first_undelivered(key).map_or(stream.expected, |(_, _, delivered)| delivered)
+}
+
 fn refresh_intent(chain: &mut RxChain, streams: &super::core::Streams, key: StreamKey, stream: &Stream) {
     let planned = streams.line(key).and_then(|line| line.segment(stream.clock.origin, stream.config));
     if let Some(cut) = planned.map_or(Some(0), |segment| segment.cut) {
         chain.request_cut(stream.clock.instant(cut.max(stream.expected)));
     }
     if matches!(streams.stop, Some((_, StopMode::Abort))) {
-        chain.request_cut(stream.clock.instant(stream.expected));
+        chain.request_cut(stream.clock.instant(floor(streams, key, stream)));
     }
 }
 
@@ -806,10 +866,11 @@ mod differential;
 mod tests {
     use super::super::control::ColdConfig;
     use super::super::core::RxDevice;
+    use super::super::test_support::ScriptedLink;
     use super::*;
     use crate::device::Device;
     use ezsdr_kernel::module_api::Link;
-    use ezsdr_kernel::stream::BackPressure;
+    use ezsdr_kernel::stream::{BackPressure, DataLink};
     use ezsdr_kernel::stream::{ContinuityBuilder, DropCarry, GapCause};
     use ezsdr_radio::payloads::RxOverflowPayload;
     use ezsdr_radio::timeline::{Item, Kind, Line, Segment};
@@ -922,6 +983,64 @@ mod tests {
         let mut streams = lock(&core.streams);
         streams.stream_mut(key).configs.insert(seq, Arc::new(ColdConfig::new(BTreeMap::new())));
         assert!(streams.book(core, key, Item { e, seq, ready: 0, delivered: None, refused: false, kind }, None));
+    }
+
+    /// An owner on stream `k` (#126's two-stream tests) with `set`'s channels, its line as `rx` makes stream 0's.
+    fn rx_stream(core: &Arc<Core>, k: usize, set: Channels) -> (Rx, Clock) {
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, k), core.root, Rational::new(200, 1).unwrap()).unwrap();
+        let clock = Clock { domain: handle.id(), origin: 0, n: 200 };
+        let config = Config { channels: set, ratio: Rational::new(200, 1).unwrap() };
+        lock(&core.streams).lines.insert(
+            stream_key(Dir::Rx, k),
+            Line::new(ezsdr_radio::timeline::Stream {
+                direction: Direction::Rx,
+                origin: 0,
+                config,
+                lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing)),
+                call: core.block_len as i64,
+                allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
+            }),
+        );
+        core.device.rx_open(k, &set.iter().map(|channel| channel as usize).collect::<Vec<usize>>()).unwrap();
+        lock(&core.streams).record_open(stream_key(Dir::Rx, k), Some(set));
+        core.device.rx_start(k, clock.origin).unwrap();
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(to_rx);
+        (Rx::new(core.clone(), k, cmds, Some((handle, set, clock.origin)), None), clock)
+    }
+
+    /// What `Provider::stop(mode)` books while it runs: the streams' end at the current instant.
+    fn stop_now(core: &Core, mode: StopMode) {
+        let at = core.now();
+        let mut streams = lock(&core.streams);
+        streams.stop = Some((at, mode));
+        streams.end(core, at, mode == StopMode::Abort, false);
+        core.release_streams(streams);
+    }
+
+    /// Every event the collector holds, drained (a drain consumes).
+    fn drained(events: &ezsdr_kernel::event::EventCollector) -> Vec<ezsdr_kernel::event::Event> {
+        events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0))
+    }
+
+    /// The events of one kind among `events`, in delivery order.
+    fn of_kind<'a>(events: &'a [ezsdr_kernel::event::Event], kind: &str) -> Vec<&'a ezsdr_kernel::event::Event> {
+        events.iter().filter(|event| event.kind.as_str() == kind).collect()
+    }
+
+    /// The blocks `link` delivered, drained, as `(domain, first sample, len, flags, lost)`.
+    fn delivered(link: &dyn ezsdr_kernel::stream::DataLink) -> Vec<(ClockDomainId, i64, u32, BlockFlags, Option<u64>)> {
+        std::iter::from_fn(|| link.receive().map(|(block, _)| block))
+            .map(|block| {
+                let header = block.header();
+                (header.first_sample_time.domain(), header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len, header.flags, header.lost) // own domain: each block's clock is returned beside its ticks
+            })
+            .collect()
+    }
+
+    /// The floor a booking reads: the first sample of the running segment no accepted block carries.
+    fn floor_of(core: &Core, k: usize) -> Option<i64> {
+        lock(&core.streams).first_undelivered(stream_key(Dir::Rx, k)).map(|(_, _, delivered)| delivered)
     }
 
     #[test]
@@ -1566,6 +1685,777 @@ mod tests {
         assert_eq!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).count(), 0);
     }
 
+    // ------------------------------------------------------------ RM-38: a `Full` is a discard
+
+    #[test]
+    fn ur_17_a_full_block_link_discards_and_the_next_block_carries_the_gap() {
+        // UR-17, RM-38 (U1): a `Block` link answering `Full` is a discard, not an overrun: the
+        // block is not counted, the first sample no accepted block carries stays, the next block
+        // a link accepts carries `GAP_BEFORE` with its whole jump, and the segment owes one
+        // `ezsdr.LINK_BACKPRESSURE` at its first discarded block. Two stretches in one segment
+        // make one event.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(2000, 6000), (8000, 10000)]));
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let mut accepted = Vec::new();
+        let mut expected = 0;
+        for (k, full) in [(0, false), (2000, true), (4000, true), (6000, false), (8000, true), (10000, false)] {
+            rx.receive(samples(clock.instant(k), 2000));
+            let stream = rx.stream.as_ref().expect("the stream runs");
+            assert!(stream.read >= stream.expected, "the first sample no accepted block carries never moves past the device's read");
+            if full {
+                assert_eq!(stream.read, k + 2000, "the discarded block moves the device's read to its end");
+                assert_eq!(stream.expected, expected, "a discard leaves the first sample no accepted block carries");
+                assert!(stream.carry.flags.is_empty() && stream.carry.loss.is_none() && stream.carry.alignment.is_none(), "a discard with no report carries nothing");
+                assert!(delivered(&*link).is_empty(), "a discarded block reaches no consumer");
+            } else {
+                assert_eq!((stream.read, stream.expected), (k + 2000, k + 2000), "an accepted block carries everything up to its end");
+                assert!(stream.carry.flags.is_empty() && stream.carry.loss.is_none() && stream.carry.alignment.is_none(), "an accepted block takes the carry");
+                accepted.extend(delivered(&*link));
+                expected = k + 2000;
+            }
+        }
+        assert_eq!(
+            accepted,
+            [(clock.domain, 0, 2000, BlockFlags::NONE, None), (clock.domain, 6000, 2000, BlockFlags::GAP_BEFORE, Some(4000)), (clock.domain, 10000, 2000, BlockFlags::GAP_BEFORE, Some(2000)),]
+        );
+        assert_eq!(link.refused(), [(2000, 2000), (4000, 2000), (8000, 2000)], "the discarded blocks, in order");
+        let got = drained(&events);
+        assert!(of_kind(&got, kinds::RX_OVERFLOW).is_empty(), "a discard is no report: {got:?}");
+        assert!(of_kind(&got, kinds::ALIGNMENT_ERROR).is_empty(), "{got:?}");
+        let raised = of_kind(&got, ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE);
+        assert_eq!(raised.len(), 1, "one event per segment, not per stretch: {got:?}");
+        assert_eq!(raised[0].source, ezsdr_kernel::event::EventSource::Node { node: core.rx_id.clone() });
+        assert_eq!(raised[0].time, TimePoint::new(clock.domain, 2000), "the first discarded block's first sample");
+        assert_eq!(raised[0].severity, Severity::Warning);
+        assert_eq!(raised[0].payload, json!({}), "RM-38's payload is empty; the node names the stream");
+        let stats = lock(&core.rec).stats.clone();
+        assert_eq!((stats["rx_blocks"], stats["rx_samples"]), (3, 6000), "accepted blocks only");
+        assert_eq!(stats["rx_link_discarded_samples"], 6000, "2 000 + 2 000 + 2 000");
+        assert_eq!(stats["link_drops_seen"], 0, "a `Full` has its own count");
+        assert_eq!(stats["rx_overflows"], 0);
+    }
+
+    #[test]
+    fn ur_17_a_segment_change_on_one_receive_owner_raises_a_second_event() {
+        // UR-17, RM-38 (U2): the once-per-segment memory belongs to the segment, not to the
+        // owner: the same owner's second segment owes its own event at its own first discarded
+        // block, in its own SampleClock, and starts with nothing carried into it.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(0, 1000), (2000, 3000)]));
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, _) = rx_unopened(&core, 1);
+        let cut = 4000;
+        let origin2 = cut * 200;
+        // Each segment is begun by a command, whose configuration the owner configures before its start.
+        plan(&core, &[(0, Some(cut), Some(1)), (origin2, None, Some(2))]);
+        assert!(rx.begin(), "the first segment begins");
+        assert!(rx.stream.is_some(), "the first segment's stream: {:?}", lock(&core.rec).rejected);
+        let clock1 = rx.stream.as_ref().expect("the first segment").clock;
+        rx.receive(samples(clock1.instant(0), 1000)); // discarded
+        assert_eq!(floor_of(&core, 0), Some(0));
+        rx.receive(samples(clock1.instant(1000), 1000)); // accepted
+        rx.receive(samples(clock1.instant(2000), 1000)); // discarded
+        rx.receive(samples(clock1.instant(3000), 1000)); // accepted, up to the cut
+        assert!(rx.stream.is_none(), "the cut ends the first segment");
+        assert_eq!(clocks(&core), [(0, Some(clock1.instant(cut)))]);
+        assert_eq!(
+            delivered(&*link),
+            [(clock1.domain, 1000, 1000, BlockFlags::GAP_BEFORE, Some(1000)), (clock1.domain, 3000, 1000, BlockFlags::GAP_BEFORE, Some(1000))],
+            "the first segment's accepted blocks"
+        );
+
+        assert!(rx.begin(), "the same owner begins the second segment");
+        let (clock2, read, expected, carry, discards) = {
+            let stream = rx.stream.as_ref().expect("the second segment");
+            (stream.clock, stream.read, stream.expected, (&stream.carry.flags, stream.carry.loss, stream.carry.alignment), stream.discards)
+        };
+        assert_ne!(clock2.domain, clock1.domain, "each segment has its own SampleClock");
+        assert_eq!(clock2.origin, origin2);
+        assert_eq!((read, expected), (0, 0), "the second segment has read and carried nothing");
+        assert!(carry.0.is_empty() && carry.1.is_none() && carry.2.is_none(), "nothing is carried into a new segment: {carry:?}");
+        assert_eq!(discards, ezsdr_radio::rx_link::Discards::default(), "the event is owed again");
+
+        rx.receive(samples(clock2.instant(0), 1000)); // discarded again
+        rx.receive(samples(clock2.instant(1000), 1000)); // accepted
+        assert_eq!(delivered(&*link), [(clock2.domain, 1000, 1000, BlockFlags::GAP_BEFORE, Some(1000))], "the second segment's only accepted block");
+        let got = drained(&events);
+        let raised = of_kind(&got, ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE);
+        assert_eq!(raised.len(), 2, "one per segment: {got:?}");
+        assert_eq!(raised[0].time, TimePoint::new(clock1.domain, 0));
+        assert_eq!(raised[1].time, TimePoint::new(clock2.domain, 0), "the second segment's own first sample");
+        assert_ne!(raised[0].time.domain(), raised[1].time.domain(), "each in its segment's clock");
+        assert!(raised.iter().all(|event| event.source == ezsdr_kernel::event::EventSource::Node { node: core.rx_id.clone() }));
+        let stats = lock(&core.rec).stats.clone();
+        assert_eq!((stats["rx_blocks"], stats["rx_samples"]), (3, 3000), "the accepted blocks of both segments");
+        assert_eq!(stats["rx_link_discarded_samples"], 3000, "the discards of both segments add");
+        assert_eq!(stats["rx_overflows"], 0);
+    }
+
+    #[test]
+    fn ur_17_a_refusal_on_rx1_names_its_own_stream_node() {
+        // UR-17, RM-38 (U12), RM-29: the event comes from the stream that discarded, its own
+        // node, and no event of stream 0 exists; the other stream's blocks stay gapless.
+        let link0 = Arc::new(ScriptedLink::new(BackPressure::DropOldest, &[]));
+        let link1 = Arc::new(ScriptedLink::new(BackPressure::Block, &[(0, 1000)]));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+        let (core, _time, events) = super::super::test_support::rig_on_description_links(device, vec![vec![link0.clone()], vec![link1.clone()]], BTreeMap::new(), layout_description());
+        let (mut rx0, clock0) = rx(&core, 1);
+        let (mut rx1, clock1) = rx_stream(&core, 1, Channels::first(0).with(1));
+
+        rx0.receive(samples(clock0.instant(0), 2000));
+        rx0.receive(samples(clock0.instant(2000), 2000));
+        rx1.receive(samples(clock1.instant(0), 1000)); // discarded
+        rx1.receive(samples(clock1.instant(1000), 1000)); // accepted
+
+        assert_eq!(delivered(&*link0), [(clock0.domain, 0, 2000, BlockFlags::NONE, None), (clock0.domain, 2000, 2000, BlockFlags::NONE, None)], "the other stream's blocks stay gapless");
+        assert_eq!(delivered(&*link1), [(clock1.domain, 1000, 1000, BlockFlags::GAP_BEFORE, Some(1000))]);
+        let got = drained(&events);
+        let raised = of_kind(&got, ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE);
+        assert_eq!(raised.len(), 1, "one stream discarded: {got:?}");
+        assert_eq!(raised[0].source, ezsdr_kernel::event::EventSource::Node { node: core.stream_node(Dir::Rx, 1) }, "the event names the stream that discarded");
+        assert_eq!(raised[0].time, TimePoint::new(clock1.domain, 0));
+        let stream0: Vec<_> = got.iter().filter(|event| event.source == ezsdr_kernel::event::EventSource::Node { node: core.rx_id.clone() }).collect();
+        assert!(stream0.is_empty(), "no event of stream 0: {stream0:?}");
+        let stats = lock(&core.rec).stats.clone();
+        assert_eq!(stats["rx_link_discarded_samples"], 1000, "stream 1's one discarded block");
+        assert_eq!((stats["rx_blocks"], stats["rx_samples"]), (3, 5000), "stream 0's two blocks and stream 1's one");
+    }
+
+    #[test]
+    fn ur_18_a_stop_inside_a_stretch_makes_no_event_and_counts_to_the_cut() {
+        // UR-17, UR-18, RM-38 (U3a): a `Stop` inside a stretch ends the stream at its cut with
+        // no tail (a discard is no report), and each discarded block counts its length up to the
+        // cut; the receive length reads the discarded blocks too.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(2000, 10000)]));
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut owner, clock) = rx(&core, 1);
+        plan(&core, &[(0, Some(9000), None)]);
+        owner.poll();
+        owner.receive(samples(clock.instant(0), 2000));
+        for k in [2000, 4000, 6000, 8000] {
+            owner.receive(samples(clock.instant(k), 2000));
+        }
+        assert!(owner.stream.is_none(), "the block that reaches the cut ends the stream");
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(9000)))], "the stream ends at the plan's cut");
+        let stats = lock(&core.rec).stats.clone();
+        assert_eq!(stats["rx_link_discarded_samples"], 7000, "2 000 + 2 000 + 2 000 and the last block's 1 000 up to the cut");
+        assert_eq!((stats["rx_blocks"], stats["rx_samples"]), (1, 2000));
+        assert_eq!(stats["rx_overflows"], 0);
+        let got = drained(&events);
+        assert!(of_kind(&got, kinds::RX_OVERFLOW).is_empty(), "a stop inside a stretch makes no tail: {got:?}");
+        assert_eq!(of_kind(&got, ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).len(), 1);
+
+        // The receive length counts from what the device returned, not from the floor.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(2000, 4000)]));
+        let (core, _device, _time, _events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut next_rx, clock) = rx(&core, 1);
+        plan(&core, &[(0, Some(5000), None)]);
+        next_rx.poll();
+        next_rx.receive(samples(clock.instant(0), 2000));
+        next_rx.receive(samples(clock.instant(2000), 2000));
+        let stream = next_rx.stream.as_ref().expect("the stream runs to its cut");
+        assert_eq!(stream.read, 4000);
+        assert_eq!(next_rx.recv_len(), 1000, "the next call asks only for the samples up to the cut");
+    }
+
+    #[test]
+    fn ur_24_an_abort_in_a_stretch_cuts_at_its_first_undelivered_sample() {
+        // UR-17, RM-16, RM-38 (U3b): the floor a booking reads is the first sample no accepted
+        // block carries, which a discarded block's optimistic write leaves where it was; the
+        // abort's plan cut, applied stop and clock end are all that sample.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(2000, 6000)]));
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(samples(clock.instant(0), 2000));
+        rx.receive(samples(clock.instant(2000), 2000));
+        rx.receive(samples(clock.instant(4000), 2000));
+        assert_eq!(floor_of(&core, 0), Some(2000), "the discarded blocks' floor writes went back");
+        assert_eq!(rx.stream.as_ref().expect("the stream runs").read, 6000, "the device read every sample of the stretch");
+        time.advance_to(core.at(clock.instant(2000))).unwrap();
+        stop_now(&core, StopMode::Abort);
+        assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0))[0].segment.cut, Some(2000), "the plan cuts at the floor the booking took");
+        rx.command(RxCmd::Shutdown(StopMode::Abort));
+        assert!(rx.stream.is_none(), "the abort ends the stream at the first sample no accepted block carries");
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(2000)))], "the clock ends there too");
+        let applied = lock(&core.rec).applied.clone();
+        let stops: Vec<_> = applied.iter().filter(|row| row["key"] == "rx_stop").collect();
+        assert_eq!(stops.len(), 1, "{applied:?}");
+        assert_eq!(stops[0]["at"]["ticks"].as_i64(), Some(clock.instant(2000)), "the applied stop is the same sample: {applied:?}");
+        assert_eq!(lock(&core.rec).stats["rx_link_discarded_samples"], 4000, "the discards are not retracted");
+        assert!(of_kind(&drained(&events), kinds::RX_OVERFLOW).is_empty(), "no report, no tail");
+    }
+
+    #[test]
+    fn ur_24_an_abort_booked_while_a_block_is_discarded_ends_the_stream_at_that_block_s_end() {
+        // UR-17, SC-20a (U3c), #126: an end booked while a block was being published and
+        // discarded took that block's end as its floor, and the floor stands: the plan's cut,
+        // the applied stop and the clock's end are that sample.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(2000, 4000)]));
+        let (core, device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let (hook_core, hook_clock) = (core.clone(), clock);
+        link.hook(move |block| {
+            if block.header().first_sample_time.ticks_in(hook_clock.domain).ok() == Some(2000) {
+                stop_now(&hook_core, StopMode::Abort);
+            }
+        });
+        rx.receive(samples(clock.instant(0), 2000));
+        rx.receive(samples(clock.instant(2000), 2000));
+        assert_eq!(floor_of(&core, 0), Some(4000), "the end booked inside the publish keeps the block's end");
+        assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0))[0].segment.cut, Some(4000), "and the plan cuts there");
+        rx.command(RxCmd::Shutdown(StopMode::Abort));
+        assert!(rx.stream.is_none());
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(4000)))], "the clock ends where the plan cuts");
+        let applied = lock(&core.rec).applied.clone();
+        let stops: Vec<_> = applied.iter().filter(|row| row["key"] == "rx_stop").collect();
+        assert_eq!(stops.len(), 1, "one end, no second: {applied:?}");
+        assert_eq!(stops[0]["at"]["ticks"].as_i64(), Some(clock.instant(4000)), "{applied:?}");
+        assert_eq!(device.calls().iter().filter(|call| call.starts_with("rx_stop ")).count(), 1, "the device is stopped once");
+        assert_eq!(lock(&core.rec).stats["rx_link_discarded_samples"], 2000);
+        assert!(of_kind(&drained(&events), kinds::RX_OVERFLOW).is_empty());
+    }
+
+    #[test]
+    fn ur_24_another_stream_s_booking_in_the_publish_window_does_not_pin_the_floor() {
+        // UR-17, SC-20a (U3d), #126: the floor goes back wherever no end of its own stream took
+        // it; an end booked on another stream is that stream's floor, not this one's.
+        let link0 = Arc::new(ScriptedLink::new(BackPressure::Block, &[(2000, 4000)]));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+        let (core, _time, _events) = super::super::test_support::rig_on_description_links(device, vec![vec![link0.clone()], Vec::new()], BTreeMap::new(), layout_description());
+        let (mut rx0, clock0) = rx(&core, 1);
+        let (mut rx1, clock1) = rx_stream(&core, 1, Channels::first(0).with(1));
+        rx1.receive(samples(clock1.instant(0), 2000));
+        assert_eq!(floor_of(&core, 1), Some(2000));
+        let (hook_core, hook_clock) = (core.clone(), clock0);
+        link0.hook(move |block| {
+            if block.header().first_sample_time.ticks_in(hook_clock.domain).ok() == Some(2000) {
+                let key = stream_key(Dir::Rx, 1);
+                let at = hook_core.now();
+                let mut streams = lock(&hook_core.streams);
+                assert!(streams.book(&hook_core, key, Item { e: at, seq: 9, ready: at, delivered: None, refused: false, kind: Kind::End { abort: true } }, None));
+            }
+        });
+        rx0.receive(samples(clock0.instant(0), 2000));
+        rx0.receive(samples(clock0.instant(2000), 2000)); // discarded, while rx1's end is booked
+        assert_eq!(floor_of(&core, 0), Some(2000), "rx0's floor goes back: no end of rx0 was booked");
+        assert_eq!(floor_of(&core, 1), Some(2000));
+        let line1 = lock(&core.streams).line(stream_key(Dir::Rx, 1)).cloned().expect("rx1's line");
+        let end = line1.items.iter().find(|item| matches!(item.kind, Kind::End { .. })).expect("rx1's end");
+        assert_eq!(end.delivered, Some(2000), "the booking took rx1's floor");
+        assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 1))[0].segment.cut, Some(2000));
+        rx0.receive(samples(clock0.instant(4000), 2000)); // accepted: the whole stretch is one jump
+        assert_eq!(delivered(&*link0), [(clock0.domain, 0, 2000, BlockFlags::NONE, None), (clock0.domain, 4000, 2000, BlockFlags::GAP_BEFORE, Some(2000))]);
+    }
+
+    #[test]
+    fn ur_24_a_pinned_floor_stands_when_a_later_block_is_discarded() {
+        // UR-17, SC-20a (U3d), #126: a floor an end took is never rolled back by a later block
+        // a link discards, nor moved on by it; the samples read after it are discards.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(1000, 4000)]));
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let (hook_core, hook_clock) = (core.clone(), clock);
+        // The loss's end is booked at 4 ms while the block [1 000, 2 000) is being published:
+        // its floor is that block's end, its cut the loss's sample.
+        link.hook(move |block| {
+            if block.header().first_sample_time.ticks_in(hook_clock.domain).ok() == Some(1000) {
+                let key = stream_key(Dir::Rx, 0);
+                let at = hook_clock.instant(4000);
+                let mut streams = lock(&hook_core.streams);
+                assert!(streams.book(&hook_core, key, Item { e: at, seq: 9, ready: at, delivered: None, refused: false, kind: Kind::End { abort: false } }, None));
+            }
+        });
+        rx.receive(samples(clock.instant(0), 1000));
+        rx.receive(samples(clock.instant(1000), 1000));
+        assert_eq!(floor_of(&core, 0), Some(2000), "the end booked while the block was published keeps its end");
+        rx.receive(samples(clock.instant(2000), 1000));
+        assert_eq!(floor_of(&core, 0), Some(2000), "a floor once pinned stands");
+        assert_eq!(rx.stream.as_ref().expect("the stream runs").read, 3000);
+        rx.receive(samples(clock.instant(3000), 1000)); // clipped at the plan's cut
+        assert!(rx.stream.is_none(), "the stream ends at the plan's cut");
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(4000)))], "the stream ends at the plan's cut, not the pinned floor");
+        let applied = lock(&core.rec).applied.clone();
+        let stops: Vec<_> = applied.iter().filter(|row| row["key"] == "rx_stop").collect();
+        assert_eq!(stops.len(), 1);
+        assert_eq!(stops[0]["at"]["ticks"].as_i64(), Some(clock.instant(4000)), "{applied:?}");
+        assert_eq!(lock(&core.rec).stats["rx_link_discarded_samples"], 3000, "every discarded block counts");
+        assert!(of_kind(&drained(&events), kinds::RX_OVERFLOW).is_empty());
+    }
+
+    #[test]
+    fn ur_18_a_report_read_with_a_discarded_block_reaches_the_next_accepted_block() {
+        // UR-18, UR-19, RM-17, RM-38 (U4a…U4e): a report is qualified against the read of the
+        // block that read it; a discarded block carries its flags and its device loss to the
+        // block a link accepts next, whose events come after its own publish. The event states
+        // the device's loss only; the accepted block's `lost` is the whole jump.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Report {
+            Overrun,
+            Sequence,
+            Alignment,
+            MissedStart,
+            OverrunAndAlignment,
+        }
+        for (report, flags, device_loss, alignment) in [
+            (Report::Overrun, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(RxOverflowCause::Overrun), false),
+            (Report::Sequence, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(RxOverflowCause::Sequence), false),
+            (Report::Alignment, BlockFlags::GAP_BEFORE | BlockFlags::ALIGNMENT, None, true),
+            (Report::MissedStart, BlockFlags::GAP_BEFORE, None, false),
+            (Report::OverrunAndAlignment, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::ALIGNMENT, Some(RxOverflowCause::Overrun), true),
+        ] {
+            let case = format!("{report:?}");
+            let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(5000, 6000)]));
+            let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, clock) = rx(&core, 1);
+            rx.receive(samples(clock.instant(0), 1000));
+            match report {
+                Report::Overrun => rx.receive(RxRecv::Overflow { out_of_sequence: false }),
+                Report::Sequence => rx.receive(RxRecv::Overflow { out_of_sequence: true }),
+                Report::Alignment => rx.receive(RxRecv::Alignment),
+                Report::MissedStart => rx.receive(RxRecv::LateCommand),
+                Report::OverrunAndAlignment => {
+                    rx.receive(RxRecv::Overflow { out_of_sequence: false });
+                    rx.receive(RxRecv::Alignment);
+                }
+            }
+            rx.receive(samples(clock.instant(5000), 1000)); // the device jumped 4 000; the block is discarded
+            {
+                let stream = rx.stream.as_ref().expect("the stream runs");
+                assert!(stream.pending.is_empty(), "{case}: the block read the reports at its own read");
+                assert_eq!(stream.carry.flags, flags, "{case}");
+                assert_eq!(stream.carry.loss.map(|report| (report.first, report.lost, report.cause)), device_loss.map(|cause| (1000, 4000, cause)), "{case}");
+                assert_eq!(stream.carry.alignment, alignment.then_some((1000, 4000)), "{case}");
+                assert_eq!((stream.read, stream.expected), (6000, 1000), "{case}");
+            }
+            let early = drained(&events);
+            assert!(of_kind(&early, kinds::RX_OVERFLOW).is_empty() && of_kind(&early, kinds::ALIGNMENT_ERROR).is_empty(), "{case}: a discard makes no report event: {early:?}");
+            assert_eq!(of_kind(&early, ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).len(), 1, "{case}: the discard's own event: {early:?}");
+
+            rx.receive(samples(clock.instant(6000), 1000));
+            assert_eq!(delivered(&*link), [(clock.domain, 0, 1000, BlockFlags::NONE, None), (clock.domain, 6000, 1000, flags, Some(5000))], "{case}: the block carries the flags and the whole jump");
+            let got = drained(&events);
+            let overflows = of_kind(&got, kinds::RX_OVERFLOW);
+            assert_eq!(overflows.len(), usize::from(device_loss.is_some()), "{case}: {got:?}");
+            if let Some(cause) = device_loss {
+                assert_eq!(RxOverflowPayload::from_payload(&overflows[0].payload).unwrap(), RxOverflowPayload { cause, lost: 4000 }, "{case}: the device's loss, not the jump");
+                assert_eq!(overflows[0].time, TimePoint::new(clock.domain, 1000), "{case}: the first lost sample");
+            }
+            let alignments = of_kind(&got, kinds::ALIGNMENT_ERROR);
+            assert_eq!(alignments.len(), usize::from(alignment), "{case}: {got:?}");
+            if alignment {
+                assert_eq!(alignments[0].payload["lost"], 4000, "{case}");
+                assert_eq!(alignments[0].time, TimePoint::new(clock.domain, 1000), "{case}");
+            }
+            let stats = lock(&core.rec).stats.clone();
+            assert_eq!(stats["rx_link_discarded_samples"], 1000, "{case}");
+            assert_eq!(stats["rx_overflows"], i64::from(matches!(report, Report::Overrun | Report::Sequence | Report::OverrunAndAlignment)), "{case}");
+        }
+    }
+
+    #[test]
+    fn ur_18_a_report_spent_on_a_gapless_discarded_block_makes_no_event() {
+        // UR-18, UR-19, RM-38 (U4s): a report is spent at its own read, so a discarded block
+        // with no device jump consumes it and carries no flag and no loss: the next accepted
+        // block is `GAP_BEFORE` alone and the end stops once.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum When {
+            Before,
+            After,
+        }
+        for (reports, when, alignment) in [
+            (vec![RxRecv::Overflow { out_of_sequence: false }], When::Before, false),
+            (vec![RxRecv::Overflow { out_of_sequence: false }, RxRecv::Alignment], When::Before, true),
+            (vec![RxRecv::Overflow { out_of_sequence: false }], When::After, false),
+        ] {
+            let case = format!("{when:?}, alignment {alignment}");
+            let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(1000, 2000)]));
+            let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, clock) = rx(&core, 1);
+            rx.receive(samples(clock.instant(0), 1000));
+            if when == When::Before {
+                for report in &reports {
+                    rx.receive(report.clone());
+                }
+            }
+            rx.receive(samples(clock.instant(1000), 1000)); // discarded, gapless: the reports are spent here
+            if when == When::After {
+                for report in &reports {
+                    rx.receive(report.clone());
+                }
+            }
+            {
+                let stream = rx.stream.as_ref().expect("the stream runs");
+                assert_eq!((stream.read, stream.expected), (2000, 1000), "{case}");
+                assert_eq!(stream.carry.flags, BlockFlags::NONE, "{case}: a gapless discard carries no flag");
+                assert!(stream.carry.loss.is_none(), "{case}");
+                if when == When::Before {
+                    assert!(stream.pending.is_empty(), "{case}: the discard's own read spent the report");
+                    assert_eq!(stream.carry.alignment, alignment.then_some((1000, 0)), "{case}");
+                }
+            }
+            rx.receive(samples(clock.instant(2000), 1000));
+            {
+                let stream = rx.stream.as_ref().expect("the stream runs");
+                assert!(stream.pending.is_empty(), "{case}: the gapless block spent the report");
+                assert!(stream.carry.flags.is_empty() && stream.carry.loss.is_none() && stream.carry.alignment.is_none(), "{case}: nothing is carried on");
+            }
+            assert_eq!(
+                delivered(&*link),
+                [(clock.domain, 0, 1000, BlockFlags::NONE, None), (clock.domain, 2000, 1000, BlockFlags::GAP_BEFORE, Some(1000))],
+                "{case}: the accepted block is `GAP_BEFORE` alone"
+            );
+            let got = drained(&events);
+            assert!(of_kind(&got, kinds::RX_OVERFLOW).is_empty(), "{case}: no event for a spent report: {got:?}");
+            assert!(!got.iter().any(|event| event.kind.as_str() == kinds::RX_OVERFLOW), "{case}");
+            assert_eq!(of_kind(&got, ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).len(), 1, "{case}");
+            let alignments = of_kind(&got, kinds::ALIGNMENT_ERROR);
+            assert_eq!(alignments.len(), usize::from(alignment), "{case}: {got:?}");
+            if alignment {
+                assert_eq!(alignments[0].payload["lost"], 0, "{case}: the gapless value, not the discard's 1 000");
+            }
+            // The end: the report was spent, so the overrun does not stop a second time.
+            book(&core, core.ticks(6_000_000), 1, Kind::Stop);
+            rx.poll();
+            end_quietly(&mut rx, &core, &time);
+            assert!(rx.stream.is_none(), "{case}");
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(6000)))], "{case}");
+            let timing = lock(&core.rec).timing.clone();
+            assert_eq!(timing.iter().filter(|row| row["what"] == "rx_stop_overrun_clear").count(), 0, "{case}: an answered overrun needs no second stop");
+            let applied = lock(&core.rec).applied.clone();
+            assert_eq!(applied.iter().filter(|row| row["key"] == "rx_stop").count(), 1, "{case}: {applied:?}");
+            assert!(of_kind(&drained(&events), kinds::RX_OVERFLOW).is_empty(), "{case}: the end makes no tail");
+        }
+    }
+
+    #[test]
+    fn ur_18_an_unannounced_jump_in_a_stretch_is_a_sequence_discontinuity() {
+        // UR-18, RM-38 (U5): a device jump no report announced is a sequence discontinuity,
+        // carried with the discard's flags; the same block boundaries with no jump are
+        // `GAP_BEFORE` alone.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(1000, 2000), (3000, 4000)]));
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut owner, clock) = rx(&core, 1);
+        for k in [0, 1000, 3000, 4000] {
+            owner.receive(samples(clock.instant(k), 1000));
+            let stream = owner.stream.as_ref().expect("the stream runs");
+            assert!(stream.read >= stream.expected, "read never falls behind the first sample no accepted block carries");
+        }
+        assert_eq!(
+            delivered(&*link),
+            [(clock.domain, 0, 1000, BlockFlags::NONE, None), (clock.domain, 4000, 1000, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(3000)),],
+            "one jump of 3 000, no report"
+        );
+        assert!(of_kind(&drained(&events), kinds::RX_OVERFLOW).is_empty(), "no report, no event");
+
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(1000, 2000)]));
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut next_rx, clock) = rx(&core, 1);
+        for k in [0, 1000, 2000] {
+            next_rx.receive(samples(clock.instant(k), 1000));
+        }
+        assert_eq!(
+            delivered(&*link),
+            [(clock.domain, 0, 1000, BlockFlags::NONE, None), (clock.domain, 2000, 1000, BlockFlags::GAP_BEFORE, Some(1000))],
+            "the contrast: no jump, no sequence discontinuity"
+        );
+        assert!(of_kind(&drained(&events), kinds::RX_OVERFLOW).is_empty());
+    }
+
+    #[test]
+    fn ur_18_a_later_report_does_not_take_an_earlier_gap() {
+        // UR-18, RM-38 (U5b, Sol's sequence): every block is judged against the end of the last
+        // block the device returned, so a report arriving after an unannounced jump is spent on
+        // the gapless read after it: no `RESTARTED`, no `RX_OVERFLOW`, and the jump keeps its
+        // `SEQ_DISCONTINUITY`.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(3000, 4000)]));
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(samples(clock.instant(0), 1000));
+        rx.receive(samples(clock.instant(3000), 1000)); // an unannounced jump of 2 000, discarded
+        assert_eq!(rx.stream.as_ref().expect("the stream runs").carry.flags, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY);
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        rx.receive(samples(clock.instant(4000), 1000)); // contiguous with the last read: its own read is gapless
+        assert_eq!(
+            delivered(&*link),
+            [(clock.domain, 0, 1000, BlockFlags::NONE, None), (clock.domain, 4000, 1000, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(3000)),],
+            "the report took no earlier gap"
+        );
+        assert!(of_kind(&drained(&events), kinds::RX_OVERFLOW).is_empty(), "the report is spent, not credited with the jump");
+        assert_eq!(lock(&core.rec).stats["rx_overflows"], 1, "the device reported once");
+    }
+
+    #[test]
+    fn ur_17_an_overlap_inside_a_stretch_is_trimmed_against_the_read_end() {
+        // UR-17, RM-38 (U6): a block wholly behind what the device returned is trimmed against
+        // `read`, not against the first sample no accepted block carries, so a repeat inside a
+        // stretch is one discard and not two, and leaves no floor behind.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(1000, 2000)]));
+        let (core, _device, _time, _events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(samples(clock.instant(1000), 1000));
+        assert_eq!(rx.stream.as_ref().expect("the stream runs").read, 2000);
+        assert_eq!(floor_of(&core, 0), Some(0), "the discarded block leaves no floor");
+        rx.receive(samples(clock.instant(1000), 1000)); // the repeat shape: wholly behind `read`
+        let stats = lock(&core.rec).stats.clone();
+        assert_eq!(stats["rx_overlapping"], 1);
+        assert_eq!(stats["rx_link_discarded_samples"], 1000, "the copy is no second discard");
+        assert_eq!(floor_of(&core, 0), Some(0), "a dropped copy writes no floor");
+        assert_eq!(rx.stream.as_ref().expect("the stream runs").read, 2000, "and moves no read");
+        assert_eq!(link.refused(), [(1000, 1000)], "the copy reached no link");
+        assert!(delivered(&*link).is_empty());
+    }
+
+    #[test]
+    fn ur_26_a_carried_overrun_makes_no_second_stop() {
+        // UR-26, UR-17, RM-38 (U7, Q8): a block that was discarded took its report into the
+        // carry, so no overrun report is unanswered and the end stops once; a report no block
+        // carried still stops twice.
+        for carried in [true, false] {
+            let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(3000, 4000)]));
+            let Second { mut rx, spy, core, time, events, clock, _guard } = second_stop_rig_with(vec![link.clone()]);
+            rx.receive(RxRecv::Overflow { out_of_sequence: false });
+            if carried {
+                rx.receive(samples(clock.instant(3000), 1000)); // discarded, with a device jump: the report goes into the carry
+                let stream = rx.stream.as_ref().expect("the stream runs");
+                assert!(stream.pending.is_empty(), "the discarded block took the report");
+                assert_eq!(stream.carry.loss.map(|report| report.lost), Some(2000));
+            } else {
+                assert!(rx.stream.as_ref().expect("the stream runs").pending == [Pending::Overrun], "the report is unanswered");
+            }
+            book(&core, core.ticks(6_000_000), 1, Kind::Stop);
+            rx.poll();
+            end_quietly(&mut rx, &core, &time);
+            assert!(rx.stream.is_none(), "carried {carried}");
+            assert_eq!(spy.seen("rx_stop"), if carried { 1 } else { 2 }, "a carried overrun is no unanswered report: carried {carried}");
+            let timing = lock(&core.rec).timing.clone();
+            assert_eq!(timing.iter().filter(|row| row["what"] == "rx_stop_overrun_clear").count(), if carried { 0 } else { 1 }, "carried {carried}");
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(6000)))], "carried {carried}");
+            let got = drained(&events);
+            let tails = of_kind(&got, kinds::RX_OVERFLOW);
+            assert_eq!(tails.len(), 1, "carried {carried}: {got:?}");
+            let lost = if carried { 2000 } else { 5000 };
+            assert_tail(tails[0], &core, TimePoint::new(clock.domain, 1000), RxOverflowCause::Overrun, lost);
+        }
+    }
+
+    #[test]
+    fn ur_18_a_tail_counts_the_carried_loss_only() {
+        // UR-18, RM-17, RM-38 (U7t): the end's tail is the device loss the discarded blocks
+        // carried; the samples the device read on after it are discards, not device loss.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(5000, 6000)]));
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        plan(&core, &[(0, Some(9000), None)]);
+        rx.poll();
+        rx.receive(samples(clock.instant(0), 1000));
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        rx.receive(samples(clock.instant(5000), 1000)); // discarded: the device jumped 4 000 and the report went into the carry
+        let stream = rx.stream.as_ref().expect("the stream runs");
+        assert_eq!(stream.read, 6000);
+        assert_eq!(stream.carry.loss.map(|report| (report.first, report.lost)), Some((1000, 4000)));
+        end_quietly(&mut rx, &core, &time);
+        assert!(rx.stream.is_none());
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(9000)))], "a carried loss keeps the plan's cut");
+        let got = drained(&events);
+        let tails = of_kind(&got, kinds::RX_OVERFLOW);
+        assert_eq!(tails.len(), 1, "{got:?}");
+        assert_tail(tails[0], &core, TimePoint::new(clock.domain, 1000), RxOverflowCause::Overrun, 4000);
+        assert_eq!(lock(&core.rec).stats["rx_link_discarded_samples"], 1000, "the discarded block, not the distance to the cut");
+    }
+
+    #[test]
+    fn ur_18_an_abort_after_a_full_publish_counts_the_carried_loss_to_its_cut() {
+        // UR-18, RM-17, RM-38, #126 (Sol M1): an abort after a block was discarded cuts at the first
+        // sample no accepted block carries, so the device loss the discarded block's report carried
+        // lies past the cut and makes no tail; an earlier `Stop`'s cut is kept, and the loss is
+        // counted up to it only.
+        for (stop_at, tail) in [(None, None), (Some(3000), Some(2000u64))] {
+            let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(5000, 6000)]));
+            let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, clock) = rx(&core, 1);
+            rx.receive(samples(clock.instant(0), 1000));
+            rx.receive(RxRecv::Overflow { out_of_sequence: false });
+            rx.receive(samples(clock.instant(5000), 1000)); // discarded: the loss [1000, 5000) is in the carry
+            assert_eq!(rx.stream.as_ref().expect("the stream runs").carry.loss.map(|report| (report.first, report.lost)), Some((1000, 4000)));
+            if let Some(stop_at) = stop_at {
+                time.advance_to(core.at(clock.instant(stop_at))).unwrap();
+                stop_now(&core, StopMode::Orderly);
+            }
+            stop_now(&core, StopMode::Abort);
+            rx.command(RxCmd::Shutdown(StopMode::Abort));
+            assert!(rx.stream.is_none());
+            let end = stop_at.unwrap_or(1000);
+            assert_eq!(clocks(&core), [(0, Some(clock.instant(end)))], "the clock ends at the cut: the first sample no accepted block carries, or the Stop's");
+            let got = drained(&events);
+            let tails = of_kind(&got, kinds::RX_OVERFLOW);
+            match tail {
+                None => assert!(tails.is_empty(), "the loss lies past the cut: {got:?}"),
+                Some(lost) => {
+                    assert_eq!(tails.len(), 1, "{got:?}");
+                    assert_tail(tails[0], &core, TimePoint::new(clock.domain, 1000), RxOverflowCause::Overrun, lost);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ur_17_a_refused_first_block_registers_the_clock() {
+        // UR-17, RM-25, RM-38 (U8): a segment whose first block a link discards has a clock,
+        // registered at that block, in which the event is stamped; the first accepted block's
+        // gap is `GAP_BEFORE` alone with `lost` its index.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(0, 2000)]));
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(samples(clock.instant(0), 2000));
+        assert_eq!(clocks(&core), [(0, None)], "the refused first block registered the segment's clock");
+        rx.receive(samples(clock.instant(2000), 2000));
+        assert_eq!(delivered(&*link), [(clock.domain, 2000, 2000, BlockFlags::GAP_BEFORE, Some(2000))], "a first block's gap is its index, with no sequence discontinuity");
+        let got = drained(&events);
+        let raised = of_kind(&got, ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE);
+        assert_eq!(raised.len(), 1, "{got:?}");
+        assert_eq!(raised[0].source, ezsdr_kernel::event::EventSource::Node { node: core.rx_id.clone() });
+        assert_eq!(raised[0].time, TimePoint::new(clock.domain, 0), "stamped in the segment's own clock");
+        assert_eq!(lock(&core.rec).stats["rx_link_discarded_samples"], 2000);
+    }
+
+    #[test]
+    fn ur_17_a_drop_class_link_s_outcomes_are_counted_and_discard_nothing() {
+        // UR-17, SC-20, RM-38 (U10): a drop outcome is not `Full`: the block is counted, the
+        // first sample no accepted block carries advances, nothing is carried and no
+        // `LINK_BACKPRESSURE` is raised.
+        for (policy, outcome) in [(BackPressure::DropOldest, PublishOutcome::DroppedOldest), (BackPressure::DropNewest, PublishOutcome::DroppedNewest)] {
+            let case = format!("{policy:?}");
+            let link = Arc::new(ScriptedLink::new(policy, &[]));
+            link.answer(1000, 2000, outcome);
+            let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+            let (mut rx, clock) = rx(&core, 1);
+            for k in [0, 1000, 2000] {
+                rx.receive(samples(clock.instant(k), 1000));
+                let stream = rx.stream.as_ref().expect("the stream runs");
+                assert_eq!(stream.read, k + 1000, "{case}");
+                assert_eq!((stream.read, stream.expected), (k + 1000, k + 1000), "{case}: a drop is no discard");
+                assert!(stream.carry.flags.is_empty() && stream.carry.loss.is_none() && stream.carry.alignment.is_none(), "{case}");
+            }
+            assert_eq!(link.drops(), 1, "{case}");
+            assert_eq!(link.accepted(), [(0, 1000), (2000, 1000)], "{case}: the dropped block is no `Accepted`");
+            assert!(link.refused().is_empty(), "{case}: a drop is no `Full`");
+            let got = drained(&events);
+            assert!(of_kind(&got, ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).is_empty(), "{case}: {got:?}");
+            assert!(of_kind(&got, kinds::RX_OVERFLOW).is_empty(), "{case}");
+            let stats = lock(&core.rec).stats.clone();
+            assert_eq!(stats["link_drops_seen"], 1, "{case}");
+            assert_eq!((stats["rx_blocks"], stats["rx_samples"]), (3, 3000), "{case}: every block is counted");
+            assert_eq!(stats["rx_link_discarded_samples"], 0, "{case}");
+            assert_eq!(stats["rx_overflows"], 0, "{case}");
+            let queued: Vec<i64> = delivered(&*link).iter().map(|(_, first, _, _, _)| *first).collect();
+            let kept = if policy == BackPressure::DropOldest { vec![1000, 2000] } else { vec![0, 2000] };
+            assert_eq!(queued, kept, "{case}: what the drop-class link kept");
+        }
+    }
+
+    #[test]
+    fn ur_20_the_overflow_follows_the_publish_of_the_block_that_carries_it() {
+        // UR-19, UR-20, RM-17 (event order): a block's `RX_OVERFLOW` and `ALIGNMENT_ERROR` are
+        // handed to the sink after its publish, `RX_OVERFLOW` first. The link's publish hook and
+        // the sink's emissions share one log, so an event before the block's publish, or the two
+        // calls reversed, is visible however the collector later drains them.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[]));
+        let (core, _device, _time, events, log) = super::super::test_support::rig_with_links_tapped(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        {
+            let log = log.clone();
+            link.hook(move |block| {
+                let first = block.header().first_sample_time;
+                log.lock().unwrap().push(format!("publish:{}", first.ticks_in(first.domain()).expect("a tick"))); // own domain: a block's own sample index
+            });
+        }
+        rx.receive(samples(clock.instant(0), 1000));
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        rx.receive(RxRecv::Alignment);
+        rx.receive(samples(clock.instant(3000), 1000)); // the block that carries both events
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["publish:0", "publish:3000", "radio.RX_OVERFLOW:1000", "radio.ALIGNMENT_ERROR:1000"],
+            "the calls in call order: each block is published, then the block that carries the events emits them, `RX_OVERFLOW` before `ALIGNMENT_ERROR`"
+        );
+        let got = drained(&events);
+        let overflows = of_kind(&got, kinds::RX_OVERFLOW);
+        let alignments = of_kind(&got, kinds::ALIGNMENT_ERROR);
+        assert_eq!((overflows.len(), alignments.len()), (1, 1), "{got:?}");
+        assert_eq!(RxOverflowPayload::from_payload(&overflows[0].payload).unwrap(), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 2000 });
+        assert_eq!(alignments[0].payload["lost"], 2000);
+        assert_eq!(overflows[0].time, TimePoint::new(clock.domain, 1000));
+        assert_eq!(alignments[0].time, TimePoint::new(clock.domain, 1000));
+    }
+
+    #[test]
+    fn ur_17_a_long_stretch_makes_no_device_overflow() {
+        // UR-17, RM-38 (UL10, Sol M5): a Provider that reads the device while its link is full
+        // never falls behind: 400 ms of device time discarded one block per turn, with no
+        // `RX_OVERFLOW` at any turn. A Provider that stalled on the full link would leave the
+        // device more than 100 ms ahead (`FakeDevice`'s behind overrun).
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(4000, 404000)]));
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
+        let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), vec![link.clone()], 2_000);
+        spy.watch(&core);
+        let _guard = super::super::test_support::clock_guard(&spy.host());
+        // The device's clock at the Run's origin, so that the start at 0 is not late.
+        spy.set_time(core.now());
+        let (mut rx, clock) = rx(&core, 1);
+        let ticks = |samples: i64| samples * clock.n;
+        let mut turns = 0;
+        while link.accepted().len() < 3 {
+            assert!(turns < 400, "the stretch did not end within 400 turns: {} refused", link.refused().len());
+            turns += 1;
+            // The device's clock stands at the end of the block this call asks for, and never goes
+            // back: a slow test thread adds nothing, while a Provider that held the clock adds it all.
+            let returned: i64 = spy.rx_requests().iter().map(|n| *n as i64).sum();
+            let now = spy.time_now().expect("the device's time");
+            spy.set_time(now.max(ticks(returned + 2000)));
+            rx.turn();
+            let stream = rx.stream.as_ref().expect("the stream runs");
+            assert_eq!(lock(&core.rec).stats["rx_overflows"], 0, "turn {turns}: a discard is no device overflow");
+            assert!(!stream.pending.contains(&Pending::Overrun), "turn {turns}: no overrun report is read");
+            assert_ne!(spy.rx_packet_modes().last(), Some(&true), "turn {turns}: no overrun made the receive one-packet");
+        }
+        assert!(spy.rx_requests().len() >= 200, "{} receive calls for 400 ms of device time", spy.rx_requests().len());
+        let refused = link.refused();
+        assert_eq!(refused.len(), 200, "2 000 samples per block over 400 000 samples");
+        for (i, (first, len)) in refused.iter().enumerate() {
+            assert_eq!((*first, *len), (4000 + 2000 * i as i64, 2000), "the refused spans are contiguous from 4 000");
+        }
+        assert_eq!(link.refused_samples(), 400000, "the reader read every sample of the stretch");
+        let blocks = delivered(&*link);
+        assert_eq!(blocks.last(), Some(&(clock.domain, 404_000, 2000, BlockFlags::GAP_BEFORE, Some(400_000))), "the first block after the stretch carries it");
+        assert!(!blocks.iter().any(|(_, _, _, flags, _)| flags.contains(BlockFlags::RESTARTED)), "no restart: a discard is no overrun");
+        let stats = lock(&core.rec).stats.clone();
+        assert_eq!(stats["rx_link_discarded_samples"], 400000);
+        assert_eq!(stats["rx_overflows"], 0);
+    }
+
+    #[test]
+    fn ur_29_a_loss_inside_a_stretch_makes_no_tail() {
+        // UR-17, UR-29, RM-38 (U11): a device loss found inside a stretch ends the stream at
+        // the loss with no `RX_OVERFLOW` (no report was read) and counts the discards up to it.
+        let link = Arc::new(ScriptedLink::new(BackPressure::Block, &[(2000, 20000)]));
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(samples(clock.instant(0), 2000));
+        rx.receive(samples(clock.instant(2000), 2000));
+        rx.receive(samples(clock.instant(4000), 2000));
+        time.advance_to(core.at(core.ticks(6_000_000))).unwrap();
+        core.device_lost("test: lost inside a stretch");
+        time.advance_to(core.at(core.ticks(7_000_000))).unwrap();
+        rx.finish();
+        assert!(rx.stream.is_none());
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(6000)))], "the stream ends at the loss's sample");
+        assert_eq!(lock(&core.rec).stats["rx_link_discarded_samples"], 4000, "the discards up to the loss");
+        let got = drained(&events);
+        assert_eq!(of_kind(&got, ezsdr_kernel::event::EventKind::DEVICE_LOST).len(), 1, "{got:?}");
+        assert!(of_kind(&got, kinds::RX_OVERFLOW).is_empty(), "no report, no tail: {got:?}");
+        assert_eq!(of_kind(&got, ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).len(), 1);
+    }
+
     #[test]
     fn ur_29_a_loss_after_a_configure_starts_no_receive_segment() {
         // UR-29 (L1): the device is found lost while the owner's configuration is in
@@ -2118,8 +3008,13 @@ mod tests {
     }
 
     fn second_stop_rig() -> Second {
+        second_stop_rig_with(vec![link()])
+    }
+
+    /// The S18 rig with `links` on stream 0.
+    fn second_stop_rig_with(links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>) -> Second {
         let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
-        let (core, time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        let (core, time, events) = super::super::test_support::rig_on_description(spy.clone(), links, BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let _guard = super::super::test_support::clock_guard(&spy.host());
         spy.set_time(core.now());

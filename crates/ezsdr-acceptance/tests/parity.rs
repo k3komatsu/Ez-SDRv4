@@ -167,20 +167,75 @@ impl ActionSubmitter for Accepting {
 
 struct MemLink {
     queue: Mutex<VecDeque<BlockRef>>,
+    /// The policy it answers (RM-38's admission, SC-19).
+    policy: BackPressure,
+    /// `Full` for a block whose first sample lies in one of these `[from, to)` ranges, and
+    /// `Accepted` elsewhere; `None` is the drop-class link that never answers `Full` (RM-38).
+    script: Option<Script>,
+}
+
+/// A scripted link's answers, and what it saw: RM-38's discard is scripted by the block's first
+/// sample in its own SampleClock, so both Providers meet the same script whatever their blocks.
+struct Script {
+    ranges: Vec<(i64, i64)>,
+    /// Every `(first sample, len)` it answered `Full` for, in order.
+    refused: Mutex<Vec<(i64, u32)>>,
+    /// Every `(first sample, len)` it accepted, in order.
+    accepted: Mutex<Vec<(i64, u32)>>,
+    /// `(domain, first sample)` it has published; a second publish of one is the Provider's defect.
+    seen: Mutex<std::collections::BTreeSet<(ClockDomainId, i64)>>,
 }
 
 impl MemLink {
     fn new() -> MemLink {
-        MemLink { queue: Mutex::new(VecDeque::new()) }
+        MemLink::with_policy(BackPressure::DropOldest)
+    }
+
+    /// A link with this policy that accepts every block (RM-38's admitted cases, P8-7).
+    fn with_policy(policy: BackPressure) -> MemLink {
+        MemLink { queue: Mutex::new(VecDeque::new()), policy, script: None }
+    }
+
+    /// A `Block` link that answers `Full` where the block's first sample lies in `ranges` (RM-38).
+    fn scripted(ranges: &[(i64, i64)]) -> MemLink {
+        MemLink {
+            queue: Mutex::new(VecDeque::new()),
+            policy: BackPressure::Block,
+            script: Some(Script { ranges: ranges.to_vec(), refused: Mutex::new(Vec::new()), accepted: Mutex::new(Vec::new()), seen: Mutex::new(std::collections::BTreeSet::new()) }),
+        }
     }
 
     fn take_blocks(&self) -> Vec<BlockRef> {
         self.queue.lock().unwrap().drain(..).collect()
     }
+
+    /// The `(first sample, len)` of every block the script answered `Full` for, in order.
+    fn refused(&self) -> Vec<(i64, u32)> {
+        self.script.as_ref().map(|script| script.refused.lock().unwrap().clone()).unwrap_or_default()
+    }
+
+    /// The `(first sample, len)` of every block the script accepted, in order.
+    fn accepted(&self) -> Vec<(i64, u32)> {
+        self.script.as_ref().map(|script| script.accepted.lock().unwrap().clone()).unwrap_or_default()
+    }
 }
 
 impl DataLink for MemLink {
     fn publish(&self, block: BlockRef) -> PublishOutcome {
+        let outcome = if let Some(script) = &self.script {
+            let header = block.header();
+            let first = header.first_sample_time;
+            let ticks = first.ticks_in(first.domain()).expect("a block's first sample is a tick of its own clock");
+            assert!(script.seen.lock().unwrap().insert((first.domain(), ticks)), "test link: first sample {ticks} was published twice");
+            if script.ranges.iter().any(|(from, to)| (*from..*to).contains(&ticks)) {
+                script.refused.lock().unwrap().push((ticks, header.len));
+                return PublishOutcome::Full;
+            }
+            script.accepted.lock().unwrap().push((ticks, header.len));
+            PublishOutcome::Accepted
+        } else {
+            PublishOutcome::Accepted
+        };
         let mut queue = self.queue.lock().unwrap();
         if queue.len() < 64 {
             queue.push_back(block);
@@ -188,7 +243,7 @@ impl DataLink for MemLink {
             queue.pop_front();
             queue.push_back(block);
         }
-        PublishOutcome::Accepted
+        outcome
     }
     fn receive(&self) -> Option<(BlockRef, DropCarry)> {
         self.queue.lock().unwrap().pop_front().map(|block| (block, DropCarry::default()))
@@ -200,7 +255,7 @@ impl DataLink for MemLink {
         DropCarry::default()
     }
     fn policy(&self) -> BackPressure {
-        BackPressure::DropOldest
+        self.policy
     }
 }
 
@@ -226,6 +281,13 @@ impl MockRig {
         Self::with_run(selector, constraints, ports, BTreeMap::new(), BTreeMap::new())
     }
 
+    /// With the links this test attaches, one policy each, so that one port can carry a `Block`
+    /// link beside a drop-class one (RM-38's admission, P8-7).
+    fn with_link_policies(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], links: &[(&str, BackPressure)]) -> Result<MockRig, ezsdr_kernel::module_api::ModuleError> {
+        let links: Vec<(&str, Arc<MemLink>)> = links.iter().map(|(port, policy)| (*port, Arc::new(MemLink::with_policy(*policy)))).collect();
+        Self::with_links(selector, constraints, &links, BTreeMap::new(), BTreeMap::new())
+    }
+
     fn with_run(
         selector: BTreeMap<Ident, Value>,
         constraints: &[(&str, Constraint)],
@@ -233,7 +295,18 @@ impl MockRig {
         inputs: BTreeMap<ContentHash, Arc<[u8]>>,
         environment: BTreeMap<ezsdr_kernel::spec::Namespace, serde_json::Value>,
     ) -> MockRig {
-        let mut mock = MockRadio::from_binding(&mock_binding(selector)).unwrap();
+        let links: Vec<(&str, Arc<MemLink>)> = ports.iter().map(|port| (*port, Arc::new(MemLink::new()))).collect();
+        Self::with_links(selector, constraints, &links, inputs, environment).unwrap()
+    }
+
+    fn with_links(
+        selector: BTreeMap<Ident, Value>,
+        constraints: &[(&str, Constraint)],
+        ports: &[(&str, Arc<MemLink>)],
+        inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+        environment: BTreeMap<ezsdr_kernel::spec::Namespace, serde_json::Value>,
+    ) -> Result<MockRig, ezsdr_kernel::module_api::ModuleError> {
+        let mut mock = MockRadio::from_binding(&mock_binding(selector))?;
         mock = mock.with_medium(ezsdr_sim::channel::Medium::new());
         let clocks = Arc::new(ClockRegistry::new());
         let root = ClockDomainId::local(41);
@@ -248,8 +321,8 @@ impl MockRig {
         let event_kinds = kinds.kinds();
         let pairs: Vec<_> = sources.into_iter().flat_map(|source| event_kinds.iter().cloned().map(move |kind| (source.clone(), kind))).collect();
         let events = Arc::new(EventCollector::new(&pairs, &event_kinds, 4096, &Policy::default()));
-        let rx_links: Vec<_> = ports.iter().map(|_| Arc::new(MemLink::new())).collect();
-        let links = ports.iter().zip(&rx_links).map(|(port, link)| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(link.clone()))).collect();
+        let rx_links: Vec<Arc<MemLink>> = ports.iter().map(|(_, link)| link.clone()).collect();
+        let links = ports.iter().map(|(port, link)| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(link.clone()))).collect();
         let ctx = {
             let mut ctx = PrepareContext::testing(EventSource::Node { node: rid("radio") }, time.clone(), clocks.clone(), events.clone(), actions.clone(), Arc::new(Accepting));
             ctx.run = RunId::from_string("vh8-mock".to_owned());
@@ -261,8 +334,8 @@ impl MockRig {
             ctx
         };
         let constraints = with_rx0(&mock, constraints);
-        let prepared = mock.prepare(&fragment(ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) }, &constraints), ctx).unwrap();
-        MockRig { mock, clocks, time, root, actions, effective: prepared.effective, events, rx_links }
+        let prepared = mock.prepare(&fragment(ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) }, &constraints), ctx)?;
+        Ok(MockRig { mock, clocks, time, root, actions, effective: prepared.effective, events, rx_links })
     }
 
     /// `arm` and `start` at `t0`, both in root ticks.
@@ -366,11 +439,33 @@ impl UhdRig {
         Self::with_run(selector, constraints, config, ports, BTreeMap::new())
     }
 
+    /// With the links a test attaches, one policy each, as `MockRig::with_link_policies` (P8-7).
+    fn with_link_policies(
+        selector: BTreeMap<Ident, Value>,
+        constraints: &[(&str, Constraint)],
+        config: FakeConfig,
+        links: &[(&str, BackPressure)],
+    ) -> Result<UhdRig, ezsdr_kernel::module_api::ModuleError> {
+        let links: Vec<(&str, Arc<MemLink>)> = links.iter().map(|(port, policy)| (*port, Arc::new(MemLink::with_policy(*policy)))).collect();
+        Self::with_links(selector, constraints, config, &links, BTreeMap::new())
+    }
+
     fn with_run(
         selector: BTreeMap<Ident, Value>,
         constraints: &[(&str, Constraint)],
         config: FakeConfig,
         ports: &[&str],
+        inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+    ) -> Result<UhdRig, ezsdr_kernel::module_api::ModuleError> {
+        let links: Vec<(&str, Arc<MemLink>)> = ports.iter().map(|port| (*port, Arc::new(MemLink::new()))).collect();
+        Self::with_links(selector, constraints, config, &links, inputs)
+    }
+
+    fn with_links(
+        selector: BTreeMap<Ident, Value>,
+        constraints: &[(&str, Constraint)],
+        config: FakeConfig,
+        ports: &[(&str, Arc<MemLink>)],
         inputs: BTreeMap<ContentHash, Arc<[u8]>>,
     ) -> Result<UhdRig, ezsdr_kernel::module_api::ModuleError> {
         // `TxBlocks` is a permanent busy loop in `tx_send`: on the rig's manual clock it freezes the clock for good, and every wait of the rig would hang.
@@ -394,14 +489,14 @@ impl UhdRig {
             .collect();
         let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
         let queue = Arc::new(Queue::new(Some(device.host())));
-        let rx_links: Vec<_> = ports.iter().map(|_| Arc::new(MemLink::new())).collect();
+        let rx_links: Vec<Arc<MemLink>> = ports.iter().map(|(_, link)| link.clone()).collect();
         let ctx = {
             let mut ctx = PrepareContext::testing(EventSource::Node { node: rid("radio") }, time.clone(), clocks.clone(), events.clone(), queue.clone(), Arc::new(Accepting));
             ctx.run = RunId::from_string("vh8-uhd".to_owned());
             ctx.class = ExecutionClass::HardwareInLoop;
             ctx.environment = Arc::new(BTreeMap::new());
             ctx.inputs = Arc::new(inputs);
-            ctx.links = ports.iter().zip(&rx_links).map(|(port, link)| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(link.clone()))).collect();
+            ctx.links = ports.iter().map(|(port, link)| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(link.clone()))).collect();
             ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
             ctx
         };
@@ -809,12 +904,43 @@ impl Started {
 
     /// As `with_fake_config`, the UHD binding's selector given `uhd` beside the shared layout keys (the Mock refuses a key it does not know).
     fn with_uhd_selector(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], ports: &[&str], fake: FakeConfig, uhd: BTreeMap<Ident, Value>) -> Started {
+        Started::build(selector, constraints, ports, fake, uhd, BTreeMap::new(), None, false)
+    }
+
+    /// Armed and started but **not** carried to T0 + 5 ms: an Action or a script the test installs
+    /// after this lands before the UHD has read the samples it concerns (note 51 M4).
+    fn booted(
+        selector: BTreeMap<Ident, Value>,
+        constraints: &[(&str, Constraint)],
+        ports: &[&str],
+        fake: FakeConfig,
+        environment: BTreeMap<Namespace, serde_json::Value>,
+        ranges: &[(i64, i64)],
+    ) -> Started {
+        Started::build(selector, constraints, ports, fake, BTreeMap::new(), environment, Some(ranges), true)
+    }
+
+    /// Both rigs armed and started at each one's own T0, with the receive links scripted (RM-38)
+    /// when `ranges` is given, and carried to relative 5 ms unless `booted`.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        selector: BTreeMap<Ident, Value>,
+        constraints: &[(&str, Constraint)],
+        ports: &[&str],
+        fake: FakeConfig,
+        uhd: BTreeMap<Ident, Value>,
+        environment: BTreeMap<Namespace, serde_json::Value>,
+        ranges: Option<&[(i64, i64)]>,
+        booted: bool,
+    ) -> Started {
         let t0 = ms(2_000) + ms(1);
-        let mut mock = MockRig::with_ports(selector.clone(), constraints, ports);
+        let mock_links: Vec<(&str, Arc<MemLink>)> = ports.iter().map(|port| (*port, Arc::new(ranges.map_or_else(MemLink::new, MemLink::scripted)))).collect();
+        let mut mock = MockRig::with_links(selector.clone(), constraints, &mock_links, BTreeMap::new(), environment).unwrap();
         mock.arm_start(t0);
         let mut uhd_selector = selector;
         uhd_selector.extend(uhd);
-        let mut uhd = UhdRig::with_ports(uhd_selector, constraints, fake, ports).unwrap();
+        let uhd_links: Vec<(&str, Arc<MemLink>)> = ports.iter().map(|port| (*port, Arc::new(ranges.map_or_else(MemLink::new, MemLink::scripted)))).collect();
+        let mut uhd = UhdRig::with_links(uhd_selector, constraints, fake, &uhd_links, BTreeMap::new()).unwrap();
         uhd.arm().unwrap();
         // The UHD's own T0: the same lead after `arm` as the Mock's T0 is after its own
         // arm. The 200-tick lattice is the one these comparisons' streams share — their
@@ -823,10 +949,36 @@ impl Started {
         let now = uhd.time.now(uhd.root).unwrap().ticks_in(uhd.root).unwrap();
         let uhd_t0 = ezsdr_radio::timeline::lattice(now, Rational::new(200, 1).unwrap()).unwrap() + ms(2_000) + ms(1);
         uhd.start(uhd_t0).unwrap();
-        uhd.wait_until(uhd_t0 + ms(5));
-        uhd.settle(Wall::from_millis(5));
-        mock.step(t0 + ms(5));
+        if !booted {
+            uhd.wait_until(uhd_t0 + ms(5));
+            uhd.settle(Wall::from_millis(5));
+            mock.step(t0 + ms(5));
+        }
         Started { mock, uhd, t0, uhd_t0 }
+    }
+
+    /// Both carried to relative `at` ms with no Stop: the run ends where the test stops it.
+    fn to(&mut self, at: i64) {
+        self.mock.step(self.t0 + ms(at));
+        self.uhd.wait_until(self.uhd_t0 + ms(at));
+    }
+
+    /// Pushes a receive Stop to both Providers; each takes it at its own next step or poll.
+    fn stop_both(&self, node: &str) {
+        self.mock.stop_at(node);
+        self.uhd.stop_at(node);
+    }
+
+    /// Waits until the UHD's control thread has taken every queued Action, a millisecond of device
+    /// time per poll (its booking then follows while the clock stands still).
+    fn take_uhd_actions(&mut self) {
+        for _ in 0..1_000 {
+            if self.uhd.actions.queued() == 0 {
+                break;
+            }
+            self.uhd.settle(Wall::from_millis(1));
+        }
+        assert_eq!(self.uhd.actions.queued(), 0, "the UHD took the Action");
     }
 
     /// Both carried to relative `at` ms, then each stopped and cleaned up for the Manifest's
@@ -862,23 +1014,10 @@ fn rx_fault_pair_uhd(faults: &[(&str, i64)], fake_faults: Vec<FakeFault>, uhd: B
                 .collect(),
         ),
     )]);
-    let t0 = ms(2_001);
-    let mut mock = MockRig::with_run(selector.clone(), &constraints, &["rx0"], BTreeMap::new(), environment);
-    mock.arm_start(t0);
-    let mut uhd_selector = selector;
-    uhd_selector.extend(uhd);
-    let mut uhd = UhdRig::with_ports(uhd_selector, &constraints, FakeConfig { faults: fake_faults, ..FakeConfig::default() }, &["rx0"]).unwrap();
-    uhd.arm().unwrap();
-    let now = uhd.time.now(uhd.root).unwrap().ticks_in(uhd.root).unwrap();
-    let uhd_t0 = ezsdr_radio::timeline::lattice(now, Rational::new(200, 1).unwrap()).unwrap() + ms(2_001);
-    uhd.start(uhd_t0).unwrap();
-    uhd.wait_until(uhd_t0 + ms(5));
-    uhd.settle(Wall::from_millis(5));
-    mock.step(t0 + ms(5));
-    Started { mock, uhd, t0, uhd_t0 }
+    Started::build(selector, &constraints, &["rx0"], FakeConfig { faults: fake_faults, ..FakeConfig::default() }, uhd, environment, None, false)
 }
 
-fn assert_rx_overflow_output(events: Vec<Event>, blocks: Vec<BlockRef>, cause: RxOverflowCause, flags: BlockFlags) -> (i64, u64) {
+fn assert_rx_overflow_output(events: Vec<Event>, blocks: Vec<BlockRef>, cause: RxOverflowCause, flags: BlockFlags, refused: &[(i64, u32)]) -> (i64, u64) {
     let overflows: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
     assert_eq!(overflows.len(), 1, "{events:?}");
     let payload = RxOverflowPayload::from_payload(&overflows[0].payload).unwrap();
@@ -889,14 +1028,70 @@ fn assert_rx_overflow_output(events: Vec<Event>, blocks: Vec<BlockRef>, cause: R
     let header = gaps[0].header();
     assert_eq!(header.flags, flags);
     let lost = header.lost.unwrap();
-    assert_eq!(payload.lost, lost);
     let first = header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap();
     let event_at = overflows[0].time.ticks_in(overflows[0].time.domain()).unwrap();
-    assert_eq!(event_at, first - lost as i64, "the event names the first lost sample");
-    let event_lost: u64 = overflows.iter().map(|event| RxOverflowPayload::from_payload(&event.payload).unwrap().lost).sum();
-    let block_lost: u64 = gaps.iter().map(|block| block.header().lost.unwrap()).sum();
-    assert_eq!(event_lost, block_lost, "T12: a nonempty event set accounts for each reported block jump");
+    if refused.is_empty() {
+        // With no discard in the jump, RM-17's event is the whole jump (Q1).
+        assert_eq!(payload.lost, lost);
+        assert_eq!(event_at, first - lost as i64, "the event names the first lost sample");
+        let event_lost: u64 = overflows.iter().map(|event| RxOverflowPayload::from_payload(&event.payload).unwrap().lost).sum();
+        let block_lost: u64 = gaps.iter().map(|block| block.header().lost.unwrap()).sum();
+        assert_eq!(event_lost, block_lost, "T12: a nonempty event set accounts for each reported block jump");
+    } else {
+        // RM-38, Q1: the block's `lost` is the whole jump; the event states the device's loss
+        // only, stamped at its own first lost sample at or after the jump's start.
+        let discarded: u64 = refused.iter().map(|(_, len)| u64::from(*len)).sum();
+        assert_eq!(payload.lost + discarded, lost, "the jump is the device loss the event states plus the discarded span");
+        assert!(event_at >= first - lost as i64, "the event's stamp is at or after the jump's start");
+    }
     (event_at, lost)
+}
+
+/// SC-13, RM-38: an accepted block begins where the previous accepted block ended plus its `lost`
+/// (the segment's origin for the first block), and `GAP_BEFORE` is set exactly where `lost > 0`.
+fn assert_gap_law(blocks: &[BlockRef], what: &str) {
+    let mut end = 0i64;
+    for block in blocks {
+        let header = block.header();
+        let first = header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap();
+        let lost = header.lost.unwrap_or(0) as i64;
+        assert_eq!(
+            first,
+            end + lost,
+            "{what}: `first` is the previous end plus `lost`: {:?}",
+            blocks.iter().map(|block| (block.header().first_sample_time.ticks_in(block.header().first_sample_time.domain()).unwrap(), block.header().len, block.header().lost)).collect::<Vec<_>>()
+        );
+        assert_eq!(header.flags.contains(BlockFlags::GAP_BEFORE), lost > 0, "{what}: `GAP_BEFORE` exactly where `lost > 0`");
+        end = first + i64::from(header.len);
+    }
+}
+
+/// RM-17, RM-38: over each jump of an accepted block, the `RX_OVERFLOW` losses stamped in it plus
+/// the samples the link refused in it are the header's `lost`, and every event's stamp is its own
+/// first lost sample, at or after the jump's start. Holds where every device gap in a jump has an
+/// `RX_OVERFLOW` (an unannounced jump is `SEQ_DISCONTINUITY` and has none; fix 6).
+fn assert_loss_law(blocks: &[BlockRef], events: &[Event], refused: &[(i64, u32)], what: &str) {
+    let overflows: Vec<(i64, u64)> = events
+        .iter()
+        .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW)
+        .map(|event| (event.time.ticks_in(event.time.domain()).unwrap(), RxOverflowPayload::from_payload(&event.payload).unwrap().lost))
+        .collect();
+    let mut end = 0i64;
+    for block in blocks {
+        let header = block.header();
+        let first = header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap();
+        let lost = header.lost.unwrap_or(0) as i64;
+        if lost > 0 {
+            let inside = |at: &i64| (end..first).contains(at);
+            let device: u64 = overflows.iter().filter(|(at, _)| inside(at)).map(|(_, lost)| *lost).sum();
+            let discarded: u64 = refused.iter().filter(|(at, _)| inside(at)).map(|(_, len)| u64::from(*len)).sum();
+            assert_eq!(device + discarded, lost as u64, "{what}: the jump [{} , {first}) is the device loss {device} plus the discarded {discarded}", end);
+            for (at, _) in overflows.iter().filter(|(at, _)| inside(at)) {
+                assert!(*at >= end, "{what}: an event's stamp {at} is its own first lost sample, at or after the jump's start {end}");
+            }
+        }
+        end = first + i64::from(header.len);
+    }
 }
 
 fn assert_fault_rows(pair: &Started, expected_lost: &[u64]) {
@@ -915,8 +1110,8 @@ fn compare_rx_overflow(faults: &[(&str, i64)], fake_faults: Vec<FakeFault>, unti
     pair.mock.step(pair.t0 + ms(until_ms));
     pair.uhd.wait_until(pair.uhd_t0 + ms(until_ms));
     pair.uhd.settle(Wall::from_millis(20));
-    let mock = assert_rx_overflow_output(pair.mock.events(), pair.mock.rx_links[0].take_blocks(), cause, flags);
-    let uhd = assert_rx_overflow_output(pair.uhd.events(), pair.uhd.rx_links[0].take_blocks(), cause, flags);
+    let mock = assert_rx_overflow_output(pair.mock.events(), pair.mock.rx_links[0].take_blocks(), cause, flags, &[]);
+    let uhd = assert_rx_overflow_output(pair.uhd.events(), pair.uhd.rx_links[0].take_blocks(), cause, flags, &[]);
     assert_eq!(mock, uhd, "the Providers agree in sample-index time and lost samples");
     assert_fault_rows(&pair, row_lost);
     pair.mock.finish();
@@ -1122,6 +1317,432 @@ fn vh_8_an_abort_in_a_gap_cuts_both_providers_at_the_first_undelivered_sample() 
     assert_eq!((mock_end, uhd_end), (10_000, 10_000), "both cuts are the first undelivered sample");
     let overflows = |events: &[Event]| events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count();
     assert_eq!((overflows(&mock_events), overflows(&uhd_events)), (0, 0), "a loss of 0 makes no tail: the report is spent with no event");
+}
+
+// ---------------------------------------------------------------- RM-38: a full `Block` link
+
+/// A `(source, key)` stats value from a Provider's sections (MR-27, UR-30).
+fn stat(instance: &ProviderInstance, section: &str, key: &str) -> u64 {
+    instance.sections[&Namespace::parse(section).unwrap()][key].as_u64().unwrap_or_else(|| panic!("{section}.{key} is an integer: {:?}", instance.sections[&Namespace::parse(section).unwrap()]))
+}
+
+/// The Mock's receive segment cut in samples from T0 (MR-27's `ended_at`).
+fn mock_segment_cut(instance: &ProviderInstance, t0: i64) -> i64 {
+    let segments = instance.sections[&Namespace::parse("ezsdr.radio.mock.segments").unwrap()].as_array().expect("the Mock's segments");
+    let segment = segments.iter().find(|row| row["direction"] == "rx" && row["stream"].as_u64() == Some(0)).expect("the receive segment");
+    (segment["ended_at"]["ticks"].as_i64().expect("the segment's end") - t0) / (ROOT_HZ / 1_000_000)
+}
+
+/// A receive SampleClock's end in samples from its origin (RM-25).
+fn clock_end_samples(records: &[ClockRow], what: &str) -> i64 {
+    let (node, ratio, origin, end) = records.iter().find(|record| record.0 == "radio/rx/s0").unwrap_or_else(|| panic!("{what}: the receive clock: {records:?}"));
+    assert_eq!(node, "radio/rx/s0", "{what}");
+    assert_eq!(*ratio, (200, 1), "{what}: one sample is 200 ticks");
+    (end.unwrap_or_else(|| panic!("{what}: the clock ends")) - origin) / (ROOT_HZ / 1_000_000)
+}
+
+/// The UHD's receive cut in root ticks, with the three places that must state it in agreement:
+/// the plan's booked cut, the applied `rx_stop` and the SampleClock's end (UR-17, SC-20a).
+fn uhd_cut_ticks(instance: &ProviderInstance, records: &[ClockRow], what: &str) -> i64 {
+    let timing = instance.sections[&Namespace::parse("ezsdr.radio.uhd.timing").unwrap()].as_array().expect("the UHD's timing");
+    let planned = timing.iter().find(|row| row["what"] == "rx_stop_untimed").unwrap_or_else(|| panic!("{what}: the untimed Stop's plan row: {timing:?}"))["cut"].as_i64().expect("a cut");
+    let applied = instance.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()].as_array().expect("the UHD's applied rows");
+    let stop = applied.iter().find(|row| row["key"] == "rx_stop").unwrap_or_else(|| panic!("{what}: the applied Stop: {applied:?}"))["at"]["ticks"].as_i64().expect("the Stop's instant");
+    let end = records.iter().find(|record| record.0 == "radio/rx/s0").and_then(|record| record.3).unwrap_or_else(|| panic!("{what}: the receive clock's end: {records:?}"));
+    assert_eq!((planned, stop), (stop, end), "{what}: the booked cut, the applied Stop and the clock's end agree");
+    planned
+}
+
+/// RM-38's one `ezsdr.LINK_BACKPRESSURE` of a receive segment: from the stream's node, stamped at
+/// the first sample of the first discarded block, payload `{}` (Q2).
+fn assert_backpressure(events: &[Event], at: i64, what: &str) {
+    let named: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).collect();
+    assert_eq!(named.len(), 1, "{what}: one event per receive segment: {named:?}");
+    assert_eq!(named[0].source, EventSource::Node { node: rid("radio/rx/s0") }, "{what}: the stream's node names the port");
+    let time = named[0].time;
+    assert_eq!(time.ticks_in(time.domain()).unwrap(), at, "{what}: stamped at the first sample of the first discarded block");
+    assert!(named[0].payload.as_object().is_some_and(|object| object.is_empty()), "{what}: the payload is `{{}}`: {}", named[0].payload);
+}
+
+/// The samples a scripted link refused (RM-38's count).
+fn refused_samples(refused: &[(i64, u32)]) -> u64 {
+    refused.iter().map(|(_, len)| u64::from(*len)).sum()
+}
+
+/// The one `RX_OVERFLOW` a Provider emitted: its stamp and the device loss it states.
+fn overflow_output(events: &[Event], what: &str) -> (i64, u64) {
+    let named: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+    assert_eq!(named.len(), 1, "{what}: one report: {named:?}");
+    let payload = RxOverflowPayload::from_payload(&named[0].payload).unwrap();
+    (named[0].time.ticks_in(named[0].time.domain()).unwrap(), payload.lost)
+}
+
+fn overflows(events: &[Event]) -> usize {
+    events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count()
+}
+
+/// Every accepted block as `(first, len, flags, lost)` (SC-13, RM-38).
+fn shape(blocks: &[BlockRef]) -> Vec<(i64, u32, BlockFlags, Option<u64>)> {
+    blocks
+        .iter()
+        .map(|block| {
+            let header = block.header();
+            (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len, header.flags, header.lost)
+        })
+        .collect()
+}
+
+/// The `sim.faults` environment of an injected Mock fault at `at_ms` (MR-21).
+fn fault_environment(faults: &[(&str, i64)]) -> BTreeMap<Namespace, serde_json::Value> {
+    BTreeMap::from([(
+        Namespace::parse("sim.faults").unwrap(),
+        serde_json::Value::Array(faults.iter().map(|(fault, at_ms)| json!({ "at_ns": at_ms * 1_000_000, "fault": fault, "target": "radio" })).collect()),
+    )])
+}
+
+/// Both rigs armed and started but not carried past T0, with scripted `Block` receive links: a
+/// Stop or a script the test installs afterwards lands before the UHD has read the samples it
+/// concerns (note 51 M4).
+fn scripted_pair(ranges: &[(i64, i64)]) -> Started {
+    let constraints = [("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap()))];
+    Started::booted(selector(&["0:A:ubx:0"], &["0:A:ubx:0"]), &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new(), ranges)
+}
+
+/// One row of the plan's table (§4.10 for s1, s2 and s6; §4.5/§4.6 for s4 and s5): the same
+/// script and the same expectations for both Providers.
+struct FullCase {
+    name: &'static str,
+    /// `[from, to)` of the first sample the scripted link answers `Full` for (RM-38).
+    refuse: Vec<(i64, i64)>,
+    /// An overrun at device/sim time 0 (s5), so no block precedes the report.
+    overrun_at_zero: bool,
+    /// An orderly Stop submitted at this relative millisecond (s4); the run then goes to `to_ms`.
+    stop_at: Option<i64>,
+    /// How far both Providers run, in relative milliseconds.
+    to_ms: i64,
+    /// The accepted blocks both Providers must deliver; empty where the length is not assumed (s5).
+    accepted: Vec<(i64, u32, BlockFlags, Option<u64>)>,
+    /// The sample RM-38's one event names.
+    backpressure_at: i64,
+}
+
+/// The plan's table with the profile's restart gap (`G`, never stated as a number).
+fn cases(gap_ms: i64, gap_samples: i64) -> Vec<FullCase> {
+    let gap = gap_samples;
+    let prefix = [(0, 2_000, BlockFlags::NONE, None), (2_000, 2_000, BlockFlags::NONE, None)];
+    vec![
+        FullCase {
+            name: "s1",
+            refuse: vec![(4_000, 8_000)],
+            overrun_at_zero: false,
+            stop_at: None,
+            to_ms: 10,
+            accepted: prefix.iter().copied().chain([(8_000, 2_000, BlockFlags::GAP_BEFORE, Some(4_000))]).collect(),
+            backpressure_at: 4_000,
+        },
+        FullCase {
+            name: "s2",
+            refuse: vec![(4_000, 8_000), (14_000, 16_000)],
+            overrun_at_zero: false,
+            stop_at: None,
+            to_ms: 18,
+            accepted: prefix
+                .iter()
+                .copied()
+                .chain([
+                    (8_000, 2_000, BlockFlags::GAP_BEFORE, Some(4_000)),
+                    (10_000, 2_000, BlockFlags::NONE, None),
+                    (12_000, 2_000, BlockFlags::NONE, None),
+                    (16_000, 2_000, BlockFlags::GAP_BEFORE, Some(2_000)),
+                ])
+                .collect(),
+            backpressure_at: 4_000,
+        },
+        FullCase { name: "s4", refuse: vec![(4_000, i64::MAX)], overrun_at_zero: false, stop_at: Some(12), to_ms: 40, accepted: prefix.to_vec(), backpressure_at: 4_000 },
+        FullCase { name: "s5", refuse: vec![(gap, gap + 1)], overrun_at_zero: true, stop_at: None, to_ms: gap_ms + 4, accepted: Vec::new(), backpressure_at: gap },
+        FullCase { name: "s6", refuse: vec![(0, 2_000)], overrun_at_zero: false, stop_at: None, to_ms: 4, accepted: vec![(2_000, 2_000, BlockFlags::GAP_BEFORE, Some(2_000))], backpressure_at: 0 },
+    ]
+}
+
+#[test]
+fn vh_8_a_full_block_link_discards_alike_on_both_providers() {
+    // RM-38, SC-20a, Q1: while the only link is full the Provider reads on and discards; the next
+    // block it accepts carries the whole jump, the event names the first discarded sample, and the
+    // stats count the discards — the same row for both Providers.
+    let (gap_ms, gap_samples) = overflow_gap();
+    for case in cases(gap_ms, gap_samples as i64) {
+        let constraints = [("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap()))];
+        let fake = if case.overrun_at_zero { vec![FakeFault::Overflow(Wall::ZERO)] } else { Vec::new() };
+        let environment = if case.overrun_at_zero { fault_environment(&[("rx_overflow", 0)]) } else { BTreeMap::new() };
+        let mut pair = Started::booted(selector(&["0:A:ubx:0"], &["0:A:ubx:0"]), &constraints, &["rx0"], FakeConfig { faults: fake, ..FakeConfig::default() }, environment, &case.refuse);
+        let (t0, uhd_t0) = (pair.t0, pair.uhd_t0);
+        if let Some(at) = case.stop_at {
+            pair.to(at);
+            pair.stop_both("rx/s0");
+            // The Mock drains its queue at the step it is given, so that step's instant is the
+            // Stop's; the UHD's control thread books it at its own next poll.
+            pair.mock.step(t0 + ms(at));
+            pair.take_uhd_actions();
+        }
+        pair.to(case.to_ms);
+        let (mock_blocks, uhd_blocks) = (pair.mock.rx_links[0].take_blocks(), pair.uhd.rx_links[0].take_blocks());
+        let (mock_refused, uhd_refused) = (pair.mock.rx_links[0].refused(), pair.uhd.rx_links[0].refused());
+        let (mock_accepted, uhd_accepted) = (pair.mock.rx_links[0].accepted(), pair.uhd.rx_links[0].accepted());
+        if !case.overrun_at_zero {
+            // The last expected block ends at `to_ms`, so the list is exact on both sides.
+            assert_eq!(shape(&mock_blocks), case.accepted, "{}: the Mock's accepted blocks", case.name);
+            assert_eq!(shape(&uhd_blocks), case.accepted, "{}: the UHD's accepted blocks", case.name);
+        }
+        // The run's end: a settle lets the reader take the block the cut clips, and the stop then
+        // reads its sections.
+        pair.uhd.settle(Wall::from_millis(20));
+        let mock = pair.mock.finish_in_place();
+        let uhd = pair.uhd.finish_in_place();
+        let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+        // The same laws for both Providers, each against its own refused list; the link recorded
+        // every block it accepted, so nothing was published twice or lost on the way.
+        for (blocks, events, refused, what) in [(&mock_blocks, &mock_events, &mock_refused, "the Mock"), (&uhd_blocks, &uhd_events, &uhd_refused, "the UHD")] {
+            assert_gap_law(blocks, what);
+            assert_loss_law(blocks, events, refused, what);
+            assert_backpressure(events, case.backpressure_at, what);
+            let taken: Vec<(i64, u32)> = blocks.iter().map(|block| (block.header().first_sample_time.ticks_in(block.header().first_sample_time.domain()).unwrap(), block.header().len)).collect();
+            assert_eq!(if what == "the Mock" { &mock_accepted } else { &uhd_accepted }, &taken, "{what}: the link recorded every block it accepted");
+        }
+        let mock_stat = stat(&mock, "ezsdr.radio.mock.stats", "rx_link_discarded_samples");
+        let uhd_stat = stat(&uhd, "ezsdr.radio.uhd.stats", "rx_link_discarded_samples");
+        let mock_refused_samples = refused_samples(&mock_refused);
+        let uhd_refused_samples = refused_samples(&uhd_refused);
+        if case.stop_at.is_some() {
+            // s4: the stretch never ends of itself, so each Provider counts to its own cut.
+            let mock_cut = mock_segment_cut(&mock, t0);
+            assert!(mock_cut >= 12_000, "{}: the Mock's cut {mock_cut} is at or after the Stop's instant", case.name);
+            assert_eq!(mock_stat, (mock_cut - 4_000) as u64, "{}: the Mock's discards are its own cut less the stretch's first sample", case.name);
+            assert_eq!(mock_stat, mock_refused_samples, "{}: the Mock's stat is what its link refused", case.name);
+            assert_eq!(clock_end_samples(&pair.mock.records(), "the Mock"), mock_cut, "{}: the Mock's clock ends at the cut", case.name);
+            let uhd_cut = (uhd_cut_ticks(&uhd, &pair.uhd.records(), "the UHD") - uhd_t0) / (ROOT_HZ / 1_000_000);
+            assert!(uhd_cut >= 12_000, "{}: the UHD's cut {uhd_cut} is at or after the Stop's instant", case.name);
+            assert_eq!(uhd_stat, (uhd_cut - 4_000) as u64, "{}: the UHD's discards are its own cut less the stretch's first sample", case.name);
+            assert_eq!(uhd_stat, uhd_refused_samples, "{}: the UHD's stat is what its link refused", case.name);
+            assert_eq!((overflows(&mock_events), overflows(&uhd_events)), (0, 0), "{}: a discard is no device report", case.name);
+        } else {
+            assert_eq!(mock_stat, mock_refused_samples, "{}: the Mock's stat is what its link refused", case.name);
+            assert_eq!(uhd_stat, uhd_refused_samples, "{}: the UHD's stat is what its link refused", case.name);
+            assert_eq!(mock_segment_cut(&mock, t0), case.to_ms * 1_000, "{}: the Mock's segment ends where the test stopped it", case.name);
+            if case.overrun_at_zero {
+                // s5: one overrun before any sample; the restart block is the one the link refuses,
+                // and the next accepted block is one jump of the device's loss plus the discard.
+                // Precondition: the refused list is exactly one block, beginning at the restart.
+                for (refused, what) in [(&mock_refused, "the Mock"), (&uhd_refused, "the UHD")] {
+                    assert_eq!(refused.len(), 1, "{what}: one refused block: {refused:?}");
+                    assert_eq!(refused[0].0, gap_samples as i64, "{what}: the refused block begins at the restart");
+                }
+                for (blocks, events, refused, what) in [(&mock_blocks, &mock_events, &mock_refused, "the Mock"), (&uhd_blocks, &uhd_events, &uhd_refused, "the UHD")] {
+                    assert_eq!(blocks.len(), 1, "{what}: one accepted block after the report: {:?}", shape(blocks));
+                    assert_eq!(blocks[0].header().flags, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, "{what}: the report's flags survive the discard");
+                    let refused_samples = refused_samples(refused);
+                    assert_eq!(blocks[0].header().lost, Some(gap_samples + refused_samples), "{what}: the header's lost is the device's loss plus the refused block");
+                    let _ = assert_rx_overflow_output(events.clone(), blocks.clone(), RxOverflowCause::Overrun, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, refused);
+                    assert_eq!(overflow_output(events, what), (0, gap_samples), "{what}: the event states the device's loss at sample 0, never the discarded span");
+                }
+            } else {
+                assert_eq!((overflows(&mock_events), overflows(&uhd_events)), (0, 0), "{}: a discard is no device report", case.name);
+            }
+        }
+    }
+}
+
+#[test]
+fn vh_8_a_stop_or_abort_in_a_stretch_cuts_both_providers_alike() {
+    // SC-20a, RM-38: an orderly Stop inside a stretch cuts where it is booked and counts to that
+    // cut; an abort cuts at the first sample no accepted block carries (Q11's window allows the end
+    // of the block being published), and its count may exceed that cut (Q3).
+    let mut pair = scripted_pair(&[(4_000, i64::MAX)]);
+    pair.to(12);
+    let (t0, uhd_t0) = (pair.t0, pair.uhd_t0);
+    pair.stop_both("rx/s0");
+    pair.mock.step(t0 + ms(12));
+    pair.take_uhd_actions();
+    pair.to(40);
+    let mock_refused = pair.mock.rx_links[0].refused();
+    let uhd_refused = pair.uhd.rx_links[0].refused();
+    let mock_blocks = pair.mock.rx_links[0].take_blocks();
+    let uhd_blocks = pair.uhd.rx_links[0].take_blocks();
+    pair.uhd.settle(Wall::from_millis(20));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+    assert_eq!(shape(&mock_blocks), [(0, 2_000, BlockFlags::NONE, None), (2_000, 2_000, BlockFlags::NONE, None)], "the Mock's prefix");
+    assert_eq!(shape(&uhd_blocks), [(0, 2_000, BlockFlags::NONE, None), (2_000, 2_000, BlockFlags::NONE, None)], "the UHD's prefix");
+    assert_backpressure(&mock_events, 4_000, "the Mock");
+    assert_backpressure(&uhd_events, 4_000, "the UHD");
+    assert_eq!((overflows(&mock_events), overflows(&uhd_events)), (0, 0), "no report, no RX_OVERFLOW");
+    let mock_cut = mock_segment_cut(&mock, t0);
+    assert!(mock_cut >= 12_000, "the Mock's cut {mock_cut} is at or after the Stop's instant");
+    assert_eq!(mock_cut, clock_end_samples(&pair.mock.records(), "the Mock"), "the Mock's clock ends at the cut");
+    assert_eq!(stat(&mock, "ezsdr.radio.mock.stats", "rx_link_discarded_samples"), (mock_cut - 4_000) as u64, "the Mock counts to its cut");
+    let uhd_cut = (uhd_cut_ticks(&uhd, &pair.uhd.records(), "the UHD") - uhd_t0) / (ROOT_HZ / 1_000_000);
+    assert!(uhd_cut >= 12_000, "the UHD's cut {uhd_cut} is at or after the Stop's instant");
+    assert_eq!(stat(&uhd, "ezsdr.radio.uhd.stats", "rx_link_discarded_samples"), (uhd_cut - 4_000) as u64, "the UHD counts to its cut");
+    assert_eq!(stat(&uhd, "ezsdr.radio.uhd.stats", "rx_link_discarded_samples"), refused_samples(&uhd_refused), "the UHD's stat is what its link refused");
+    assert_eq!(stat(&mock, "ezsdr.radio.mock.stats", "rx_link_discarded_samples"), refused_samples(&mock_refused), "the Mock's stat is what its link refused");
+
+    // The abort: at 20 ms inside the stretch, both end at the first sample no accepted block
+    // carries; the UHD's may be the end of the block it was publishing (Q11's window).
+    let mut pair = scripted_pair(&[(4_000, i64::MAX)]);
+    pair.to(20);
+    let (t0, uhd_t0) = (pair.t0, pair.uhd_t0);
+    pair.uhd.settle(Wall::from_millis(20));
+    let mock = pair.mock.finish_abort_in_place();
+    let uhd = pair.uhd.finish_abort_in_place();
+    let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+    let mock_refused = pair.mock.rx_links[0].refused();
+    let uhd_refused = pair.uhd.rx_links[0].refused();
+    assert_backpressure(&mock_events, 4_000, "the Mock");
+    assert_backpressure(&uhd_events, 4_000, "the UHD");
+    assert_eq!((overflows(&mock_events), overflows(&uhd_events)), (0, 0), "a discard makes no report");
+    assert_eq!(mock_segment_cut(&mock, t0), 4_000, "the Mock aborts at the first sample no accepted block carries");
+    assert_eq!(clock_end_samples(&pair.mock.records(), "the Mock"), 4_000, "the Mock's clock ends there");
+    assert_eq!(stat(&mock, "ezsdr.radio.mock.stats", "rx_link_discarded_samples"), refused_samples(&mock_refused), "the Mock's stat is what it read and discarded (Q3)");
+    let uhd_end = uhd_cut_ticks(&uhd, &pair.uhd.records(), "the UHD");
+    let uhd_cut = (uhd_end - uhd_t0) / (ROOT_HZ / 1_000_000);
+    let ends: Vec<i64> = uhd_refused.iter().map(|(first, len)| first + i64::from(*len)).collect();
+    assert!(uhd_cut == 4_000 || ends.contains(&uhd_cut), "the UHD's cut {uhd_cut} is the abort's floor or the end of a refused block: {ends:?}");
+    assert_eq!(stat(&uhd, "ezsdr.radio.uhd.stats", "rx_link_discarded_samples"), refused_samples(&uhd_refused), "the UHD's stat is what it read and discarded (Q3)");
+}
+
+#[test]
+fn vh_8_a_discarded_restart_block_is_one_jump_on_both_providers() {
+    // RM-38, Q1 (§4.6): an overrun before any sample makes a restart block; with that block
+    // discarded the next accepted one carries the whole jump and the event states the device's
+    // loss only, at its own first lost sample.
+    let (gap_ms, gap_samples) = overflow_gap();
+    let gap = gap_samples as i64;
+    let constraints = [("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap()))];
+    let mut pair = Started::booted(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &constraints,
+        &["rx0"],
+        FakeConfig { faults: vec![FakeFault::Overflow(Wall::ZERO)], ..FakeConfig::default() },
+        fault_environment(&[("rx_overflow", 0)]),
+        &[(gap, gap + 1)],
+    );
+    pair.to(gap_ms + 4);
+    let (mock_blocks, uhd_blocks) = (pair.mock.rx_links[0].take_blocks(), pair.uhd.rx_links[0].take_blocks());
+    let (mock_refused, uhd_refused) = (pair.mock.rx_links[0].refused(), pair.uhd.rx_links[0].refused());
+    pair.uhd.settle(Wall::from_millis(20));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+    // Precondition: the refused list is exactly one block, beginning at the restart (UR-17's one
+    // packet after the report is not assumed to be one block length).
+    for (refused, what) in [(&mock_refused, "the Mock"), (&uhd_refused, "the UHD")] {
+        assert_eq!(refused.len(), 1, "{what}: one refused block: {refused:?}");
+        assert_eq!(refused[0].0, gap, "{what}: the refused block begins at the restart");
+    }
+    for (blocks, events, refused, section, instance, what) in
+        [(&mock_blocks, &mock_events, &mock_refused, "ezsdr.radio.mock.stats", &mock, "the Mock"), (&uhd_blocks, &uhd_events, &uhd_refused, "ezsdr.radio.uhd.stats", &uhd, "the UHD")]
+    {
+        assert_eq!(blocks.len(), 1, "{what}: one accepted block after the report: {:?}", shape(blocks));
+        assert_eq!(blocks[0].header().flags, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, "{what}: the report's flags survive the discard");
+        let refused_samples = refused_samples(refused);
+        assert_eq!(blocks[0].header().lost, Some(gap_samples + refused_samples), "{what}: the header's lost is the device's loss plus the discarded span");
+        let _ = assert_rx_overflow_output(events.clone(), blocks.clone(), RxOverflowCause::Overrun, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, refused);
+        assert_eq!(overflow_output(events, what), (0, gap_samples), "{what}: the event states the device's loss at sample 0");
+        assert_eq!(stat(instance, section, "rx_link_discarded_samples"), refused_samples, "{what}: the stat is the discarded span");
+    }
+}
+
+#[test]
+fn vh_8_an_abort_after_a_discarded_restart_block_counts_the_device_loss_to_its_cut_alike() {
+    // RM-17, RM-38, SC-20a: the overrun before any sample makes a restart block, and every block
+    // from the restart on is refused, so no block is accepted and the first sample no accepted
+    // block carries stays 0. An abort then cuts at that sample or, where it was booked while a
+    // refused block was being published, at that block's end (SC-20a); a discard is no report
+    // (RM-38), so the only loss is the device's [0, G), and RM-17's tail may state it only up to
+    // the cut: no event states a loss past the cut, every event names sample 0, and the clock
+    // ends at the applied cut. Each Provider is read against its own refused blocks and its own
+    // cut: the two Providers do not assume equal packet lengths.
+    let (gap_ms, gap_samples) = overflow_gap();
+    let gap = gap_samples as i64;
+    let constraints = [("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap()))];
+    let mut pair = Started::booted(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &constraints,
+        &["rx0"],
+        FakeConfig { faults: vec![FakeFault::Overflow(Wall::ZERO)], ..FakeConfig::default() },
+        fault_environment(&[("rx_overflow", 0)]),
+        &[(gap, i64::MAX)],
+    );
+    pair.to(gap_ms + 4);
+    pair.uhd.wait_for_event("the first discard", |event| event.kind.as_str() == ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE);
+    // Precondition: each Provider refused the block beginning at the restart before the abort,
+    // and accepted none.
+    let (mock_before, uhd_before) = (pair.mock.rx_links[0].refused(), pair.uhd.rx_links[0].refused());
+    let (mock_blocks_before, uhd_blocks_before) = (pair.mock.rx_links[0].take_blocks(), pair.uhd.rx_links[0].take_blocks());
+    for (refused, blocks, what) in [(&mock_before, &mock_blocks_before, "the Mock"), (&uhd_before, &uhd_blocks_before, "the UHD")] {
+        assert!(refused.iter().any(|(first, _)| *first == gap), "{what}: the block that begins at the restart was refused before the abort: {refused:?}");
+        assert!(blocks.is_empty(), "{what}: no block was accepted before the abort: {:?}", shape(blocks));
+    }
+    // The abort, submitted after the refusal: each Provider ends at the cut, not at the device's loss.
+    pair.uhd.settle(Wall::from_millis(20));
+    let mock = pair.mock.finish_abort_in_place();
+    let uhd = pair.uhd.finish_abort_in_place();
+    let mock_refused = pair.mock.rx_links[0].refused();
+    let uhd_refused = pair.uhd.rx_links[0].refused();
+    let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+    let (mock_after, uhd_after) = (pair.mock.rx_links[0].take_blocks(), pair.uhd.rx_links[0].take_blocks());
+    assert!(shape(&mock_after).is_empty(), "the Mock accepted no block: {:?}", shape(&mock_after));
+    assert!(shape(&uhd_after).is_empty(), "the UHD accepted no block: {:?}", shape(&uhd_after));
+    let mock_cut = mock_segment_cut(&mock, pair.t0);
+    assert_eq!(clock_end_samples(&pair.mock.records(), "the Mock"), mock_cut, "the Mock's clock ends at the applied cut");
+    let uhd_cut = (uhd_cut_ticks(&uhd, &pair.uhd.records(), "the UHD") - pair.uhd_t0) / (ROOT_HZ / 1_000_000);
+    for (events, refused, section, instance, cut, what) in
+        [(&mock_events, &mock_refused, "ezsdr.radio.mock.stats", &mock, mock_cut, "the Mock"), (&uhd_events, &uhd_refused, "ezsdr.radio.uhd.stats", &uhd, uhd_cut, "the UHD")]
+    {
+        assert_backpressure(events, gap, what);
+        let ends: Vec<i64> = refused.iter().map(|(first, len)| first + i64::from(*len)).collect();
+        assert!(cut == 0 || ends.contains(&cut), "{what}: the abort's cut {cut} is the first sample no accepted block carries or the end of a refused block: {refused:?}");
+        let overflows: Vec<(i64, u64)> = events
+            .iter()
+            .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW)
+            .map(|event| (event.time.ticks_in(event.time.domain()).unwrap(), RxOverflowPayload::from_payload(&event.payload).unwrap().lost))
+            .collect();
+        for (at, lost) in &overflows {
+            assert_eq!(*at, 0, "{what}: the overrun's loss begins at sample 0: {events:?}");
+            assert!(*at + *lost as i64 <= cut, "{what}: no event states a loss past the cut {cut}: {events:?}");
+        }
+        let lost: u64 = overflows.iter().map(|(_, lost)| *lost).sum();
+        let owed = gap_samples.min(cut as u64);
+        assert_eq!(lost, owed, "{what}: the tail states the device's loss [0, {gap}) to the cut {cut}, no more and no less: {events:?}");
+        assert_eq!(overflows.len(), usize::from(owed > 0), "{what}: one tail when the cut passes sample 0, none otherwise: {events:?}");
+        assert_eq!(stat(instance, section, "rx_link_discarded_samples"), refused_samples(refused), "{what}: the stat is every refused sample, the abort's cut included");
+    }
+}
+
+#[test]
+fn vh_8_a_block_link_is_admitted_or_refused_alike() {
+    // RM-38 (UR-12, MR-7): a `Block` link is admitted when it is its port's only link, and
+    // refused otherwise; one `Block` link per port is admitted. Both Providers state the same
+    // reason, in the same words.
+    let reason = "RM-38: a Block link must be its receive port's only link";
+    #[allow(clippy::type_complexity)]
+    let cases: [(&str, &[(&str, BackPressure)], bool); 3] = [
+        ("a sole Block link", &[("rx0", BackPressure::Block)], true),
+        ("a Block link beside a drop-class one", &[("rx0", BackPressure::Block), ("rx0", BackPressure::DropOldest)], false),
+        ("two ports, one Block link each", &[("rx0", BackPressure::Block), ("rx1", BackPressure::Block)], true),
+    ];
+    for (name, links, admitted) in cases {
+        // Two front ends, so that the receive layout has two ports for the third case.
+        let selector = selector(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0"]);
+        let mock = MockRig::with_link_policies(selector.clone(), &[], links).map(|_| ());
+        let uhd = UhdRig::with_link_policies(selector, &[], FakeConfig::default(), links).map(|_| ());
+        assert_eq!(mock.is_ok(), admitted, "{name}: the Mock: {mock:?}");
+        assert_eq!(uhd.is_ok(), admitted, "{name}: the UHD: {uhd:?}");
+        if let (Err(mock_error), Err(uhd_error)) = (&mock, &uhd) {
+            assert_eq!(mock_error.message, reason, "{name}: the Mock's reason");
+            assert_eq!(uhd_error.message, reason, "{name}: the UHD's reason");
+        }
+    }
 }
 
 /// The constraints of two receive streams, one channel each: c0 in stream 0 at 2 Msps, c1

@@ -592,12 +592,14 @@ impl Provider for UhdRadio {
                     let Some(k) = (0..rx_count).find(|k| self.description.rx_port(*k) == port) else {
                         return Err(rejected("UR-12: only a StreamOut link on this fragment's rx port may be attached"));
                     };
-                    if link.policy() == BackPressure::Block {
-                        return Err(rejected("UR-12: a device cannot wait for a Block link; it overflows instead"));
-                    }
                     links[k].push(link.clone());
                 }
                 _ => return Err(rejected("UR-12: only a StreamOut link on this fragment's rx port may be attached")),
+            }
+        }
+        for port in &links {
+            if let Some(reason) = ezsdr_radio::rx_link::refusal(&port.iter().map(|link| link.policy()).collect::<Vec<BackPressure>>()) {
+                return Err(rejected(reason));
             }
         }
         // KC-8: the Kernel names this instance's source root; its streams are below it.

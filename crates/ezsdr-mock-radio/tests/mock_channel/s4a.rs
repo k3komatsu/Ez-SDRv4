@@ -324,8 +324,10 @@ fn s4a_a_sequence_error_skips_samples_and_has_no_head() {
 }
 
 #[test]
-fn s4a_a_back_pressure_restart_begins_with_the_head() {
-    // MR-19: a full link drops the block and restarts the stream after the gap; the restart is a start.
+fn s4a_a_discard_does_not_restart_the_head() {
+    // RM-38, MR-35: a full `Block` link makes the Mock read on and discard; the discard adds
+    // `GAP_BEFORE` alone and is not a start, so the block after it begins with signal on its
+    // own ticks, not with a head's zeros.
     let d = 200;
     let world = World::new(json!({ "sim.seed": SEED, "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 }] } }));
     let constraints = [
@@ -345,13 +347,14 @@ fn s4a_a_back_pressure_restart_begins_with_the_head() {
     step(&world, &mut [&mut radio], T0);
     step(&world, &mut [&mut radio], T0 + 5_000_000);
     let mut got = blocks(&radio, &world);
-    assert_eq!(got.len(), 1, "one block queued, the second was refused");
+    assert_eq!(got.len(), 1, "one block queued, the second was discarded");
     *radio.link.limit.lock().unwrap() = None;
-    step(&world, &mut [&mut radio], T0 + gap_ns() + 100_000_000);
+    step(&world, &mut [&mut radio], T0 + 5_999_001);
     got.extend(blocks(&radio, &world));
-    let after = got.iter().find(|block| block.flags.bits() & BlockFlags::RESTARTED.bits() != 0).expect("a restarted block");
-    assert!(after.flags.bits() & BlockFlags::GAP_BEFORE.bits() != 0 && after.first > 2_000, "the gap accounting is as before");
+    let after = got.iter().find(|block| block.flags.bits() & BlockFlags::GAP_BEFORE.bits() != 0).expect("the block after the discard");
+    assert_eq!(after.flags, BlockFlags::GAP_BEFORE, "a discard adds GAP_BEFORE alone");
     let (origin, samples) = latest(&got);
     assert_eq!(origin, T0);
-    assert_head_then_on_time(origin, &samples, after.first as usize, d, 1.0, "back-pressure restart");
+    assert_on_time(origin, &samples, after.first as usize, d, 1.0, "the block after a discard");
+    assert!(magnitude(samples[after.first as usize].expect("a delivered sample")) > 0.0, "no head restarted at the discard");
 }

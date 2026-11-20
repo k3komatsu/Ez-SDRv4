@@ -114,7 +114,9 @@ impl DataLink for Sink {
         DropCarry::default()
     }
     fn policy(&self) -> BackPressure {
-        BackPressure::DropOldest
+        // A set limit models a consumer that has stopped taking blocks: the producer sees a
+        // `Block` link (RM-38, SC-20a); with no limit this double is drop-class.
+        if self.limit.lock().unwrap().is_some() { BackPressure::Block } else { BackPressure::DropOldest }
     }
 }
 

@@ -2288,6 +2288,214 @@ fn two_link_docs() -> (serde_json::Value, serde_json::Value) {
     (spec, profile)
 }
 
+/// The K rig (KC-8, RM-38, SC-20a): two Providers in one Run. `left`'s `rx` port carries a
+/// `Block` StreamOut link to `c1` beside the drop-class feed to `rec`; `right` carries its own
+/// drop-class feed to `rec2`, so both Providers have a StreamOut link and only `left`'s is
+/// `Block`. A Provider's own one-`Block`-link rule (RM-38) is the Provider's, not the Kernel's:
+/// the double Provider accepts every link.
+fn block_link_docs() -> (serde_json::Value, serde_json::Value) {
+    let (mut spec, mut profile) = distinct_resource_docs(&["left", "right"]);
+    let mut component = support::recorder_component(support::cf32());
+    component.id = Ident::parse("c1").unwrap();
+    component.implementation.id = "c1".to_owned();
+    spec["outputs"] = serde_json::json!([
+        {
+            "id": "rec", "kind": "test.capture", "params": {},
+            "feed": { "port": { "component": "left", "port": "rx" }, "policy": "drop_oldest", "capacity": 4 }
+        },
+        {
+            "id": "rec2", "kind": "test.capture", "params": {},
+            "feed": { "port": { "component": "right", "port": "rx" }, "policy": "drop_oldest", "capacity": 4 }
+        }
+    ]);
+    spec["graph"] = serde_json::json!({
+        "components": { "c1": component },
+        "links": [{
+            "from": { "component": "left", "port": "rx" },
+            "to": { "component": "c1", "port": "in" },
+            "policy": "block", "capacity": 1
+        }]
+    });
+    profile["bindings"]["rec"] = serde_json::json!({
+        "module": { "id": "ezsdr.test.sink", "version": { "major": 1, "minor": 0, "patch": 0 } }
+    });
+    profile["bindings"]["rec2"] = serde_json::json!({
+        "module": { "id": "ezsdr.test.sink", "version": { "major": 1, "minor": 0, "patch": 0 } }
+    });
+    profile["bindings"]["exec"] = serde_json::json!({
+        "module": { "id": "ezsdr.test.executor", "version": { "major": 1, "minor": 0, "patch": 0 } }
+    });
+    profile["placements"] = serde_json::json!({
+        "links": [
+            {
+                "link": { "id": "ezsdr.test.link", "version": { "major": 1, "minor": 0, "patch": 0 } },
+                "from": { "component": "left", "port": "rx" },
+                "to": { "component": "c1", "port": "in" }
+            },
+            {
+                "link": { "id": "ezsdr.test.link", "version": { "major": 1, "minor": 0, "patch": 0 } },
+                "from": { "component": "left", "port": "rx" },
+                "to": { "component": "rec", "port": "in" }
+            },
+            {
+                "link": { "id": "ezsdr.test.link", "version": { "major": 1, "minor": 0, "patch": 0 } },
+                "from": { "component": "right", "port": "rx" },
+                "to": { "component": "rec2", "port": "in" }
+            }
+        ],
+        "islands": [
+            { "id": { "node": 0, "local": 0 }, "executor": "exec",
+              "components": [{ "component": "c1", "memory_domain": { "node": 0, "local": 0 } }] }
+        ]
+    });
+    (spec, profile)
+}
+
+/// Both Providers of [`block_link_docs`], and what `left` emits at tick 150 from its child node.
+fn block_link_assembly(probe: &Probe) -> Assembly {
+    let mut assembly = rig(Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("left").unwrap(),
+        Box::new(
+            SteppedProvider::new("left", TestProvider::new("left", 2), probe)
+                .emitting_at("0", ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE, ezsdr_kernel::event::Severity::Warning, 150)
+                .with_wakeups(&[150]),
+        ),
+    );
+    assembly.providers.insert(Ident::parse("right").unwrap(), Box::new(SteppedProvider::new("right", TestProvider::new("right", 2), probe)));
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", probe)));
+    assembly.sinks.insert(Ident::parse("rec").unwrap(), Box::new(RecordingSink::new("rec", probe)));
+    assembly.sinks.insert(Ident::parse("rec2").unwrap(), Box::new(RecordingSink::new("rec2", probe)));
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(probe)));
+    assembly
+}
+
+fn link_backpressure_row(manifest: &ezsdr_kernel::manifest::Manifest, node: &str) -> Option<u64> {
+    let kind = ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).unwrap();
+    manifest.events.counters.iter().find(|row| row.source == support::node_source(node) && row.kind == kind).map(|row| row.count)
+}
+
+#[test]
+fn kc_08_a_provider_with_a_block_link_has_a_link_backpressure_row_at_every_node() {
+    // KC-8, RS-27, RM-38: a Provider whose attached StreamOut link is `Block` emits
+    // `ezsdr.LINK_BACKPRESSURE` from its stream's node, so every node of its tree has the pair
+    // and the count lands in that row — not in RS-33's `unforeseen` fallback.
+    let (spec, profile) = block_link_docs();
+    let probe = Probe::new();
+    let mut run = start_spec_run(&spec, &profile, block_link_assembly(&probe)).unwrap();
+    let _ = run.advance_to(TimePoint::new(run.now().domain(), 160));
+    let manifest = run.finish_checked();
+    assert_eq!(link_backpressure_row(&manifest, "left/0"), Some(1), "the child node's planned row counts the event");
+    for node in ["left", "left/1"] {
+        assert_eq!(link_backpressure_row(&manifest, node), Some(0), "{node}: every node of the tree has the row");
+    }
+    assert!(
+        manifest.events.counters.iter().filter(|row| row.source == EventSource::Unforeseen {}).all(|row| row.count == 0),
+        "the event is planned, so no unforeseen row counts it: {:?}",
+        manifest.events.counters.iter().filter(|row| row.source == EventSource::Unforeseen {}).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn kc_08_a_provider_without_a_block_link_has_no_link_backpressure_row() {
+    // KC-8 (RM-38's narrow registration): the same Run's `right` Provider has a drop-class
+    // StreamOut link of its own and no `Block` one, so no node of its tree has the pair — a
+    // registration that took "any Provider with a StreamOut whenever any `Block` exists" would
+    // give it one, and a zero row there would count an emission the Kernel never planned. With
+    // only drop-class links, no `Node` source has the row at all (the Kernel's own planned row
+    // aside).
+    let kind = ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).unwrap();
+    let (spec, profile) = block_link_docs();
+    let probe = Probe::new();
+    let mut run = start_spec_run(&spec, &profile, block_link_assembly(&probe)).unwrap();
+    let _ = run.advance_to(TimePoint::new(run.now().domain(), 160));
+    let manifest = run.finish_checked();
+    assert!(probe.lines().iter().any(|line| line == "link:create:right.rx->rec2.in"), "`right` has a StreamOut link of its own to leave unregistered: {:?}", probe.lines());
+    for node in ["right", "right/0", "right/1"] {
+        assert_eq!(link_backpressure_row(&manifest, node), None, "{node}: no row without a `Block` link");
+    }
+    // The left Provider's rows exist in the same Run, so the comparison is of the registration,
+    // not of a table the Kernel never built.
+    assert_eq!(link_backpressure_row(&manifest, "left/0"), Some(1));
+
+    // Only drop-class links: no `Node` source has the row.
+    let (spec, profile) = two_link_docs();
+    let probe = Probe::new();
+    let mut assembly = output_assembly(&probe, None, None);
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(ProbeExecutor::new("x", &probe)));
+    let run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let manifest = run.finish_checked();
+    let node_rows: Vec<_> = manifest.events.counters.iter().filter(|row| row.kind == kind && matches!(row.source, EventSource::Node { .. })).collect();
+    assert!(node_rows.is_empty(), "no `Node` source holds an unplanned pair: {node_rows:?}");
+}
+
+#[test]
+fn kc_08_a_link_whose_policy_panics_is_not_called_by_the_registration() {
+    // KC-8, KC-30: the registration reads the policy from the validated link declaration, never
+    // from `DataLink::policy()`, which is a Module call outside the registration's panic
+    // containment. The Run starts, registers the `Block`-declared link's row and ends normally;
+    // a registration that asked the Link would unwind the test here instead.
+    let (spec, profile) = block_link_docs();
+    let probe = Probe::new();
+    let mut assembly = block_link_assembly(&probe);
+    assembly.links.insert(mref("ezsdr.test.link"), Box::new(TestLinkModule::new(&probe).panicking_policy()));
+    let mut run = start_spec_run(&spec, &profile, assembly).expect("the Run starts without unwinding");
+    let _ = run.advance_to(TimePoint::new(run.now().domain(), 160));
+    let manifest = run.finish_checked();
+    assert!(probe.lines().iter().any(|line| line == "link:create:left.rx->c1.in"), "the `Block` link was created by the panicking Link: {:?}", probe.lines());
+    assert!(!probe.lines().iter().any(|line| line.starts_with("link:policy")), "the registration never asked the Link for its policy: {:?}", probe.lines());
+    assert_eq!(link_backpressure_row(&manifest, "left/0"), Some(1), "the declaration's `block` decides the row: the event reaches its planned row");
+    for node in ["left", "left/1"] {
+        assert_eq!(link_backpressure_row(&manifest, node), Some(0), "{node}: every node of the tree has the row");
+    }
+    assert!(matches!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }), "no stage failed: {:?}", manifest.termination.reason);
+    assert!(manifest.termination.cleanup_failures.is_empty(), "no KC-30 failure was recorded: {:?}", manifest.termination.cleanup_failures);
+}
+
+#[test]
+fn kc_08_a_provider_s_link_backpressure_follows_the_policy_table() {
+    // RS-27, RS-28: the Spec's `failure` table reaches a Provider-emitted
+    // `ezsdr.LINK_BACKPRESSURE` like any other kind; `stop` ends the Run orderly
+    // (`Stopped { Policy { .. } }`), and a control-path body is not dropped.
+    let (mut spec, profile) = block_link_docs();
+    spec["policies"] = serde_json::json!({ "failure": { "ezsdr.LINK_BACKPRESSURE": "stop" } });
+    let probe = Probe::new();
+    let mut run = start_spec_run(&spec, &profile, block_link_assembly(&probe)).unwrap();
+    let _ = run.advance_to(TimePoint::new(run.now().domain(), 160));
+    let manifest = run.finish_checked();
+    let kind = ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).unwrap();
+    assert!(
+        manifest.events.delivered.iter().any(|event| event.kind == kind && event.source == support::node_source("left/0")),
+        "the control-path body reaches the Run: {:?}",
+        manifest.events.delivered
+    );
+    assert!(matches!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { ref event } } if *event == kind), "{:?}", manifest.termination.reason);
+    assert!(manifest.run.transitions.iter().any(|row| matches!(row.state, RunState::Stopping { mode: CleanupMode::Orderly })), "a policy stop is orderly: {:?}", manifest.run.transitions);
+}
+
+#[test]
+fn kc_08_a_link_backpressure_event_marks_the_open_artifact() {
+    // RS-27, RS-30: with no override, the default reaction (continue + mark artifact) reaches a
+    // Provider-emitted event: an artifact open at the event's instant records the mark, and one
+    // whose span does not cover it records none.
+    let (spec, profile) = block_link_docs();
+    let probe = Probe::new();
+    let mut assembly = block_link_assembly(&probe);
+    assembly.sinks.insert(Ident::parse("rec").unwrap(), Box::new(RecordingSink::new("rec", &probe).returning_spans(&[(100, 200), (300, 400)])));
+    let mut run = start_spec_run(&spec, &profile, assembly).unwrap();
+    let _ = run.advance_to(TimePoint::new(run.now().domain(), 160));
+    let manifest = run.finish_checked();
+    let kind = ezsdr_kernel::event::EventKind::parse(ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).unwrap();
+    let artifacts = &manifest.artifacts[&Ident::parse("rec").unwrap()];
+    assert_eq!(artifacts.len(), 2, "{artifacts:?}");
+    assert_eq!(artifacts[0].marks.len(), 1, "the span (100, 200) is open at the event's instant: {:?}", artifacts[0].marks);
+    assert_eq!(artifacts[0].marks[0].kind, kind);
+    let at = artifacts[0].marks[0].time;
+    assert_eq!(at.ticks_in(at.domain()).unwrap(), 150, "the mark is at the event's time");
+    assert!(artifacts[1].marks.is_empty(), "the span (300, 400) is not open then");
+    assert!(matches!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }), "the default reaction does not stop the Run");
+}
+
 #[test]
 fn ka_18_nonzero_link_drops_reach_the_manifest() {
     // SC-20: the Manifest's `links` is `shared.links` and step 6's `link_drops` zipped by

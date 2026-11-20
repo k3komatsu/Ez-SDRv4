@@ -635,8 +635,8 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_19_reports_before_one_block_keep_each_kind",
-  "old2": "            for pending in pending {\n",
-  "new2": "            let alignment = pending.contains(&Pending::Alignment);\n            for pending in pending {\n"
+  "old2": "            let header = BlockHeader {",
+  "new2": "            let alignment = stream.carry.alignment.is_some();\n            let header = BlockHeader {"
  },
  {
   "id": "U26",
@@ -650,10 +650,10 @@
  },
  {
   "id": "U47",
-  "name": "UHD emits one RX_OVERFLOW per report, not per block",
+  "name": "UHD emits a block's one RX_OVERFLOW twice",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "            if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&reports, lost) {",
-  "new": "            if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&reports, lost) {\n                for _ in &reports { let _ = self.core.events.emit(self.core.overflow(self.k), at, Severity::Warning, &payload.to_hot()); }",
+  "old": "            if let Some(payload) = carry.loss.and_then(|report| report.payload()) {\n                emit_overflow(&self.core, self.k, TimePoint::new(clock.domain, carry.loss.expect(\"a loss report\").first), &payload);",
+  "new": "            if let Some(payload) = carry.loss.and_then(|report| report.payload()) {\n                emit_overflow(&self.core, self.k, TimePoint::new(clock.domain, carry.loss.expect(\"a loss report\").first), &payload);\n                emit_overflow(&self.core, self.k, TimePoint::new(clock.domain, carry.loss.expect(\"a loss report\").first), &payload);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_19_reports_before_one_block_keep_each_kind"
@@ -854,8 +854,8 @@
   "id": "R08",
   "name": "an abort delivers the orderly tail (L12); note 23 round 2: uhd-rx's own abort, its command channel gone (Provider::stop(abort)'s cut is J55's)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-    "old": "                self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(stream.expected));",
-    "new": "                self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(stream.expected.saturating_add(1)));",
+    "old": "                    self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(floor));",
+    "new": "                    self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(floor.saturating_add(1)));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_uhd_rx_aborts_when_its_provider_is_gone"

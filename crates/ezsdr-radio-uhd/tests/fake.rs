@@ -1627,9 +1627,6 @@ fn ur_12_prepare_refusals() {
     direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &[]).unwrap();
     let again = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &[]).unwrap_err();
     assert!(again.message.contains("already called"), "{}", again.message);
-    let mut radio = provider();
-    let block = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, vec![attached(ezsdr_kernel::stream::BackPressure::Block)], &[]).unwrap_err();
-    assert!(block.message.contains("Block"), "{}", block.message);
     let unknown_device = fake(FakeConfig { serial: "ur12-unknown-key".to_owned(), ..FakeConfig::default() });
     let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), unknown_device.clone()).unwrap();
     let applies = |device: &FakeDevice| device.calls().iter().filter(|call| call.starts_with("apply")).count();
@@ -1638,6 +1635,35 @@ fn ur_12_prepare_refusals() {
     assert_eq!(unknown.kind, ModuleErrorKind::Rejected);
     assert!(unknown.message.contains("RM-4:"), "{}", unknown.message);
     assert_eq!(applies(&unknown_device), before, "prepare called the device before rejecting the unknown key: {:?}", unknown_device.calls());
+}
+
+#[test]
+fn ur_12_a_block_link_must_be_its_ports_only_link() {
+    // UR-12, RM-38: a `Block` link is admitted when it is its receive port's only link, and a
+    // port that holds one beside another link is refused with RM-38's reason; two ports may
+    // each hold one.
+    let mut radio = provider();
+    direct_prepare(&mut radio, fake(FakeConfig::default()), ExecutionClass::HardwareInLoop, vec![attached(ezsdr_kernel::stream::BackPressure::Block)], &[]).unwrap();
+    let mut radio = provider();
+    let refused = direct_prepare(
+        &mut radio,
+        fake(FakeConfig::default()),
+        ExecutionClass::HardwareInLoop,
+        vec![attached(ezsdr_kernel::stream::BackPressure::Block), attached(ezsdr_kernel::stream::BackPressure::DropOldest)],
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(refused.kind, ModuleErrorKind::Rejected);
+    assert_eq!(refused.message, "RM-38: a Block link must be its receive port's only link", "the reason is RM-38's, written out here");
+    let mut radio = provider();
+    direct_prepare(
+        &mut radio,
+        fake(FakeConfig::default()),
+        ExecutionClass::HardwareInLoop,
+        vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::Block), attached_on("rx1", ezsdr_kernel::stream::BackPressure::Block)],
+        &[],
+    )
+    .unwrap();
 }
 
 /// `direct_prepare_events` on a device that fails with `fault`: the refusal, the `DEVICE_LOST` events delivered and the device's calls.
@@ -3590,7 +3616,21 @@ fn ur_30_the_sections_are_written() {
     // UR-30: `record_bound` is always written; a Run that left nothing out says so, with the N in effect.
     assert_eq!(section(&manifest, "record_bound"), &json!({ "rows_per_kind": 1_000, "omitted": {} }));
     let stats = section(&manifest, "stats");
-    for key in ["rx_blocks", "rx_samples", "rx_overflows", "rx_errors", "rx_off_lattice", "rx_overlapping", "link_drops_seen", "tx_bursts", "tx_samples", "tx_errors", "tx_resumes", "tx_gap_samples"] {
+    for key in [
+        "rx_blocks",
+        "rx_samples",
+        "rx_overflows",
+        "rx_errors",
+        "rx_off_lattice",
+        "rx_overlapping",
+        "rx_link_discarded_samples",
+        "link_drops_seen",
+        "tx_bursts",
+        "tx_samples",
+        "tx_errors",
+        "tx_resumes",
+        "tx_gap_samples",
+    ] {
         assert!(stats[key].is_i64(), "{key}");
     }
     assert!(stats["rx_samples"].as_i64().unwrap() >= 1_000);

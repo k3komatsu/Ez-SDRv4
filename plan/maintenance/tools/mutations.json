@@ -327,8 +327,8 @@
   "id": "F43",
   "name": "MockRadio emits the block's RX_OVERFLOW twice, as if one per report, not once per block",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "self.emit_overflow(k, payload, TimePoint::new(domain, at))?;",
-  "new": "self.emit_overflow(k, payload, TimePoint::new(domain, at))?; self.emit_overflow(k, payload, TimePoint::new(domain, at))?;",
+  "old": "self.emit_overflow(k, payload, TimePoint::new(domain, report.first))?;",
+  "new": "self.emit_overflow(k, payload, TimePoint::new(domain, report.first))?; self.emit_overflow(k, payload, TimePoint::new(domain, report.first))?;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_21_overrun_shape"
@@ -337,11 +337,11 @@
   "id": "F44",
   "name": "MockRadio carries old reports into the next block",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "let report = self.rx[k].running.as_mut().and_then(|rx| rx.report.take());",
-  "new": "let report = self.rx[k].running.as_ref().and_then(|rx| rx.report);",
+  "old": "self.rx[k].running.as_mut().and_then(|rx| rx.report.take())",
+  "new": "self.rx[k].running.as_ref().and_then(|rx| rx.report.clone())",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
-  "filter": "mr_21_overrun_shape"
+  "filter": "mr_20a_the_overflow_comes_with_the_block_that_carries_it"
  },
  {
   "id": "G03",
@@ -608,8 +608,8 @@
   "id": "J45",
   "name": "note 23: uhd-rx waits for samples past a cut at or before what it delivered, so an abort does not end the stream at once",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        let done = chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected)",
-  "new": "        let done = chain.cut().is_some()",
+  "old": "let done = chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read);",
+  "new": "let done = chain.cut().is_some();",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stopped_stream_keeps_its_end"
@@ -698,8 +698,8 @@
   "id": "J55",
   "name": "RM-16: an abort shortens a segment's existing cut to the first undelivered sample",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "            if let Some(stream) = self.stream.as_mut() {\n                self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(stream.expected));\n            }\n            self.core.rx_chain[self.k].lock().request_end_now();\n            self.try_end();",
-  "new": "            self.core.rx_chain[self.k].lock().request_end_now();\n            self.try_end();",
+  "old": "if let Some(stream) = self.stream.as_ref() {\n                let floor = floor(&lock(&self.core.streams), stream_key(Dir::Rx, self.k), stream);\n                self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(floor));\n            }\n            self.core.rx_chain[self.k].lock().request_end_now();\n            self.try_end();",
+  "new": "self.core.rx_chain[self.k].lock().request_end_now();\n            self.try_end();",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_uhd_rx_aborts_when_its_provider_is_gone"
@@ -6600,16 +6600,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_14_the_handed_burst_keeps_its_requested_at"
- },
- {
-  "id": "T37",
-  "name": "MR-19: a back-pressure restart begins `a + gap` instead of the dropped block's end",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                let next_sample = stop.max(after_gap);",
-  "new": "                let next_sample = next.saturating_add(gap_samples);",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_19_a_zero_gap_still_loses_the_dropped_block"
  },
  {
   "id": "T38",
@@ -22859,8 +22849,8 @@
   "id": "N67F-01",
   "name": "uhd-rx waits for a queued start's origin before it stops a cut at or before it (#67)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
-  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read);",
+  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read) && self.core.now() >= stream.clock.origin;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_cut_at_a_queued_origin_stops_the_stream_at_once"
@@ -22869,7 +22859,7 @@
   "id": "N67F-02",
   "name": "uhd-rx stops a segment for any cut, including one that leaves samples of a queued segment (#67)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read);",
   "new": "chain.cut().is_some();",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -22879,8 +22869,8 @@
   "id": "N67F-03",
   "name": "uhd-rx waits for a queued start's origin before it stops a cut at or before it (#67): a Stop and Provider::stop in one turn",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
-  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read);",
+  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read) && self.core.now() >= stream.clock.origin;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stop_and_provider_stop_in_one_turn_stop_a_queued_start_once"
@@ -22889,8 +22879,8 @@
   "id": "N67F-04",
   "name": "uhd-rx waits for a queued start's origin before it stops a cut at or before it (#67): an abort",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
-  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read);",
+  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read) && self.core.now() >= stream.clock.origin;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_an_abort_stops_a_queued_start_when_uhd_rx_reads_the_plan"
@@ -22899,8 +22889,8 @@
   "id": "N67F-05",
   "name": "uhd-rx waits for a queued start's origin before it stops a cut at or before it (#67): a start after the cancelled one",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
-  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read);",
+  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read) && self.core.now() >= stream.clock.origin;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_start_after_a_cancelled_queued_start_delivers_at_its_own_origin"
@@ -22909,8 +22899,8 @@
   "id": "N67F-06",
   "name": "uhd-rx waits for a queued start's origin before it stops a cut at or before it (#67): Provider::stop before a distant T0",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected);",
-  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;",
+  "old": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read);",
+  "new": "chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.read) && self.core.now() >= stream.clock.origin;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_26_provider_stop_before_a_distant_t0_stops_before_it_closes"
@@ -26759,16 +26749,6 @@
   "filter": "s4a_an_injected_overflow_restart_begins_with_the_head"
  },
  {
-  "id": "S4A-41",
-  "name": "MockRadio's back-pressure restart has no head (MR-35, stage 4a)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "rx.head_until = next_sample + rx.head;",
-  "new": "let _ = next_sample + rx.head;",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "s4a_a_back_pressure_restart_begins_with_the_head"
- },
- {
   "id": "S4A-42",
   "name": "FakeDevice's scripted overflow restart has no head (UR-33, stage 4a)",
   "file": "crates/ezsdr-radio-uhd/src/device.rs",
@@ -27370,7 +27350,7 @@
   "id": "N108-20",
   "name": "uhd-rx emits no tail for a segment cut before a block carried its report (stage 4b)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "self.emit_tail(&stream, &loss_causes(&stream.pending), end);",
+  "old": "self.emit_tail(&stream, end);",
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -27380,8 +27360,8 @@
   "id": "N108-21",
   "name": "uhd-rx's tail measures `lost` from sample 0, not from the first sample not delivered (stage 4b)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "(stream.clock.at_or_after(end) - stream.expected).max(0) as u64",
-  "new": "stream.clock.at_or_after(end).max(0) as u64",
+  "old": "(cut - stream.read).max(0) as u64",
+  "new": "cut.max(0) as u64",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_18_an_orderly_stop_in_the_gap_emits_the_tail_to_its_cut"
@@ -27390,8 +27370,8 @@
   "id": "N108-22",
   "name": "uhd-rx's tail is emitted with no loss report pending (stage 4b)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "ezsdr_radio::payloads::rx_overflow_payload(causes, Some(lost))",
-  "new": "ezsdr_radio::payloads::rx_overflow_payload(&[RxOverflowCause::Overrun], Some(lost))",
+  "old": "ezsdr_radio::payloads::rx_overflow_payload(&loss_causes(&stream.pending), Some((cut - stream.read).max(0) as u64))",
+  "new": "ezsdr_radio::payloads::rx_overflow_payload(&[RxOverflowCause::Overrun], Some((cut - stream.read).max(0) as u64))",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_18_a_silent_end_with_no_report_makes_no_tail"
@@ -27400,8 +27380,8 @@
   "id": "N108-24",
   "name": "uhd-rx's tail takes the first pending report's cause, not RM-17's (an overrun beats a sequence error) (stage 4b)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "ezsdr_radio::payloads::rx_overflow_payload(causes, Some(lost))",
-  "new": "ezsdr_radio::payloads::rx_overflow_payload(&causes[..causes.len().min(1)], Some(lost))",
+  "old": "ezsdr_radio::payloads::rx_overflow_payload(&loss_causes(&stream.pending), Some((cut - stream.read).max(0) as u64))",
+  "new": "ezsdr_radio::payloads::rx_overflow_payload(&loss_causes(&stream.pending).into_iter().take(1).collect::<Vec<_>>(), Some((cut - stream.read).max(0) as u64))",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_18_a_tail_names_the_overrun_over_the_sequence_error"
@@ -27440,7 +27420,7 @@
   "id": "N108-35",
   "name": "uhd-rx ends a segment with a loss report pending at the chain's cut, not the plan's: a Stop's cut does not survive a later abort (stage 4b)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "if loss_causes(&stream.pending).is_empty() { cut } else { self.planned_end(stream).or(cut) }",
+  "old": "if loss_causes(&stream.pending).is_empty() && stream.carry.loss.is_none() { cut } else { self.planned_end(stream).or(cut) }",
   "new": "cut",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -27450,7 +27430,7 @@
   "id": "N108-35b",
   "name": "uhd-rx ends a segment at the plan's cut even with no loss report pending (stage 4b)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "if loss_causes(&stream.pending).is_empty() { cut } else { self.planned_end(stream).or(cut) }",
+  "old": "if loss_causes(&stream.pending).is_empty() && stream.carry.loss.is_none() { cut } else { self.planned_end(stream).or(cut) }",
   "new": "self.planned_end(stream).or(cut)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -27568,33 +27548,33 @@
  },
  {
   "id": "N108-31",
-  "name": "the Mock's tail `lost` is the reports' sum, not the cut's distance from the first sample not delivered (stage 4b)",
+  "name": "the Mock's tail `lost` is the fault reports' sum, not the device loss up to the cut (stage 4b; #126)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "Some((cut - undelivered).max(0) as u64)",
-  "new": "Some(rx.lost.unwrap_or(0))",
+  "old": "lost: ezsdr_radio::rx_link::lost_before(&gaps, cut),",
+  "new": "lost: report.lost,",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
-  "filter": "mr_21_a_second_overrun_in_a_gap_then_a_cut_reports_the_cut_not_the_sum"
+  "filter": "mr_19_a_fault_inside_a_stretch_then_a_stop_reports_the_device_loss_to_the_cut"
  },
  {
   "id": "N108-48",
-  "name": "the Mock's tail takes the sequence cause over an overrun (a later overrun loses to the sequence error) (stage 4b)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "if cause == ezsdr_radio::payloads::RxOverflowCause::Overrun {",
-  "new": "if cause == ezsdr_radio::payloads::RxOverflowCause::Sequence {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_21_a_sequence_error_then_an_overrun_before_one_cut_make_one_tail"
+  "name": "a later overrun report no longer wins over an earlier sequence report (stage 4b; #126)",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "if other.cause == RxOverflowCause::Overrun {",
+  "new": "if self.cause == RxOverflowCause::Overrun {",
+  "crate": "ezsdr-radio",
+  "test_bin": "rx_link",
+  "filter": "rm_38_loss_reports_merge_to_the_first_sample_the_sum_and_the_overrun"
  },
  {
   "id": "N108-48b",
-  "name": "the Mock's tail takes the last pending report's cause (an overrun loses to a later sequence error) (stage 4b)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "if cause == ezsdr_radio::payloads::RxOverflowCause::Overrun {",
-  "new": "if cause == ezsdr_radio::payloads::RxOverflowCause::Sequence {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_21_an_overrun_then_a_sequence_error_before_one_cut_make_one_tail"
+  "name": "the pending cause takes the last report's cause (an overrun loses to a later sequence error) (stage 4b; #126)",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "if other.cause == RxOverflowCause::Overrun {\n            self.cause = RxOverflowCause::Overrun;\n        }",
+  "new": "self.cause = other.cause;",
+  "crate": "ezsdr-radio",
+  "test_bin": "rx_link",
+  "filter": "rm_38_loss_reports_merge_to_the_first_sample_the_sum_and_the_overrun"
  },
  {
   "id": "N108-33",
@@ -27620,8 +27600,8 @@
   "id": "N108-27",
   "name": "the Mock's tail is always stamped in the primary root, never in the segment's SampleClock (stage 4b)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "let at = match domain {\n            Some(domain) => TimePoint::new(domain, undelivered),",
-  "new": "let at = match None::<ClockDomainId> {\n            Some(domain) => TimePoint::new(domain, undelivered),",
+  "old": "let at = match domain {\n            Some(domain) => TimePoint::new(domain, report.first),",
+  "new": "let at = match None::<ClockDomainId> {\n            Some(domain) => TimePoint::new(domain, report.first),",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_21_overrun_shape"
@@ -27630,8 +27610,8 @@
   "id": "N108-28",
   "name": "the Mock's root-time tail reads the sample index as a root tick (stage 4b)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "time::v_of(origin, ratio, undelivered).ok_or_else(|| self.reject(\"MR-12: receive cut overflow\"))?",
-  "new": "undelivered",
+  "old": "time::v_of(origin, ratio, report.first).ok_or_else(|| self.reject(\"MR-12: receive cut overflow\"))?",
+  "new": "report.first",
   "crate": "ezsdr-acceptance",
   "test_bin": "parity",
   "filter": "vh_8_an_overrun_cut_before_its_restart_emits_the_tail_on_both_providers"
@@ -27924,67 +27904,47 @@
   "new": "if true {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
-  "filter": "mr_19_a_fault_report_survives_a_refused_publish"
+  "filter": "mr_19_a_fault_before_the_discards_reports_its_loss_with_the_accepted_block"
  },
  {
   "id": "N108-98",
-  "name": "a refused publish consumes the pending reports, seen at a repeated refusal (MR-19; stage 4b)",
+  "name": "a refused publish consumes the pending reports, seen at a discarded restart block (MR-19; stage 4b; #126)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
   "old": "if !full {",
   "new": "if true {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
-  "filter": "mr_19_repeated_refusals_are_one_overrun_with_the_first_block_a_link_accepts"
- },
- {
-  "id": "N108-51",
-  "name": "the refusal emits its event at once again, in place of the report (MR-19; stage 4b)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "rx.note(next, ezsdr_radio::payloads::RxOverflowCause::Overrun);",
-  "new": "{ let domain = self.rx_register(k)?; let payload = ezsdr_radio::payloads::RxOverflowPayload { cause: ezsdr_radio::payloads::RxOverflowCause::Overrun, lost: (next_sample - next) as u64 }; self.emit_overflow(k, payload, TimePoint::new(domain, next))?; }",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_19_backpressure_is_an_overrun"
- },
- {
-  "id": "N108-97",
-  "name": "the refusal emits its event at once again, in place of the report, seen with a fault in the gap (MR-19; stage 4b)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "rx.note(next, ezsdr_radio::payloads::RxOverflowCause::Overrun);",
-  "new": "{ let domain = self.rx_register(k)?; let payload = ezsdr_radio::payloads::RxOverflowPayload { cause: ezsdr_radio::payloads::RxOverflowCause::Overrun, lost: (next_sample - next) as u64 }; self.emit_overflow(k, payload, TimePoint::new(domain, next))?; }",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_19_a_fault_inside_a_refusal_s_gap_then_a_stop_counts_the_stretch_once"
+  "filter": "mr_37_pending_reports_keep_the_first_sample_the_causes_and_the_gaps"
  },
  {
   "id": "N108-52",
-  "name": "`undelivered` is set to the refused block's end at a refused publish (MR-19; stage 4b)",
+  "name": "`undelivered` is set to the discarded block's end at a discard (MR-19; stage 4b; #126)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "rx.lost = Some(lost_total);",
-  "new": "rx.lost = Some(lost_total); rx.undelivered = stop;",
+  "old": "rx.lost = Some(lost.unwrap_or(0).saturating_add(samples));",
+  "new": "rx.lost = Some(lost.unwrap_or(0).saturating_add(samples)); rx.undelivered = stop;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
-  "filter": "mr_19_an_abort_after_a_refusal_loses_nothing_before_its_cut"
+  "filter": "mr_19_an_abort_in_a_stretch_cuts_at_its_first_sample"
  },
  {
   "id": "N108-53",
-  "name": "the tail after a refusal is measured from the restart sample (MR-19; stage 4b)",
+  "name": "`undelivered` is set to the discarded block's first sample at a discard (MR-19; stage 4b; #126)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "rx.lost = Some(lost_total);",
-  "new": "rx.lost = Some(lost_total); rx.undelivered = next_sample;",
+  "old": "rx.lost = Some(lost.unwrap_or(0).saturating_add(samples));",
+  "new": "rx.lost = Some(lost.unwrap_or(0).saturating_add(samples)); rx.undelivered = next;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
-  "filter": "mr_19_a_stop_before_acceptance_emits_the_tail_from_the_refused_block"
+  "filter": "mr_19_an_abort_in_a_stretch_cuts_at_its_first_sample"
  },
  {
   "id": "N108-96",
-  "name": "the Mock's tail is stamped in the primary root even when a refused first block registered the clock (MR-19; stage 4b)",
+  "name": "the Mock's tail is stamped in the primary root even when a refused first block registered the clock (MR-19; stage 4b; #126)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "let at = match domain {\n            Some(domain) => TimePoint::new(domain, undelivered),",
-  "new": "let at = match None::<ClockDomainId> {\n            Some(domain) => TimePoint::new(domain, undelivered),",
+  "old": "let at = match domain {\n            Some(domain) => TimePoint::new(domain, report.first),",
+  "new": "let at = match None::<ClockDomainId> {\n            Some(domain) => TimePoint::new(domain, report.first),",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
-  "filter": "mr_19_a_refused_first_block_registers_the_clock_and_its_tail_is_timed_in_it"
+  "filter": "mr_19_a_tail_after_a_refused_first_block_is_timed_in_the_registered_clock"
  },
  {
   "id": "N108-94",
@@ -28871,29 +28831,29 @@
  {
   "id": "N108-153",
   "name": "the pending report takes the later first sample (`min` becomes `max`) (S9; stage 4b)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "report.first = report.first.min(first);",
-  "new": "report.first = report.first.max(first);",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "self.first = self.first.min(other.first);",
+  "new": "self.first = self.first.max(other.first);",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
-  "filter": "mr_37_pending_reports_keep_the_first_sample_and_the_causes_not_a_list"
+  "filter": "mr_37_pending_reports_keep_the_first_sample_the_causes_and_the_gaps"
  },
  {
   "id": "N108-154",
   "name": "a later overrun report does not make the pending cause overrun (S9; stage 4b)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "report.cause = cause;",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "if other.cause == RxOverflowCause::Overrun {\n            self.cause = RxOverflowCause::Overrun;\n        }",
   "new": "",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
-  "filter": "mr_37_pending_reports_keep_the_first_sample_and_the_causes_not_a_list"
+  "filter": "mr_37_pending_reports_keep_the_first_sample_the_causes_and_the_gaps"
  },
  {
   "id": "N108-155",
   "name": "the pending report's sequence cause is ignored, so a sequence-only report gives no event (S9; stage 4b)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "let report = rx.report.take();",
-  "new": "let report = rx.report.take().filter(|report| report.cause == ezsdr_radio::payloads::RxOverflowCause::Overrun);",
+  "old": "let Some(PendingReport { report, gaps }) = rx.report.take() else { return Ok(()) };",
+  "new": "let Some(PendingReport { report, gaps }) = rx.report.take().filter(|pending| pending.report.cause == ezsdr_radio::payloads::RxOverflowCause::Overrun) else { return Ok(()) };",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_22_a_cut_inside_a_sequence_error_s_skip_emits_the_tail"
@@ -31498,5 +31458,445 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_16_a_transmit_stage_joins_the_thread_that_ends_beside_a_stuck_one"
-  }
+  },
+ {
+  "id": "N126-M01",
+  "name": "MockRadio's discard adds `RESTARTED` to the next block",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "rx.flags = rx.flags | ezsdr_radio::rx_link::GAP_FLAGS;",
+  "new": "rx.flags = rx.flags | ezsdr_radio::rx_link::GAP_FLAGS | BlockFlags::RESTARTED;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_full_link_discards_and_the_next_block_carries_the_gap"
+ },
+ {
+  "id": "N126-M02",
+  "name": "MockRadio's discard restarts after the profile's gap instead of at the discarded block's end",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                if let Some(rx) = self.rx[k].running.as_mut() {\n                    rx.next = stop;\n                    rx.planned = None;\n                    rx.flags = rx.flags | ezsdr_radio::rx_link::GAP_FLAGS;\n                    rx.lost = Some(lost.unwrap_or(0).saturating_add(samples));\n                }",
+  "new": "                let gap_ns = self.profile.timing().overflow_restart_gap_ns;\n                if let Some(rx) = self.rx[k].running.as_mut() {\n                    rx.next = stop.max(next.saturating_add(gap_ns / 1_000));\n                    rx.planned = None;\n                    rx.flags = rx.flags | ezsdr_radio::rx_link::GAP_FLAGS;\n                    rx.lost = Some(lost.unwrap_or(0).saturating_add(samples));\n                }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_discard_ignores_the_restart_gap_and_the_head"
+ },
+ {
+  "id": "N126-M03",
+  "name": "MockRadio's pending `lost` drops the discarded span",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "rx.lost = Some(lost.unwrap_or(0).saturating_add(samples));",
+  "new": "rx.lost = Some(lost.unwrap_or(0));",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_full_link_discards_and_the_next_block_carries_the_gap"
+ },
+ {
+  "id": "N126-M04",
+  "name": "MockRadio's next block skips a sample past the discarded one (`stop + 1`)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                    rx.next = stop;\n                    rx.planned = None;",
+  "new": "                    rx.next = stop + 1;\n                    rx.planned = None;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_full_link_discards_and_the_next_block_carries_the_gap"
+ },
+ {
+  "id": "N126-M05",
+  "name": "MockRadio notes a discard as a device report, so a stretch makes an RX_OVERFLOW",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "rx.lost = Some(lost.unwrap_or(0).saturating_add(samples));",
+  "new": "rx.lost = Some(lost.unwrap_or(0).saturating_add(samples)); rx.note(next, next.saturating_add(samples as i64), ezsdr_radio::payloads::RxOverflowCause::Overrun);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_full_link_discards_and_the_next_block_carries_the_gap"
+ },
+ {
+  "id": "N126-M06",
+  "name": "RM-38's event is raised at every discard, not once per segment",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "Refused { samples: len, raise_event: !std::mem::replace(&mut self.raised, true) }",
+  "new": "Refused { samples: len, raise_event: { self.raised = true; true } }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_full_link_discards_and_the_next_block_carries_the_gap"
+ },
+ {
+  "id": "N126-M08",
+  "name": "MockRadio counts a discarded block as an accepted one in `rx_blocks`",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "self.add_stat(ezsdr_radio::rx_link::DISCARDED_STAT, refused.samples);",
+  "new": "self.add_stat(ezsdr_radio::rx_link::DISCARDED_STAT, refused.samples); self.add_stat(\"rx_blocks\", 1);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_full_link_discards_and_the_next_block_carries_the_gap"
+ },
+ {
+  "id": "N126-M09",
+  "name": "MockRadio's discard stat adds the pending jump instead of the discarded samples",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "self.add_stat(ezsdr_radio::rx_link::DISCARDED_STAT, refused.samples);",
+  "new": "self.add_stat(ezsdr_radio::rx_link::DISCARDED_STAT, lost.unwrap_or(0));",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_fault_after_discards_reports_the_device_loss_only"
+ },
+ {
+  "id": "N126-M10",
+  "name": "MockRadio's block-carried RX_OVERFLOW states the header's whole jump, not the device loss",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if let Some(payload) = report.payload() {",
+  "new": "if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&[report.cause], lost) {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_fault_after_discards_reports_the_device_loss_only"
+ },
+ {
+  "id": "N126-M11",
+  "name": "MockRadio restarts the head at a discard",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                    rx.next = stop;\n                    rx.planned = None;\n                    rx.flags = rx.flags | ezsdr_radio::rx_link::GAP_FLAGS;",
+  "new": "                    rx.next = stop;\n                    rx.head_until = stop + rx.head;\n                    rx.planned = None;\n                    rx.flags = rx.flags | ezsdr_radio::rx_link::GAP_FLAGS;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "s4a_a_discard_does_not_restart_the_head"
+ },
+ {
+  "id": "N126-M12",
+  "name": "MockRadio counts a discarded block's planned length, not its length clipped at the cut",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                let samples = (stop - next) as u64;\n                let refused = self.rx[k].running.as_mut().map(|rx| rx.discards.refuse(samples)).expect(\"a receive stream\");",
+  "new": "                let samples = planned as u64;\n                let refused = self.rx[k].running.as_mut().map(|rx| rx.discards.refuse(samples)).expect(\"a receive stream\");",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_stop_inside_a_stretch_makes_no_event_and_counts_to_the_cut"
+ },
+ {
+  "id": "N126-M13",
+  "name": "MockRadio stamps the block-carried RX_OVERFLOW at the carrying block's first sample, not the report's",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "self.emit_overflow(k, payload, TimePoint::new(domain, report.first))?;",
+  "new": "self.emit_overflow(k, payload, TimePoint::new(domain, first))?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_fault_after_discards_reports_the_device_loss_only"
+ },
+ {
+  "id": "N126-R01",
+  "name": "RM-38 refuses a sole `Block` link: `len > 1` becomes `len > 0`",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "(policies.len() > 1 && policies.contains(&BackPressure::Block)).then_some(REASON)",
+  "new": "(!policies.is_empty() && policies.contains(&BackPressure::Block)).then_some(REASON)",
+  "crate": "ezsdr-radio",
+  "test_bin": "rx_link",
+  "filter": "rm_38_a_block_link_must_be_its_ports_only_link"
+ },
+ {
+  "id": "N126-R02",
+  "name": "RM-38 refuses only when every link is `Block`: `contains` becomes `all`",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "policies.contains(&BackPressure::Block)",
+  "new": "policies.iter().all(|policy| *policy == BackPressure::Block)",
+  "crate": "ezsdr-radio",
+  "test_bin": "rx_link",
+  "filter": "rm_38_a_block_link_must_be_its_ports_only_link"
+ },
+ {
+  "id": "N126-R03",
+  "name": "RM-38's event is owed at every discard: `raised` is never set",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "Refused { samples: len, raise_event: !std::mem::replace(&mut self.raised, true) }",
+  "new": "Refused { samples: len, raise_event: !self.raised }",
+  "crate": "ezsdr-radio",
+  "test_bin": "rx_link",
+  "filter": "rm_38_the_event_is_owed_once_per_segment"
+ },
+ {
+  "id": "N126-R04",
+  "name": "the merged report keeps the later first lost sample",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "self.first = self.first.min(other.first);",
+  "new": "self.first = other.first;",
+  "crate": "ezsdr-radio",
+  "test_bin": "rx_link",
+  "filter": "rm_38_loss_reports_merge_to_the_first_sample_the_sum_and_the_overrun"
+ },
+ {
+  "id": "N126-R05",
+  "name": "the lost intervals are not merged: an overlap is counted twice",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "let from = from.max(covered);",
+  "new": "let from = from;",
+  "crate": "ezsdr-radio",
+  "test_bin": "rx_link",
+  "filter": "rm_38_loss_before_a_cut_counts_overlapping_gaps_once"
+ },
+ {
+  "id": "N126-R06",
+  "name": "the merged report's loss is the later report's, not the sum",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "self.lost = self.lost.saturating_add(other.lost);",
+  "new": "self.lost = other.lost;",
+  "crate": "ezsdr-radio",
+  "test_bin": "rx_link",
+  "filter": "rm_38_loss_reports_merge_to_the_first_sample_the_sum_and_the_overrun"
+ },
+ {
+  "id": "N126-R07",
+  "name": "a discard's pending flag is `RESTARTED` instead of `GAP_BEFORE`",
+  "file": "crates/ezsdr-radio/src/rx_link.rs",
+  "old": "pub const GAP_FLAGS: BlockFlags = BlockFlags::GAP_BEFORE;",
+  "new": "pub const GAP_FLAGS: BlockFlags = BlockFlags::RESTARTED;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_full_link_discards_and_the_next_block_carries_the_gap"
+ },
+ {
+  "id": "N126-U01",
+  "name": "a `Block` link on a receive port is refused even alone (the refusal RM-38 removed)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if let Some(reason) = ezsdr_radio::rx_link::refusal(&port.iter().map(|link| link.policy()).collect::<Vec<BackPressure>>()) {",
+  "new": "if let Some(reason) = ezsdr_radio::rx_link::refusal(&port.iter().map(|link| link.policy()).collect::<Vec<BackPressure>>()).or_else(|| port.iter().any(|link| link.policy() == BackPressure::Block).then_some(\"UR-12: a device cannot wait for a Block link\")) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_12_a_block_link_must_be_its_ports_only_link"
+ },
+ {
+  "id": "N126-U02",
+  "name": "a discarded block leaves the reports it read pending (a report not consumed at its own read)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if full {\n                self.core.stat(rx_link::DISCARDED_STAT, len);",
+  "new": "if full {\n                stream.pending = pending;\n                self.core.stat(rx_link::DISCARDED_STAT, len);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_report_read_with_a_discarded_block_reaches_the_next_accepted_block"
+ },
+ {
+  "id": "N126-U02b",
+  "name": "a discarded block yields no carry: its flags, device loss and alignment are dropped",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if full {\n                self.core.stat(rx_link::DISCARDED_STAT, len);",
+  "new": "if full {\n                stream.carry = Carry::default();\n                self.core.stat(rx_link::DISCARDED_STAT, len);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_report_read_with_a_discarded_block_reaches_the_next_accepted_block"
+ },
+ {
+  "id": "N126-U03",
+  "name": "a discarded block does not roll the floor it wrote back",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "streams.undeliver(stream_key(Dir::Rx, self.k), stream.expected);",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_an_abort_in_a_stretch_cuts_at_its_first_undelivered_sample"
+ },
+ {
+  "id": "N126-U03b",
+  "name": "the rollback of a discarded block ignores the end an end booking already took",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "let pinned = self.lines.line(stream).into_iter().flat_map(|line| line.items.iter()).filter(|item| matches!(item.kind, Kind::End { .. })).filter_map(|item| item.delivered).max();\n        if let Some(delivered) = self.stream_mut(stream).delivered.as_mut() {\n            delivered.2 = back.max(pinned.unwrap_or(i64::MIN));\n        }",
+  "new": "if let Some(delivered) = self.stream_mut(stream).delivered.as_mut() {\n            delivered.2 = back;\n        }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_an_abort_booked_while_a_block_is_discarded_ends_the_stream_at_that_block_s_end"
+ },
+ {
+  "id": "N126-U03c",
+  "name": "the abort floor is the stream's first sample no accepted block carries, not the floor a booking read",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "streams.first_undelivered(key).map_or(stream.expected, |(_, _, delivered)| delivered)",
+  "new": "stream.expected",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_an_abort_booked_while_a_block_is_discarded_ends_the_stream_at_that_block_s_end"
+ },
+ {
+  "id": "N126-U04",
+  "name": "a discard emits an RX_OVERFLOW of its own",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if full {\n                self.core.stat(rx_link::DISCARDED_STAT, len);",
+  "new": "if full {\n                self.core.stat(rx_link::DISCARDED_STAT, len);\n                emit_overflow(&self.core, self.k, TimePoint::new(clock.domain, k), &ezsdr_radio::payloads::RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: len as u64 });",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_report_read_with_a_discarded_block_reaches_the_next_accepted_block"
+ },
+ {
+  "id": "N126-U05",
+  "name": "every discarded block raises LINK_BACKPRESSURE, not the segment's first",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if stream.discards.refuse(len as u64).raise_event {",
+  "new": "if true {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_full_block_link_discards_and_the_next_block_carries_the_gap"
+ },
+ {
+  "id": "N126-U06",
+  "name": "SEQ_DISCONTINUITY is added to a gapless read too (own == 0)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if own > 0 {",
+  "new": "if own >= 0 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_an_unannounced_jump_in_a_stretch_is_a_sequence_discontinuity"
+ },
+ {
+  "id": "N126-U06b",
+  "name": "a discarded block's flags never reach the next accepted block's header",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let flags = if lost.is_some() { BlockFlags::GAP_BEFORE } else { BlockFlags::NONE } | stream.carry.flags;",
+  "new": "let flags = if lost.is_some() { BlockFlags::GAP_BEFORE } else { BlockFlags::NONE };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_report_read_with_a_discarded_block_reaches_the_next_accepted_block"
+ },
+ {
+  "id": "N126-U06c",
+  "name": "a report is qualified against the first sample no accepted block carries, not against the device's read",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let own = k - read;",
+  "new": "let own = k - expected;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_later_report_does_not_take_an_earlier_gap"
+ },
+ {
+  "id": "N126-U07",
+  "name": "an overlap inside a stretch is trimmed against the first sample no accepted block carries",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if k < stream.read {\n            let trim = stream.read - k;",
+  "new": "if k < stream.expected {\n            let trim = stream.expected - k;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_an_overlap_inside_a_stretch_is_trimmed_against_the_read_end"
+ },
+ {
+  "id": "N126-U08",
+  "name": "a discarded block does not move the device's read",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "stream.read = k + len;\n                if stream.discards.refuse(len as u64).raise_event {",
+  "new": "if stream.discards.refuse(len as u64).raise_event {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_full_block_link_discards_and_the_next_block_carries_the_gap"
+ },
+ {
+  "id": "N126-U09",
+  "name": "a discarded block is counted in rx_blocks and rx_samples",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if !full {\n                        self.core.stat(\"rx_blocks\", 1);",
+  "new": "if true {\n                        self.core.stat(\"rx_blocks\", 1);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_full_block_link_discards_and_the_next_block_carries_the_gap"
+ },
+ {
+  "id": "N126-U10",
+  "name": "the receive length counts from the first sample no accepted block carries",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let left = stream.clock.at_or_after(cut) - stream.read;",
+  "new": "let left = stream.clock.at_or_after(cut) - stream.expected;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_stop_inside_a_stretch_makes_no_event_and_counts_to_the_cut"
+ },
+ {
+  "id": "N126-U11",
+  "name": "the provider stalls on a full link instead of reading the device on",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if stream.discards.refuse(len as u64).raise_event {",
+  "new": "self.host.sleep(Wall::from_millis(150));\n                if stream.discards.refuse(len as u64).raise_event {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_long_stretch_makes_no_device_overflow"
+ },
+ {
+  "id": "N126-U12",
+  "name": "a new receive segment starts with a carried device loss (the carry kept across a segment)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "carry: Carry::default(),",
+  "new": "carry: Carry { flags: BlockFlags::GAP_BEFORE, loss: Some(LossReport { first: 0, lost: 1, cause: RxOverflowCause::Overrun }), gaps: vec![(0, 1)], alignment: None },",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_segment_change_on_one_receive_owner_raises_a_second_event"
+ },
+ {
+  "id": "N126-U13",
+  "name": "the end's tail ignores the loss a discarded block carried",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "let mut report = stream.carry.loss.map(|report| LossReport { lost: rx_link::lost_before(&stream.carry.gaps, cut), ..report });",
+  "new": "let mut report: Option<LossReport> = None;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_tail_counts_the_carried_loss_only"
+ },
+ {
+  "id": "N126-K01",
+  "name": "The Kernel registers no `(node, LINK_BACKPRESSURE)` pair for a Block-linked Provider, so RM-38's event lands in the unforeseen row",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": "if blocking.contains(&Inst::Provider(index)) {",
+  "new": "if blocking.contains(&Inst::Provider(index)) && false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_08_a_provider_with_a_block_link_has_a_link_backpressure_row_at_every_node"
+ },
+ {
+  "id": "N126-K02",
+  "name": "The Kernel registers `(node, LINK_BACKPRESSURE)` for every Provider: the `Block` link condition is dropped (KC-8, RM-38)",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": ".filter(|(decl, _)| decl.policy == crate::stream::BackPressure::Block)",
+  "new": ".filter(|_| true)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_08_a_provider_without_a_block_link_has_no_link_backpressure_row"
+ },
+ {
+  "id": "N126-U14",
+  "name": "the tail counts the carried loss whole, not to the cut",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "lost: rx_link::lost_before(&stream.carry.gaps, cut)",
+  "new": "lost: report.lost",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_an_abort_after_a_full_publish_counts_the_carried_loss_to_its_cut"
+ },
+ {
+  "id": "N126-U15",
+  "name": "the carried loss interval is not kept, so the tail counts none",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "stream.carry.gaps.push((read, k));",
+  "new": "",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_tail_counts_the_carried_loss_only"
+ },
+ {
+  "id": "N126-K03",
+  "name": "The Kernel registration asks the Link's own `policy()` instead of reading the validated declaration, so a panicking Link unwinds Run startup (KC-8, KC-30)",
+  "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+  "old": ".filter(|(decl, _)| decl.policy == crate::stream::BackPressure::Block)",
+  "new": ".filter(|(_, link)| crate::stream::DataLink::policy(&**link) == crate::stream::BackPressure::Block)",
+  "crate": "ezsdr-kernel",
+  "test_bin": "coordinator",
+  "filter": "kc_08_a_link_whose_policy_panics_is_not_called_by_the_registration"
+ },
+ {
+  "id": "N126-U16",
+  "name": "a block's ALIGNMENT_ERROR is handed to the sink before its RX_OVERFLOW (UR-20's order)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                if let Some(payload) = carry.loss.and_then(|report| report.payload()) {\n                    emit_overflow(&self.core, self.k, TimePoint::new(clock.domain, carry.loss.expect(\"a loss report\").first), &payload);\n                }\n                if let Some((first, lost)) = carry.alignment {\n                    let payload = serde_json::to_value(AlignmentErrorPayload { lost }).expect(\"a payload\");\n                    self.core.emit_at(&self.core.stream_node(Dir::Rx, self.k), kinds::ALIGNMENT_ERROR, Severity::Error, payload, TimePoint::new(clock.domain, first));\n                }",
+  "new": "                if let Some((first, lost)) = carry.alignment {\n                    let payload = serde_json::to_value(AlignmentErrorPayload { lost }).expect(\"a payload\");\n                    self.core.emit_at(&self.core.stream_node(Dir::Rx, self.k), kinds::ALIGNMENT_ERROR, Severity::Error, payload, TimePoint::new(clock.domain, first));\n                }\n                if let Some(payload) = carry.loss.and_then(|report| report.payload()) {\n                    emit_overflow(&self.core, self.k, TimePoint::new(clock.domain, carry.loss.expect(\"a loss report\").first), &payload);\n                }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_20_the_overflow_follows_the_publish_of_the_block_that_carries_it"
+ },
+ {
+  "id": "N126-U17",
+  "name": "a block's RX_OVERFLOW is handed to the sink before the block is published (UR-20): a duplicate emission inserted at the publish loop",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                    let block = Arc::new(block);\n                    for link in self.core.links(self.k) {",
+  "new": "                    let block = Arc::new(block);\n                    if let Some(payload) = stream.carry.loss.and_then(|report| report.payload()) {\n                        emit_overflow(&self.core, self.k, TimePoint::new(clock.domain, stream.carry.loss.expect(\"a loss report\").first), &payload);\n                    }\n                    for link in self.core.links(self.k) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_20_the_overflow_follows_the_publish_of_the_block_that_carries_it"
+ }
 ]

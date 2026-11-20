@@ -475,8 +475,20 @@ impl RunHandle {
             EventKind::parse(EventKind::STEP_LIVELOCK).expect("Kernel event kind"),
         ];
         let device_lost = EventKind::parse(EventKind::DEVICE_LOST).expect("Kernel event kind");
+        let link_backpressure = EventKind::parse(EventKind::LINK_BACKPRESSURE).expect("Kernel event kind");
+        // RS-27, SC-20a: a Provider whose attached StreamOut link is `Block` emits `LINK_BACKPRESSURE` from its own nodes where the link is full and its device cannot wait; no other Provider has the pair.
+        let routing = self.shared.routing().expect("plan was installed");
+        // The policy is read from the validated declaration: a Link's own `policy()` is a Module call, outside panic containment here.
+        let blocking: BTreeSet<Inst> = self
+            .shared
+            .links
+            .lock()
+            .iter()
+            .filter(|(decl, _)| decl.policy == crate::stream::BackPressure::Block)
+            .filter_map(|(decl, _)| fragment_owner(&self.shared, &decl.from.component).and_then(|owner| routing.fragment_of.get(&owner).copied()))
+            .collect();
 
-        for slot in &self.shared.providers {
+        for (index, slot) in self.shared.providers.iter().enumerate() {
             let instance = match contain_all(|| {
                 let guard = lock(&slot.object);
                 guard.instance().clone()
@@ -492,6 +504,9 @@ impl RunHandle {
                 for kind in &kinds {
                     pairs.insert((EventSource::Node { node: node.id.clone() }, kind.clone()));
                 }
+                if blocking.contains(&Inst::Provider(index)) {
+                    pairs.insert((EventSource::Node { node: node.id.clone() }, link_backpressure.clone()));
+                }
             }
             pairs.insert((EventSource::Node { node: instance.id }, device_lost.clone()));
         }
@@ -506,7 +521,6 @@ impl RunHandle {
             }
             pairs.insert((source, device_lost.clone()));
         }
-        let routing = self.shared.routing().expect("plan was installed");
         for fragment in routing.plan.fragments.iter().filter(|f| f.role == crate::module_api::Role::Executor) {
             let Some(Inst::Executor(i)) = routing.fragment_of.get(&fragment.id).copied() else {
                 continue;

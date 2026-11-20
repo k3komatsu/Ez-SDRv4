@@ -732,15 +732,15 @@ fn mr_7_each_receive_port_takes_its_own_links() {
         &links,
     );
     assert!(ok.is_ok(), "{:?}", ok.err().map(|error| error.message));
-    let refused = [("rx0", BackPressure::Block, 1), ("rx0", BackPressure::Block, 1)];
+    let refused = [("rx0", BackPressure::Block, 1), ("rx0", BackPressure::Block, 1), ("rx0", BackPressure::DropOldest, 1)];
     let why = harness_links(
         Layout { profile: "x3xx", id: "mock", rx: two(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &[("radio.rx.c1.stream", eq(Scalar::from(1)))], env: &[], ports: &[] },
         &refused,
     )
     .err()
-    .expect("two Block links on one port")
+    .expect("a Block link beside another on one port")
     .message;
-    assert!(why.contains("multiple rx links cannot use Block back-pressure"), "{why}");
+    assert_eq!(why, "RM-38: a Block link must be its receive port's only link");
     // A link on a port whose stream holds no channel is kept, and the stream begins no
     // segment: the same as the current keys' `rx.channels = 0` with a link (RM-21, MR-7).
     let mut idle = built(Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(0), selector: &[], constraints: &[], env: &[], ports: &["rx0", "rx1"] });
@@ -768,6 +768,30 @@ fn mr_31_a_layout_instance_joins_simulation_channel() {
     harness.step(10_000_000).unwrap();
     let heard: usize = harness.blocks("rx0").iter().map(|block| (0..block.header().len as usize).filter(|&sample| block_sample(block, 0, sample) != (0.0, 0.0)).count()).sum();
     assert_eq!(heard, 100);
+}
+
+#[test]
+fn mr_19_a_refusal_on_rx1_names_its_own_stream_node() {
+    // RM-38, MR-28: the event's source is the stream node of the port whose link is full, and the
+    // other stream keeps its gapless blocks.
+    let mut harness = harness_links(
+        Layout { profile: "x3xx", id: "mock", rx: two(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &[("radio.rx.c1.stream", eq(Scalar::from(1)))], env: &[], ports: &["rx0"] },
+        &[("rx1", BackPressure::Block, 1)],
+    )
+    .unwrap_or_else(|error| panic!("prepare: {error}"));
+    harness.arm_start(T0).unwrap();
+    harness.step(T0 + 1_999_001).unwrap();
+    // Both streams' block 0 were accepted; rx1's one-slot link is now full and its next block discarded.
+    harness.step(T0 + 3_999_001).unwrap();
+    let events = harness.events();
+    let links: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::LINK_BACKPRESSURE).collect();
+    assert_eq!(links.len(), 1, "one event, from the port whose link is full");
+    assert_eq!(links[0].source, node_src("mock/rx/s1"));
+    assert_eq!(links[0].time, TimePoint::new(harness.clocks_of("mock/rx/s1")[0].domain, 2_000));
+    assert!(events.iter().all(|event| event.source != node_src("mock/rx/s0")), "no event names rx0's node");
+    let fast = harness.headers("rx0");
+    assert_eq!(fast.iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len)).collect::<Vec<_>>(), [(0, 2_000), (2_000, 2_000)]);
+    assert!(fast.iter().all(|header| header.flags == BlockFlags::NONE && header.lost.is_none()), "rx0's blocks stay gapless: {fast:?}");
 }
 
 #[test]

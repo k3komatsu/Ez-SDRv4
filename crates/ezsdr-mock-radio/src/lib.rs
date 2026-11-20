@@ -123,11 +123,11 @@ struct Selector {
     rx_test_pattern: String,
 }
 
-/// What the pending loss reports owe the event (RM-17, MR-37): the first lost sample among them and the merged cause. A fault's and a refused block's reports merge here; nothing grows with their number.
-#[derive(Clone, Copy, Debug)]
+/// What the pending fault reports owe the event (RM-17, MR-37): the merged report, and the sample intervals the faults lost, which a cut inside a gap clips (MR-27). A discard is no report (RM-38).
+#[derive(Clone, Debug)]
 struct PendingReport {
-    first: i64,
-    cause: ezsdr_radio::payloads::RxOverflowCause,
+    report: ezsdr_radio::rx_link::LossReport,
+    gaps: Vec<(i64, i64)>,
 }
 
 /// The receive segment being delivered (RM-21).
@@ -150,8 +150,10 @@ struct Rx {
     planned: Option<i64>,
     flags: BlockFlags,
     lost: Option<u64>,
-    /// What the pending loss reports owe the event (RM-17, MR-37): the first lost sample among them and the merged cause. A fault's and a refused block's reports merge here; nothing grows with their number.
+    /// What the pending fault reports owe the event (RM-17, MR-37).
     report: Option<PendingReport>,
+    /// RM-38's event is owed once per receive segment.
+    discards: ezsdr_radio::rx_link::Discards,
     /// Its SampleClock has ended.
     ended: bool,
 }
@@ -161,13 +163,15 @@ impl Rx {
         timeline::Config { channels: self.channels, ratio: self.ratio }
     }
 
-    /// RM-17, MR-37: merges a report into the pending one, keeping the first lost sample and the merged cause; nothing grows with their number.
-    fn note(&mut self, first: i64, cause: ezsdr_radio::payloads::RxOverflowCause) {
-        let report = self.report.get_or_insert(PendingReport { first, cause });
-        report.first = report.first.min(first);
-        // RM-17: overrun wins over sequence.
-        if cause == ezsdr_radio::payloads::RxOverflowCause::Overrun {
-            report.cause = cause;
+    /// RM-17, MR-37: merges the fault that lost samples `[kf, kg)` into the pending report.
+    fn note(&mut self, kf: i64, kg: i64, cause: ezsdr_radio::payloads::RxOverflowCause) {
+        let fault = ezsdr_radio::rx_link::LossReport { first: kf, lost: (kg - kf) as u64, cause };
+        match self.report.as_mut() {
+            Some(pending) => {
+                pending.report.merge(&fault);
+                pending.gaps.push((kf, kg));
+            }
+            None => self.report = Some(PendingReport { report: fault, gaps: vec![(kf, kg)] }),
         }
     }
 }
@@ -418,7 +422,7 @@ impl MockRadio {
         sections.insert(section("bursts"), serde_json::json!([]));
         sections.insert(section("faults"), serde_json::json!([]));
         sections.insert(section("rejected"), serde_json::json!([]));
-        sections.insert(section("stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0, "rx_clipped": 0, "tx_clipped": 0}));
+        sections.insert(section("stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "rx_link_discarded_samples": 0, "tx_blocks": 0, "rx_clipped": 0, "tx_clipped": 0}));
         sections.insert(section("segments"), serde_json::json!([]));
         sections.insert(section("switches"), serde_json::json!([]));
         let instance = ProviderInstance {
@@ -601,20 +605,20 @@ impl MockRadio {
             let full = self.publish_rx(k, next, stop, channels, flags, lost)?;
             progressed = true;
             if full {
-                let gap = time::ns_to_v(self.clocks.as_ref().expect("prepared clocks"), self.root.expect("prepared root"), self.profile.timing().overflow_restart_gap_ns)
-                    .map_err(|error| self.reject(format!("MR-19: {error}")))?;
-                let gap_samples = time::k_at_or_after(0, ratio, gap).ok_or_else(|| self.reject("MR-19: restart sample overflow"))?;
-                let after_gap = next.checked_add(gap_samples).ok_or_else(|| self.reject("MR-19: restart sample overflow"))?;
-                let next_sample = stop.max(after_gap);
-                let lost_total = lost.unwrap_or(0).saturating_add((next_sample - next) as u64);
+                // RM-38: the device does not wait; the block is discarded and the next one carries the gap. Nothing else moves: `undelivered`, the head and the pending report stay (RM-16, MR-35).
+                let samples = (stop - next) as u64;
+                let refused = self.rx[k].running.as_mut().map(|rx| rx.discards.refuse(samples)).expect("a receive stream");
+                self.add_stat(ezsdr_radio::rx_link::DISCARDED_STAT, refused.samples);
+                if refused.raise_event {
+                    let domain = self.rx[k].running.as_ref().and_then(|rx| rx.domain).expect("a published block registered the clock");
+                    let path = self.rx[k].path.clone();
+                    self.emit_event(&path, EventKind::LINK_BACKPRESSURE, Severity::Warning, ezsdr_radio::rx_link::event_payload(), TimePoint::new(domain, next))?;
+                }
                 if let Some(rx) = self.rx[k].running.as_mut() {
-                    rx.next = next_sample;
-                    rx.head_until = next_sample + rx.head;
+                    rx.next = stop;
                     rx.planned = None;
-                    rx.flags = rx.flags | BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
-                    rx.lost = Some(lost_total);
-                    // MR-19, RM-17: the refused block's loss is a report at its first sample; `undelivered` stays where it was, so a cut in the gap measures from `a`.
-                    rx.note(next, ezsdr_radio::payloads::RxOverflowCause::Overrun);
+                    rx.flags = rx.flags | ezsdr_radio::rx_link::GAP_FLAGS;
+                    rx.lost = Some(lost.unwrap_or(0).saturating_add(samples));
                 }
             } else if let Some(rx) = self.rx[k].running.as_mut() {
                 rx.next = stop;
@@ -702,14 +706,13 @@ impl MockRadio {
                 full = true;
             }
         }
-        // MR-19, RM-17: a block the link refused is an overrun report of its own and consumes no pending report; the report waits for the block a link accepts.
+        // MR-19, RM-38: a block the link refused consumes no pending report; the report waits for the block a link accepts.
         if !full {
-            // RM-17, MR-37: one event for the block's reported loss, at the record's first lost sample and with its causes.
-            let report = self.rx[k].running.as_mut().and_then(|rx| rx.report.take());
-            let causes = report.as_ref().map(|report| std::slice::from_ref(&report.cause)).unwrap_or_default();
-            if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(causes, lost) {
-                let at = report.expect("a reported loss").first;
-                self.emit_overflow(k, payload, TimePoint::new(domain, at))?;
+            // RM-17, MR-37: one event for the faults' loss, at their first lost sample and with their causes.
+            if let Some(PendingReport { report, .. }) = self.rx[k].running.as_mut().and_then(|rx| rx.report.take()) {
+                if let Some(payload) = report.payload() {
+                    self.emit_overflow(k, payload, TimePoint::new(domain, report.first))?;
+                }
             }
         }
         Ok(full)
@@ -778,7 +781,7 @@ impl MockRadio {
                         ezsdr_radio::payloads::RxOverflowCause::Sequence => BlockFlags::SEQ_DISCONTINUITY,
                     };
                 rx.lost = Some(rx.lost.unwrap_or(0).saturating_add(lost as u64));
-                rx.note(kf, cause);
+                rx.note(kf, kg, cause);
             }
         }
         self.faults[index].applied = true;
@@ -1329,16 +1332,15 @@ impl MockRadio {
         Ok(())
     }
 
-    /// RM-17, MR-37: the loss reports no block carried, up to the cut `cut` (a sample index): one `RX_OVERFLOW` at the first sample not delivered, `lost` that distance, in the segment's SampleClock once registered, else in the primary root (RM-11).
+    /// RM-17, MR-37: the fault reports no block carried, up to the cut `cut` (a sample index): one `RX_OVERFLOW` at their first lost sample, `lost` the device loss up to the cut (a discard excluded, RM-38), in the segment's SampleClock once registered, else in the primary root (RM-11).
     fn rx_tail(&mut self, k: usize, cut: i64) -> Result<(), ModuleError> {
         let Some(rx) = self.rx[k].running.as_mut() else { return Ok(()) };
-        let report = rx.report.take();
-        let (domain, origin, ratio, undelivered) = (rx.domain, rx.origin, rx.ratio, rx.undelivered);
-        let causes = report.as_ref().map(|report| std::slice::from_ref(&report.cause)).unwrap_or_default();
-        let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(causes, Some((cut - undelivered).max(0) as u64)) else { return Ok(()) };
+        let Some(PendingReport { report, gaps }) = rx.report.take() else { return Ok(()) };
+        let (domain, origin, ratio) = (rx.domain, rx.origin, rx.ratio);
+        let Some(payload) = (ezsdr_radio::rx_link::LossReport { lost: ezsdr_radio::rx_link::lost_before(&gaps, cut), ..report }).payload() else { return Ok(()) };
         let at = match domain {
-            Some(domain) => TimePoint::new(domain, undelivered),
-            None => TimePoint::new(self.root.expect("prepared root"), time::v_of(origin, ratio, undelivered).ok_or_else(|| self.reject("MR-12: receive cut overflow"))?),
+            Some(domain) => TimePoint::new(domain, report.first),
+            None => TimePoint::new(self.root.expect("prepared root"), time::v_of(origin, ratio, report.first).ok_or_else(|| self.reject("MR-12: receive cut overflow"))?),
         };
         self.emit_overflow(k, payload, at)
     }
@@ -1402,6 +1404,7 @@ impl MockRadio {
             flags: BlockFlags::NONE,
             lost: None,
             report: None,
+            discards: ezsdr_radio::rx_link::Discards::default(),
             ended: false,
         });
         self.rx[k].pool = Some(HostPool::new(self.profile.block_len() as usize * 2 * channels.count() as usize * 8));
@@ -2221,8 +2224,8 @@ impl Provider for MockRadio {
             }
         }
         for stream in &links {
-            if stream.len() > 1 && stream.iter().any(|link| link.policy() == BackPressure::Block) {
-                return Err(self.reject("MR-7: multiple rx links cannot use Block back-pressure"));
+            if let Some(reason) = ezsdr_radio::rx_link::refusal(&stream.iter().map(|link| link.policy()).collect::<Vec<BackPressure>>()) {
+                return Err(self.reject(reason));
             }
         }
         let seed = ezsdr_sim::seed(&ctx.environment).map_err(|error| self.reject(format!("MR-7: {error}")))?;
