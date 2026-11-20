@@ -7155,13 +7155,13 @@
    },
    {
     "id": "P690",
-    "name": "receive and transmit throughput use the upper-bound comparison rule",
+    "name": "the transmit byte rate is compared as an upper bound (D13: it is NotCompared)",
     "file": "crates/ezsdr-radio/src/measurement.rs",
-    "old": "| keys::TX_BYTES_PER_S => return Some(UpperBound),",
-    "new": "| keys::TX_BYTES_PER_S => return Some(LowerBound),",
+    "old": "keys::TX_BYTES_PER_S => return Some(NotCompared),",
+    "new": "keys::TX_BYTES_PER_S => return Some(UpperBound),",
     "crate": "ezsdr-radio",
     "test_bin": "measurement",
-    "filter": "rm_35_rule_labels_match_the_declared_comparison_classes"
+    "filter": "rm_35_the_transmit_byte_rate_is_not_compared_and_a_row_for_it_is_refused"
    },
    {
     "id": "P692",
@@ -7451,8 +7451,8 @@
    "id": "P723",
    "name": "FakeDevice Run observations are retained in the record",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-    "old": "        observations: measurements.observations,\n    })",
-   "new": "        observations: Vec::new(),\n    })",
+    "old": "values: merge_values(source, description, measured)?,\n        observations,",
+   "new": "values: merge_values(source, description, measured)?,\n        observations: Vec::new(),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "measurement_fake_rehearsal_round_trips_and_only_fails_source"
@@ -8282,17 +8282,7 @@
    "test_bin": "fake",
    "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
   },
-  {
-   "id": "P823",
-   "name": "raw numeric observations skip stable decimal normalization",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "\"requested\": observation_number(point.requested),",
-   "new": "\"requested\": point.requested,",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
-  },
-  {
+   {
    "id": "P824",
    "name": "measurement restoration omits bench rate and gain",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
@@ -8328,8 +8318,8 @@
    "id": "P833",
    "name": "numeric coercion observation drops read-back values",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "\"readback\": point.returned.map(observation_number),",
-   "new": "\"returned\": point.returned.map(observation_number),",
+   "old": "\"readback\": point.returned,",
+   "new": "\"returned\": point.returned,",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
@@ -26564,7 +26554,7 @@
   "new": "keys::RX_BYTES_PER_S => Worst::Number(description.performance.tx_bytes_per_s as f64),",
   "crate": "ezsdr-radio",
   "test_bin": "measurement",
-  "filter": "rm_35_the_receive_and_transmit_byte_rates_are_each_compared_with_their_own_value"
+  "filter": "rm_35_the_transmit_byte_rate_is_not_compared_and_a_row_for_it_is_refused"
  },
  {
   "id": "S4A-13",
@@ -31136,5 +31126,35 @@
   "test_bin": "lib",
   "filter": "uhd_47_is_lost_only_at_the_two_stream_opens",
   "features": ["uhd"]
+ },
+ {
+  "id": "D13F2-1",
+  "name": "a NotCompared value stays in `values` (D13 fix round 2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "model::rule(record_key(row).as_str()) == Some(Rule::NotCompared)",
+  "new": "model::rule(record_key(row).as_str()) == Some(Rule::UpperBound)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_not_compared_value_is_an_observation_and_no_values_row"
+ },
+ {
+  "id": "D13F2-2",
+  "name": "a NotCompared value's observation loses its row (D13 fix round 2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "json!({ \"row\": row })",
+  "new": "json!({ \"row\": 0 })",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_not_compared_value_is_an_observation_and_no_values_row"
+ },
+ {
+  "id": "D13F2-3",
+  "name": "a Fake record keeps a NotCompared value as measured (D13 fix round 2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+  "old": "let row = if source == Source::Fake { ValueRecord::Unmeasured { key: record_key(&row).clone()",
+  "new": "let row = if source == Source::Hardware { ValueRecord::Unmeasured { key: record_key(&row).clone()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "a_not_compared_value_is_an_observation_and_no_values_row"
  }
 ]

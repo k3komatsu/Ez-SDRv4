@@ -130,13 +130,12 @@ fn rm_35_each_value_rule_accepts_equal_or_stricter_claims_and_rejects_looser_one
     assert_rejected(&record, &description, key, "claims true");
     set_worst(&mut record, key, Worst::Boolean(true));
 
-    for key in ["radio.perf.rx_bytes_per_s", "radio.perf.tx_bytes_per_s"] {
-        set_worst(&mut record, key, Worst::Number(99_999_999.0));
-        assert_rejected(&record, &description, key, "exceeds measured");
-        set_worst(&mut record, key, Worst::Number(100_000_001.0));
-        assert_clear(&record, &description);
-        set_worst(&mut record, key, Worst::Number(100_000_000.0));
-    }
+    let key = "radio.perf.rx_bytes_per_s";
+    set_worst(&mut record, key, Worst::Number(99_999_999.0));
+    assert_rejected(&record, &description, key, "exceeds measured");
+    set_worst(&mut record, key, Worst::Number(100_000_001.0));
+    assert_clear(&record, &description);
+    set_worst(&mut record, key, Worst::Number(100_000_000.0));
 
     let key = "radio.perf.wire_bytes_per_sample";
     set_worst(&mut record, key, Worst::Number(4.0));
@@ -507,19 +506,34 @@ fn rm_35_each_provider_is_compared_with_its_own_description() {
 }
 
 #[test]
-fn rm_35_the_receive_and_transmit_byte_rates_are_each_compared_with_their_own_value() {
-    // An asymmetric Description: with rx = tx a swap of the two keys changes no verdict.
+fn rm_35_the_transmit_byte_rate_is_not_compared_and_a_row_for_it_is_refused() {
+    // The profile's value is the admission bound; a sustained transmit below it (KL-5) passes, and the measured value is not a `values` row.
     let mut record = fixture_record();
     let mut desc = description(&record, mock_terms());
     desc.performance.rx_bytes_per_s = 80_000_000;
-    desc.performance.tx_bytes_per_s = 40_000_000;
-    set_worst(&mut record, "radio.perf.rx_bytes_per_s", Worst::Number(60_000_000.0));
-    set_worst(&mut record, "radio.perf.tx_bytes_per_s", Worst::Number(60_000_000.0));
-    assert_rejected(&record, &desc, "radio.perf.rx_bytes_per_s", "exceeds measured");
+    desc.performance.tx_bytes_per_s = 800_000_000;
     set_worst(&mut record, "radio.perf.rx_bytes_per_s", Worst::Number(80_000_000.0));
     assert_clear(&record, &desc);
-    set_worst(&mut record, "radio.perf.tx_bytes_per_s", Worst::Number(30_000_000.0));
-    assert_rejected(&record, &desc, "radio.perf.tx_bytes_per_s", "exceeds measured");
+    assert!(measurement::profile_values(&desc).contains_key(&Key::parse("radio.perf.tx_bytes_per_s").unwrap()), "the profile still states the key");
+    record.values.push(ValueRecord::Measured {
+        key: Key::parse("radio.perf.tx_bytes_per_s").unwrap(),
+        worst: Worst::Number(400_000_000.0),
+        trials: 1,
+        condition: "baseline".to_owned(),
+        test: "fixture".to_owned(),
+    });
+    assert_rejected(&record, &desc, "radio.perf.tx_bytes_per_s", "not recorded in values");
+}
+
+#[test]
+fn a_json_float_of_seventeen_digits_parses_to_the_double_it_was_written_from() {
+    // Without serde_json's `float_roundtrip`, 14285714.285714285 (Python's `200e6 / 14`) reads one ulp low and misses the exact `Values` rate grid.
+    let parsed: f64 = serde_json::from_str("14285714.285714285").unwrap();
+    assert_eq!(parsed, 200e6 / 14.0);
+    for (name, rates) in [("receive", ezsdr_radio::x3xx::rates(200_000_000)), ("transmit", ezsdr_radio::x3xx::tx_rates(200_000_000))] {
+        let back: Vec<f64> = serde_json::from_str(&serde_json::to_string(&rates).unwrap()).unwrap();
+        assert_eq!(back, rates, "the {name} rate grid survives its own JSON text");
+    }
 }
 
 #[test]
@@ -539,7 +553,7 @@ fn rm_35_rule_labels_match_the_declared_comparison_classes() {
         ("radio.full_duplex", measurement::Rule::TrueImplies),
         ("radio.hardware_time", measurement::Rule::TrueImplies),
         ("radio.perf.rx_bytes_per_s", measurement::Rule::UpperBound),
-        ("radio.perf.tx_bytes_per_s", measurement::Rule::UpperBound),
+        ("radio.perf.tx_bytes_per_s", measurement::Rule::NotCompared),
         ("radio.perf.wire_bytes_per_sample", measurement::Rule::Equal),
         ("radio.tx.c1.path_delay_samples", measurement::Rule::Equal),
         ("radio.tx.c0.stream", measurement::Rule::NotCompared),

@@ -160,6 +160,17 @@ pub fn build_record_with_identity(
         (Source::Hardware, None) => return Err("device metadata does not include a nonempty uhd_version".to_owned()),
     };
     let profile = binding.profile.clone().ok_or_else(|| "radio binding has no profile".to_owned())?;
+    // A `NotCompared` key is no `values` row (RM-35): the group's measured row stays in the record as an observation.
+    let (not_compared, measured): (Vec<_>, Vec<_>) = measurements.values.into_iter().partition(|row| model::rule(record_key(row).as_str()) == Some(Rule::NotCompared));
+    let mut observations = measurements.observations;
+    for row in not_compared {
+        let (test, trials, condition) = match (&row, source) {
+            (ValueRecord::Measured { test, trials, condition, .. }, Source::Hardware) => (test.clone(), *trials, Some(condition.clone())),
+            _ => ("tests/hardware.rs::hw_measurements_record".to_owned(), 1, None),
+        };
+        let row = if source == Source::Fake { ValueRecord::Unmeasured { key: record_key(&row).clone(), reason: FAKE_REASON.to_owned() } } else { row };
+        observations.push(observation(format!("not_compared_{}", record_key(&row).as_str().replace('.', "_")), test, condition, trials, json!({ "row": row }))?);
+    }
     Ok(Record {
         schema: model::Schema::V1,
         source,
@@ -170,10 +181,12 @@ pub fn build_record_with_identity(
         load: metadata.load,
         commit: metadata.commit.clone(),
         conditions: measurements.conditions,
-        values: merge_values(source, description, measurements.values)?,
-        observations: measurements.observations,
+        values: merge_values(source, description, measured)?,
+        observations,
     })
 }
+
+const FAKE_REASON: &str = "FakeDevice は実機の証拠ではない";
 
 fn merge_values(source: Source, description: &channels::Description, measured: Vec<ValueRecord>) -> Result<Vec<ValueRecord>, String> {
     let mut values: BTreeMap<Key, ValueRecord> = unmeasured_values(description)
@@ -193,7 +206,7 @@ fn merge_values(source: Source, description: &channels::Description, measured: V
         if !supplied.insert(key.clone()) {
             return Err(format!("measurement supplied `{}` more than once", key.as_str()));
         }
-        let value = if source == Source::Fake { ValueRecord::Unmeasured { key: key.clone(), reason: "FakeDevice は実機の証拠ではない".to_owned() } } else { value };
+        let value = if source == Source::Fake { ValueRecord::Unmeasured { key: key.clone(), reason: FAKE_REASON.to_owned() } } else { value };
         values.insert(key, value);
     }
     Ok(values.into_values().collect())
@@ -226,7 +239,6 @@ fn unmeasured_reason(key: &str) -> &'static str {
         }
         "radio.timing.tx_in_flight_ns" => "Not measured in this record; the Phase 8 stage 3b-2 group is deleted, and the value rests on the bench rows in `plan/phase8/bench-results.md`.",
         "radio.timing.rx_start_lead_ns" => "Not measured in this record; note 47 stage 3 measures the start lead of `start_rx`.",
-        "radio.perf.tx_bytes_per_s" => "Not measured in this record; the Phase 8 stage 3c-1 hardware measurement has not been run.",
         "radio.timing.overflow_restart_gap_ns" => "Not measured in this record; the overflow gap group was not run.",
         _ => "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required.",
     }
@@ -1030,23 +1042,14 @@ fn frequency_values(keys: [&str; 2], points: &[NumericReadback], requests: &[f64
     ])
 }
 
-fn observation_number(value: f64) -> f64 {
-    if value == 0.0 {
-        return value;
-    }
-    let exponent = value.abs().log10().floor() as i32;
-    let scale = 10.0_f64.powi(12 - exponent);
-    (value * scale).round() / scale
-}
-
 fn numeric_points_json(points: &[NumericReadback]) -> Json {
-    // Keep observed decimals stable through serde_json's f64 parse/serialize round trip.
+    // serde_json's `float_roundtrip` (ezsdr-kernel) keeps every f64 exact through a parse/serialize round trip.
     json!(
         points
             .iter()
             .map(|point| json!({
-                "requested": observation_number(point.requested),
-                "readback": point.returned.map(observation_number),
+                "requested": point.requested,
+                "readback": point.returned,
                 "error": point.error.as_deref(),
             }))
             .collect::<Vec<_>>()
@@ -5039,13 +5042,12 @@ mod tests {
         let lead_reason = reason("radio.timing.min_timed_command_lead_ns");
         let startup_reason = reason("radio.timing.startup_latency_ns");
         let overflow_reason = reason("radio.timing.overflow_restart_gap_ns");
-        let tx_throughput_reason = reason("radio.perf.tx_bytes_per_s");
         assert!(gain_reason.contains("3c-2a") && gain_reason.contains("coercion read-back"), "{gain_reason}");
         assert!(antenna_reason.contains("3c-2a") && antenna_reason.contains("coercion read-back"), "{antenna_reason}");
         assert!(sample_rate_reason.contains("3c-2a") && sample_rate_reason.contains("sample-rate read-back"), "{sample_rate_reason}");
         assert!(lead_reason.contains("has not been run"), "{lead_reason}");
         assert!(startup_reason.contains("3b-1"), "{startup_reason}");
-        assert!(overflow_reason.contains("overflow gap group") && tx_throughput_reason.contains("3c-1"));
+        assert!(overflow_reason.contains("overflow gap group"));
         assert_ne!(lead_reason, startup_reason);
         let no_pass = BTreeMap::from([("tx-1msps".to_owned(), vec![CandidateStage { value: 1, trials: vec![TrialClass::ProviderFailure] }])]);
         let summary = summarize_candidates(SummaryMode::MinimumLead, &no_pass, 1).unwrap();
@@ -5244,6 +5246,36 @@ mod tests {
         assert!(fake.iter().all(|row| matches!(row, ValueRecord::Unmeasured { .. })));
         assert!(fake.iter().any(|row| matches!(row, ValueRecord::Unmeasured { key: found, reason }
             if found == &key && reason == "FakeDevice は実機の証拠ではない")));
+    }
+
+    #[test]
+    fn a_not_compared_value_is_an_observation_and_no_values_row() {
+        let dir = super::super::TempDir::new();
+        let document = super::super::profile(&dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+        let binding = radio_binding(&document).unwrap();
+        let description = description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+        let key = Key::parse("radio.perf.tx_bytes_per_s").unwrap();
+        let tx = ValueRecord::Measured {
+            key: key.clone(),
+            worst: model::Worst::Number(400_000_000.0),
+            trials: 3,
+            condition: "tx-100msps".to_owned(),
+            test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+        };
+        let group = |condition: Condition| MeasurementGroup { conditions: vec![condition], values: vec![tx.clone()], observations: Vec::new() };
+        let condition = tx_rate_condition("tx-100msps", 100_000_000);
+        for source in [Source::Hardware, Source::Fake] {
+            let record = build_record_with_identity(source, &binding, json!({ "uhd_version": "4.10.0" }), "SERIAL".to_owned(), &rehearsal_metadata(), group(condition.clone()), &description).unwrap();
+            assert!(record.values.iter().all(|row| record_key(row) != &key), "{source:?}: the key is no `values` row");
+            let row = record.observations.iter().find(|row| row.name == "not_compared_radio_perf_tx_bytes_per_s").expect("the row stays as an observation");
+            let kept = &row.result["row"];
+            if source == Source::Hardware {
+                assert_eq!((kept["status"].as_str(), kept["worst"].as_f64(), row.trials, row.condition.as_deref()), (Some("measured"), Some(400_000_000.0), 3, Some("tx-100msps")));
+            } else {
+                assert_eq!(kept["status"], "unmeasured");
+            }
+            assert!(model::compare(&record, &description).iter().all(|violation| violation.key != key.as_str()), "{source:?}");
+        }
     }
 
     #[test]

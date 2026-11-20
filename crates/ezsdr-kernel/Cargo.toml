@@ -10,7 +10,7 @@ repository.workspace = true
 # 00-overview.md X6 / §8: exactly four direct dependencies. OV-18 governs additions.
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"          # OV-15: never enable `preserve_order`
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }  # OV-15: never enable `preserve_order`; float_roundtrip: a 17-digit float parses to the double it was written from (every crate depends on this one)
 schemars = "1.2.2"              # OV-11: pinned in Cargo.lock, not by an `=` requirement
 sha2 = "0.11.0"
 

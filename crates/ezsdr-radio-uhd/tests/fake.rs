@@ -810,11 +810,14 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     }
     let record = measurement::build_record(ezsdr_radio::measurement::Source::Fake, &binding, &*device, &measurement::rehearsal_metadata(), group, &description).unwrap();
     assert!(record.values.iter().all(|row| matches!(row, ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. } if !reason.trim().is_empty())));
-    for key in &measured_keys {
+    for key in measured_keys.iter().filter(|key| *key != "radio.perf.tx_bytes_per_s") {
         assert!(record.values.iter().any(|row| matches!(row,
             ezsdr_radio::measurement::ValueRecord::Unmeasured { key: found, reason }
                 if found.as_str() == key && reason == "FakeDevice は実機の証拠ではない")));
     }
+    assert!(record.values.iter().all(
+        |row| !matches!(row, ezsdr_radio::measurement::ValueRecord::Measured { key, .. } | ezsdr_radio::measurement::ValueRecord::Unmeasured { key, .. } if key.as_str() == "radio.perf.tx_bytes_per_s")
+    ));
     let path = dir.0.join("provider-measurement-rehearsal.json");
     measurement::write_record(&path, &record).unwrap();
     let round_trip: ezsdr_radio::measurement::Record = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();

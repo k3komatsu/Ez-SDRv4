@@ -966,6 +966,14 @@ class EasyApi(unittest.TestCase):
         preview = sdr.manifest["admission"]["coercions_preview"]
         self.assertTrue(any(p["coercion"]["key"] == "radio.rx.s0.sample_rate_hz" and p["coercion"]["requested"] == 19.5e6 and p["coercion"]["applied"] == 20e6 for p in preview), preview)
 
+    def test_ea_16_a_grid_rate_written_in_python_reaches_the_server_exactly(self) -> None:
+        # 200e6 / 14 is on the x3xx grid; its 17-digit JSON text must parse to the same double, or the server reads it one ulp low and coerces it.
+        rate = 200e6 / 14
+        with ezsdr.connect(rx={0: ezsdr.Stream([0], sample_rate=rate)}, tx={}, runs_dir=self.runs) as sdr:
+            self.assertEqual(sdr.rx.sample_rate, rate)
+        preview = sdr.manifest["admission"]["coercions_preview"]
+        self.assertEqual([p for p in preview if p["coercion"]["key"] == "radio.rx.s0.sample_rate_hz"], [], "a rate on the grid is not coerced")
+
     def test_ea_16_connect_refuses_the_duplex_antenna_conflict(self) -> None:
         # RM-31: a transmit channel in a stream and its board's receive antenna on TX/RX.
         with self.assertRaises(ezsdr.RunEnded) as raised:

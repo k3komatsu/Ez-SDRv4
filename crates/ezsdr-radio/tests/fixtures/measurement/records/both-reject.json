@@ -29,7 +29,6 @@
     { "status": "measured", "key": "radio.timing.rx_start_lead_ns", "worst": 9000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.tx_in_flight_ns", "worst": 9000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.perf.rx_bytes_per_s", "worst": 50000000, "trials": 1, "condition": "baseline", "test": "fixture" },
-    { "status": "measured", "key": "radio.perf.tx_bytes_per_s", "worst": 100000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.perf.wire_bytes_per_sample", "worst": 4, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.rx.c0.frequency_hz", "worst": { "kind": "step", "lo": 10000000, "hi": 6000000000, "step": 1 }, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.rx.c0.gain_db", "worst": { "kind": "step", "lo": 0, "hi": 31.5, "step": 0.5 }, "trials": 1, "condition": "baseline", "test": "fixture" },

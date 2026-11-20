@@ -29,7 +29,7 @@
 | 1 | **4b**（**済** 2026-11-19，`reviews/4b-*`） | overflow の後の再開の gap（`overflow_restart_gap_ns`，今は推定 140 ms，RM-17）と #108（overflow の直後に予約した受信の再開が遅れる：uhd-rx が gap の間 `rx_recv` に止まる） | 高：Vocabulary の規則，両 Provider，受信のスレッドの並行性 | step 0 の設計 → owner の判断 → 危険な段（試験計画と Sol のレビュー，コードの Sol のレビュー） |
 | 2 | 道具の修正（**済** 2026-11-19，`reviews/tools-*`：S4 は公表された header から gap を読み capture は 1 sample，S5 は受信の map を広げてから slot A・B を読む，C2 の 100・200 MS/s は bt2 まで外す） | S4 の 200 MS/s が RS-8a の 5 s に収まらない（capture の後片付け），S5 の 2 channel の pass が走らない（slot A だけの device を開く），C2 の前提（100・200 MS/s では host が遅れを取り戻せず，最後の chunk を期限前に渡せない） | 中：bench の道具だけ | 危険な段の実装役（手作業は規則の決まった段の実装役に出してよい），Opus の小段レビュー．測定の道具なので試験計画は省く |
 | 3 | bt2（**進行中** 2026-11-19：試験計画 3 回〈Sol，Opus と Terra の再確認 2 回〉の後，B1 hook → B2 止める仕掛けと試行の本体 → B3 判定，の 3 小段で．m を変えた Run は Manifest の `timing` に `resume_margin` を 1 行〈owner 2026-11-19〉．**C2 の 100・200 MS/s は外した**〈orchestrator：作り直しの前提が成り立たない，Sol〉：この 2 rate の遅れた device burst の規則は INFERRED のまま，C7 の後に見直す） | C7 の道具：Module の水準で repeat の再開と m の掃引（10・1・0.2 ms，1・10 MS/s）．production に hook が要る．#106 の実機の確認を兼ねる | 中〜高 | 危険な段，Sol |
-| 4 | D13 の変換 | record suite の記録を `crates/ezsdr-radio/measurements/` の形に（`observations: []`，実際の `selector.args`） | 低 | 規則の決まった小さな段 |
+| 4 | D13 の変換（**済** 2026-11-20，`reviews/d13-*`：`plan/phase8/tools/place_measurement.py`．`tx_bytes_per_s` は比較しない〈owner〉，`float_roundtrip`） | record suite の記録を `crates/ezsdr-radio/measurements/` の形に（`observations: []`，実際の `selector.args`） | 低 | 規則の決まった小さな段 |
 | 5 | **bench（1 回，2026-11-26 ごろ）** | 4b の値の掃引，両盤の record suite を段階 4 を閉じる commit で（D13），C7（送信は PN：att と帯域を owner が確かめる），TXP の B3．C2 の 100・200 MS/s は流さない | — | 実機．送信の前に owner が att を確かめる |
 
 ### 流れ 2（worktree：Kernel と規則の sweep のコード側）
@@ -70,7 +70,7 @@
 
 ### bench までの空いた時間（owner 2026-11-20）
 
-bench は 2026-11-27（丸 1 日）．それまでの順（orchestrator）：#118（流れ 2，**済**）→ #117（流れ 1，bt2 と D13 の後）→ #73・#97 の設計（step 0，**決定済み** 2026-11-20：[53](53-capture-in-memory.md)．実装は Gate X の後）→ mutation の image を `ezsdr-v4-dev:uhd4.10` に（[52](52-phase8-end-review.md) D2）と生成器の試し（D1．**済** 2026-11-20，`reviews/tools2-*`：全体は流さず crate ごとに）→ 8b の最初の掃除（52 §2d の 12・30・32）→ 8b の step 0 の設計（④ から）．
+bench は 2026-11-27（丸 1 日）．それまでの順（orchestrator）：#118（流れ 2，**済**）→ bt2（**済**）→ D13（**済**）→ #117（流れ 1）→ #73・#97 の設計（step 0，**決定済み** 2026-11-20：[53](53-capture-in-memory.md)．実装は Gate X の後）→ mutation の image を `ezsdr-v4-dev:uhd4.10` に（[52](52-phase8-end-review.md) D2）と生成器の試し（D1．**済** 2026-11-20，`reviews/tools2-*`：全体は流さず crate ごとに）→ 8b の最初の掃除（52 §2d の 12・30・32）→ 8b の step 0 の設計（④ から）．
 
 ### owner の判断（出てくる順）
 

@@ -90,7 +90,7 @@ def main(raw, out):
                 record = json.load(fh)
         except (OSError, ValueError):
             continue
-        record.pop("observations", None)
+        record["bench_copy"] = True  # place_measurement.py refuses a copy: floats are re-parsed here
         target = out / "measurements" / (str(js.relative_to(raw)).replace("/", "__"))
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(record, ensure_ascii=False, indent=1) + "\n")

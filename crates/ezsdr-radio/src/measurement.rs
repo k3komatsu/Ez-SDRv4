@@ -296,13 +296,15 @@ pub fn rule(key: &str) -> Option<Rule> {
 
     match key {
         keys::FULL_DUPLEX | keys::HARDWARE_TIME => return Some(TrueImplies),
-        keys::TX_REPEAT_MAX_SAMPLES | keys::RX_BYTES_PER_S | keys::TX_BYTES_PER_S => return Some(UpperBound),
+        keys::TX_REPEAT_MAX_SAMPLES | keys::RX_BYTES_PER_S => return Some(UpperBound),
         keys::TX_REPEAT_ALIGN_SAMPLES => return Some(Multiple),
         keys::MIN_TIMED_COMMAND_LEAD_NS | keys::STARTUP_LATENCY_NS | keys::OVERFLOW_RESTART_GAP_NS | keys::RX_START_LEAD_NS | keys::TX_IN_FLIGHT_NS => {
             return Some(LowerBound);
         }
         keys::WIRE_BYTES_PER_SAMPLE => return Some(Equal),
         keys::RX_BLOCK_LEN => return Some(NotCompared),
+        // The profile's value is the admission bound; a sustained host-fed transmit is KL-5's Ceiling, and the measured value stays in the bench record.
+        keys::TX_BYTES_PER_S => return Some(NotCompared),
         _ => {}
     }
 
