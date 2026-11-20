@@ -5602,8 +5602,8 @@
   "id": "P440",
   "name": "`start` issues stream 0's timed start alone (UR-15, RM-29)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "            if rx_first[stream.k].is_some() {\n                // UR-15: a later stream's failed start leaves the owners already begun to\n                // cleanup, which joins them before closing the device's streams.\n                if let Err(error) = self.device.rx_start(stream.k, t0) {",
-   "new": "            if rx_first[stream.k].is_some() && stream.k == 0 {\n                // UR-15: a later stream's failed start leaves the owners already begun to\n                // cleanup, which joins them before closing the device's streams.\n                if let Err(error) = self.device.rx_start(stream.k, t0) {",
+   "old": "            if rx_first[stream.k].is_some() {\n                // UR-15: a later stream's failed start leaves the owners already begun to\n                // cleanup, which joins them before closing the device's streams.\n                match core.rx_start_admitted(stream.k, t0, \"start_stream_first_start_before_gate\") {",
+   "new": "            if rx_first[stream.k].is_some() && stream.k == 0 {\n                // UR-15: a later stream's failed start leaves the owners already begun to\n                // cleanup, which joins them before closing the device's streams.\n                match core.rx_start_admitted(stream.k, t0, \"start_stream_first_start_before_gate\") {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_12_a_layout_declares_and_starts_every_stream"
@@ -5829,7 +5829,7 @@
   "new": "",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_15_a_loss_published_by_an_owner_stops_the_next_stream_s_start"
+  "filter": "ur_15_a_loss_published_by_an_owner_stops_a_next_stream_without_a_first_segment"
  },
  {
   "id": "P479",
@@ -11566,7 +11566,7 @@
       "id": "P1290",
       "name": "a late RX restart calls the device after loss (L1 fix 1)",
       "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-      "old": "if self.core.is_lost() || chain.device() == RxDevice::Lost { None } else { self.core.rx_start_admitted(self.k, restart).map(|started| chain.restart_result(restart, started)) }",
+      "old": "if self.core.is_lost() || chain.device() == RxDevice::Lost { None } else { self.core.rx_start_admitted(self.k, restart, \"rx_start_before_gate\").map(|started| chain.restart_result(restart, started)) }",
       "new": "Some(chain.restart_result(restart, self.core.device.rx_start(self.k, restart)))",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
@@ -28678,7 +28678,7 @@
  },
  {
   "id": "N108-135",
-  "name": "an admitted receive call (the first stop, the second stop, the restart) is made without the device gate (UR-17, UR-29; stage 4b)",
+  "name": "an admitted receive call (a stop or a start) is made without the device gate (UR-17, UR-29; stage 4b)",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
   "old": "self.probe(before_gate, None);\n        let _device_gate = self.lock_device_gate();",
   "new": "self.probe(before_gate, None);",
@@ -28930,11 +28930,41 @@
   "id": "N108-159",
   "name": "the restart after a missed start is made without the device gate (UR-17, UR-29; stage 4b)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "self.core.rx_start_admitted(self.k, restart)",
-  "new": "Some(self.core.device.rx_start(self.k, restart))",
+  "old": "self.core.rx_start_admitted(self.k, restart, \"rx_start_before_gate\")",
+  "new": "{ self.core.probe(\"rx_start_before_gate\", None); Some(self.core.device.rx_start(self.k, restart)) }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_29_a_loss_published_just_before_the_restart_start_s_gate_makes_no_call"
+ },
+ {
+  "id": "N117-1",
+  "name": "a segment's start is made without the device gate (UR-29; #117)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.rx_start_admitted(self.k, origin, \"rx_segment_start_before_gate\")",
+  "new": "({ self.core.probe(\"rx_segment_start_before_gate\", None); Some(self.core.device.rx_start(self.k, origin)) })",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_published_just_before_the_segment_start_s_gate_makes_no_call"
+ },
+ {
+  "id": "N117-2",
+  "name": "a later stream's first start is made without the device gate (UR-29, UR-15; #117)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "core.rx_start_admitted(stream.k, t0, \"start_stream_first_start_before_gate\")",
+  "new": "{ core.probe(\"start_stream_first_start_before_gate\", None); Some(self.device.rx_start(stream.k, t0)) }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_published_just_before_a_later_stream_s_first_start_gate_makes_no_call"
+ },
+ {
+  "id": "N117-3",
+  "name": "the stop after a failed clock declaration is made without the device gate (UR-29; #117)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "self.core.rx_stop_admitted(self.k, \"rx_declare_failed_stop_before_gate\")",
+  "new": "{ self.core.probe(\"rx_declare_failed_stop_before_gate\", None); Some(self.core.device.rx_stop(self.k)) }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_published_just_before_the_failed_declaration_s_stop_gate_makes_no_call"
  },
  {
   "id": "N108-160",

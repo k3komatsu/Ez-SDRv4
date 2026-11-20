@@ -70,7 +70,7 @@
 
 ### bench までの空いた時間（owner 2026-11-20）
 
-bench は 2026-11-27（丸 1 日）．それまでの順（orchestrator）：#118（流れ 2，**済**）→ bt2（**済**）→ D13（**済**）→ #117（流れ 1）→ #73・#97 の設計（step 0，**決定済み** 2026-11-20：[53](53-capture-in-memory.md)．実装は Gate X の後）→ mutation の image を `ezsdr-v4-dev:uhd4.10` に（[52](52-phase8-end-review.md) D2）と生成器の試し（D1．**済** 2026-11-20，`reviews/tools2-*`：全体は流さず crate ごとに）→ 8b の最初の掃除（52 §2d の 12・30・32．**済** 2026-11-20，`reviews/c8b1-*`：30 は取り下げ〈block ごとの確保を避けている〉）→ 8b の step 0 の設計（④ から）．
+bench は 2026-11-27（丸 1 日）．それまでの順（orchestrator）：#118（流れ 2，**済**）→ bt2（**済**）→ D13（**済**）→ #117（流れ 1，**済** 2026-11-20，`reviews/n117-*`）→ #73・#97 の設計（step 0，**決定済み** 2026-11-20：[53](53-capture-in-memory.md)．実装は Gate X の後）→ mutation の image を `ezsdr-v4-dev:uhd4.10` に（[52](52-phase8-end-review.md) D2）と生成器の試し（D1．**済** 2026-11-20，`reviews/tools2-*`：全体は流さず crate ごとに）→ 8b の最初の掃除（52 §2d の 12・30・32．**済** 2026-11-20，`reviews/c8b1-*`：30 は取り下げ〈block ごとの確保を避けている〉）→ 8b の step 0 の設計（④ から）．
 
 ### owner の判断（出てくる順）
 

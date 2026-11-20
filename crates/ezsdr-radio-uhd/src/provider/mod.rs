@@ -673,12 +673,19 @@ impl Provider for UhdRadio {
             if rx_first[stream.k].is_some() {
                 // UR-15: a later stream's failed start leaves the owners already begun to
                 // cleanup, which joins them before closing the device's streams.
-                if let Err(error) = self.device.rx_start(stream.k, t0) {
-                    // UR-29: a lost device is published before those owners are stopped, so
-                    // that no thread calls the device after it.
-                    core.publish_loss(&error);
-                    failed = Some(format!("UR-15: {error}"));
-                    break;
+                match core.rx_start_admitted(stream.k, t0, "start_stream_first_start_before_gate") {
+                    Some(Ok(())) => {}
+                    Some(Err(error)) => {
+                        // UR-29: a lost device is published before those owners are stopped, so
+                        // that no thread calls the device after it.
+                        core.publish_loss(&error);
+                        failed = Some(format!("UR-15: {error}"));
+                        break;
+                    }
+                    None => {
+                        failed = Some(format!("UR-15: the device was lost before stream {} was started", stream.k));
+                        break;
+                    }
                 }
             }
             let first = rx_first[stream.k].clone();
@@ -1491,6 +1498,16 @@ mod tests {
 
     #[test]
     fn ur_15_a_loss_published_by_an_owner_stops_the_next_stream_s_start() {
+        a_loss_published_by_an_owner_stops_the_next_stream_s_start(true);
+    }
+
+    #[test]
+    fn ur_15_a_loss_published_by_an_owner_stops_a_next_stream_without_a_first_segment() {
+        // UR-29, UR-15: a stream with no first segment makes no device call, but its owner is no more spawned after a published loss than a started stream's.
+        a_loss_published_by_an_owner_stops_the_next_stream_s_start(false);
+    }
+
+    fn a_loss_published_by_an_owner_stops_the_next_stream_s_start(second_first_segment: bool) {
         // UR-29, UR-15 (P1b): stream 0's owner finds the device lost while `start` goes on;
         // the published loss stops stream 1 before any device call of its own.
         let binding: Binding = serde_json::from_value(json!({
@@ -1512,7 +1529,7 @@ mod tests {
             core: core.clone(),
             actions: Arc::new(NoActions),
             config: BTreeMap::new(),
-            rx: (0..2).map(|k| PreparedStream { k, handle: Some(handle(k)), channels: Channels::first(1), clock: None }).collect(),
+            rx: (0..2).map(|k| PreparedStream { k, handle: (k == 0 || second_first_segment).then(|| handle(k)), channels: Channels::first(1), clock: None }).collect(),
             tx: Vec::new(),
         });
         let flagged = Mutex::new(Some(marked));
@@ -1528,6 +1545,68 @@ mod tests {
         let calls = inner.calls();
         assert_eq!(calls.iter().filter(|call| *call == "mark_lost").count(), 1, "{calls:?}");
         assert!(!calls.iter().any(|call| call == "close_streams"), "a lost device's streamers are not closed: {calls:?}");
+    }
+
+    #[test]
+    fn ur_29_a_loss_published_just_before_a_later_stream_s_first_start_gate_makes_no_call() {
+        // UR-29, UR-15: stream 0 is begun and its owner runs; a loss published after `start` read `!is_lost()` and before stream 1's first start's gate makes no start call for stream 1, the start is refused with UR-15's message, stream 0's owner is joined, and no receive call follows the loss.
+        // One-line wrong change: no gate on that start: `rx_start 1` is called after the loss.
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig",  "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0"] }
+        }))
+        .unwrap();
+        let inner = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let device: Arc<dyn Device> = inner.clone();
+        let mut radio = UhdRadio::from_binding(&binding, device.clone()).unwrap();
+        device.rx_open(0, &[0]).unwrap();
+        device.rx_open(1, &[1]).unwrap();
+        let links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>> = (0..2).map(|_| vec![Arc::new(NoLink) as Arc<dyn ezsdr_kernel::stream::DataLink>]).collect();
+        let (core, _time, _events) = test_support::rig_on_description_links(device, links, BTreeMap::new(), two_rx_description());
+        let handle = |k: usize| core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, k), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
+        radio.prepared = Some(Prepared {
+            core: core.clone(),
+            actions: Arc::new(NoActions),
+            config: BTreeMap::new(),
+            rx: (0..2).map(|k| PreparedStream { k, handle: Some(handle(k)), channels: Channels::first(1), clock: None }).collect(),
+            tx: Vec::new(),
+        });
+        // Stream 0's owner passes this probe on its own thread at each turn it finds the device alive: a count above 0 is that it ran before the loss.
+        let owner_turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let turns = owner_turns.clone();
+        test_support::probe(&core, "rx_after_early_loss_check", move |_| {
+            turns.fetch_add(1, Ordering::SeqCst);
+        });
+        let hook_core = core.clone();
+        let (reached, seen) = (std::sync::atomic::AtomicUsize::new(0), owner_turns.clone());
+        test_support::probe(&core, "start_stream_first_start_before_gate", move |_| {
+            // The second stream's first start is the one the loss comes before, once stream 0's owner has taken a turn.
+            if reached.fetch_add(1, Ordering::SeqCst) == 1 {
+                let wait = std::time::Instant::now();
+                while seen.load(Ordering::SeqCst) == 0 && wait.elapsed() < Wall::from_secs(10) {
+                    std::thread::sleep(Wall::from_millis(1));
+                }
+                hook_core.device_lost("test: lost before stream 1's first start's gate");
+            }
+        });
+        let result = radio.start(None);
+        // The call log first: a start that was made after the loss is the failure, whatever `start` returned.
+        let calls = inner.calls();
+        let mark = calls.iter().position(|call| call == "mark_lost").expect("the loss marks the device");
+        assert!(calls.iter().any(|call| call.starts_with("rx_start 0")), "stream 0 was begun: {calls:?}");
+        assert!(!calls.iter().any(|call| call.starts_with("rx_start 1")), "stream 1 was not started: {calls:?}");
+        assert!(calls[mark..].iter().all(|call| call == "mark_lost"), "no device call follows the loss: {calls:?}");
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, ModuleErrorKind::Rejected, "{error:?}");
+        assert!(error.message.starts_with("UR-15:"), "{}", error.message);
+        assert!(core.is_lost(), "the pre-gate hook published the loss");
+        let joined_at = owner_turns.load(Ordering::SeqCst);
+        assert!(joined_at > 0, "stream 0's owner ran before the loss");
+        radio.cleanup();
+        assert_eq!(owner_turns.load(Ordering::SeqCst), joined_at, "stream 0's owner was joined by the refused start: it makes no turn after it");
+        let calls = inner.calls();
+        assert!(calls[calls.iter().position(|call| call == "mark_lost").unwrap()..].iter().all(|call| call == "mark_lost"), "cleanup makes no device call after the loss: {calls:?}");
     }
 
     #[test]

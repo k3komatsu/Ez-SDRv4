@@ -437,7 +437,13 @@ impl Rx {
             .expect("a payload");
             self.core.emit(&self.core.stream_node(Dir::Rx, self.k), kinds::START_LEAD_SHORT, Severity::Warning, payload);
         }
-        if let Err(error) = chain.begin_result(segment, origin, self.core.device.rx_start(self.k, origin)) {
+        // UR-29: a loss published since the check above makes no start call; the segment ends as that check does.
+        let Some(started) = self.core.rx_start_admitted(self.k, origin, "rx_segment_start_before_gate") else {
+            drop(chain);
+            self.finish();
+            return true;
+        };
+        if let Err(error) = chain.begin_result(segment, origin, started) {
             drop(chain);
             self.refuse_segment(&next, None, error);
             return true;
@@ -457,9 +463,14 @@ impl Rx {
                 self.follow();
             }
             Err(error) => {
-                let stop = self.core.device.rx_stop(self.k);
-                if let Err(stop_error) = chain.stop_result(stop) {
-                    self.core.device_failed(None, "stop", &stop_error);
+                // UR-29: a lost device gets no stop call.
+                match self.core.rx_stop_admitted(self.k, "rx_declare_failed_stop_before_gate") {
+                    Some(stop) => {
+                        if let Err(stop_error) = chain.stop_result(stop) {
+                            self.core.device_failed(None, "stop", &stop_error);
+                        }
+                    }
+                    None => chain.lose(),
                 }
                 chain.finish();
                 drop(chain);
@@ -568,7 +579,11 @@ impl Rx {
                 let result = {
                     let mut chain = self.core.rx_chain[self.k].lock();
                     // UR-29: admitted under the device gate: a device lost before it makes no start (`None`).
-                    if self.core.is_lost() || chain.device() == RxDevice::Lost { None } else { self.core.rx_start_admitted(self.k, restart).map(|started| chain.restart_result(restart, started)) }
+                    if self.core.is_lost() || chain.device() == RxDevice::Lost {
+                        None
+                    } else {
+                        self.core.rx_start_admitted(self.k, restart, "rx_start_before_gate").map(|started| chain.restart_result(restart, started))
+                    }
                 };
                 match result {
                     None => self.try_end(),
@@ -1576,7 +1591,7 @@ mod tests {
     #[test]
     fn ur_29_a_begin_rechecks_loss_after_acquiring_the_chain_before_rx_start() {
         let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
-        let (core, _, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        let (core, _, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let _guard = super::super::test_support::clock_guard(&spy.host());
         let (mut rx, _) = rx_unopened(&core, 1);
@@ -1584,6 +1599,11 @@ mod tests {
         lock(&core.streams).stream_mut(stream_key(Dir::Rx, 0)).configs.insert(1, Arc::new(ColdConfig::new(core.description.defaults())));
         let next = lock(&core.streams).planned(stream_key(Dir::Rx, 0))[0].clone();
         assert!(core.owner_configure(Dir::Rx, 0, &next).unwrap(), "the segment is configured before the lock race");
+        let reached_start = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = reached_start.clone();
+        super::super::test_support::probe(&core, "rx_segment_start_before_gate", move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
         let chain = core.rx_chain[0].lock();
         let (done, returned) = std::sync::mpsc::channel();
         let owner = core
@@ -1608,6 +1628,10 @@ mod tests {
 
         assert!(began);
         assert_eq!(spy.seen("rx_start"), starts_at_loss, "begin made no device start call after loss");
+        // The early check ends `begin` before the start's admission: a segment begun after the loss does not even reach it, which the re-check under the gate alone would.
+        assert_eq!(reached_start.load(std::sync::atomic::Ordering::SeqCst), 0, "begin did not reach the start's gate after the loss");
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        assert!(short_lead_events(&delivered).is_empty(), "no START_LEAD_SHORT after the loss: {delivered:?}");
         let calls = spy.log();
         let marked = calls.iter().position(|call| call == "mark_lost").expect("loss was published");
         assert!(!calls[marked + 1..].iter().any(|call| call.starts_with("rx_start") || call.starts_with("rx_close")), "no receive device call follows loss: {calls:?}");
@@ -4364,6 +4388,55 @@ mod tests {
         assert!(device.calls().iter().any(|call| *call == format!("rx_start 0 {origin}")), "{:?}", device.calls());
         assert!(events.iter().all(|event| event.kind.as_str() != kinds::LATE_COMMAND));
         assert_eq!(lock(&core.streams).first_undelivered(stream_key(Dir::Rx, 0)), Some((origin, Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, 0)));
+    }
+
+    #[test]
+    fn ur_29_a_loss_published_just_before_the_segment_start_s_gate_makes_no_call() {
+        // UR-29: a loss published after `begin` read `!is_lost()` and before the start's gate is taken makes no start call, and the segment ends as a loss seen earlier ends it.
+        // One-line wrong change: no gate on the start: `seen("rx_start")` is 1.
+        let (core, device, time, _events) = super::super::test_support::rig_with(crate::device::FakeConfig::default(), vec![link()]);
+        let _guard = super::super::test_support::clock_guard(&device.host());
+        super::super::test_support::device_at(&core, &time, &device, 0);
+        let (mut rx, _clock) = rx_unopened(&core, 1);
+        plan(&core, &[(core.ticks(100_000_000), None, Some(1))]);
+        let hook_core = core.clone();
+        super::super::test_support::probe(&core, "rx_segment_start_before_gate", move |_| hook_core.device_lost("test: lost before the segment start's gate"));
+        assert!(rx.begin());
+
+        assert!(core.is_lost(), "the pre-gate hook published the loss");
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_start")), "the loss before the gate makes no start call: {:?}", device.calls());
+        assert!(rx.stream.is_none());
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Lost);
+    }
+
+    #[test]
+    fn ur_29_a_loss_published_just_before_the_failed_declaration_s_stop_gate_makes_no_call() {
+        // UR-29: a segment whose SampleClock cannot be declared (the id space is exhausted) is stopped again; a loss published before that stop's gate makes no stop call, the chain ends lost and the segment is refused.
+        // One-line wrong change: no gate on that stop: `rx_stop` is called after the loss.
+        let (core, device, time, events) = super::super::test_support::rig_with(crate::device::FakeConfig::default(), vec![link()]);
+        let _guard = super::super::test_support::clock_guard(&device.host());
+        super::super::test_support::device_at(&core, &time, &device, 0);
+        let (mut rx, _clock) = rx_unopened(&core, 1);
+        plan(&core, &[(core.ticks(100_000_000), None, Some(1))]);
+        let top = ezsdr_kernel::id::ClockDomainId::local(u32::MAX - 1);
+        core.clocks.register(ezsdr_kernel::time::ClockDomain::root(top, Rational::new(3, 1).unwrap(), ezsdr_kernel::time::EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
+        let (hook_core, hook_device) = (core.clone(), device.clone());
+        let stops_at_loss = Arc::new(std::sync::Mutex::new(None));
+        let recorded = stops_at_loss.clone();
+        super::super::test_support::probe(&core, "rx_declare_failed_stop_before_gate", move |_| {
+            hook_core.device_lost("test: lost before the failed declaration's stop gate");
+            *recorded.lock().unwrap() = Some(hook_device.calls().len());
+        });
+        assert!(rx.begin());
+
+        let at_loss = stops_at_loss.lock().unwrap().expect("the pre-gate hook ran after the start succeeded");
+        assert!(core.is_lost(), "the pre-gate hook published the loss");
+        assert!(device.calls().iter().any(|call| call.starts_with("rx_start")), "the start was made: {:?}", device.calls());
+        assert!(!device.calls()[at_loss..].iter().any(|call| call.starts_with("rx_stop")), "the loss before the gate makes no stop call: {:?}", device.calls());
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Lost);
+        assert!(rx.stream.is_none());
+        let delivered = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(delivered.iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).count(), 1, "the segment is refused: {delivered:?}");
     }
 
     #[test]

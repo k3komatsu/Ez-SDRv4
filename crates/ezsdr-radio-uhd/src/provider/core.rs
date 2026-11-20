@@ -1556,14 +1556,14 @@ impl Core {
         (!self.is_lost()).then(call)
     }
 
-    /// UR-17, UR-29: a receive stop (the first of a stream's end, or the second of an overrun stream) admitted under `device_gate`; `None`: the device was lost and no stop was made.
+    /// UR-17, UR-29: a receive stop (the first of a stream's end, the second of an overrun stream, or the one after a failed clock declaration) admitted under `device_gate`; `None`: the device was lost and no stop was made.
     pub fn rx_stop_admitted(&self, k: usize, before_gate: &'static str) -> Option<Result<(), DeviceError>> {
         self.admitted(before_gate, || self.device.rx_stop(k))
     }
 
-    /// UR-17, UR-29: the restart after a missed start admitted under `device_gate`; `None`: the device was lost and no start was made.
-    pub fn rx_start_admitted(&self, k: usize, at: i64) -> Option<Result<(), DeviceError>> {
-        self.admitted("rx_start_before_gate", || self.device.rx_start(k, at))
+    /// UR-17, UR-29: a receive start (a segment's, a later stream's first, or the restart after a missed start) admitted under `device_gate`; `None`: the device was lost and no start was made.
+    pub fn rx_start_admitted(&self, k: usize, at: i64, before_gate: &'static str) -> Option<Result<(), DeviceError>> {
+        self.admitted(before_gate, || self.device.rx_start(k, at))
     }
 
     #[cfg(test)]
