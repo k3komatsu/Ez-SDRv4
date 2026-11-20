@@ -31156,5 +31156,125 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "a_not_compared_value_is_an_observation_and_no_values_row"
+ },
+ {
+  "id": "C8B1-1",
+  "name": "a BasicTX front end receives (RM-28) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "FrontEnd::BasicRx | FrontEnd::LfRx)",
+  "new": "FrontEnd::BasicRx | FrontEnd::LfRx | FrontEnd::BasicTx)",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_28_a_front_end_receives_or_transmits_by_its_kind"
+ },
+ {
+  "id": "C8B1-2",
+  "name": "the UBX board's UHD name is empty, so every front end name starts with it (UR-5) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "Board::Ubx => \"UBX\"",
+  "new": "Board::Ubx => \"\"",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "ur_05_a_board_is_found_by_the_start_of_its_uhd_front_end_name"
+ },
+ {
+  "id": "C8B1-3",
+  "name": "decimation 1 is refused (RM-8, UR-12) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "if n < 1.0 {",
+  "new": "if n <= 1.0 {",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "x3xx_decimation_is_exact_and_refuses"
+ },
+ {
+  "id": "C8B1-4",
+  "name": "a grid does not contain its greatest value (RM-8) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": "value > self.max() { return false; }",
+  "new": "value >= self.max() { return false; }",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_08_a_grid_contains_its_values_and_both_ends"
+ },
+ {
+  "id": "C8B1-5",
+  "name": "a grid does not refuse a value that is not finite (RM-8) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": "!value.is_finite() || value < self.min() || value > self.max() { return false; }",
+  "new": "value < self.min() || value > self.max() { return false; }",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_08_a_grid_contains_its_values_and_both_ends"
+ },
+ {
+  "id": "C8B1-6",
+  "name": "nearest rounds a tie up, not to the lower (RM-8) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": "let rounded = if r > 0.5",
+  "new": "let rounded = if r >= 0.5",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_08_nearest_rounds_to_the_grid"
+ },
+ {
+  "id": "C8B1-7",
+  "name": "nearest of an Integer grid keeps a fraction (RM-8) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": "(value.fract() == 0.0 && value",
+  "new": "(value.fract() == 0.0 || value",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_08_nearest_rounds_to_the_grid"
+ },
+ {
+  "id": "C8B1-8",
+  "name": "at_or_above of a Values grid skips the bound itself (RM-8) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": ".find(|v| *v >= bound)",
+  "new": ".find(|v| *v > bound)",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_08_at_or_above_and_at_or_below"
+ },
+ {
+  "id": "C8B1-9",
+  "name": "at_or_below of a Values grid skips the bound itself (RM-8) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": ".find(|v| *v <= bound)",
+  "new": ".find(|v| *v < bound)",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_08_at_or_above_and_at_or_below"
+ },
+ {
+  "id": "C8B1-10",
+  "name": "at_or_above of an Integer grid refuses a bound at its greatest value (RM-8) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/device.rs",
+  "old": "if bound > *hi as f64 {",
+  "new": "if bound >= *hi as f64 {",
+  "crate": "ezsdr-radio",
+  "test_bin": "device",
+  "filter": "rm_08_at_or_above_and_at_or_below"
+ },
+ {
+  "id": "C8B1-11",
+  "name": "the stream number one past the last stream is addressed as a stream (RM-29) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "if k < streams(direction) {",
+  "new": "if k <= streams(direction) {",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_29_addressed_names_the_instance"
+ },
+ {
+  "id": "C8B1-12",
+  "name": "a band whose ends are one frequency is refused (RM-19) (8b first clean-up, item 4)",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": ".find(|band| band.lo_hz > band.hi_hz)",
+  "new": ".find(|band| band.lo_hz >= band.hi_hz)",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_19_a_band_whose_ends_are_one_frequency"
  }
 ]

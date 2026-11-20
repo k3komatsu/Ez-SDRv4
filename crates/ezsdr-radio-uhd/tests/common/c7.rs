@@ -577,7 +577,7 @@ impl Common {
     }
 
     /// The repeat's lattice on the transmit stream, at the observed origin.
-    fn lattice(&self) -> Lattice {
+    pub fn lattice(&self) -> Lattice {
         Lattice { tx_origin: self.tx_origin, per: self.per, origin: self.origin(), period: self.period }
     }
 

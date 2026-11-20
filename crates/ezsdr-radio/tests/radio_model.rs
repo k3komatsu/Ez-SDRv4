@@ -285,6 +285,17 @@ fn rm_19_a_malformed_section_is_one_violation() {
 }
 
 #[test]
+fn rm_19_a_band_whose_ends_are_one_frequency_is_valid_and_inclusive() {
+    // RM-19 refuses `lo_hz > hi_hz` only: one point is a band, and its own frequency is in it.
+    let envelope = json!({"allowed_bands": [{"lo_hz": 2_450_000_000.0, "hi_hz": 2_450_000_000.0}], "max_gain_db": 20.0, "tx_enabled": true, "antenna_ports": ["TX/RX"]});
+    let empty = BTreeMap::new();
+    assert!(run_check(envelope.clone(), &radio_configuration(&tx_values(1, 2_450_000_000.0, 10.0)), &empty, CheckStage::Validate).is_empty());
+    let violations = run_check(envelope, &radio_configuration(&tx_values(1, 2_450_000_001.0, 10.0)), &empty, CheckStage::Validate);
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.frequency_hz");
+}
+
+#[test]
 fn rm_19_the_proposed_value_is_judged() {
     let effective = radio_configuration(&tx_values(1, 2_450_000_000.0, 10.0));
     let proposed = radio_configuration(&[("radio.tx.c0.frequency_hz", Value::num(2_600_000_000.0).unwrap())]);

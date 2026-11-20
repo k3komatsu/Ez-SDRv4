@@ -6,8 +6,8 @@ mod generator;
 use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::stream::Direction;
 use ezsdr_kernel::time::Rational;
-use ezsdr_radio::stream_target;
 use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Segment, Stream, plan};
+use ezsdr_radio::{Addressed, addressed, stream_target};
 use generator::{CLASSES, Terms};
 
 /// Root ticks per millisecond on the 1 GHz root.
@@ -344,6 +344,23 @@ fn rm_12_a_stream_node_names_its_direction_and_number() {
     }
     assert_eq!(stream_target(&at("other"), &at("radio/rx/s0")), None, "another device");
     assert_eq!(stream_target(&at("radio/rx"), &at("radio/rx/s0")), None, "the stream node is no device");
+}
+
+/// RM-12, RM-29: a resolved node is the instance, one of its streams, or another node; a stream number the instance does not have is another node, the last one it has is a stream.
+#[test]
+fn rm_29_addressed_names_the_instance_its_streams_or_another_node() {
+    let device = ResourceId::parse("radio").unwrap();
+    let at = |path: &str| ResourceId::parse(path).unwrap();
+    // Two receive streams and none to transmit.
+    let streams = |direction: Direction| if direction == Direction::Rx { 2 } else { 0 };
+    assert_eq!(addressed(&device, Some(&device), streams), Addressed::Instance);
+    assert_eq!(addressed(&device, None, streams), Addressed::Other);
+    assert_eq!(addressed(&device, Some(&at("radio/rx/s0")), streams), Addressed::Stream { direction: Direction::Rx, k: 0 });
+    assert_eq!(addressed(&device, Some(&at("radio/rx/s1")), streams), Addressed::Stream { direction: Direction::Rx, k: 1 });
+    assert_eq!(addressed(&device, Some(&at("radio/rx/s2")), streams), Addressed::Other, "the instance has streams 0 and 1");
+    assert_eq!(addressed(&device, Some(&at("radio/tx/s0")), streams), Addressed::Other, "no transmit stream at all");
+    assert_eq!(addressed(&device, Some(&at("radio/gpio")), streams), Addressed::Other);
+    assert_eq!(addressed(&device, Some(&at("other")), streams), Addressed::Other);
 }
 
 fn check(stream: &Stream, planned: &[Segment], seed: u64) {

@@ -784,6 +784,7 @@ impl Tx {
             valid: ChannelMask::full(self.channels.count().max(1) as u16),
             flags,
             lost: None,
+            // Taken and restored below so the TX path allocates no `String` per block.
             contract: self.contract.take().expect("contract is available"),
         };
         let open_record = if first {

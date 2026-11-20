@@ -1587,6 +1587,18 @@ impl Direct {
     }
 }
 
+impl Drop for Direct {
+    /// A test that fails before `finish` still ends the Run, so its threads do not outlive it into the binary's later tests: `cleanup` stops (Abort) and joins what is running, and does nothing after `finish`. A panic here
+    /// would abort the binary while one is already unwinding, so it is caught and discarded then; on the normal path it fails the test.
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.radio.cleanup()));
+        } else {
+            self.radio.cleanup();
+        }
+    }
+}
+
 /// An instance's Manifest section `suffix` (UR-30).
 fn section_of(instance: &ezsdr_kernel::module_api::ProviderInstance, suffix: &str) -> Json {
     instance.sections[&Namespace::parse(&format!("ezsdr.radio.uhd.{suffix}")).unwrap()].clone()
@@ -3257,6 +3269,7 @@ fn c7_the_oracle_and_the_rf_scan_follow_the_first_accepted_start_when_the_bookin
     let observed = trial.start;
     trial.common.start += 37;
     assert_eq!(trial.origin(), observed, "the oracle's origin follows the observed Start, not the moved booking");
+    assert_eq!(trial.lattice().origin, observed, "the oracle's lattice is at the observed Start: the resume interval's width depends on host stamps, so the rows alone do not always tell");
     let e = common::c7_verdict::evidence(&trial, true);
     assert_eq!(e.origin, observed, "the verdict's origin follows the observed Start");
     assert!(e.row_checks.iter().all(Result::is_ok), "{:?}", e.row_checks);
@@ -10355,6 +10368,20 @@ fn direct_rig_unwound_joins_uhd_clock_even_asleep_inside_its_read() {
     assert!(result.is_err());
     let (seen, before) = probe.into_inner().unwrap().unwrap();
     assert_joined(&seen, before, "unwound");
+}
+
+#[test]
+fn direct_rig_unwound_before_finish_ends_its_run() {
+    let device = Mutex::new(None);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut direct = armed_direct(FakeConfig::default());
+        direct.start();
+        *device.lock().unwrap() = Some(direct.device.clone());
+        panic!("the test body fails before finish");
+    }));
+    assert!(result.is_err());
+    let device = device.into_inner().unwrap().unwrap();
+    assert!(device.calls().iter().any(|call| call == "close_streams"), "the rig's drop stopped and joined the Run and closed its streamers: {:?}", device.calls());
 }
 
 // ---------------------------------------------------------------- the Run wrapper (note 51 stage 2a)
