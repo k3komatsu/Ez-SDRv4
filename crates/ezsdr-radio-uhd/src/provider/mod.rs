@@ -186,6 +186,8 @@ pub struct UhdRadio {
     description: channels::Description,
     /// Rows of each kind the Module keeps per section (UR-5's `record_rows_per_kind`, UR-30).
     record_rows: usize,
+    /// The margin `m` a measurement Run replaced UR-22's with (`with_measurement_resume_margin`); `None` is the profile's.
+    resume_margin_ns: Option<i64>,
     /// Its hold on the device's serial (UR-5): released when this instance drops.
     _serial: SerialGuard,
     rx_stall: Option<(Wall, Wall)>,
@@ -327,6 +329,7 @@ impl UhdRadio {
             epoch,
             description,
             record_rows,
+            resume_margin_ns: None,
             _serial: registration,
             rx_stall: None,
             #[cfg(test)]
@@ -353,6 +356,14 @@ impl UhdRadio {
     /// keys declare. Only Rust code reaches it (GZ-9).
     pub fn with_rx_stall(mut self, after: Wall, duration: Wall) -> UhdRadio {
         self.rx_stall = Some((after, duration));
+        self
+    }
+
+    /// Replaces the resume margin `m` of UR-22 (10 ms) with `ns` for this instance, for a measurement Run (bench cell C7). Only Rust code reaches it
+    /// (GZ-9): no Spec key, Binding selector or environment variable does.
+    pub fn with_measurement_resume_margin(mut self, ns: i64) -> UhdRadio {
+        assert!(ns >= 0, "a resume margin is not negative");
+        self.resume_margin_ns = Some(ns);
         self
     }
 
@@ -522,9 +533,13 @@ impl Provider for UhdRadio {
             links,
             self.description.clone(),
             self.record_rows,
+            self.resume_margin_ns.unwrap_or(crate::profile::RESUME_MARGIN_NS),
         )?);
         if let Some(error) = &self.reopened {
             core.timing(json!({ "what": "reopened_on_unlock", "first_error": error }));
+        }
+        if let Some(ns) = self.resume_margin_ns {
+            core.timing(json!({ "what": "resume_margin", "ns": ns }));
         }
         // One entry per declared stream (RM-29): a stream with no channel declares no
         // SampleClock (UR-12).
@@ -842,6 +857,57 @@ mod tests {
             tx: (0..tx).map(|k| PreparedStream { k, ..stream.clone() }).collect(),
         });
         (radio, radio_device, rig_device, events)
+    }
+
+    struct NoSubmit;
+    impl ezsdr_kernel::module_api::ActionSubmitter for NoSubmit {
+        fn submit(&self, _: ezsdr_kernel::event::Action) -> Result<ezsdr_kernel::event::ActionId, Vec<ezsdr_kernel::binding::Violation>> {
+            Ok(ezsdr_kernel::event::ActionId(1))
+        }
+    }
+
+    /// A Provider of the `x3xx` profile on a manual-clock fake, `prepare`d with a hand-built context (as `tests/fake.rs`'s `direct_prepare`); the Core's `m` in root ticks.
+    fn prepared_margin_ticks(builder: impl FnOnce(UhdRadio) -> UhdRadio) -> i64 {
+        use ezsdr_kernel::event::EventCollector;
+        use ezsdr_kernel::module_api::Authority;
+        use ezsdr_kernel::policy::{EventKindRegistry, Policy};
+        use ezsdr_kernel::time::{ClockRegistry, RelativeBudget};
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
+        }))
+        .unwrap();
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let mut radio = builder(UhdRadio::from_binding(&binding, device.clone()).unwrap());
+        let clocks = Arc::new(ClockRegistry::new());
+        let authority = crate::DeviceAuthority::new(device, clocks.clone(), "internal", "internal", "type=fake-rig").unwrap();
+        let mut registry = ezsdr_kernel::module_api::ModuleRegistry::new();
+        let (mut checks, mut kinds) = (ezsdr_kernel::binding::AdmissionCheckRegistry::new(), EventKindRegistry::with_kernel_kinds());
+        ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
+        let pairs: Vec<_> = ["usrp", "usrp/rx/s0", "usrp/tx/s0"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
+        let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 1024, &Policy::default()));
+        let mut ctx = PrepareContext::testing(EventSource::Node { node: ResourceId::parse("usrp").unwrap() }, authority.time(), clocks, events, Arc::new(NoActions), Arc::new(NoSubmit));
+        ctx.class = ExecutionClass::HardwareInLoop;
+        ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
+        let fragment = Fragment {
+            id: Ident::parse("radio").unwrap(),
+            instance: crate::module_ref(),
+            role: Role::Provider,
+            content: json!({ "selector": {}, "requested": Requested { resource: ResourceId::parse("usrp").unwrap(), constraints: BTreeMap::new() } }),
+            after: Vec::new(),
+        };
+        radio.prepare(&fragment, ctx).unwrap();
+        radio.prepared.as_ref().unwrap().core.resume_margin()
+    }
+
+    /// UR-22 (bt2): the builder's value reaches the Core's `m` exactly (0.2 ms, 1 ms, 10 ms, 0), through a later `with_reopened` and `prepare`; no builder leaves the profile's 10 ms.
+    #[test]
+    fn ur_22_the_resume_margin_builder_keeps_its_value_exactly() {
+        assert_eq!(prepared_margin_ticks(|r| r), 2_000_000, "no builder: the profile's 10 ms at the 200 MHz root");
+        for (ns, ticks) in [(0, 0), (200_000, 40_000), (999_999, 200_000), (1_000_000, 200_000), (10_000_000, 2_000_000)] {
+            assert_eq!(prepared_margin_ticks(|r| r.with_measurement_resume_margin(ns).with_reopened("pll".to_owned())), ticks, "{ns} ns");
+        }
     }
 
     /// S3 (UR-5, UR-30): `record_rows_per_kind` is the one parse `from_binding` and the server share; no device is involved.

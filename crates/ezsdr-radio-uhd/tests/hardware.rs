@@ -4268,3 +4268,85 @@ fn hw_s9_restart_booked_after_an_overflow() {
         assert!(run.stopped.is_none(), "S9 stopped early: {:?}", run.stopped);
     });
 }
+
+// ---------------------------------------------------------------- C7 (bt2 B3): the repeat's resume after a dropped device burst
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_c7_late_start() {
+    // Cell C7, late start (bt2 B3): the first send of a repeat's device burst reaches the device after the repeat's start, so the device drops the whole
+    // burst, and the repeat resumes at R = the first lattice point at or after busy + m. It measures the repeat's decision on the bench: silence from the
+    // start to R, the waveform phase-continuous on the lattice at R, and one resume row per drop (`plan/phase8/bench.md`'s C7 row). The margin is swept
+    // 10 / 1 / 0.2 ms at 1 and 10 MS/s, 10 / 20 / 20 trials a cell. Slot A only (channel 0), 1 GHz, 0 dB, a QPSK PN of peak 0.495, its period 1 ms, into the
+    // >= 30 dB loopback; the owner confirms the attenuator AND the PN before every run. INCONCLUSIVE fails the test as FAIL does; RETRIED and UNSETTLED do not.
+    // Bounded to 15 min.
+    bounded(Wall::from_secs(900), "hw_c7_late_start", || {
+        let device = usrp();
+        pin_slot_a(&*device);
+        assert_eq!(d9_channel(), 0, "C7 transmits on slot A only (channel 0)");
+        let board_label = match device.serial() {
+            Ok(serial) => format!("{} {serial}", board_of(&*device).name()),
+            Err(_) => board_of(&*device).name().to_owned(),
+        };
+        let failures = common::c7_cells::run_bench(
+            device.clone(),
+            &|dir| bench_profile(&*device, dir, serde_json::json!({ "record_rows_per_kind": 100_000 }), bench_envelope(&*device), true),
+            &board_label,
+            common::c7::Mode::LateStart,
+            common::c7::HW_PERIOD_US,
+            false,
+        );
+        assert!(failures.is_empty(), "C7: {failures:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_c7_starved() {
+    // Cell C7, starved (bt2 B3): a send midway through a repeat's play is held 40 ms, so the device runs dry, and the repeat resumes at R = the first
+    // lattice point at or after busy + m. It measures the repeat's decision on the bench: silence from the stall to R, the waveform phase-continuous on
+    // the lattice at R, and one resume row per drop (`plan/phase8/bench.md`'s C7 row). The margin is swept 10 / 1 / 0.2 ms at 1 and 10 MS/s, 10 / 20 / 20
+    // trials a cell. Slot A only (channel 0), 1 GHz, 0 dB, a QPSK PN of peak 0.495, its period 1 ms, into the >= 30 dB loopback; the owner confirms the
+    // attenuator AND the PN before every run. INCONCLUSIVE fails the test as FAIL does; RETRIED and UNSETTLED do not. Bounded to 15 min.
+    bounded(Wall::from_secs(900), "hw_c7_starved", || {
+        let device = usrp();
+        pin_slot_a(&*device);
+        assert_eq!(d9_channel(), 0, "C7 transmits on slot A only (channel 0)");
+        let board_label = match device.serial() {
+            Ok(serial) => format!("{} {serial}", board_of(&*device).name()),
+            Err(_) => board_of(&*device).name().to_owned(),
+        };
+        let failures = common::c7_cells::run_bench(
+            device.clone(),
+            &|dir| bench_profile(&*device, dir, serde_json::json!({ "record_rows_per_kind": 100_000 }), bench_envelope(&*device), true),
+            &board_label,
+            common::c7::Mode::Starved,
+            common::c7::HW_PERIOD_US,
+            false,
+        );
+        assert!(failures.is_empty(), "C7: {failures:?}");
+    });
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_c7_storm() {
+    // Cell C7, the drop storm (bt2 B3, S8): 20 s of a Start held 12 ms every cycle at 1 MS/s, m = 10 ms default: the first send of every part reaches the device
+    // after the part's resume point, so the device drops it and the repeat resumes again, for as long as the Run lasts. It measures the repeat's record bound on the
+    // bench: the 600 ms capture window checks RF silence after the first drop; the per-kind record bound keeps 1 000 resume rows and counts the rest; events are a
+    // subset of the kept rows and at most the resumes. Slot A only (channel 0), 1 GHz, 0 dB, a QPSK PN of peak 0.495, its period 1 ms, into the >= 30 dB loopback;
+    // the owner confirms the attenuator AND the PN before running. The fake rehearsal runs the same `STORM_MS`. INCONCLUSIVE fails the test as FAIL does. Bounded to
+    // 5 min.
+    bounded(Wall::from_secs(300), "hw_c7_storm", || {
+        let device = usrp();
+        pin_slot_a(&*device);
+        assert_eq!(d9_channel(), 0, "C7 transmits on slot A only (channel 0)");
+        let board_label = match device.serial() {
+            Ok(serial) => format!("{} {serial}", board_of(&*device).name()),
+            Err(_) => board_of(&*device).name().to_owned(),
+        };
+        let failures =
+            common::c7_cells::run_storm(device.clone(), &|dir| bench_profile(&*device, dir, serde_json::json!({}), bench_envelope(&*device), true), &board_label, common::c7::HW_PERIOD_US, false);
+        assert!(failures.is_empty(), "C7 storm: {failures:?}");
+    });
+}

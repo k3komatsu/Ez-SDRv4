@@ -625,6 +625,42 @@ fn mt3d_the_margin_is_ten_milliseconds_and_the_lattice_rounds_up() {
 }
 
 #[test]
+fn mt3d_a_core_margin_sets_r_and_the_fakes_drain_limit_lies_between_the_998_and_999_cases() {
+    // UR-22, S1b (bt2): V5's rig with a period-100 waveform (k0 = 20 030, lattice 20 030 + 100 j). The first send is a whole 2 500-sample chunk (x = k0, r = 17 000),
+    // reaches a device at 21 000 and is dropped: busy1 = k0 + 2 500 = 22 530, the close (H = 22 530, n = 2) busy = 22 532; the decision instant plus the lead is
+    // 21 000 + 2 000 = 23 000 and the front is H + 2 + g = 22 547. The fake's drain of the dropped chunk ends at 21 000 + 2 502 = 23 502, its pad is 26 + 4 + (15 + 10)
+    // = 55 and `g` = 15, so a part that starts before 23 572 is dropped again and one at or past it plays (F6). The pair 998 / 999 therefore puts the fake's limit somewhere in (23 530, 23 630], not at 23 572 (the lattice's step is 100): it shows that the margin is read, not where the limit is; MT3-21…24 pin the pad.
+    // m = 10 000 us: busy + m = 32 532, R = 32 630 (the first lattice point at or after it). m = 1 000: 23 532 -> 23 630. m = 999: 23 531 -> 23 630. m = 998: 23 530 is a
+    // lattice point and past the decision bound, R = 23 530 (the margin binds), inside the drain. m = 200: busy + m = 22 732 < 23 000, R = 23 030 (the lead binds), inside it.
+    for (margin_us, r, plays) in [(10_000, 32_630, true), (1_000, 23_630, true), (999, 23_630, true), (998, 23_530, false), (200, 23_030, false)] {
+        let mut rig = switch_rig_with_margin(vec![o::ramp(1, 100)], Vec::new(), 200, margin_us * 1_000);
+        book_repeat(&mut rig, 1, 20_030, 0);
+        at(&rig, 17 * MS);
+        rig.device.set_time(21 * MS);
+        hand(&mut rig, 1);
+        assert_eq!(tx_sends(&rig.device).iter().map(|send| send.0).collect::<Vec<_>>(), [2_500], "m {margin_us}: {:?}", rig.device.calls());
+        at(&rig, 21 * MS);
+        rig.tx.reports(Wall::ZERO);
+        assert_eq!(emitted(&rig.events), [("late", Some(r))], "m {margin_us}: {:?}", lock(&rig.core.rec).rejected);
+        assert_eq!(resumes(&rig.core).len(), 1, "m {margin_us}");
+        // The part at R is handed once R is inside the window (9 ms ahead, or at once when it is nearer); the device reads it when its time passes R.
+        at(&rig, (21 * MS).max((r / 1_000 - 9) * MS));
+        go(&mut rig);
+        at(&rig, (r / 1_000 + 1) * MS);
+        go(&mut rig);
+        let heard = rig.device.transmitted(rig.clock.instant(r), 100);
+        if plays {
+            assert!(heard.iter().all(Option::is_some), "m {margin_us}: the part plays at {r}: {:?}", rig.device.calls());
+            assert_eq!(resumes(&rig.core).len(), 1, "m {margin_us}");
+        } else {
+            assert!(heard.iter().all(Option::is_none), "m {margin_us}: the part at {r} is dropped in the drain: {:?}", rig.device.calls());
+            rig.tx.reports(Wall::ZERO);
+            assert_eq!(resumes(&rig.core).len(), 2, "m {margin_us}: a second resume follows: {:?}", resumes(&rig.core));
+        }
+    }
+}
+
+#[test]
 fn mt3d_a_recovery_that_fails_ends_the_repeat_and_the_clock() {
     // V7 (UR-22, #75): the close is uncertain, so the owner reopens and runs T3 before anything else is sent. Three unconfirmed flushes (the fake's sends 2, 3 and
     // 4 take nothing), or a reopen the device refuses, end the transmit stream's clock: the repeat ends, its record ends `stop`, nothing is sent at R. (A flush

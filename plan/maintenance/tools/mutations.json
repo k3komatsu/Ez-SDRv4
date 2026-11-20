@@ -26400,8 +26400,8 @@
   "id": "N106-36",
   "name": "the Core keeps the default N, not the one the binding gave (UR-30, #106)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "self.record_rows, )?);",
-  "new": "core::DEFAULT_RECORD_ROWS, )?);",
+  "old": "self.record_rows, self.resume_margin_ns.unwrap_or(crate::profile::RESUME_MARGIN_NS), )?);",
+  "new": "core::DEFAULT_RECORD_ROWS, self.resume_margin_ns.unwrap_or(crate::profile::RESUME_MARGIN_NS), )?);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_30_a_run_past_the_bound_says_what_it_left_out"
@@ -29685,5 +29685,1445 @@
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "ma_12_a_narrowing_violation_records_the_specs_request_and_the_reported_value"
+ },
+ {
+  "id": "C7-01",
+  "name": "the builder stores nothing: the Run reads the profile's margin (bt2 S1b')",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "self.resume_margin_ns = Some(ns); self",
+  "new": "let _ = ns; self",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_the_hook_sets_what_the_run_reads"
+ },
+ {
+  "id": "C7-02",
+  "name": "Core::resume_margin reads the profile's constant, not the instance's margin (bt2 S1b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "self.ticks(self.resume_margin_ns)",
+  "new": "self.ticks(crate::profile::RESUME_MARGIN_NS)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_core_margin_sets_r_and_the_fakes_drain_limit_lies_between_the_998_and_999_cases"
+ },
+ {
+  "id": "C7-03",
+  "name": "from_binding starts the margin at 0, not the profile's 10 ms (bt2 S1a)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "resume_margin_ns: None,",
+  "new": "resume_margin_ns: Some(0),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_no_hook_resumes_after_ten_milliseconds"
+ },
+ {
+  "id": "C7-04",
+  "name": "Core::new drops the margin it is given (bt2 S1b)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "rec: Mutex::new(Records::with_limit(record_rows)), resume_margin_ns,",
+  "new": "rec: Mutex::new(Records::with_limit(record_rows)), resume_margin_ns: 0,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "mt3d_a_core_margin_sets_r_and_the_fakes_drain_limit_lies_between_the_998_and_999_cases"
+ },
+ {
+  "id": "C7-05",
+  "name": "a negative resume margin is accepted (bt2 S1c)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "assert!(ns >= 0,",
+  "new": "assert!(true,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_05_a_resume_margin_is_no_selector_key_and_no_margin_is_negative"
+ },
+ {
+  "id": "C7-60",
+  "name": "the builder clamps a margin below 1 ms to 1 ms (bt2 B2: the 0.2 ms cell would run at 1 ms)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "self.resume_margin_ns = Some(ns); self",
+  "new": "self.resume_margin_ns = Some(ns.max(1_000_000)); self",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_the_resume_margin_builder_keeps_its_value_exactly"
+ },
+ {
+  "id": "C7-61",
+  "name": "the Manifest records no margin for a builder-set one (bt2 B2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if let Some(ns) = self.resume_margin_ns { core.timing(json!({ \"what\": \"resume_margin\", \"ns\": ns })); }",
+  "new": "if let Some(_ns) = self.resume_margin_ns {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_the_hook_sets_what_the_run_reads"
+ },
+ {
+  "id": "C7-62",
+  "name": "the Manifest records the profile's margin for an instance no builder touched (bt2 B2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "if let Some(ns) = self.resume_margin_ns {",
+  "new": "if let Some(ns) = Some(self.resume_margin_ns.unwrap_or(crate::profile::RESUME_MARGIN_NS)) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_no_hook_resumes_after_ten_milliseconds"
+ },
+ {
+  "id": "C7-63",
+  "name": "prepare gives the Core 0 when no builder set a margin (bt2 B2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "self.resume_margin_ns.unwrap_or(crate::profile::RESUME_MARGIN_NS), )?);",
+  "new": "self.resume_margin_ns.unwrap_or(0), )?);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_the_resume_margin_builder_keeps_its_value_exactly"
+ },
+ {
+  "id": "C7-82",
+  "name": "prepare gives the Core the profile's margin whatever the builder set (bt2 B2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "self.resume_margin_ns.unwrap_or(crate::profile::RESUME_MARGIN_NS), )?);",
+  "new": "crate::profile::RESUME_MARGIN_NS, )?);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_22_the_resume_margin_builder_keeps_its_value_exactly"
+ },
+ {
+  "id": "C7-64",
+  "name": "a timed four-zero start is a flush (bt2 send class)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "if at.is_none() && sob && eob",
+  "new": "if true && sob && eob",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_send_class_table"
+ },
+ {
+  "id": "C7-65",
+  "name": "a three-sample end of burst is a close (bt2 send class)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "channel.len() <= 2",
+  "new": "channel.len() <= 3",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_send_class_table"
+ },
+ {
+  "id": "C7-66",
+  "name": "the hold's Start fires on the first start, not the nth (bt2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "class == SendClass::Start && starts == nth",
+  "new": "class == SendClass::Start && starts == 1",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_hold_start_holds_only_the_nth_start"
+ },
+ {
+  "id": "C7-67",
+  "name": "the midplay hold ignores `after` (bt2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "entered.saturating_sub(first) >= after.as_nanos() as u64",
+  "new": "entered.saturating_sub(first) >= 0",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_hold_midplay_picks_a_continuation_after_the_play_time"
+ },
+ {
+  "id": "C7-68",
+  "name": "the hold sleeps real time, not the inner device's clock (bt2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "self.inner.host().sleep(held);",
+  "new": "std::thread::sleep(held);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_hold_start_holds_only_the_nth_start"
+ },
+ {
+  "id": "C7-69",
+  "name": "an `Until` hold sleeps until the instant counted from zero, not from the entry (bt2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "Hold::Until(until) => Wall::from_nanos(until.saturating_sub(entered)),",
+  "new": "Hold::Until(until) => Wall::from_nanos(until),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_hold_until_is_an_instant_of_the_probe_axis_and_never_a_negative_hold"
+ },
+ {
+  "id": "C7-70",
+  "name": "a row records no hold (bt2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "\"held_ns\": held.as_nanos() as u64,",
+  "new": "\"held_ns\": 0u64,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_hold_rows_carry_the_entry_before_and_after_stamps_on_the_inner_clock"
+ },
+ {
+  "id": "C7-71",
+  "name": "the probe's clock axis is real time on a manual clock (Terra v3 2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "if host.is_manual() { u64::try_from(host.now().as_nanos()).unwrap_or(u64::MAX) } else { self.host_ns() }",
+  "new": "self.host_ns()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_stamps_map_through_the_anchor_on_the_manual_clock"
+ },
+ {
+  "id": "C7-72",
+  "name": "the entry stamp is taken after the hold (bt2: the starvation window starts at the call's entry)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "\"host_entered_ns\": entered,",
+  "new": "\"host_entered_ns\": before,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_hold_rows_carry_the_entry_before_and_after_stamps_on_the_inner_clock"
+ },
+ {
+  "id": "C7-73",
+  "name": "busy replay without the send's return (bt2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": ".max(send.returned + shift(send)).max(send.first)",
+  "new": ".max(send.first)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_busy_follows_the_modules_recursion_with_the_return_of_each_send"
+ },
+ {
+  "id": "C7-74",
+  "name": "the expected lattice point rounds down (bt2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "(bound - lattice_origin + period - 1).div_euclid(period)",
+  "new": "(bound - lattice_origin).div_euclid(period)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_expected_r_pins_the_mt3d_hand_numbers"
+ },
+ {
+  "id": "C7-75",
+  "name": "the expected R leaves the margin out (bt2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "unaligned, decided) = (busy + margin_ticks, now + lead_ticks)",
+  "new": "unaligned, decided) = (busy, now + lead_ticks)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_expected_r_pins_the_mt3d_hand_numbers"
+ },
+ {
+  "id": "C7-77",
+  "name": "busy replay counts the sends after the decision's close (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "let target = armed_closes + i + 1;",
+  "new": "let target = armed_closes + i + 2;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_history_pairs_each_resume_with_its_own_close_not_a_later_one_inside_the_slack"
+ },
+ {
+  "id": "C7-78",
+  "name": "the anchor truncates toward zero, not floors (bt2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "* MCR as i128).div_euclid(1_000_000_000) as i64",
+  "new": "* MCR as i128 / 1_000_000_000) as i64",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_anchor_maps_host_stamps_to_ticks_and_back"
+ },
+ {
+  "id": "C7-79",
+  "name": "an interval of one lattice point reports itself unpinned (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "self.lo == self.hi",
+  "new": "self.lo != self.hi",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_resume_interval_spans_a_boundary_and_pins_a_point_inside_a_period"
+ },
+ {
+  "id": "C7-80",
+  "name": "an aligned stall ignores the side it was asked for (bt2: both sides of the lattice point)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "tx_origin + l * per + ns_to_ticks_ceil(side_ns)",
+  "new": "tx_origin + l * per",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_late_start_resumes_on_its_lattice_after_busy_plus_10_ms_at_1_msps"
+ },
+ {
+  "id": "C7-81",
+  "name": "the starved stall holds the first start, not a midplay send (bt2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "Mode::Starved => TxHold::Midplay { after: Wall::from_millis(60), hold },",
+  "new": "Mode::Starved => TxHold::Start { nth: 2, hold },",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_starved_repeat_resumes_on_its_lattice_after_busy_plus_10_ms_at_1_msps"
+ },
+ {
+  "id": "C7-90",
+  "name": "the interval's upper side moves busy + m down, not up (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "let hi = at((busy_hi + margin_ticks).max(decided));",
+  "new": "let hi = at((busy_lo + margin_ticks).max(decided));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_resume_interval_spans_a_boundary_and_pins_a_point_inside_a_period"
+ },
+ {
+  "id": "C7-91",
+  "name": "the interval's lower side moves busy + m up, not down (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "let lo = at((busy_lo + margin_ticks).max(decided));",
+  "new": "let lo = at((busy_hi + margin_ticks).max(decided));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_resume_interval_spans_a_boundary_and_pins_a_point_inside_a_period"
+ },
+ {
+  "id": "C7-92",
+  "name": "resume row i pairs with the close before its own (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "armed_closes + i + 1",
+  "new": "armed_closes + i",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_history_pairs_each_resume_with_its_own_close_not_a_later_one_inside_the_slack"
+ },
+ {
+  "id": "C7-93",
+  "name": "a close after its row's decision is accepted (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "if self.rows[end].sent.returned > at + slack {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_history_pairs_each_resume_with_its_own_close_not_a_later_one_inside_the_slack"
+ },
+ {
+  "id": "C7-94",
+  "name": "m is bound by any R past the lead, not a whole lattice period past it (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "- terms.decided >= self.period * self.per",
+  "new": "- terms.decided >= 0",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_short_first_send_is_lead_bound_and_a_full_one_is_m_bound"
+ },
+ {
+  "id": "C7-95",
+  "name": "a short first send is informative about the margin (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "self.first_send_samples() == send_cap(self.cell.rate) as i64 && self.m_bound(row, terms)",
+  "new": "true && self.m_bound(row, terms)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_short_first_send_is_lead_bound_and_a_full_one_is_m_bound"
+ },
+ {
+  "id": "C7-97",
+  "name": "the armed close count includes one more close (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "row[\"class\"] == \"close\" && row[\"result\"][\"accepted_samples\"].as_i64().unwrap_or(0) > 0).count()",
+  "new": "row[\"class\"] == \"close\" && row[\"result\"][\"accepted_samples\"].as_i64().unwrap_or(0) > 0).count() + 1",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_no_hook_resumes_after_ten_milliseconds"
+ },
+ {
+  "id": "C7-120",
+  "name": "the heard threshold is half the floor, not twice it (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "(2.0 * q).max(0.05 * g_c)",
+  "new": "(q / 2.0).max(0.05 * g_c)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_the_heard_threshold_is_twice_the_floor"
+ },
+ {
+  "id": "C7-121",
+  "name": "the loop delay is not checked against the control's onset (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "(onset - (control_at + d)).abs() > span / 2",
+  "new": "false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_the_delay_is_anchored_to_the_controls_onset"
+ },
+ {
+  "id": "C7-122",
+  "name": "the onset is a gain test, not a power test (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "if power >= tp {",
+  "new": "if cap.gain_phase(wave, at).is_some_and(|(gain, _)| gain >= tp) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_the_onset_is_a_power_test_within_a_quarter_period"
+ },
+ {
+  "id": "C7-123",
+  "name": "the fake's ramp baseline is ignored (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "let samples = if fake_ramp {",
+  "new": "let samples = if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_the_fake_ramp_is_silence_and_a_pn_over_it_is_heard"
+ },
+ {
+  "id": "C7-124",
+  "name": "the wave keeps its DC offset (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "(s.0 - mean_i, s.1 - mean_q)",
+  "new": "(s.0, s.1)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_the_wave_is_zero_mean_and_a_dc_offset_is_not_heard"
+ },
+ {
+  "id": "C7-125",
+  "name": "the late search skips the first period (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "(1..=9).find(",
+  "new": "(2..=9).find(",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_read_part_a_silent_period_then_the_pn_is_one_period_late"
+ },
+ {
+  "id": "C7-126",
+  "name": "a silence window may straddle the region's end (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "at + span <= region_end",
+  "new": "at <= region_end",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_silence_stops_at_the_region_end"
+ },
+ {
+  "id": "C7-127",
+  "name": "the silence region's coverage is not required (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "if !cap.covers(region_from + ctl.d - n * per, region_end) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_silence_refuses_a_hole"
+ },
+ {
+  "id": "C7-130",
+  "name": "the m >= 2 / none short-tail branch gives INCONCLUSIVE instead of UNSETTLED (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "Class::Unsettled(m - 1)",
+  "new": "Class::Inconclusive(vec![\"no start after resume\".to_owned()])",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_m2_none_short_tail"
+ },
+ {
+  "id": "C7-131",
+  "name": "the m = 1 / none short-tail branch is UNSETTLED(1) (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if m == 1 { Class::Inconclusive(vec![\"ended before R + 5 ms\".to_owned()]) }",
+  "new": "if m == 1 { Class::Unsettled(1) }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_m1_none_short_tail"
+ },
+ {
+  "id": "C7-132",
+  "name": "the silent cell's tail threshold is 0, not 5 ms (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if drop_after(e, start.at) { if tail < open {",
+  "new": "if drop_after(e, start.at) { if tail < 0 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_m1_silent_short_tail_is_unsettled"
+ },
+ {
+  "id": "C7-133",
+  "name": "a silent last part with no drop report is CLEAN instead of NoResume (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "Class::Fail(Fail::NoResume, format!(\"the repeat is silent after its last start {}\", start.at))",
+  "new": "Class::Clean",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_m1_silent_old_reports_only_is_no_resume"
+ },
+ {
+  "id": "C7-134",
+  "name": "the LateRestart check is dropped, so a late restart reads NoResume (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "} else if let Some(k) = reading.as_ref().and_then(|part| part.late_by_periods) { Class::Fail(Fail::LateRestart, format!(\"RF started {k} period(s) after the accepted start\")) } else {",
+  "new": "} else {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_m1_silent_one_period_late_is_late_restart"
+ },
+ {
+  "id": "C7-135",
+  "name": "a TimeError anywhere counts as the final part's drop (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "code == \"TimeError\" && tick.is_some_and(|tick| tick >= at)",
+  "new": "code == \"TimeError\" && tick.is_some()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_m1_silent_old_reports_only_is_no_resume"
+ },
+ {
+  "id": "C7-136",
+  "name": "a heard final part after retries is CLEAN instead of RETRIED (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "Class::Retried(m - 1)",
+  "new": "Class::Clean",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_m2_heard_is_retried"
+ },
+ {
+  "id": "C7-137",
+  "name": "StartedEarly accepts a Start exactly at R as early (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if at < r {",
+  "new": "if at <= r {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_clean_late_start"
+ },
+ {
+  "id": "C7-138",
+  "name": "the starved pre-stall RF gate is dropped (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if !c7_rf::prestall_rf(&e.capture, &e.wave, control, before) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_inconclusive_no_rf_before_the_stall"
+ },
+ {
+  "id": "C7-139",
+  "name": "the Underflow report is required, not printed as data (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if !c7_rf::prestall_rf(&e.capture, &e.wave, control, before) {",
+  "new": "if !c7_rf::prestall_rf(&e.capture, &e.wave, control, before) || !e.reports.iter().any(|r| r.0.starts_with(\"Underflow\")) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_underflow_absent_with_rf_is_clean"
+ },
+ {
+  "id": "C7-140",
+  "name": "the held start need not be shown late (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "let shown_late = held.at.is_some_and(|at| held.returned - e.bracket > at);",
+  "new": "let shown_late = true;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_inconclusive_held_start_returned_within_the_bracket"
+ },
+ {
+  "id": "C7-141",
+  "name": "the counters are not compared with the rows (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if e.stats_resumes != m as i64 || e.stats_gap != gap {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_fail_counters"
+ },
+ {
+  "id": "C7-142",
+  "name": "the silence region's end includes the part's own first period (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "final_start.map(|start| start.at + control.d)",
+  "new": "final_start.map(|start| start.at + control.d + e.n * e.per)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_clean_late_start"
+ },
+ {
+  "id": "C7-143",
+  "name": "a row outside the rule's lattice points is not a failure (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if let Err(text) = check { return Class::Fail(Fail::ResumeOffRule, text.clone()); }",
+  "new": "let _ = check;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_fail_resume_off_rule"
+ },
+ {
+  "id": "C7-144",
+  "name": "a coverage hole is read as silence, not INCONCLUSIVE (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "Ok(part) => { heard_final = part.w0_heard; reading = Some(part); } Err(text) => push_hole(&mut reasons, text.clone()),",
+  "new": "Ok(part) => { heard_final = part.w0_heard; reading = Some(part); } Err(_) => heard_final = false,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_inconclusive_hole_in_the_coverage"
+ },
+ {
+  "id": "C7-145",
+  "name": "the starts include the control's own start (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "skip(trial.control_starts)",
+  "new": "skip(0)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_late_start_resumes_on_its_lattice_after_busy_plus_10_ms_at_1_msps"
+ },
+ {
+  "id": "C7-150",
+  "name": "a drop report exactly at the start belongs to D_before (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "if tick < a {",
+  "new": "if tick <= a {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_the_drain_distances_split_at_the_start_and_a_report_at_the_start_belongs_to_after"
+ },
+ {
+  "id": "C7-151",
+  "name": "FAIL loses to INCONCLUSIVE in the VERDICT line (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "let verdict = if fail > 0 {",
+  "new": "let verdict = if fail > 0 && inconclusive == 0 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_a_fail_names_the_failure_and_wins_over_inconclusive"
+ },
+ {
+  "id": "C7-152",
+  "name": "a bare PASS is printed when retried or unsettled trials exist (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "} else if retried + unsettled == 0 {",
+  "new": "} else if retried + unsettled > 0 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_retried_and_unsettled_trials_print_the_counts_and_never_a_bare_pass"
+ },
+ {
+  "id": "C7-153",
+  "name": "delta_first keeps the wrong sign (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "(t1 - r1) / TICKS_PER_US",
+  "new": "(r1 - t1) / TICKS_PER_US",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_the_delta_first_is_printed_signed_with_its_endpoints"
+ },
+ {
+  "id": "C7-154",
+  "name": "the retries total counts trials, not retries (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "retried += 1;\n                retries += record.datum.retries;",
+  "new": "retried += 1;\n                retries += 1;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_retried_and_unsettled_trials_print_the_counts_and_never_a_bare_pass"
+ },
+ {
+  "id": "C7-160",
+  "name": "the 0.2 ms cell runs one trial, not twenty (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "pub const MARGINS: [(i64, usize); 3] = [(10_000_000, 10), (1_000_000, 20), (200_000, 20)];",
+  "new": "pub const MARGINS: [(i64, usize); 3] = [(10_000_000, 10), (1_000_000, 20), (200_000, 1)];",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_the_bench_grid_is_two_rates_three_margins_with_ten_twenty_twenty_trials"
+ },
+{
+ "id": "C7-171",
+ "name": "the storm's hold also fires for a close (bt2 B3)",
+ "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+ "old": "if class == SendClass::Start { if let Some(hold) = state.plan.iter().find_map(|hold| match *hold {",
+ "new": "if class != SendClass::Flush { if let Some(hold) = state.plan.iter().find_map(|hold| match *hold {",
+ "crate": "ezsdr-radio-uhd",
+ "test_bin": "fake",
+ "filter": "probe_hold_every_start_holds_starts_only_never_a_close_a_flush_or_a_continuation"
+},
+{
+ "id": "C7-172",
+ "name": "the storm's hold fires only for the first start (bt2 B3)",
+ "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+ "old": "TxHold::EveryStart(hold) => Some(hold), _ => None,",
+ "new": "TxHold::EveryStart(hold) => (state.starts == 1).then_some(hold), _ => None,",
+ "crate": "ezsdr-radio-uhd",
+ "test_bin": "fake",
+ "filter": "probe_hold_every_start_holds_starts_only_never_a_close_a_flush_or_a_continuation"
+},
+{
+ "id": "C7-173",
+ "name": "the storm reads the bounded record_bound section with the checked accessor (bt2 B3)",
+ "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+ "old": "let record_bound = manifest.section(&usrp(), \"ezsdr.radio.uhd.record_bound\").cloned().unwrap_or_default();",
+ "new": "let record_bound = section(manifest, \"record_bound\").clone();",
+ "crate": "ezsdr-radio-uhd",
+ "test_bin": "fake",
+ "filter": "c7_rehearsal_a_drop_storm_at_the_default_bound_keeps_going_and_counts_exactly"
+},
+{
+ "id": "C7-174",
+ "name": "the storm reads radiated RF after the first drop as clean (bt2 B3)",
+ "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+ "old": "Ok(Some(tick)) => return Class::Fail(Fail::StormRadiated, format!(\"heard RF at {tick} after the first drop at {from}\")),",
+ "new": "Ok(Some(_)) => {}",
+ "crate": "ezsdr-radio-uhd",
+ "test_bin": "fake",
+ "filter": "c7_storm_fail_storm_radiated"
+},
+{
+ "id": "C7-175",
+ "name": "the storm's events may exceed the resumes (bt2 B3)",
+ "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+ "old": "if e.events.len() > e.stats_resumes as usize {",
+ "new": "if false {",
+ "crate": "ezsdr-radio-uhd",
+ "test_bin": "fake",
+ "filter": "c7_storm_fail_events_exceed_resumes"
+},
+{
+ "id": "C7-176",
+ "name": "the fake's storm may lose resume events (bt2 B3)",
+ "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+ "old": "if e.fake && e.events.len() + 1 < e.stats_resumes as usize {",
+ "new": "if false {",
+ "crate": "ezsdr-radio-uhd",
+ "test_bin": "fake",
+ "filter": "c7_storm_fail_events_missing_on_the_fake"
+},
+{
+ "id": "C7-177",
+ "name": "the storm's record bound may keep or omit the wrong count (bt2 B3)",
+ "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+ "old": "if e.bound != DEFAULT_BOUND || e.rows_kept != DEFAULT_BOUND || e.omitted_resumes != e.stats_resumes - DEFAULT_BOUND as i64 {",
+ "new": "if false {",
+ "crate": "ezsdr-radio-uhd",
+ "test_bin": "fake",
+ "filter": "c7_storm_fail_bound_wrong"
+},
+{
+ "id": "C7-178",
+ "name": "a held close is clean in the storm (bt2 B3)",
+ "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+ "old": "if e.close_held {",
+ "new": "if false {",
+ "crate": "ezsdr-radio-uhd",
+ "test_bin": "fake",
+ "filter": "c7_storm_fail_close_held"
+},
+{
+ "id": "C7-179",
+ "name": "a storm that did not reach the bound is clean (bt2 B3)",
+ "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+ "old": "if e.stats_resumes <= DEFAULT_BOUND as i64 {",
+ "new": "if false {",
+ "crate": "ezsdr-radio-uhd",
+ "test_bin": "fake",
+ "filter": "c7_storm_inconclusive_short_of_the_bound"
+},
+ {
+  "id": "C7-200",
+  "name": "unresolved compares the stamps' width against half a period, not a whole one (bt2 F3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "let unresolved = busy_hi - busy_lo > period * per;",
+  "new": "let unresolved = busy_hi - busy_lo > period * per / 2;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_resume_interval_is_unresolved_when_the_uncertainty_exceeds_half_a_period"
+ },
+ {
+  "id": "C7-201",
+  "name": "the R check accepts any lattice point when the stamps leave several points (bt2 fix round 2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "if terms.lo <= resumes_at && resumes_at <= terms.hi {",
+  "new": "if terms.unresolved || (terms.lo <= resumes_at && resumes_at <= terms.hi) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_an_unresolved_interval_refuses_a_lattice_point_outside_it"
+ },
+ {
+  "id": "C7-202",
+  "name": "the Module's read half width takes the last read of the window, not the widest (bt2 fix round 2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": ".map(|(_, width)| *width).max()",
+  "new": ".map(|(_, width)| *width).last()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_module_read_half_width_is_the_widest_read_in_the_window_before_the_return"
+ },
+ {
+  "id": "C7-203",
+  "name": "a Module clock read wider than the 1 ms the Module accepts is used (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "(width <= WIDEST_READ_NS).then_some((exit, width))",
+  "new": "(true).then_some((exit, width))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_module_read_half_width_is_the_widest_read_in_the_window_before_the_return"
+ },
+ {
+  "id": "C7-204",
+  "name": "the per-send stamp error leaves out the Module's half read width (bt2 B3, per send in F3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "err: probe_uncertainty + row.read_half + offset,",
+  "new": "err: probe_uncertainty + offset,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_r_interval_bounds_the_stamps_that_set_busy_not_the_read_at_the_decision"
+ },
+ {
+  "id": "C7-205",
+  "name": "the anchor's worst bracket is its best read (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "brackets.iter().copied().max().unwrap_or(0)",
+  "new": "brackets.iter().copied().min().unwrap_or(0)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_anchors_worst_bracket_is_the_widest_read"
+ },
+ {
+  "id": "C7-206",
+  "name": "history's slack leaves out the Module's half read width (bt2 B3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "probe_uncertainty + MODULE_READ_HALF_MAX_TICKS",
+  "new": "probe_uncertainty",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_history_accepts_a_close_that_returned_a_module_read_error_after_the_decision"
+ },
+ {
+  "id": "C7-210",
+  "name": "an expired first incident needs a TimeError report again (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if !matches!(cause, \"late_at_device\" | \"expired\") {",
+  "new": "if !matches!(cause, \"late_at_device\" | \"expired\") {\n                    } else if cause != \"late_at_device\" && !held.at.is_some_and(|at| drop_after(e, at)) {\n                        reasons.push(\"no attributable late-start evidence\".to_owned());",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_an_expired_first_incident_needs_no_timeerror_report"
+ },
+ {
+  "id": "C7-211",
+  "name": "a starved m = 0 repeat is read as the late-start one (heard -> no incident) (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "(0, Some(_)) if mode == Mode::Starved => {",
+  "new": "(0, Some(_)) if false => {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_starved_m0_silent_after_the_stall_is_dropped_never_resumed"
+ },
+ {
+  "id": "C7-212",
+  "name": "the starved m = 0 silence scan starts at the held call's entry (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "c7_rf::silence(&e.capture, &e.wave, control, held.returned, e.stop_tick + control.d, e.tx_origin + e.origin * e.per)",
+  "new": "c7_rf::silence(&e.capture, &e.wave, control, held.entered, e.stop_tick + control.d, e.tx_origin + e.origin * e.per)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_starved_m0_the_ring_down_inside_the_stall_is_not_rf_after_it"
+ },
+ {
+  "id": "C7-213",
+  "name": "a missing capture artifact is no missing evidence (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if capture_missing(manifest) { reasons.push(\"no capture artifact `rec` in the Manifest\".to_owned());",
+  "new": "if false { reasons.push(\"no capture artifact `rec` in the Manifest\".to_owned());",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_trial_without_its_capture_or_sections_is_inconclusive"
+ },
+ {
+  "id": "C7-214",
+  "name": "a cell's holds may exceed the ones it arms (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "Some(held) if e.holds.len() == e.expected_holds && held.class == class",
+  "new": "Some(held) if e.holds.len() >= e.expected_holds && held.class == class",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_two_expected_holds_fire_as_the_cell_says"
+ },
+ {
+  "id": "C7-215",
+  "name": "a heard final part may stop before its 20 periods are read (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if heard_final && final_start.is_some_and(|start| start.at + 20 * e.n * e.per > e.stop_tick) {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_a_final_start_5_ms_before_the_stop_has_not_played_its_20_periods"
+ },
+ {
+  "id": "C7-216",
+  "name": "the starved m = 0 tail check is 0, not 5 ms (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if starved_tail.is_some_and(|tail| tail < open) {",
+  "new": "if starved_tail.is_some_and(|tail| tail < 0) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_starved_m0_short_tail_is_ended_before_a_resume"
+ },
+ {
+  "id": "C7-220",
+  "name": "the retry lines print only the first five and the last again (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "lines.extend(retries.iter().map(print_retry));",
+  "new": "lines.extend(retries.iter().take(5).map(print_retry)); lines.push(print_retry(retries.last().unwrap()));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_every_start_and_every_retry_is_printed"
+ },
+ {
+  "id": "C7-221",
+  "name": "an UNSETTLED trial's retries are left out of the cell total (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "unsettled += 1;\n                retries += record.datum.retries;",
+  "new": "unsettled += 1;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_retried_and_unsettled_trials_print_the_counts_and_never_a_bare_pass"
+ },
+ {
+  "id": "C7-222",
+  "name": "an unresolved row prints no r_unresolved line (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "if row.unresolved {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_an_unresolved_row_prints_its_interval_and_a_resolved_one_does_not"
+ },
+ {
+  "id": "C7-223",
+  "name": "the storm line leaves out probe_rows (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "format!(\"C7 storm {board}: resumes={} rows_kept={} omitted={} events={} held_starts={held_starts} probe_rows={} probe_dropped={} {}\", e.stats_resumes, e.rows_kept, e.omitted_resumes, e.events.len(), e.probe_rows, e.probe_dropped, c7_verdict::describe(class))",
+  "new": "format!(\"C7 storm {board}: resumes={} rows_kept={} omitted={} events={} held_starts={held_starts} probe_dropped={} {}\", e.stats_resumes, e.rows_kept, e.omitted_resumes, e.events.len(), e.probe_dropped, c7_verdict::describe(class))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_the_storm_line_names_what_it_counted"
+ },
+ {
+  "id": "C7-224",
+  "name": "close_returned is printed from the dropped Start, not the close (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "number(datum.row_data.get(row - 1).and_then(|row| row.close_returned)),",
+  "new": "dropped_start.map_or_else(|| \"-\".to_owned(), |start| start.returned.to_string()),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_cells_every_start_and_every_retry_is_printed"
+ },
+ {
+  "id": "C7-230",
+  "name": "a resume writes its tx_resume row twice (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "self.core.timing(json!({ \"what\": \"tx_resume\", \"stream\": self.k, \"cause\": cause, \"from\": handed, \"resumes_at\": planned, \"at\": now }));",
+  "new": "self.core.timing(json!({ \"what\": \"tx_resume\", \"stream\": self.k, \"cause\": cause, \"from\": handed, \"resumes_at\": planned, \"at\": now }));\n        self.core.timing(json!({ \"what\": \"tx_resume\", \"stream\": self.k, \"cause\": cause, \"from\": handed, \"resumes_at\": planned, \"at\": now }));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_late_start_resumes_on_its_lattice_after_busy_plus_10_ms_at_1_msps"
+ },
+ {
+  "id": "C7-231",
+  "name": "the trial arms only its first hold, never the recovery Start's (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "(Mode::LateStart, Some(retry)) => holds.push(TxHold::Start { nth: 2, hold: Hold::For(retry) }),",
+  "new": "(Mode::LateStart, Some(_)) => {}",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_host_stall_in_the_recovery_send_gives_one_retry_and_the_next_part_plays"
+ },
+ {
+  "id": "C7-232",
+  "name": "the fake's drain limit leaves out each closed burst's guard and DUC wait (bt2 B3 fix)",
+  "file": "crates/ezsdr-radio-uhd/tests/fake.rs",
+  "old": "let pad = (samples + 99) / 100 + 2 * packets + bursts * (g + wait);",
+  "new": "let pad = (samples + 99) / 100 + 2 * packets;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_fake_drain_limit_is_70_us_at_1_msps_and_60_5_us_at_10_msps_for_one_dropped_burst"
+ },
+ {
+  "id": "C7-241",
+  "name": "the oracle's lattice origin is the booked start, not the first accepted one (bt2 F2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "Lattice { tx_origin: self.tx_origin, per: self.per, origin: self.origin(), period: self.period }",
+  "new": "Lattice { tx_origin: self.tx_origin, per: self.per, origin: self.start, period: self.period }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_oracle_and_the_rf_scan_follow_the_first_accepted_start_when_the_booking_was_moved"
+ },
+ {
+  "id": "C7-242",
+  "name": "the oracle's lattice check uses the booked start, not the first accepted one (bt2 F2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "r_check(&terms, row.resumes_at, self.origin(), self.period)?;",
+  "new": "r_check(&terms, row.resumes_at, self.start, self.period)?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_oracle_and_the_rf_scan_follow_the_first_accepted_start_when_the_booking_was_moved"
+ },
+ {
+  "id": "C7-243",
+  "name": "the verdict's origin is the booked start, not the first accepted one (bt2 F2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "origin: trial.origin(),",
+  "new": "origin: trial.start,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_oracle_and_the_rf_scan_follow_the_first_accepted_start_when_the_booking_was_moved"
+ },
+ {
+  "id": "C7-244",
+  "name": "the storm's silence scan uses the booked start, not the first accepted one (bt2 F2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "lattice_tick: storm.tx_origin + storm.origin() * storm.per,",
+  "new": "lattice_tick: storm.tx_origin + storm.start * storm.per,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_drop_storm_at_the_default_bound_keeps_going_and_counts_exactly"
+ },
+ {
+  "id": "C7-245",
+  "name": "the datum prints the move with the opposite sign (bt2 F2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "start_moved_samples: trial.origin() - trial.start,",
+  "new": "start_moved_samples: trial.start - trial.origin(),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_oracle_and_the_rf_scan_follow_the_first_accepted_start_when_the_booking_was_moved"
+ },
+ {
+  "id": "C7-240",
+  "name": "the trial's window follows the first accepted start after the control, not the latest (bt2 F1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "latest = ticks.iter().take(MAX_FOLLOWED_STARTS).copied().max();",
+  "new": "latest = ticks.iter().take(MAX_FOLLOWED_STARTS).copied().min();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_host_stall_in_the_recovery_send_gives_one_retry_and_the_next_part_plays_at_the_hardware_period"
+ },
+ {
+  "id": "C7-246",
+  "name": "the trial's window follows every accepted start, not only the first nine (bt2 F1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "ticks.iter().take(MAX_FOLLOWED_STARTS).copied()",
+  "new": "ticks.iter().copied()",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_part_inside_the_fakes_drain_is_dropped_again_and_one_past_it_plays_at_1_msps"
+ },
+ {
+  "id": "C7-250",
+  "name": "the per-send stamp error leaves out the delay to the next send's entry (bt2 F3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "(anchor.map(entered(next)) - sent.returned).max(0)",
+  "new": "0",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_r_interval_bounds_the_stamps_that_set_busy_not_the_read_at_the_decision"
+ },
+ {
+  "id": "C7-251",
+  "name": "the last send's stamp error is 0, not the delay to the decision (bt2 F3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "(at - row.sent.returned).max(0)",
+  "new": "0",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_r_interval_bounds_the_stamps_that_set_busy_not_the_read_at_the_decision"
+ },
+ {
+  "id": "C7-252",
+  "name": "the busy bounds' low replay adds each error instead of subtracting it (bt2 F3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "shifted_busy_replay(sends, |send| -send.err)",
+  "new": "shifted_busy_replay(sends, |send| send.err)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_r_interval_bounds_the_stamps_that_set_busy_not_the_read_at_the_decision"
+ },
+ {
+  "id": "C7-253",
+  "name": "the busy bounds replay the widest error of all sends for every send (bt2 F3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "(shifted_busy_replay(sends, |send| -send.err), shifted_busy_replay(sends, |send| send.err))",
+  "new": "{ let widest = sends.iter().map(|send| send.err).max().unwrap_or(0); (shifted_busy_replay(sends, |_| -widest), shifted_busy_replay(sends, |_| widest)) }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_busy_bounds_replay_each_stamp_at_its_own_error_so_a_stale_send_drops_out"
+ },
+ {
+  "id": "C7-260",
+  "name": "the power scan ignores its threshold (bt2 F4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "if power >= ctl.tp {",
+  "new": "if power >= 0.0 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_quiet_threshold_both_sides"
+ },
+ {
+  "id": "C7-261",
+  "name": "the verdict's heard column never runs the power scan (bt2 F4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if leak.is_none() {",
+  "new": "if false {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_verdict_fails_off_lattice_pn_radiated_in_the_gap_at_the_hardware_period"
+ },
+ {
+  "id": "C7-262",
+  "name": "the verdict's UNSETTLED(m-1) exit scans no gap (bt2 F4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "final_start.is_none() && m >= 2",
+  "new": "final_start.is_none() && false",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_verdict_fails_an_intermediate_part_that_radiated_before_an_unsettled_end"
+ },
+ {
+  "id": "C7-263",
+  "name": "the verdict's UNSETTLED(m) exit scans no gap (bt2 F4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "final_start.is_some_and(|start| !heard_final && drop_after(e, start.at))",
+  "new": "final_start.is_some_and(|start| false && !heard_final && drop_after(e, start.at))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_verdict_fails_a_gap_leak_before_a_silent_dropped_again_final_start"
+ },
+ {
+  "id": "C7-264",
+  "name": "the storm never runs the power scan (bt2 F4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "match c7_rf::quiet(&e.capture, &control, from, scheduled_end) {",
+  "new": "match Ok::<Option<(i64, f64)>, String>(None) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_storm_fails_off_lattice_pn_radiated_after_the_first_drop_at_the_hardware_period"
+ },
+ {
+  "id": "C7-270",
+  "name": "the storm never reports a capture shorter than the scheduled samples (bt2 F5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "e.capture.end() < scheduled_end",
+  "new": "e.capture.end() < 0",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_storm_inconclusive_a_capture_shorter_than_scheduled"
+ },
+ {
+  "id": "C7-271",
+  "name": "the storm's scheduled end loses its one-sample allowance (bt2 F5)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "e.capture.start() + (e.scheduled_samples - 1) * e.capture.per",
+  "new": "e.capture.start() + e.scheduled_samples * e.capture.per",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_storm_a_capture_one_sample_short_is_complete_and_two_short_is_not"
+ },
+ {
+  "id": "C7-272",
+  "name": "the storm's verdict reads the expected bound from the Manifest it checks (bt2 F6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "e.bound != DEFAULT_BOUND || e.rows_kept != DEFAULT_BOUND || e.omitted_resumes != e.stats_resumes - DEFAULT_BOUND as i64",
+  "new": "e.bound != e.bound || e.rows_kept != e.bound || e.omitted_resumes != e.stats_resumes - e.bound as i64",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_storm_fail_a_manifest_declaring_another_bound_is_not_clean"
+ },
+ {
+  "id": "C7-273",
+  "name": "the storm's booked samples are its capture's milliseconds (bt2 F6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "scheduled_samples: (rate * storm.capture_ms as f64 / 1_000.0) as i64,",
+  "new": "scheduled_samples: storm.capture_ms,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_drop_storm_at_the_default_bound_keeps_going_and_counts_exactly"
+ },
+ {
+  "id": "C7-274",
+  "name": "the kept rows may lie past their paired Start (bt2 F6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "if row > start {",
+  "new": "if row < start {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_kept_rows_are_the_first_rows"
+ },
+ {
+  "id": "C7-275",
+  "name": "the storm's verdict never checks that the kept rows are the first (bt2 F6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "kept_rows_are_the_first(&e.row_ticks, &e.start_ticks)",
+  "new": "kept_rows_are_the_first(&[], &[])",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_storm_fail_substituted_kept_row"
+ },
+ {
+  "id": "C7-280",
+  "name": "the trial line prints the last row's margin where the first belongs (bt2 F7)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "number(datum.first_r_minus_busy_us())",
+  "new": "number(datum.row_data.last().and_then(|row| row.expectation.as_ref()).map(|row| row.r_minus_busy_us))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_trial_line_prints_the_first_rows_margin_on_every_trial"
+ },
+ {
+  "id": "C7-282",
+  "name": "the first TimeError ignores the first resume bound (bt2 F9)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "before.is_none_or(|limit| *tick < limit)",
+  "new": "before.is_none_or(|_| true)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_first_time_error_is_the_one_before_the_first_resume_point"
+ },
+ {
+  "id": "C7-283",
+  "name": "the first TimeError's bound is inclusive (bt2 F9)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_cells.rs",
+  "old": "*tick < limit",
+  "new": "*tick <= limit",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_first_time_error_is_the_one_before_the_first_resume_point"
+ },
+ {
+  "id": "C7-290",
+  "name": "the read half width counts a read that completed after the send returned (bt2 fix round 2, item 1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "*exit > opened && *exit <= returned_ns",
+  "new": "*exit > opened && *exit <= returned_ns + WIDEST_READ_NS",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_module_read_half_width_is_the_widest_read_in_the_window_before_the_return"
+ },
+ {
+  "id": "C7-291",
+  "name": "the read half width leaves out the read in effect when the window opened (bt2 fix round 2, item 1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "in_effect.into_iter().chain(inside)",
+  "new": "inside",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_module_read_half_width_is_the_widest_read_in_the_window_before_the_return"
+ },
+ {
+  "id": "C7-292",
+  "name": "the read window is empty, so a wide read a narrow one replaced no longer bounds the stamp (bt2 fix round 2, item 1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "let opened = returned_ns.saturating_sub(WIDEST_READ_NS);",
+  "new": "let opened = returned_ns;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_module_read_half_width_is_the_widest_read_in_the_window_before_the_return"
+ },
+ {
+  "id": "C7-293",
+  "name": "the Authority's bracket is the probe's inner call, not the whole call: entry (bt2 fix round 2, item 1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "let entered = row[\"host_entered_ns\"].as_u64()?;",
+  "new": "let entered = row[\"host_before_ns\"].as_u64()?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_module_read_half_width_is_the_widest_read_in_the_window_before_the_return"
+ },
+ {
+  "id": "C7-294",
+  "name": "the Authority's bracket is the probe's inner call, not the whole call: exit (bt2 fix round 2, item 1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "let exit = row[\"host_exit_ns\"].as_u64()?;",
+  "new": "let exit = row[\"host_after_ns\"].as_u64()?;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_module_read_half_width_is_the_widest_read_in_the_window_before_the_return"
+ },
+ {
+  "id": "C7-295",
+  "name": "the per-send stamp error leaves out the Module's read half width of the send's return (bt2 fix round 2, item 1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "read_half: read_half_ticks(&reads, returned_ns),",
+  "new": "read_half: 0,",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_r_interval_bounds_the_stamps_that_set_busy_not_the_read_at_the_decision"
+ },
+ {
+  "id": "C7-296",
+  "name": "the probe's Module clock-read row carries no whole-call stamps (bt2 fix round 2, item 1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+  "old": "if let Some(entered) = entered {",
+  "new": "if let Some(entered) = None::<u64> {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "probe_a_modules_clock_read_row_carries_the_stamps_of_the_whole_call_around_the_inner_ones"
+ },
+ {
+  "id": "C7-297",
+  "name": "the storm's kept rows are not judged against their own rule range (bt2 fix round 2, item 3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "if let Some((index, text)) = e.row_checks.iter().enumerate().find_map(|(index, check)| check.as_ref().err().map(|text| (index, text))) {",
+  "new": "if let Some((index, text)) = None::<(usize, &String)> {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_storm_fail_a_kept_row_off_its_own_rule_range"
+ },
+ {
+  "id": "C7-298",
+  "name": "a kept storm row whose own incident lacks the data is not INCONCLUSIVE (bt2 fix round 2, item 3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "if let Some(first) = ambiguous.first() {",
+  "new": "if let Some(first) = ambiguous.first().filter(|_| false) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_storm_inconclusive_a_kept_row_whose_incident_lacks_the_data_the_rule_needs"
+ },
+ {
+  "id": "C7-299",
+  "name": "the storm checks its rows with a zero margin, not the default (bt2 fix round 2, item 3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "storm.checks(&resumes, c7::DEFAULT_MARGIN_NS)",
+  "new": "storm.checks(&resumes, 0)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_drop_storm_at_the_default_bound_keeps_going_and_counts_exactly"
+ },
+ {
+  "id": "C7-300",
+  "name": "the storm's row check accepts any R (bt2 fix round 2, item 3)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "r_check(&terms, row.resumes_at, lattice.origin, self.period)",
+  "new": "Ok(())",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_a_drop_storm_at_the_default_bound_keeps_going_and_counts_exactly"
+ },
+ {
+  "id": "C7-301",
+  "name": "the trial verdict ignores a capture link drop (bt2 fix round 2, item 4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "if e.link_drops > 0 {",
+  "new": "if e.link_drops > 1_000_000 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_inconclusive_the_capture_link_dropped_blocks"
+ },
+ {
+  "id": "C7-302",
+  "name": "the storm verdict ignores a capture link drop (bt2 fix round 2, item 4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "if e.link_drops > 0 {",
+  "new": "if e.link_drops > 1_000_000 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_storm_inconclusive_the_capture_link_dropped_blocks"
+ },
+ {
+  "id": "C7-303",
+  "name": "the Manifest's link drops are counted as one per link (bt2 fix round 2, item 4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_verdict.rs",
+  "old": "manifest.links.iter().map(|link| link.drops.unwrap_or(0)).sum()",
+  "new": "manifest.links.iter().map(|link| link.drops.unwrap_or(0)).count() as u64",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_oracle_and_the_rf_scan_follow_the_first_accepted_start_when_the_booking_was_moved"
+ },
+ {
+  "id": "C7-304",
+  "name": "the C7 capture link keeps the shared profile's 64 blocks (bt2 fix round 2, item 4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "pub const CAPTURE_LINK_CAPACITY: u64 = 1_024;",
+  "new": "pub const CAPTURE_LINK_CAPACITY: u64 = 64;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_capture_link_holds_a_200_ms_stall_at_10_msps_and_the_c7_session_applies_it"
+ },
+ {
+  "id": "C7-305",
+  "name": "a C7 Session leaves the capture link at the shared profile's capacity (bt2 fix round 2, item 4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "feed[\"capacity\"] = serde_json::json!(CAPTURE_LINK_CAPACITY);",
+  "new": "feed[\"capacity\"] = serde_json::json!(64);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_the_capture_link_holds_a_200_ms_stall_at_10_msps_and_the_c7_session_applies_it"
+ },
+ {
+  "id": "C7-306",
+  "name": "the storm's continuity is checked from the held Start, not from the capture's first sample (bt2 fix round 2, item 6)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_storm.rs",
+  "old": "e.capture.covers(e.capture.start(), scheduled_end)",
+  "new": "e.capture.covers(e.held_first_at.unwrap_or(0), scheduled_end)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_storm_inconclusive_a_hole_between_the_control_and_the_held_start"
+ },
+ {
+  "id": "C7-307",
+  "name": "a silent first period still needs the 19 steady periods (bt2 fix round 2, item 7)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "for p in 1..=if w0_heard { 19 } else { 9 } {",
+  "new": "for p in 1..=19 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_read_part_a_silent_part_with_its_ten_promised_periods_is_read_not_a_coverage_error"
+ },
+ {
+  "id": "C7-310",
+  "name": "a silent final part still needs 19 steady periods at the verdict (bt2 fix round 2, item 7)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "for p in 1..=if w0_heard { 19 } else { 9 } {",
+  "new": "for p in 1..=19 {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_verdict_a_silent_final_part_is_judged_on_its_ten_promised_periods"
+ },
+ {
+  "id": "C7-308",
+  "name": "the power threshold is a tenth of the steady power only, the noise-floor term left out (bt2 fix round 2, item 8, N4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "let tp = (4.0 * p_q).max(0.1 * p_c);",
+  "new": "let tp = 0.1 * p_c;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_the_noise_floor_term_of_the_power_threshold_binds_over_a_tenth_of_the_steady_power"
+ },
+ {
+  "id": "C7-309",
+  "name": "the power threshold is four times the noise floor only, the steady-power term left out (bt2 fix round 2, item 8, N4)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7_rf.rs",
+  "old": "let tp = (4.0 * p_q).max(0.1 * p_c);",
+  "new": "let tp = 4.0 * p_q;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rf_quiet_threshold_both_sides"
+ },
+ {
+  "id": "C7-313",
+  "name": "a C7 Session opens on the shared profile's capture link, not the raised one (bt2 fix round 3, item 2)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "let profile = &with_capture_capacity(profile);",
+  "new": "let profile = profile;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_rehearsal_no_hook_resumes_after_ten_milliseconds"
+ },
+ {
+  "id": "C7-311",
+  "name": "the off-rule distance of an R above the interval is measured from lo (bt2 fix round 3, item 1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "(resumes_at - terms.hi) / period",
+  "new": "(resumes_at - terms.lo) / period",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_an_unresolved_interval_refuses_a_lattice_point_outside_it"
+ },
+ {
+  "id": "C7-312",
+  "name": "the off-rule distance of an R below the interval is one point too far (bt2 fix round 3, item 1)",
+  "file": "crates/ezsdr-radio-uhd/tests/common/c7.rs",
+  "old": "(terms.lo - resumes_at) / period",
+  "new": "(terms.lo - resumes_at) / period + 1",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "c7_an_unresolved_interval_refuses_a_lattice_point_outside_it"
  }
 ]

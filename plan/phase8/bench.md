@@ -1569,7 +1569,7 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 
 ## 11-15 の後の手順（保守表 3：遅れた device burst の cell C1〜C7．**11-15 には流さない**）
 
-出典：保守表 3 の design（`~/.cache/ezsdr-fixes/2026-11-14-mt3/`：C1〜C6 は `fable-review.md` §2.4，C7 は `addendum.md` §2.4），owner の決定 O7（2026-11-14：bench は 11-15 の後．code は source で確かめた「遅れた device burst は device ごと捨てられる」規則で先に進める）．**道具は C1〜C6 が揃っている**（bench-tools の step `bt1`）：各 cell に `#[ignore]` の `hw_mt3_c*`（body は `tests/common/mt3.rs`・`mt3_cascade.rs`・`mt3_two.rs`・`mt3_tail.rs`），判定の純関数（手で組んだ evidence の単体 test つき），default の suite の FakeDevice の rehearsal（`mt3_c*_rehearsal_…`）．**C7 は bt2（Module 水準．production の hook が要る）で，まだ無い**：下の表の C7 は何を測るかの定義で，流す command も test の名前も無い．**結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．**
+出典：保守表 3 の design（`~/.cache/ezsdr-fixes/2026-11-14-mt3/`：C1〜C6 は `fable-review.md` §2.4，C7 は `addendum.md` §2.4），owner の決定 O7（2026-11-14：bench は 11-15 の後．code は source で確かめた「遅れた device burst は device ごと捨てられる」規則で先に進める）．**道具は C1〜C6 が揃っている**（bench-tools の step `bt1`）：各 cell に `#[ignore]` の `hw_mt3_c*`（body は `tests/common/mt3.rs`・`mt3_cascade.rs`・`mt3_two.rs`・`mt3_tail.rs`），判定の純関数（手で組んだ evidence の単体 test つき），default の suite の FakeDevice の rehearsal（`mt3_c*_rehearsal_…`），C7 は bt2（Module の水準：`UhdRadio::with_measurement_resume_margin`，`ProbeDevice` の hold，`tests/common/c7*.rs`）で揃った．**結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．**
 
 ### 問い（INFERRED のもの）
 
@@ -1581,12 +1581,12 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 | cell | 形 | 測ること | 道具 | TX |
 |---|---|---|---|---|
 | C1 | raw UHD．Module の chunk の形（`segment::send_cap`：1 MS/s で 2 500，10 MS/s で 20 000 sample）の時刻つき send × 8（最初に SOB，最後に EOB，各 send に最初の sample の時刻）．**前に on-time の control の burst**（同じ形，聞く）．late burst は最初の sample の時刻を host の基準の時刻の 1 ms 前にし，host はその基準の時刻以後に最初の chunk を送る（最初の send は少なくとも 1 ms 遅れる．最後の chunk が自分の時刻の 1 ms 以上前に渡されたことを判定が確かめる）．1・10 MS/s × 10 trial | chunk の形でも device burst ごと捨てられるか | `hw_mt3_c1_chunked_late_burst`（書いてある） | あり |
-| C2 | C1 の trial を 100・200 MS/s の送信で（**受信は 10 MS/s**，tone の窓と閾値は C1 のまま），late burst は 20 ms．#2 でも（200 MS/s では packet + 2 clock の間隔が残るか）．**100・200 MS/s の cell は bt2 へ延期（owner 2026-11-19：この rate では道具の前提を満たせない：`bench/2026-11-18-mt3/README.md`）：流さない**．1・10 MS/s は C1 で測定済み（2026-11-18） | rate と board | `hw_mt3_c2_chunked_late_burst_high_rates`（100・200 MS/s は延期：流さない） | あり |
+| C2 | C1 の trial を 100・200 MS/s の送信で（**受信は 10 MS/s**，tone の窓と閾値は C1 のまま），late burst は 20 ms．#2 でも（200 MS/s では packet + 2 clock の間隔が残るか）．**100・200 MS/s の cell は bt2 へ延期（orchestrator 2026-11-19：この rate では道具の前提を満たせない：`bench/2026-11-18-mt3/README.md`）：流さない**．高い rate の cell は次の bench に流さず，100・200 MS/s の late device burst の規則は INFERRED のままで，C7 が実機で測った後に見直す（C7 の `delta_first` は遅れでも上限でもない：最初の TimeError の tick と保持した send の戻りの符号つきの差で，データとして出し，どの class も使わない）．1・10 MS/s は C1 で測定済み（2026-11-18） | rate と board | `hw_mt3_c2_chunked_late_burst_high_rates`（100・200 MS/s は延期：流さない） | あり |
 | C3 | C1 の late burst の最初の send を 32 sample に（UR-22 の最小の最初の send），あとは Module の chunk で 20 ms．1・10 MS/s | DUC の出力 packet が短く始まるときの overhead（pad の `2 × packets`） | `hw_mt3_c3_short_first_send` | あり |
 | C4 | cascade：A（C1 の late burst の形，20 ms，1 ms 遅れ）の最初の TimeError の tick を t0 とし，B（時刻つき，1 chunk，SOB+EOB）を `t0 + S × per + δ` に置く．δ は固定の格子（粗：−20・−10・50・100 µs，細：0〜30 µs を 1 µs 刻み，fake の limit とその +20 µs），各 δ 10 trial．1・10 MS/s | drain の終わりの境界，fake の pad が覆うか（UR-33，M3） | `hw_mt3_c4_cascade_boundary` | あり |
 | C5 | 2 channel（slot A と B の 1 つの 2 channel streamer，受信も両方）で，開始が host の基準の時刻の ±数百 µs の burst | 片方の channel だけ鳴ることがあるか（RM-11 の「何も送られなかった」） | `hw_mt3_c5_two_channel_late_start`．**slot B にも送信する**：slot B の board と att を owner が確かめ，`EZSDR_SLOT_B_ATTENUATOR_CONFIRMED=1` を付けた 1 本だけ（11-15 の (4) と同じ規則．配線が無ければ `NOT RUNNABLE` で送信しない） | あり（slot A と B） |
 | C6 | 保持した尾の close を 1 ms 遅らせる（Module の close：尾と零の 2 sample，SOB なし EOB，尾の時刻）．1・10 MS/s | Underflow，その後 TimeError，ACK なしか（M2） | `hw_mt3_c6_held_tail_starves` | あり |
-| C7 | Module の水準（Session）で，`start_repeat` を開始で遅らせた場合と，途中で飢えさせた場合（`tests/fake.rs` の `Descheduled` を `UhdDevice` に）．m = 10・1・0.2 ms の掃引，1 cell ≥ 10 trial，**両 board** | [from, R) の無音，R で波形が位相連続で戻る，repeat は drop のたびに再開する（cap は無い）．開始で遅らせる cell は，どの part も late で落とされても repeat が何も送らずに再開し続ける（1 周期に `TIME_ERROR { late_at_device }` が 1 つ）ことの確認も兼ねる．τ（Module の道での host から radio への遅れ）を測るのは C7 だけ．そのあと owner が m を決める | **bt2，まだ無い**（production の hook が要る．repeat の再開の段階（段階 D）の後） | あり |
+| C7 | Module の水準（Session）で，`start_repeat` を開始で遅らせた場合と，途中で飢えさせた場合（`ProbeDevice` の hold で send を保持する）．m = 10・1・0.2 ms の掃引，1 cell ≥ 10 trial，**両 board** | [from, R) の無音，R で波形が位相連続で戻る，repeat は drop のたびに再開する（cap は無い）．開始で遅らせる cell は，どの part も late で落とされても repeat が何も送らずに再開し続ける（1 周期に `TIME_ERROR { late_at_device }` が 1 つ）ことの確認も兼ねる．PN の周期は 1 ms（`HW_PERIOD_US`：fake の 100 µs では R の oracle が lattice 1 点を見分けられない）．storm の events は resume の行の部分集合で resume の数以下（`⊆ rows ∧ ≤ resumes`；1 周期に 1 つではない）．host から radio への遅れ τ は測らない（`delta_first` は遅れでも上限でもない）；そのあと owner が m を決める | `hw_c7_late_start`・`hw_c7_starved`・`hw_c7_storm`（`tests/common/c7_cells.rs`・`c7_storm.rs` の body） | あり |
 
 ### C1 の流し方
 
@@ -1623,7 +1623,7 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
 
 ### C2 の流し方：C1 を 100・200 MS/s で（約 3 分 / 台，estimate．期限 15 分）
 
-- **100・200 MS/s の cell は bt2 へ延期（owner 2026-11-19）：この rate では道具の前提（最後の chunk が自分の時刻の 1 ms 以上前に渡されること）を満たせない（`bench/2026-11-18-mt3/README.md`：20/20 INCONCLUSIVE）．流さない**．以下は履歴として残す．1・10 MS/s は C1 で測定済み（2026-11-18）．
+- **100・200 MS/s の cell は bt2 へ延期（orchestrator 2026-11-19）：この rate では道具の前提（最後の chunk が自分の時刻の 1 ms 以上前に渡されること）を満たせない（`bench/2026-11-18-mt3/README.md`：20/20 INCONCLUSIVE）．流さない**．高い rate の cell は次の bench に流さず，100・200 MS/s の late device burst の規則は INFERRED のままで，C7 が実機で測った後に見直す（C7 の `delta_first` は遅れでも上限でもない：最初の TimeError の tick と保持した send の戻りの符号つきの差で，データとして出し，どの class も使わない）．以下は履歴として残す．1・10 MS/s は C1 で測定済み（2026-11-18）．
 
 - 送信 100・200 MS/s，**受信 10 MS/s**（`Device::apply` で別に設定する．tone の窓と閾値は C1 のまま：INFERRED．evidence は受信の間隔を送信と別に持つ）．late burst は 20 ms（100 MS/s で 2 000 000 sample = Module の chunk 20 000 × 100 send，200 MS/s で 4 000 000 sample × 200 send）．1 cell 10 trial．
 - **観測（判定の項ではない）**：late の TimeError の tick を全部，順に，隣との差，最頻の差，最頻の整数倍の差（欠けた report：FPGA の error FIFO は 32 entry で report を落としうる，R7）を出す：`MT3 C2 gaps <rate> MS/s trial <i>: …`．packet 長は UHD の streamer の値を Device が出さないので **INFERRED（最頻の差）**と明記される．late の report は burst の後にまとめて読むので，数千の report のうち古い tick が欠ける可能性がある（UHD 4.10 の送信の async queue は `boost::lockfree::queue` を 1 000 で作る：`rfnoc_tx_streamer.cpp:18,28`．容量は初期の node の数で，満杯で捨てるとは読めない：boost の仕様からの INFERRED）．判定には影響しない（新しい report だけを使う）．読むこと：200 MS/s でも差が packet + 2 clock のままか（Fable §2.1）．
@@ -1701,14 +1701,108 @@ while read -r i affinity; do echo "$affinity" | sudo tee /proc/irq/$i/smp_affini
   grep -h 'VERDICT\|MT3 C6\|MT3 rates\|EZSDR-INFRA' ~/.cache/ezsdr-bench/$(date +%F)/hw_mt3_c6_held_tail_starves.$BOARD.log
   ```
 
-### C7：bt2，まだ無い
+### C7 の流し方：repeat の再開（Module の水準）（各 hw 試験 15 分以内，storm は 5 分以内）
 
-Module の水準で repeat の再開に m の掃引を入れる cell．production の hook が要るので bt2 で書く．道具が揃うまで流さない．
+- **測ること**：
+  - UR-22：repeat は，`busy + m`・決定の時刻 + lead・device の front のうち最も遅いもの以後の最初の格子点 R で再開する．
+  - 遅い開始（mode (a)，`hw_c7_late_start`）：device burst の最初の send が device の開始の後に着き，device が burst ごと捨て，repeat が R で再開する．最初の出来事で Module が書く cause は `expired` か `late_at_device` のどちらでもよい（device の報告は `late_at_device`，Module の row は `expired`）：どちらも late start の証拠で，TimeError の report が無くても失敗にしない（report は data として出す）．
+  - 飢え（mode (b)，`hw_c7_starved`）：repeat の途中の send を 40 ms 保持する．**storm（`hw_c7_storm`）**：1 MS/s で 20 s（`c7_cells::STORM_MS`．60 s は probe の 65 536 行の記録を溢れる），毎周期 Start を 12 ms 保持する（記録の上限は既定の 1 000 行）．
+  - **PN の周期は 1 ms**（1 MS/s で 1 000 sample，10 MS/s で 10 000．fake の rehearsal は 100 µs のまま）：R の oracle は，`busy` を決める各 send の stamp の誤差を send ごとに持つ：probe の最悪の bracket（6 回の anchor の read の最悪）＋ drift ＋ **その send の戻りの時点で Module の stamp を縛る `time_now` の幅の半分**（≤ 0.5 ms．幅は probe の `Device::time_now` 呼び出し全体の entry から exit まで（行の記録を含む．内側の `time_now` だけの幅ではない）．これは Authority の bracket の内側で最も近い境界で，同じではない．対象は，戻りの 1 ms 前に窓が開いた時点で有効だった read と，窓の中で終わった read のうち最も広いもの：Module の単調化（`last.fetch_max`）は，狭い read に置き換わった広い read の stamp を，その半幅だけ先に保つ．戻りより後に終わった read は使わない．INFERRED：戻りから Module の stamp までの間に着く read は，この遅れの項にも入らない．残りは thread が止まる窓だけで，起きても correct な Module に `ResumeOffRule` が出るだけで，偽の CLEAN にはならない）＋ probe の stamp から Module の `Core::now()` までの遅れ（次の send の entry まで，最後の send は決定の時刻まで．INFERRED：同じ thread で `note_sent` が次の send より前）．`busy` を各 stamp の下限と上限で 2 回 replay して R の許される範囲 `[lo, hi]` を作り（stale な send は `first` が支配するので幅に入らない），上下の `busy` の幅が 1 周期を超える row は `R unresolved` として data を出し，R が `[lo, hi]` の中の格子点ならどれも通し，外の格子点は `ResumeOffRule`（どの点が規則の点かは決めないが，範囲の外は常に失敗）．**再実行の規則**：`ResumeOffRule` の trial の R が `[lo, hi]` のちょうど 1 格子点外（FAIL の文の `1 lattice point(s) outside`）なら 1 回だけ再実行し，clean ならその cell は「one ResumeOffRule at the lattice edge, rerun clean」と記録して FAIL にしない（2 点以上外，または再実行も失敗は FAIL）．1 回目の incident の R は tight でも，stamp が散る後の retry の row は `R unresolved` になりうる（初回の bench で見る）．
+  - **観測の窓**：trial は，control の Start を除いた受理された Start のうち**最初の 9 個**（最初の Start，resume，7 回の retry）の最新の `at` の 30 ms 後に止まる（deadline は c0 + 300 ms）：retry の Start が late に遅れて来ても，その part の 20 周期（1 ms の PN で 20 ms）が窓に入る．9 個を超えて落とされ続ける chain は，窓がそれ以上伸びず，UNSETTLED の data になる（窓が全部の Start を追うと Module の 1 000 行の記録を溢れる：fake の rehearsal で測定）．
+  - **lattice の原点は最初に受理された Start**：booking の start は UHD の `SendAsapAndFlag` で動くことがあり，Module は動いた booking の lattice で R を丸める．oracle・RF の走査・`LatticeOff` は，control の後の最初の受理された payload Start を原点にする．booking との差は `C7 trial` の `start_moved_samples=<n>`（観測 − booking，sample）で出る（0 でなければ data）．
+  - **所要時間（INFERRED，初回の bench で測る）**：`hw_c7_late_start`・`hw_c7_starved` は 1 board あたり各 6〜9 分（100 trial × 数秒），`hw_c7_storm` は約 30 秒（20 s ＋ 準備）．どれも 15 分（storm は 5 分）の期限より下．超えたら report して止め，cell を減らす提案を orchestrator へ．
+  - **SNR（INFERRED）**：雑音は 1 MS/s の記録から 1 sample 当たり 7e-9．PN の gain の雑音は n = 100 で 1.7e-5，n = 1 000 で 5.3e-6，n = 10 000 で 1.7e-6 に下がる（loop gain 0.002〜0.015 で SNR は n = 1 000 で約 380〜2 800，n = 10 000 で約 1 200〜8 800）．閾値は control の gain の 0.05 倍で相対的なので，`g_c1_over_t` は約 20（棄却の目安は 4）のまま．
+  - **無音の確認は 2 本**：(1) lattice に揃えた相関（`silence`）：位相の揃わない窓の相関は約 1/√n（n = 1 000 で 0.03，10 000 で 0.01）で閾値 0.05 を下回るため，窓は repeat の lattice に揃え（`silence` の `lattice_tick`），guard は 200 µs．(2) **位相に依らない power の確認（`quiet`）**：guard の後の n/4 sample の窓の平均 power が control から読む閾値 `max(4 × quiet floor の power, 0.1 × control の steady power)` 以上なら RF（PN が lattice の 1/4 周期ずれていても聞こえる．閾値は INFERRED：burst の端の過渡）．どちらかが先に見つけた RF が漏れで，`SilenceViolated`（power の漏れの文は power と閾値を出す）．窓が 1 つも置けない region は silence ではなく INCONCLUSIVE．無音を確かめる区間は：RETRIED／CLEAN の列は最初の drop から最後の Start まで，UNSETTLED の 2 つの出口（最後の resume の後に Start が無い m ≥ 2，または最後の Start が静かで再び drop された場合．どちらも tail < 5 ms）は最初の drop から Run の stop まで；NoResume・LateRestart・INCONCLUSIVE の出口は見ない（後で鳴るのが正しいため）．
+
+- **格子**：m = 10・1・0.2 ms × 1・10 MS/s．trial は 10・20・20 / cell（m = 10 が 10，m = 1 と 0.2 が 20），1 mode 6 cell（2 rate × 3 m）．slot A だけ（channel 0），1 GHz，0 dB．loopback は「slot A の TX/RX → ≥30 dB の att → 同じ board の RX2」．送信は QPSK PN（peak 0.495．帯域は 1 MS/s で ±0.5 MHz，10 MS/s で ±5 MHz に収まるはず：INFERRED）．**owner が loopback の att と PN の帯域（±0.5 / ±5 MHz）を確かめてから送信する**（毎回，台ごと）．
+
+- **command**（C6 と同じ形．`hw` は「`<DATE>` の手順（note 47 段階 5 の後）」の「共通の準備」の定義で，C3・C4・C6 と同じもの．**この shell で定義し直さない**．期限は試験ごと（15 分・15 分・5 分．過ぎると `EZSDR-INFRA:` の行を書いて abort する：hang の印で，電源を入れ直して owner へ）．
+
+  **送信する block は 6 つで，どれも送信は 1 invocation だけ**．各 block の直前に，その board の att と PN の確認を置く．owner がその board の確認をしてから，その block 1 つだけを貼る（block の最初の `#` の行は確認の印で，貼っても実行されない）．1 つの block に複数の送信を入れない（確認が最初の 1 本にしか効かず，失敗した `hw` の後も次が走るため）．
+
+  **#1 OBX（BOARD=36）の `hw_c7_late_start`（期限 15 分）**：owner が #1 OBX の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2 の loopback と，PN の帯域（1 MS/s で ±0.5 MHz，10 MS/s で ±5 MHz）を確かめた後に，次の 1 本だけ：
+
+  ```sh
+  # owner が #1 OBX（BOARD=36）の att（≥30 dB）と PN を確かめた後にだけ貼る．この block は送信が 1 本
+  export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_c7_late_start
+  ```
+
+  **#1 OBX（BOARD=36）の `hw_c7_starved`（期限 15 分）**：owner が #1 OBX の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2 の loopback と，PN の帯域（1 MS/s で ±0.5 MHz，10 MS/s で ±5 MHz）を確かめた後に，次の 1 本だけ：
+
+  ```sh
+  # owner が #1 OBX（BOARD=36）の att（≥30 dB）と PN を確かめた後にだけ貼る．この block は送信が 1 本
+  export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_c7_starved
+  ```
+
+  **#1 OBX（BOARD=36）の `hw_c7_storm`（期限 5 分）**：owner が #1 OBX の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2 の loopback と，PN の帯域（1 MS/s で ±0.5 MHz，10 MS/s で ±5 MHz）を確かめた後に，次の 1 本だけ：
+
+  ```sh
+  # owner が #1 OBX（BOARD=36）の att（≥30 dB）と PN を確かめた後にだけ貼る．この block は送信が 1 本
+  export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_c7_storm
+  ```
+
+  **#1 OBX（BOARD=36）の結果の抜粋**（送信しない．同じ試験を流し直した `.2.log`・`.3.log` があれば，一番新しい log を読む）：
+
+  ```sh
+  BOARD=36; d=~/.cache/ezsdr-bench/$(date +%F)
+  for t in hw_c7_late_start hw_c7_starved; do log=$(ls -t "$d"/$t.$BOARD*.log 2>/dev/null | head -1); [ -n "$log" ] && grep -h 'C7 cell\|VERDICT c7\|C7 trial\|C7 start\|C7 retry\|C7 r_unresolved\|EZSDR-INFRA' "$log"; done
+  log=$(ls -t "$d"/hw_c7_storm.$BOARD*.log 2>/dev/null | head -1); [ -n "$log" ] && grep -h 'C7 storm\|VERDICT c7\|EZSDR-INFRA' "$log"
+  ```
+
+  **#2 UBX（BOARD=37）の `hw_c7_late_start`（期限 15 分）**：owner が #2 UBX の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2 の loopback と，PN の帯域（1 MS/s で ±0.5 MHz，10 MS/s で ±5 MHz）を確かめた後に，次の 1 本だけ：
+
+  ```sh
+  # owner が #2 UBX（BOARD=37）の att（≥30 dB）と PN を確かめた後にだけ貼る．この block は送信が 1 本
+  export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_c7_late_start
+  ```
+
+  **#2 UBX（BOARD=37）の `hw_c7_starved`（期限 15 分）**：owner が #2 UBX の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2 の loopback と，PN の帯域（1 MS/s で ±0.5 MHz，10 MS/s で ±5 MHz）を確かめた後に，次の 1 本だけ：
+
+  ```sh
+  # owner が #2 UBX（BOARD=37）の att（≥30 dB）と PN を確かめた後にだけ貼る．この block は送信が 1 本
+  export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_c7_starved
+  ```
+
+  **#2 UBX（BOARD=37）の `hw_c7_storm`（期限 5 分）**：owner が #2 UBX の slot A の TX/RX → ≥30 dB の att → 同じ board の RX2 の loopback と，PN の帯域（1 MS/s で ±0.5 MHz，10 MS/s で ±5 MHz）を確かめた後に，次の 1 本だけ：
+
+  ```sh
+  # owner が #2 UBX（BOARD=37）の att（≥30 dB）と PN を確かめた後にだけ貼る．この block は送信が 1 本
+  export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_c7_storm
+  ```
+
+  **#2 UBX（BOARD=37）の結果の抜粋**（送信しない．同じ試験を流し直した `.2.log`・`.3.log` があれば，一番新しい log を読む）：
+
+  ```sh
+  BOARD=37; d=~/.cache/ezsdr-bench/$(date +%F)
+  for t in hw_c7_late_start hw_c7_starved; do log=$(ls -t "$d"/$t.$BOARD*.log 2>/dev/null | head -1); [ -n "$log" ] && grep -h 'C7 cell\|VERDICT c7\|C7 trial\|C7 start\|C7 retry\|C7 r_unresolved\|EZSDR-INFRA' "$log"; done
+  log=$(ls -t "$d"/hw_c7_storm.$BOARD*.log 2>/dev/null | head -1); [ -n "$log" ] && grep -h 'C7 storm\|VERDICT c7\|EZSDR-INFRA' "$log"
+  ```
+
+- **読み方（`C7 cell` の行）**：`C7 cell <board> <mode> <rate> pn=<µs>us m=<m>: n=… clean=… retried=… (retries total …; by r: …) unsettled=… inconclusive=… (<理由>: <数>) fail=… (<名前>: <数>); n1_full=…/n; m_bound=…/n; m_informative=…/n; allowed min/median/max=…; r_unresolved_rows=<行数> in <trial 数>/<n> trials; A_minus_Dbefore_us min/median/max over played starts=… (raw: reports may stop before the drain ends, F7); reports_after_a_played_start=…; r_minus_busy_us min/median/max=…（全 row を合わせる）; r_minus_busy_first_us min/median/max=…（最初の row だけ）; gap_us min/median/max=…; report_gap_us median=…; delta_first_us min/median/max=… (signed; no class uses it); phase_spread_deg=…`．trial の class は 5 つ（`c7_verdict::describe` の文）：
+  - `CLEAN`：drop の後に再開し，最後の part が格子の上で位相連続．
+  - `RETRIED(n): the repeat resumed after n retries; the last part is phase-continuous on the lattice (a datum, not a failure)`．
+  - `UNSETTLED(n): n dropped resumed part(s), nothing heard from a part by the end of the trial (a datum, not a failure)`．
+  - `INCONCLUSIVE: <理由を ; でつないだもの>`：読めない trial．capture の data link（Kernel の `drop_oldest`，C7 の Session では **1 024 block**：1 block は 2 000 sample で 10 MS/s なら 200 µs，200 ms 分．共有の profile の 64 block は 12.8 ms）が block を捨てた run は，Manifest の `links` の drop 数を読んで `the capture link dropped <n> blocks` を，穴の文のどれよりも前の理由として出す（負荷で capture の thread が止まったときの穴は，装置の隙間ではなくこれ）．メモリは最大 1 024 × 2 000 sample × 8 byte ≒ 16 MB．
+  - `FAIL: <失敗の文>`：cell の行が名前を数える（`Counters`・`EventWithoutRow`・`ResumeOffRule`・`LatticeOff`・`StartedEarly`・`SilenceViolated`・`PhaseDiscontinuous`・`LateRestart`・`NoResume`・`DroppedNeverResumed`）．
+- **RETRIED と UNSETTLED は test を失敗させない**；INCONCLUSIVE と FAIL は失敗させる（`hw` の exit 0 は全 cell が PASS のとき）．`VERDICT c7 <board> <mode> <rate> pn=<µs>us m=<m>` は，FAIL があれば `FAIL: <名前>: <数>`，無くて INCONCLUSIVE があれば `INCONCLUSIVE: <理由>: <数>`，どちらも無ければ `PASS (contract)`（RETRIED か UNSETTLED があれば `PASS (contract); retries in <n>/<n> trials, unsettled in <n>/<n> -- read the C7 retry lines`）．
+- **`C7 trial` の行**（1 trial に 1 行）：class と生の数（`rows=… retries=… n1=… n1_full=… m_bound=… m_informative=… allowed=… r_unresolved=… gap_us=… r_minus_busy_first_us=… delta_first_us=… (t1 = …, r1 = … +- <tick>) return_minus_at_us=… +- <µs> held_ns=… start_moved_samples=… g_c1_over_t=… phase_vs_control_deg=… phase_vs_prestall_deg=…`）．`C7 start` の行は最初の開始の後の受理された Start ごと（全部．`A`・`returned`・`played`・`D_before`・`D_after`・`A_minus_Dbefore_us`・`Dafter_minus_A_us`），`C7 retry` の行は 2 番目以後の resume row（＝ retry）ごと（全部．`cause`・`from`・`resumes_at`・`at`・`close_returned`・その row が retry した Start の `dropped_start_A`・`dropped_start_returned`・`dropped_start_held_ns`・`D_before`・`D_after`・`A_minus_Dbefore_us`・`Dafter_minus_A_us`・`r_minus_busy_us`・`m_bound`）．`r_minus_busy_first_us` は**最初の incident の R − busy（µs）**：1 ms の格子では [m, m + 1 ms) に散るので，m の cell の名目値ではなく，この値と trial の class（RETRIED かどうか）を並べて読む．R の oracle が 1 点に決められない row は `C7 r_unresolved <prefix> row=<k>: R_act=… interval=[lo, hi] allowed=<n> uncertainty_us=<U> period_us=<period>` の行で出る（区間の中の格子点はどれも通り，外は `ResumeOffRule`．`R unresolved` 自体は data で失敗ではない）．
+- **`delta_first_us`**：`t1 − r1`（µs，符号つき）で，`t1`（保持した send の時刻以後で，**最初の resume 点より前の**最初の `TimeError` の tick．最初の drop の report が無く retry の report だけがある trial は `-` で，後の incident の時刻を最初の incident に付けない）と `r1`（保持した呼び出しの戻りの tick）と，その `+-`（anchor の bracket．tick）とともに出る．どの class も読まない；遅れ（delivery delay）でも上限（bound）でもない．
+- **drain の距離**：`C7 start` の `A_minus_Dbefore_us` と `Dafter_minus_A_us` は，A の最も近い前後の async report までの生の距離（`raw distances: reports may stop before the drain ends, F7`）．report は drain の終わりより前に止まりうる；drain が明けたと言う行は無い（`c7_cells_no_line_says_a_drain_cleared`）．
+- **`r_minus_busy_us`・`gap_us`・`allowed`・`m_bound`・`m_informative`**：行ごとの R − busy（µs）（最初の row の値は `r_minus_busy_first_us` として trial の行に毎回出る）；最初の row の `from` から `resumes_at` までの gap（`gap_us`）；規則が許す格子点の数（`allowed`：`lo`〜`hi` の不確かさの間）；R が `busy + m` に縛られているか（`m_bound`：R − 決定の時刻が 1 周期以上）；m を lead と区別できるか（`m_informative`：最初の send が chunk いっぱい（`send_cap`）で，`m_bound`）．cell の行は trial の数と min/median/max で出す．
+- **INFERRED の前提は上限として出さない**：verdict が使う OPEN の閾値 5 ms（`c7_verdict::OPEN_NS`），PN の検出器の閾値，control から読む loopback の遅れ．データとして出るのは `g_c1_over_t`（control の最初の周期の gain ÷ 閾値）と `+-` の bracket で，`delta_first_us` も上限ではない．
+- **cell の retry の合計**は RETRIED と UNSETTLED の trial を合わせて数える（`retries total <r>; by r: <r>:<trial 数>`）．
+- **cross-burst の位相（INFERRED）**：part をまたぐ位相の基準は，同じ repeat の control の周期とする前提で，hardware で成り立つかは初回の bench で出る（`phase_vs_control_deg`・`phase_vs_prestall_deg` はデータ）．
+- **1 ms の格子では R − busy は [m, m + 1 ms) に散る**（R は `busy + m` 以後の最初の格子点）ので，m = 0.2 と 1 ms の cell は R − busy の分布が重なる；10 MS/s の m = 0.2 では `m_bound` はほとんど false（INFERRED：drain は 1 ms の格子より十分小さい）．**owner は m を，名目の cell だけでなく，trial ごとの `r_minus_busy_first_us`（最初の incident の実効の margin）と，その trial が retry したか（RETRIED／CLEAN）を並べて読む**（decisions の合意）．重なる cell は実効の margin で並べ直せる．
+- **m は owner が読む**：材料は trial ごとの実効の margin（`r_minus_busy_first_us`）に対する retry の率で，tool は retry を m に帰さない（`C7 retry` の行は cause と時刻を出すだけ）．
+
+- **storm の行**：`C7 storm <board>: resumes=… rows_kept=… omitted=… events=… held_starts=… probe_rows=<n> probe_dropped=<n> <class>`（`probe_rows` は 65 536 行の上限までの余裕を見るため；`probe_dropped` > 0 の run は INCONCLUSIVE）．記録の上限は tool が自分で持つ既定の 1 000 行（`c7_storm::DEFAULT_BOUND`：Manifest が宣言する `rows_per_kind` を信じない）：宣言された上限・`rows_kept`・`omitted` が 1 000・1 000・`resumes − 1 000` でなければ `BoundWrong`；残した行は**最初の行**でなければならない（残した行 i の resume 点が，control の後の受理された Start の i + 1 番目の Start 以前で，次の残した行の resume 点より前：満たさなければ `BoundWrong`）．**残した各行の R は，その行自身の incident の規則の範囲**（trial の row と同じ `expected_r` と `r_check`，その行の決定までの send から作る）**に入らなければならない**（外は `ResumeOffRule`）；その行の incident に規則が要るデータ（対になる close）が無い行は INCONCLUSIVE（順序だけでは通さない）．capture は予定の sample 数（`sink.capture_samples`，1 MS/s の 600 ms で 600 000）を，capture 自身の最初の sample から 1 本の連続した run で（1 sample の許容つき．control と最初の drop の間の穴も含む）持たなければならない：短い capture は INCONCLUSIVE（`the capture is shorter than the scheduled … samples`），穴は `hole in the capture`．最初の drop から予定の capture の終わりまで RF は無音で（鳴れば `StormRadiated`：lattice の相関と，位相に依らない power の確認の両方），保持した close は無い（`CloseHeld`）．残した行の最後の resume 点までの events は，残した行のどれかの resume 点でなければならない（`EventsOutsideRows`）；数は resume の数以下（`EventsExceedResumes`）．上限に届かない run は INCONCLUSIVE（`the storm did not reach the bound`）．`VERDICT c7 <board> storm` は `PASS (contract)`・`INCONCLUSIVE: <理由>`・`FAIL: <文>` のどれか．
+
+- **orchestrator に返すもの**：commit，各 log の path，**両 board の全 cell の `C7 cell` と `VERDICT c7` の行**，RETRIED・UNSETTLED・FAIL の trial の `C7 retry` と `C7 start` の行，storm の `C7 storm` の行，電源の入れ直しの有無，att の型番と PN の確認（owner の）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．stop の条件は「流した後・記録」の節と同じ（`EZSDR-INFRA`，`Control operation timed out`，`Reference Clock PLL failed to lock`，装置が応答しない）．
 
 ### 流した後・記録
 
 - stop：`EZSDR-INFRA`，`Control operation timed out`，`Reference Clock PLL failed to lock`，装置が応答しない → 電源を入れ直して owner へ．
-- orchestrator に返すもの：commit，各 log の path，`MT3 C1 cell` と `VERDICT mt3 c1` の行（2 台分），`MT3 C1 trace` の dump（`head`），C3〜C6 は各項の grep の行（C3 は `MT3 C* gaps` を全部，C4 は `MT3 C4 cell`・`MT3 C4 boundary`・`VERDICT mt3 c4`，C5 は `MT3 C5 reading` と marginal の行，C6 は `MT3 C6 trace`），電源の入れ直しの有無，att の型番（owner の確認）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．C3〜C6 は下の各項（C2・C7 は bt2 の後）．
+- orchestrator に返すもの：commit，各 log の path，`MT3 C1 cell` と `VERDICT mt3 c1` の行（2 台分），`MT3 C1 trace` の dump（`head`），C3〜C6 は各項の grep の行（C3 は `MT3 C* gaps` を全部，C4 は `MT3 C4 cell`・`MT3 C4 boundary`・`VERDICT mt3 c4`，C5 は `MT3 C5 reading` と marginal の行，C6 は `MT3 C6 trace`），電源の入れ直しの有無，att の型番（owner の確認）．raw の log は bench/ の規則（AGENTS §9）で private repo の release へ．C3〜C6 は下の各項（C2 は 100・200 MS/s を延期，C7 は上の節）．
 
 ## 受信 start lead だけの再測定（stage 4a の D：`hw_s5_rx_start_lead`．**送信なし・att 不要**．約 10〜15 分 / 台，estimate）
 

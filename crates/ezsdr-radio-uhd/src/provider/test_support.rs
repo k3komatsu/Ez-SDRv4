@@ -2,6 +2,7 @@
 use super::core::{Core, DEFAULT_RECORD_ROWS};
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, Iq, RxRecv, Settings, TxReport};
 use crate::host::{ClockMode, HostClock};
+use crate::profile::RESUME_MARGIN_NS;
 use ezsdr_kernel::event::{EventCollector, EventSink, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ResourceId;
@@ -56,6 +57,17 @@ pub(super) fn rig_on_inputs(
     rig_on_description(device, links, inputs, default_description(block_len))
 }
 
+/// `rig_on_inputs` with UR-22's resume margin `m` of `margin_ns` in place of the profile's.
+pub(super) fn rig_on_inputs_with_margin(
+    device: Arc<dyn Device>,
+    links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>,
+    block_len: u32,
+    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+    margin_ns: i64,
+) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+    rig_on_description_links_with_margin(device, vec![links], inputs, default_description(block_len), margin_ns)
+}
+
 pub(super) fn default_description(block_len: u32) -> ezsdr_radio::channels::Description {
     let selector = BTreeMap::from([
         (Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
@@ -82,6 +94,16 @@ pub(super) fn rig_on_description_links(
     inputs: BTreeMap<ContentHash, Arc<[u8]>>,
     description: ezsdr_radio::channels::Description,
 ) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+    rig_on_description_links_with_margin(device, links, inputs, description, RESUME_MARGIN_NS)
+}
+
+fn rig_on_description_links_with_margin(
+    device: Arc<dyn Device>,
+    links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>,
+    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+    description: ezsdr_radio::channels::Description,
+    margin_ns: i64,
+) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
     clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "uhd.test".to_owned() })).unwrap();
@@ -95,7 +117,7 @@ pub(super) fn rig_on_description_links(
         .flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k)))
         .collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
-    let core = core_on(device, clocks, time.clone(), events.clone(), inputs, links, description);
+    let core = core_on(device, clocks, time.clone(), events.clone(), inputs, links, description, margin_ns);
     (core, time, events)
 }
 
@@ -114,6 +136,7 @@ pub(super) fn rig_with_links_on(
 }
 
 /// The rig's `Core` on `sink`.
+#[allow(clippy::too_many_arguments)]
 fn core_on(
     device: Arc<dyn Device>,
     clocks: Arc<ClockRegistry>,
@@ -122,10 +145,12 @@ fn core_on(
     inputs: BTreeMap<ContentHash, Arc<[u8]>>,
     links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>,
     description: ezsdr_radio::channels::Description,
+    margin_ns: i64,
 ) -> Arc<Core> {
     let root = time.primary_root();
     Arc::new(
-        Core::new(device, ResourceId::parse("usrp").unwrap(), root, time, clocks, events, Arc::new(inputs), links, description, DEFAULT_RECORD_ROWS).expect("the rx node is inside the instance root"),
+        Core::new(device, ResourceId::parse("usrp").unwrap(), root, time, clocks, events, Arc::new(inputs), links, description, DEFAULT_RECORD_ROWS, margin_ns)
+            .expect("the rx node is inside the instance root"),
     )
 }
 

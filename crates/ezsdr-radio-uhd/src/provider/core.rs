@@ -815,6 +815,8 @@ pub(crate) struct Core {
     pub description: ezsdr_radio::channels::Description,
     pub block_len: usize,
     pub rec: Mutex<Records>,
+    /// UR-22's `m` in nanoseconds: the profile's 10 ms unless a measurement Run replaced it (`UhdRadio::with_measurement_resume_margin`).
+    resume_margin_ns: i64,
     pub streams: Mutex<Streams>,
     /// UR-13's rate-set comparison, once per direction: `None` until the direction's
     /// first streamer opened, then the check's outcome (design 33 D5).
@@ -872,6 +874,7 @@ impl Core {
         mut links: Vec<Vec<Arc<dyn DataLink>>>,
         description: ezsdr_radio::channels::Description,
         record_rows: usize,
+        resume_margin_ns: i64,
     ) -> Result<Core, ModuleError> {
         #[cfg(test)]
         let rx_id = description.stream_node(&id, Dir::Rx, 0);
@@ -915,6 +918,7 @@ impl Core {
             links,
             description,
             rec: Mutex::new(Records::with_limit(record_rows)),
+            resume_margin_ns,
             streams: Mutex::new(Streams::with_streams(rx_count, tx_count)),
             rates: Mutex::new([None, None]),
             start_up: AtomicI64::new(i64::MIN),
@@ -987,6 +991,11 @@ impl Core {
     /// RM-14, RM-15: the device lead in root ticks, the one value a booking's decision instant and its join deadline both read.
     pub fn device_lead(&self) -> i64 {
         self.ticks(DEVICE_LEAD_NS)
+    }
+
+    /// UR-22: the margin `m` a repeat's resume point adds to `busy`, in root ticks.
+    pub fn resume_margin(&self) -> i64 {
+        self.ticks(self.resume_margin_ns)
     }
 
     pub fn at(&self, ticks: i64) -> TimePoint {

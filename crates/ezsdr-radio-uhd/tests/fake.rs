@@ -2698,6 +2698,683 @@ fn ur_22_a_late_send_asap_repeat_resumes() {
     assert!(std::panic::catch_unwind(|| require_stream_timing(&eventless, "a resumed repeat whose events were lost", true)).is_err());
 }
 
+/// A C7 trial (`common::c7::trial`) on a manual-clock fake behind a `ProbeDevice`: one Session through the real Module. The capture's directory comes back with
+/// the trial: what reads the capture (the verdict) runs after the Session, and the directory removes the capture when it drops.
+fn c7_trial_with(mode: common::c7::Mode, rate: f64, margin_ns: Option<i64>, stall: common::c7::Stall, lead_us: Option<i64>) -> (common::c7::Trial, TempDir) {
+    let dir = TempDir::new();
+    let probe = Arc::new(probe_device::ProbeDevice::new(Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }))));
+    let trial =
+        common::c7::trial(&profile(&dir, json!({}), json!({}), true), probe, common::c7::Cell { mode, rate, period_us: common::c7::FAKE_PERIOD_US, margin_ns, stall, lead_us, retry_hold: None });
+    (trial, dir)
+}
+
+fn c7_trial(mode: common::c7::Mode, rate: f64, margin_ns: Option<i64>, stall: common::c7::Stall) -> (common::c7::Trial, TempDir) {
+    c7_trial_period(mode, rate, common::c7::FAKE_PERIOD_US, margin_ns, stall)
+}
+
+/// `c7_trial` at another PN period: the hardware period's rehearsals run at `HW_PERIOD_US`.
+fn c7_trial_period(mode: common::c7::Mode, rate: f64, period_us: i64, margin_ns: Option<i64>, stall: common::c7::Stall) -> (common::c7::Trial, TempDir) {
+    let dir = TempDir::new();
+    let probe = Arc::new(probe_device::ProbeDevice::new(Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }))));
+    let trial = common::c7::trial(&profile(&dir, json!({}), json!({}), true), probe, common::c7::Cell { mode, rate, period_us, margin_ns, stall, lead_us: None, retry_hold: None });
+    (trial, dir)
+}
+
+/// The nominal stall of a bench cell: the held send stays in its call 40 ms.
+fn c7_nominal() -> common::c7::Stall {
+    common::c7::Stall::For(Wall::from_millis(40))
+}
+
+/// What every C7 Session must show whatever its cell: at least one `tx_resume` row, each the rule's (`Trial::check`) with the test's margin `m`, the Module's counters
+/// equal to the rows, and the capture written. Returns the rows.
+fn c7_rows_follow_the_rule(trial: &common::c7::Trial, margin_ns: i64, what: &str) -> Vec<common::c7::Resume> {
+    assert!(trial.incomplete.is_empty(), "{what}: the trial is complete: {:?}", trial.incomplete);
+    assert!(trial.armed_closes >= 1, "{what}: the control's close is armed: {}", trial.armed_closes);
+    let booking = trial.booking.as_ref().unwrap_or_else(|| panic!("{what}: the cell's repeat was booked"));
+    assert!(matches!(booking.outcome, Outcome::Admitted { .. }), "{what}: the cell's booking was admitted: {booking:?}");
+    let rows = trial.resumes();
+    assert!(!rows.is_empty(), "{what}: the drop resumes the repeat: {:?}", trial.reports());
+    for (index, row) in rows.iter().enumerate() {
+        trial.check(index, row, margin_ns).unwrap_or_else(|why| panic!("{what}: {why}"));
+    }
+    let stats = section(&trial.manifest, "stats");
+    assert_eq!(stats["tx_resumes"].as_i64(), Some(rows.len() as i64), "{what}");
+    assert_eq!(stats["tx_gap_samples"].as_i64(), Some(rows.iter().map(|row| row.resumes_at - row.from).sum()), "{what}");
+    capture_of(&trial.manifest, "rec");
+    rows
+}
+
+#[test]
+fn c7_rehearsal_no_hook_resumes_after_ten_milliseconds() {
+    // UR-22 (bt2 S1a): with no hook the margin is 10 ms: the Session's own R is the rule's with a literal 10 ms over the Session's own sends, and the Manifest says nothing of a margin.
+    let (trial, _dir) = c7_trial(common::c7::Mode::LateStart, 1e6, None, c7_nominal());
+    c7_rows_follow_the_rule(&trial, 10_000_000, "no hook");
+    assert_eq!(trial.margin_rows(), Vec::<i64>::new(), "an instance no builder touched records no margin");
+    // bt2 fix round 3: the Session's compiled plan carries the capture link at the C7 capacity, not the shared profile's 64 blocks.
+    let links = &trial.manifest.plan.as_ref().expect("a plan").links;
+    assert_eq!(links.iter().map(|link| link.capacity).collect::<Vec<_>>(), vec![common::c7::CAPTURE_LINK_CAPACITY as u32], "no hook: the capture link: {links:?}");
+    assert!(trial.incomplete.is_empty(), "no hook: {:?}", trial.incomplete);
+    assert!(trial.rows_complete.is_ok(), "no hook: {:?}", trial.rows_complete);
+    assert_eq!(trial.armed_closes, 1, "no hook: the control's close is the one armed close");
+    assert!(trial.control.is_some(), "no hook: the control's start is in the probe");
+    assert!(trial.stop_tick > trial.c0, "no hook: the final Stop follows the capture's first sample");
+}
+
+#[test]
+fn c7_rehearsal_a_trial_without_its_capture_or_sections_is_inconclusive() {
+    // B3's verdict reads a trial whose capture or Manifest sections are missing as INCONCLUSIVE with its reasons, not as a panic that ends the bench grid.
+    let (mut trial, _dir) = c7_trial(common::c7::Mode::LateStart, 1e6, Some(10_000_000), c7_nominal());
+    trial.common.manifest.artifacts.clear();
+    trial.common.manifest.sections.retain(|section| section.name.as_str() != "ezsdr.radio.uhd.timing");
+    let reasons = common::c7_verdict::missing_evidence(&trial.common.manifest, &["timing", "stats"]);
+    assert_eq!(reasons, ["no capture artifact `rec` in the Manifest".to_owned(), "no `timing` section in the Manifest".to_owned()], "{reasons:?}");
+    let e = common::c7_verdict::evidence(&trial, true);
+    for reason in ["no capture artifact `rec` in the Manifest", "no `timing` section in the Manifest"] {
+        assert!(e.incomplete.iter().any(|incomplete| incomplete == reason), "{reason}: {:?}", e.incomplete);
+    }
+    match common::c7_verdict::verdict(&e) {
+        common::c7_verdict::Class::Inconclusive(reasons) => {
+            for reason in ["no capture artifact `rec` in the Manifest", "no `timing` section in the Manifest"] {
+                assert!(reasons.iter().any(|inconclusive| inconclusive == reason), "{reason}: {reasons:?}");
+            }
+        }
+        other => panic!("{}", common::c7_verdict::describe(&other)),
+    }
+}
+
+#[test]
+fn c7_rehearsal_the_hook_sets_what_the_run_reads() {
+    // UR-22 (bt2 S1b'): the builder's value is the margin the Run uses, exactly (the builder to the Module's rule, through `prepare` and the transmit owner), at the
+    // three bench margins: the Session's R is the rule's with that margin, and not the rule's with either of the others (a builder that clamps 0.2 ms to 1 ms, or
+    // stores nothing, fails here); the Manifest records the margin the builder set.
+    let margins = [10_000_000, 1_000_000, 200_000];
+    for margin in margins {
+        let (trial, _dir) = c7_trial(common::c7::Mode::LateStart, 1e6, Some(margin), c7_nominal());
+        let rows = c7_rows_follow_the_rule(&trial, margin, &format!("m {margin}"));
+        for other in margins.into_iter().filter(|other| *other != margin) {
+            assert!(trial.check(0, &rows[0], other).is_err(), "m {margin}: the first R is not the rule's with {other}");
+        }
+        assert_eq!(trial.margin_rows(), [margin], "the Manifest records the margin the builder set");
+    }
+}
+
+#[test]
+fn c7_rehearsal_a_default_run_after_a_custom_margin_run_uses_ten_milliseconds() {
+    // UR-22 (bt2 S1e): a margin set on one instance reaches no other: a plain Run before and after a 1 ms Run follows the 10 ms rule and records no margin.
+    for margin in [None, Some(1_000_000), None] {
+        let (trial, _dir) = c7_trial(common::c7::Mode::LateStart, 1e6, margin, c7_nominal());
+        c7_rows_follow_the_rule(&trial, margin.unwrap_or(10_000_000), &format!("{margin:?}"));
+        assert_eq!(trial.margin_rows(), margin.into_iter().collect::<Vec<_>>());
+    }
+}
+
+/// UR-22 (bt2): the stall the hardware cells use (the held send stays in its call 40 ms, whatever instant it was handed over) in one mode at one rate: the held send is the one the mode
+/// names, the first R follows the rule over the Session's own sends, and the cause is the mode's (a late start: `late_at_device` or `expired`; a starvation: `underflow` or `expired`).
+fn c7_bench_stall(mode: common::c7::Mode, rate: f64) {
+    let (class, causes) = match mode {
+        common::c7::Mode::LateStart => ("start", ["late_at_device", "expired"]),
+        common::c7::Mode::Starved => ("continuation", ["underflow", "expired"]),
+    };
+    let what = format!("{mode:?} at {rate} S/s");
+    let (trial, _dir) = c7_trial(mode, rate, Some(10_000_000), c7_nominal());
+    let rows = c7_rows_follow_the_rule(&trial, 10_000_000, &what);
+    let held = trial.held().unwrap_or_else(|| panic!("{what}: a send was held"));
+    assert_eq!((held["class"].as_str(), held["held_ns"].as_u64()), (Some(class), Some(40_000_000)), "{what}: {held}");
+    assert!(causes.contains(&rows[0].cause.as_str()), "{what}: {:?}", rows[0]);
+}
+
+#[test]
+fn c7_rehearsal_the_bench_stall_of_a_late_start_follows_the_rule_at_1_msps() {
+    c7_bench_stall(common::c7::Mode::LateStart, 1e6);
+}
+
+#[test]
+fn c7_rehearsal_the_bench_stall_of_a_late_start_follows_the_rule_at_10_msps() {
+    c7_bench_stall(common::c7::Mode::LateStart, 10e6);
+}
+
+#[test]
+fn c7_rehearsal_the_bench_stall_of_a_starvation_follows_the_rule_at_1_msps() {
+    c7_bench_stall(common::c7::Mode::Starved, 1e6);
+}
+
+#[test]
+fn c7_rehearsal_the_bench_stall_of_a_starvation_follows_the_rule_at_10_msps() {
+    c7_bench_stall(common::c7::Mode::Starved, 10e6);
+}
+
+#[test]
+fn c7_rehearsal_a_short_first_send_is_lead_bound_and_a_full_one_is_m_bound() {
+    // UR-22 (bt2 B3, S2''): a start lead past the 10 ms window (11 ms) holds the first send back until the window opens, so it is the window's first few samples (a lead of
+    // 9.9 ms is not short: the Module hands the send about 1 ms after the booking and the window then has 1.1 ms of room); its busy is too small for a small margin to bind,
+    // while the default lead sends a full chunk and the margin does; only a full first send makes the trial informative about m.
+    let cases = [(Some(11_000), 10_000_000, true, true, false), (Some(11_000), 1_000_000, true, false, false), (None, 1_000_000, false, true, true), (None, 200_000, false, true, true)];
+    for (lead_us, margin, short, m_bound, informative) in cases {
+        let what = format!("lead {lead_us:?}, m {margin}");
+        let (trial, _dir) = c7_trial_with(common::c7::Mode::LateStart, 1e6, Some(margin), common::c7::Stall::For(Wall::from_millis(40)), lead_us);
+        let rows = c7_rows_follow_the_rule(&trial, margin, &what);
+        assert_eq!(rows.len(), 1, "{what}: one incident: {rows:?}");
+        let terms = trial.check(0, &rows[0], margin).unwrap_or_else(|why| panic!("{what}: {why}"));
+        let (n1, cap) = (trial.first_send_samples(), common::c7::send_cap(1e6) as i64);
+        assert!(n1 >= 32, "{what}: at least the open first send: {n1} of {cap} samples");
+        assert_eq!(n1 < cap, short, "{what}: first send {n1} of {cap} samples");
+        assert_eq!(trial.m_bound(&rows[0], &terms), m_bound, "{what}: {terms:?}");
+        assert_eq!(trial.m_informative(&rows[0], &terms), informative, "{what}: {terms:?}");
+        assert_eq!(terms.unaligned > terms.decided, m_bound, "{what}: the margin binds exactly where R is a period past the lead: {terms:?}");
+    }
+}
+
+/// The stall of the one-incident rehearsals: `busy + m` lands `distance_ns` below (`below`) or above a lattice point of the repeat (20 µs, 300 µs at the hardware
+/// period), whatever instant the Module handed the held send over. The Module's own clock reads carry real host widths even on the manual clock (tens of µs under load),
+/// so the hardware period's rehearsals aim 300 µs off the lattice point: the oracle's interval then holds one point unless U reaches 300 µs.
+fn c7_aligned_by(above: bool, distance_ns: i64) -> common::c7::Stall {
+    common::c7::Stall::Aligned { side_ns: if above { distance_ns } else { -distance_ns } }
+}
+
+/// UR-22, UR-28 (bt2 S2): a repeat whose full first send is held past its start, so that the device drops the whole device burst, resumes at R = the first lattice
+/// point at or after busy + m, on either side of the lattice point that busy + m is aimed at. `pinned` selects the hardware period's rehearsal: the stall aims 300 µs
+/// off the lattice point instead of 20 µs, so that a read's width under load does not move R across the boundary.
+fn c7_late_start_incident(rate: f64, m: i64, above: bool, period_us: i64, pinned: bool) {
+    use common::c7::Mode;
+    let what = format!("late start at {rate} S/s, m {m}, pn {period_us} us, {} the lattice point", if above { "above" } else { "below" });
+    let (trial, _dir) = c7_trial_period(Mode::LateStart, rate, period_us, Some(m), c7_aligned_by(above, if pinned { 300_000 } else { 20_000 }));
+    let rows = c7_rows_follow_the_rule(&trial, m, &what);
+    assert_eq!(rows.len(), 1, "{what}: one incident: {rows:?}");
+    let (cap, per, period) = (common::c7::send_cap(rate) as i64, trial.per, trial.period);
+    // The state the cell is about: the first send is a full chunk, held, and returned after its own time (late by the host's own record); the device dropped the burst.
+    let held = trial.held().unwrap_or_else(|| panic!("{what}: a send was held"));
+    assert_eq!((held["class"].as_str(), held["result"]["accepted_samples"].as_i64()), (Some("start"), Some(cap)), "{what}: {held}");
+    let returned = trial.anchor.map(held["host_after_ns"].as_u64().unwrap());
+    assert!(returned - trial.anchor.bracket_ticks() > held["at"].as_i64().unwrap(), "{what}: the held start returned after its own time");
+    assert!(
+        trial.reports().iter().any(|(code, tick)| code == "TimeError" && tick.is_some_and(|tick| tick >= held["at"].as_i64().unwrap())),
+        "{what}: the device reported the late start: {:?}",
+        trial.reports()
+    );
+    // One incident: the first row, on the booked side of its lattice point; both sides exist because the stall aimed `busy + m` 20 µs either side of `L`.
+    let (l, side) = trial.aimed.unwrap();
+    let first = &rows[0];
+    assert!(["late_at_device", "expired"].contains(&first.cause.as_str()), "{what}: {first:?}");
+    assert_eq!(first.resumes_at, if above { l + period } else { l }, "{what}: R is L (below) or the next point (above): {first:?}, aimed {l} {side}");
+    // R is on the lattice, past the decision and its lead, and it is the margin that binds; nothing starts before it.
+    let terms = trial.check(0, first, m).unwrap();
+    assert_eq!((first.resumes_at - trial.start) % period, 0, "{what}");
+    assert!(terms.unaligned > terms.decided, "{what}: m binds, not the lead: {terms:?}");
+    assert!(trial.tx_origin + first.resumes_at * per >= terms.decided, "{what}: R is past the decision and its lead");
+    let held_at = held["at"].as_i64().unwrap();
+    let after_drop: Vec<_> =
+        trial.sends_of("start").into_iter().filter(|row| row["at"].as_i64().is_some_and(|at| at > held_at) && row["result"]["accepted_samples"].as_i64().unwrap_or(0) > 0).collect();
+    assert_eq!(after_drop.len(), 1, "{what}: one accepted payload start after the held send: {after_drop:?}");
+    assert_eq!(after_drop[0]["at"].as_i64(), Some(trial.tx_origin + first.resumes_at * per), "{what}: the part starts at R: {after_drop:?}");
+    assert!(after_drop.iter().all(|row| row["at"].as_i64().unwrap() >= trial.tx_origin + first.resumes_at * per), "{what}: no start of burst before R: {after_drop:?}");
+    let named = trial.event_resume_points();
+    assert!(named.len() <= 1, "{what}: at most one resume event: {named:?}");
+    assert!(named.iter().all(|at| *at == first.resumes_at), "{what}: the event names R {}: {named:?}", first.resumes_at);
+    let class = common::c7_verdict::verdict(&common::c7_verdict::evidence(&trial, true));
+    assert_eq!(class, common::c7_verdict::Class::Clean, "{what}: {}", common::c7_verdict::describe(&class));
+}
+
+/// UR-22 (bt2 S3): a repeat whose midplay send is held until the device runs dry resumes at R = the first lattice point at or after busy + m, on either side of the
+/// lattice point that busy + m is aimed at. `pinned` selects the hardware period's rehearsal: the stall aims 300 µs off the lattice point instead of 20 µs, so that a
+/// read's width under load does not move R across the boundary.
+fn c7_starved_incident(rate: f64, m: i64, above: bool, period_us: i64, pinned: bool) {
+    use common::c7::Mode;
+    let what = format!("starved at {rate} S/s, m {m}, pn {period_us} us, {} the lattice point", if above { "above" } else { "below" });
+    let (trial, _dir) = c7_trial_period(Mode::Starved, rate, period_us, Some(m), c7_aligned_by(above, if pinned { 300_000 } else { 20_000 }));
+    let rows = c7_rows_follow_the_rule(&trial, m, &what);
+    assert_eq!(rows.len(), 1, "{what}: one incident: {rows:?}");
+    let (cap, per, period) = (common::c7::send_cap(rate) as i64, trial.per, trial.period);
+    // The state: a continuation of a whole chunk, midway through the play, held far longer than the 10 ms window, so that the device ran dry.
+    let held = trial.held().unwrap_or_else(|| panic!("{what}: a send was held"));
+    assert_eq!((held["class"].as_str(), held["result"]["accepted_samples"].as_i64()), (Some("continuation"), Some(cap)), "{what}: {held}");
+    assert!(held["held_ns"].as_u64().unwrap() >= 12_000_000, "{what}: held past the window: {held}");
+    let first = &rows[0];
+    assert!(["underflow", "expired"].contains(&first.cause.as_str()), "{what}: {first:?}");
+    // The Underflow report is in the stall: from the held call's entry to the part that follows, not from its return.
+    let a1 = trial.sends_of("start").iter().map(|row| row["at"].as_i64().unwrap()).filter(|at| *at >= trial.tx_origin + first.resumes_at * per).min().expect("the part after the drop");
+    let underflows: Vec<i64> = trial.reports().into_iter().filter(|(code, _)| code.starts_with("Underflow")).filter_map(|(_, tick)| tick).collect();
+    let (entered, before) = (trial.anchor.map(held["host_entered_ns"].as_u64().unwrap()), trial.anchor.map(held["host_before_ns"].as_u64().unwrap()));
+    let bracket = trial.anchor.bracket_ticks();
+    let reported = |from: i64| underflows.iter().any(|tick| *tick >= from - bracket && *tick <= a1 + bracket);
+    assert!(reported(entered), "{what}: an Underflow in the stall: {underflows:?}, entered {entered}, part at {a1}");
+    assert!(!reported(before), "{what}: the device ran dry before the held call returned, so a window from its return misses the report: {underflows:?}, return {before}");
+    // The test's own `reported` closure (not the Module): a window opening one bracket after the earliest Underflow still counts it, and one opening a tick past the
+    // latest plus the bracket counts none, so the closure's edges are the ones the two assertions above rely on.
+    let (earliest, latest) = (underflows.iter().copied().min().expect("an Underflow tick"), underflows.iter().copied().max().expect("an Underflow tick"));
+    assert!(reported(earliest + bracket), "{what}: a window opening at the earliest Underflow counts it: {underflows:?}, bracket {bracket}");
+    assert!(!reported(latest + bracket + 1), "{what}: a window opening one tick past the latest Underflow counts none: {underflows:?}, bracket {bracket}");
+    let (l, _) = trial.aimed.unwrap();
+    assert_eq!(first.resumes_at, if above { l + period } else { l }, "{what}: {first:?}");
+    let terms = trial.check(0, first, m).unwrap();
+    assert_eq!((first.resumes_at - trial.start) % period, 0, "{what}");
+    assert!(terms.unaligned > terms.decided, "{what}: m binds, not the lead: {terms:?}");
+    let held_at = held["at"].as_i64().unwrap();
+    let after_drop: Vec<_> =
+        trial.sends_of("start").into_iter().filter(|row| row["at"].as_i64().is_some_and(|at| at > held_at) && row["result"]["accepted_samples"].as_i64().unwrap_or(0) > 0).collect();
+    assert_eq!(after_drop.len(), 1, "{what}: one accepted payload start after the held send: {after_drop:?}");
+    assert_eq!(after_drop[0]["at"].as_i64(), Some(trial.tx_origin + first.resumes_at * per), "{what}: the part starts at R: {after_drop:?}");
+    assert!(after_drop.iter().all(|row| row["at"].as_i64().unwrap() >= trial.tx_origin + first.resumes_at * per), "{what}: no start before R");
+    let named = trial.event_resume_points();
+    assert!(named.len() <= 1, "{what}: at most one resume event: {named:?}");
+    assert!(named.iter().all(|at| *at == first.resumes_at), "{what}: the event names R {}: {named:?}", first.resumes_at);
+    let class = common::c7_verdict::verdict(&common::c7_verdict::evidence(&trial, true));
+    assert_eq!(class, common::c7_verdict::Class::Clean, "{what}: {}", common::c7_verdict::describe(&class));
+}
+
+#[test]
+fn c7_rehearsal_late_start_resumes_on_its_lattice_after_busy_plus_10_ms_at_1_msps() {
+    for above in [false, true] {
+        c7_late_start_incident(1e6, 10000000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_late_start_resumes_on_its_lattice_after_busy_plus_1_ms_at_1_msps() {
+    for above in [false, true] {
+        c7_late_start_incident(1e6, 1000000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_late_start_resumes_on_its_lattice_after_busy_plus_10_ms_at_10_msps() {
+    for above in [false, true] {
+        c7_late_start_incident(10e6, 10000000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_late_start_resumes_on_its_lattice_after_busy_plus_1_ms_at_10_msps() {
+    for above in [false, true] {
+        c7_late_start_incident(10e6, 1000000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_a_starved_repeat_resumes_on_its_lattice_after_busy_plus_10_ms_at_1_msps() {
+    for above in [false, true] {
+        c7_starved_incident(1e6, 10000000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_a_starved_repeat_resumes_on_its_lattice_after_busy_plus_1_ms_at_1_msps() {
+    for above in [false, true] {
+        c7_starved_incident(1e6, 1000000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_a_starved_repeat_resumes_on_its_lattice_after_busy_plus_10_ms_at_10_msps() {
+    for above in [false, true] {
+        c7_starved_incident(10e6, 10000000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_a_starved_repeat_resumes_on_its_lattice_after_busy_plus_1_ms_at_10_msps() {
+    for above in [false, true] {
+        c7_starved_incident(10e6, 1000000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_late_start_resumes_on_its_lattice_after_busy_plus_0_2_ms_at_1_msps() {
+    for above in [false, true] {
+        c7_late_start_incident(1e6, 200_000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_late_start_resumes_on_its_lattice_after_busy_plus_0_2_ms_at_10_msps() {
+    for above in [false, true] {
+        c7_late_start_incident(10e6, 200_000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_a_starved_repeat_resumes_on_its_lattice_after_busy_plus_0_2_ms_at_1_msps() {
+    for above in [false, true] {
+        c7_starved_incident(1e6, 200_000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_a_starved_repeat_resumes_on_its_lattice_after_busy_plus_0_2_ms_at_10_msps() {
+    for above in [false, true] {
+        c7_starved_incident(10e6, 200_000, above, common::c7::FAKE_PERIOD_US, false);
+    }
+}
+
+#[test]
+fn c7_rehearsal_late_start_at_the_hardware_period_resumes_on_its_lattice_at_1_msps() {
+    // bt2 B3 (S2'): at the hardware's 1 ms PN the fake's 70 us drain is far below the lattice (m = 1 ms keeps R m-bound on both sides, whatever the fake), and the
+    // oracle's interval is resolved and names exactly one point: the anchors' brackets are 0 on the manual clock, the Module's own reads carry their real host width (tens of us under load) and the stall
+    // aims 300 us off the lattice point, so U stays well below that.
+    for above in [false, true] {
+        c7_late_start_incident(1e6, 1_000_000, above, common::c7::HW_PERIOD_US, true);
+    }
+}
+
+#[test]
+fn c7_rehearsal_a_starved_repeat_at_the_hardware_period_resumes_on_its_lattice_at_1_msps() {
+    for above in [false, true] {
+        c7_starved_incident(1e6, 1_000_000, above, common::c7::HW_PERIOD_US, true);
+    }
+}
+
+#[test]
+fn c7_rehearsal_late_start_at_the_hardware_period_resumes_on_its_lattice_at_10_msps() {
+    for above in [false, true] {
+        c7_late_start_incident(10e6, 1_000_000, above, common::c7::HW_PERIOD_US, true);
+    }
+}
+
+#[test]
+fn c7_rehearsal_a_starved_repeat_at_the_hardware_period_resumes_on_its_lattice_at_10_msps() {
+    for above in [false, true] {
+        c7_starved_incident(10e6, 1_000_000, above, common::c7::HW_PERIOD_US, true);
+    }
+}
+
+/// The fake's `drain_limit` past the drain's end, in root ticks, from the drain's own counts (`device.rs`): `(pad + g) * per` with
+/// `pad = ceil(S / 100) + 2 * P + B * (g + wait)`, `g = max(3, samples_in(15 us))` and `wait = samples_in(10 us)`. The 15 µs and the 10 µs restate the fake's
+/// `SHORT_GAP_NANOS` and `DUC_WAIT_NANOS`, so that a change of the fake's pad fails a rehearsal instead of being followed.
+fn c7_fake_drain_limit_ticks(per: i64, samples: i64, packets: i64, bursts: i64) -> i64 {
+    let samples_in = |nanos: i128| {
+        let ticks = (nanos * i128::from(MCR) + 999_999_999) / 1_000_000_000;
+        i64::try_from((ticks + i128::from(per.max(1)) - 1) / i128::from(per.max(1))).unwrap()
+    };
+    let g = samples_in(15_000).max(3);
+    let wait = samples_in(10_000);
+    let pad = (samples + 99) / 100 + 2 * packets + bursts * (g + wait);
+    (pad + g) * per
+}
+
+#[test]
+fn c7_the_fake_drain_limit_is_70_us_at_1_msps_and_60_5_us_at_10_msps_for_one_dropped_burst() {
+    // One dropped device burst: a full 2 500-sample send (20 000 at 10 MS/s) and its two-sample close; one tick is 5 ns, so 70 µs is 14 000 ticks and 60.5 µs
+    // is 12 100. At 1 MS/s g is 15 and wait 10, pad 26 + 4 + 25 = 55; at 10 MS/s g is 150 and wait 100, pad 201 + 4 + 250 = 455.
+    assert_eq!(c7_fake_drain_limit_ticks(200, 2_502, 2, 1), 14_000, "70 us at 1 MS/s");
+    assert_eq!(c7_fake_drain_limit_ticks(20, 20_002, 2, 1), 12_100, "60.5 us at 10 MS/s");
+}
+
+/// The fake's drain before resume row `j`'s decision, from the trial's own rows: the accepted samples `S` and sends `P` of the device bursts the drop chain has
+/// covered so far (from the cell's held Start through the close before the decision) and the bursts `B` those sends closed.
+fn c7_drain_state(trial: &common::c7::Trial, j: usize, row: &common::c7::Resume) -> (i64, i64, i64) {
+    let sends = trial.sent_for_row(j, row).unwrap_or_else(|why| panic!("{why}"));
+    let held_at = trial.held().expect("the held send")["at"].as_i64().expect("the held start's time");
+    let accepted: Vec<&Json> = trial.probe.iter().filter(|row| row["call"] == "tx_send" && row["class"] != "flush" && row["result"]["accepted_samples"].as_i64().unwrap_or(0) > 0).collect();
+    let first = accepted.iter().position(|row| row["class"] == "start" && row["at"].as_i64() == Some(held_at)).expect("the held Start is in the probe");
+    assert!(sends.len() > first, "the row's sends include the held Start and its close: {} of {first}", sends.len());
+    let covered = &accepted[first..sends.len()];
+    let samples = sends[first..].iter().map(|sent| sent.ticks / trial.per).sum();
+    let bursts = covered.iter().filter(|row| row["class"] == "close").count() as i64;
+    (samples, covered.len() as i64, bursts)
+}
+
+/// bt2 B3, S4: the same Session aimed on both sides of the fake's drain limit. Session B aims `busy + m` 20 µs below a lattice point L with m = 30 µs, so the first
+/// resumed part is handed at `busy + 50 µs` (below the drain's limit): the device drops it again, and every later one. Session C aims 20 µs above L, so its first resumed
+/// part is handed at `busy + 110 µs`, past the limit, and plays.
+fn c7_drain_rehearsal(rate: f64, above: bool) {
+    use common::c7::Mode;
+    let what = format!("drain at {rate} S/s, {} L", if above { "above" } else { "below" });
+    let m = 30_000;
+    let (trial, _dir) = c7_trial(Mode::LateStart, rate, Some(m), common::c7::Stall::Aligned { side_ns: if above { 20_000 } else { -20_000 } });
+    assert!(trial.incomplete.is_empty(), "{what}: {:?}", trial.incomplete);
+    let booking = trial.booking.as_ref().unwrap_or_else(|| panic!("{what}: the cell's repeat was booked"));
+    assert!(matches!(booking.outcome, Outcome::Admitted { .. }), "{what}: the booking was admitted: {booking:?}");
+    assert_eq!(trial.first_send_samples(), common::c7::send_cap(rate) as i64, "{what}: the held first send is a full chunk");
+    let rows = trial.resumes();
+    assert!(!rows.is_empty(), "{what}: a resume");
+    for (index, row) in rows.iter().enumerate() {
+        trial.check(index, row, m).unwrap_or_else(|why| panic!("{what}: {why}"));
+    }
+    let (l, _) = trial.aimed.unwrap();
+    let (per, period) = (trial.per, trial.period);
+    let tick = |row: &common::c7::Resume| trial.tx_origin + row.resumes_at * per;
+    // The fake's drain limit at each row, from the Session's own rows: the first part of B starts inside it and is dropped again; C's starts past it and plays.
+    let drains: Vec<(i64, i64)> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let terms = trial.expected(index, row, m).unwrap_or_else(|why| panic!("{what}: {why}"));
+            let (samples, packets, bursts) = c7_drain_state(&trial, index, row);
+            let limit = c7_fake_drain_limit_ticks(per, samples, packets, bursts);
+            let (past_busy, limit_us) = (tick(row) - terms.busy, limit as f64 * 1_000_000.0 / common::MCR as f64);
+            println!(
+                "C7 S4 {what} row{index}: R-busy={:.1} us limit={limit_us:.1} us (R-busy={past_busy} ticks, busy={}, limit={limit} ticks; S={samples} P={packets} B={bursts})",
+                past_busy as f64 * 1_000_000.0 / common::MCR as f64,
+                terms.busy
+            );
+            (past_busy, limit)
+        })
+        .collect();
+    let ten_us = common::c7::ns_to_ticks_ceil(10_000);
+    let e = common::c7_verdict::evidence(&trial, true);
+    let class = common::c7_verdict::verdict(&e);
+    if above {
+        assert_eq!(rows.len(), 1, "{what}: the part past the limit plays: {rows:?}");
+        assert_eq!(rows[0].resumes_at, l + period, "{what}: R is L + one period");
+        assert!(drains[0].0 >= drains[0].1 + ten_us, "{what}: row 0 starts 10 us or more past the fake's drain limit: R - busy {} ticks, limit {}", drains[0].0, drains[0].1);
+        assert_eq!(class, common::c7_verdict::Class::Clean, "{what}: {}", common::c7_verdict::describe(&class));
+        return;
+    }
+    assert!(rows.len() >= 3, "{what}: no cap ends the repeat: {rows:?}");
+    assert_eq!(rows[0].resumes_at, l, "{what}: R is L");
+    assert!(drains[0].0 <= drains[0].1 - ten_us, "{what}: row 0 starts 10 us or more inside the fake's drain limit: R - busy {} ticks, limit {}", drains[0].0, drains[0].1);
+    for (index, (past_busy, limit)) in drains.iter().enumerate().take(drains.len() - 1) {
+        assert!(past_busy < limit, "{what}: row {index} starts inside the fake's own growing drain limit: R - busy {past_busy} ticks, limit {limit}");
+    }
+    let first = trial.expected(0, &rows[0], m).unwrap();
+    let first_us = (tick(&rows[0]) - first.busy) * 1_000_000 / common::MCR;
+    assert!((first_us - 50).abs() <= 2, "{what}: row 0 is busy + 50 us, measured {first_us}");
+    let second = trial.expected(1, &rows[1], m).unwrap();
+    let second_ticks = tick(&rows[1]) - second.busy;
+    let expected_ticks = if rate == 1e6 { 19_600 } else { 19_960 };
+    println!("C7 S4 {what}: row0={first_us} us row1={second_ticks} ticks rows={}", rows.len());
+    assert!((second_ticks - expected_ticks).abs() <= 400, "{what}: row 1 is busy + 98 us (1 MS/s) or 99.8 us (10 MS/s), measured {second_ticks} ticks");
+    let control_at = e.control_at.expect("the control's start");
+    let ctl = common::c7_rf::analyse_control(&e.capture, &e.wave, e.c0, control_at).expect("the control is separable");
+    let held = trial.held().expect("the held send");
+    let from = held["at"].as_i64().expect("the held start's time");
+    let end = e.capture.end().min(trial.stop_tick + ctl.d);
+    assert_eq!(common::c7_rf::silence(&e.capture, &e.wave, &ctl, from, end, trial.tx_origin + trial.origin() * trial.per), Ok(None), "{what}: nothing radiated after the first drop");
+    match class {
+        common::c7_verdict::Class::Unsettled(k) => assert!(k >= 2, "{what}: {k} dropped parts"),
+        other => panic!("{what}: {}", common::c7_verdict::describe(&other)),
+    }
+}
+
+#[test]
+fn c7_rehearsal_a_part_inside_the_fakes_drain_is_dropped_again_and_one_past_it_plays_at_1_msps() {
+    c7_drain_rehearsal(1e6, false);
+    c7_drain_rehearsal(1e6, true);
+}
+
+#[test]
+fn c7_rehearsal_a_part_inside_the_fakes_drain_is_dropped_again_and_one_past_it_plays_at_10_msps() {
+    c7_drain_rehearsal(10e6, false);
+    c7_drain_rehearsal(10e6, true);
+}
+
+/// bt2 B3 (S4'): the cell's first Start is held 40 ms and dropped; the resumed part's own Start (the second after arming) is held 12 ms, reaches the device 10 ms
+/// past its time and is dropped as a fresh drain (past the first limit); a second resume follows, m-bound at 10 ms, and that part plays. One retry is a datum
+/// (RETRIED(1)), and the `C7 retry` line of row 2 carries the recovery hold.
+fn c7_recovery_stall_retry(period_us: i64, margin_ns: i64) {
+    use common::c7::Mode;
+    let dir = TempDir::new();
+    let probe = Arc::new(probe_device::ProbeDevice::new(Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }))));
+    let cell = common::c7::Cell {
+        mode: Mode::LateStart,
+        rate: 1e6,
+        period_us,
+        margin_ns: Some(margin_ns),
+        stall: common::c7::Stall::For(Wall::from_millis(40)),
+        lead_us: None,
+        retry_hold: Some(Wall::from_millis(12)),
+    };
+    let trial = common::c7::trial(&profile(&dir, json!({}), json!({}), true), probe, cell);
+    assert!(trial.incomplete.is_empty(), "{:?}", trial.incomplete);
+    let rows = trial.resumes();
+    assert_eq!(rows.len(), 2, "the recovery Start is dropped and the next part resumes: {rows:?}");
+    for (index, row) in rows.iter().enumerate() {
+        trial.check(index, row, margin_ns).unwrap_or_else(|why| panic!("{why}"));
+    }
+    let e = common::c7_verdict::evidence(&trial, true);
+    assert_eq!(e.holds.len(), 2, "both holds fired: {:?}", e.holds);
+    let class = common::c7_verdict::verdict(&e);
+    assert_eq!(class, common::c7_verdict::Class::Retried(1), "{}", common::c7_verdict::describe(&class));
+    let record = common::c7_cells::TrialRecord { class, datum: common::c7_cells::datum(&trial, &e, &common::c7_verdict::read(&e)) };
+    let lines = common::c7_cells::trial_lines("fake", &trial.cell, 0, &record, &e);
+    let retry = lines.iter().find(|line| line.starts_with("C7 retry ") && line.contains(" row=2: ")).unwrap_or_else(|| panic!("a C7 retry line for row 2: {lines:?}"));
+    assert!(retry.contains("dropped_start_held_ns=12000000"), "{retry}");
+}
+
+#[test]
+fn c7_rehearsal_a_host_stall_in_the_recovery_send_gives_one_retry_and_the_next_part_plays() {
+    c7_recovery_stall_retry(common::c7::FAKE_PERIOD_US, 10_000_000);
+}
+
+#[test]
+fn c7_rehearsal_a_host_stall_in_the_recovery_send_gives_one_retry_and_the_next_part_plays_at_the_hardware_period() {
+    // The same retry at the bench's 1 ms PN, where the verdict needs 20 periods (20 ms) of the final part, and m = 25 ms so that the old 30 ms window (which
+    // starts when the probe first sees the third start row) ends before that part's 20 periods: Sol's A2 arrives about m past A1's return.
+    c7_recovery_stall_retry(common::c7::HW_PERIOD_US, 25_000_000);
+}
+
+#[test]
+fn c7_the_oracle_and_the_rf_scan_follow_the_first_accepted_start_when_the_booking_was_moved() {
+    // bt2 F2: the Module moves the initial Start by a fraction of a period when it takes SendAsapAndFlag, and rounds R on the moved booking's lattice. The oracle
+    // and the verdict must use the observed first accepted payload Start, not the booked one; the datum reports the move.
+    let (mut trial, _dir) = c7_trial(common::c7::Mode::LateStart, 1e6, Some(10_000_000), c7_nominal());
+    assert!(trial.incomplete.is_empty(), "{:?}", trial.incomplete);
+    assert_eq!(trial.origin(), trial.start, "nothing moved: the observed origin is the booked start");
+    let baseline = common::c7_verdict::evidence(&trial, true);
+    assert_eq!(common::c7_verdict::verdict(&baseline), common::c7_verdict::Class::Clean, "{}", common::c7_verdict::describe(&common::c7_verdict::verdict(&baseline)));
+    let observed = trial.start;
+    trial.common.start += 37;
+    assert_eq!(trial.origin(), observed, "the oracle's origin follows the observed Start, not the moved booking");
+    let e = common::c7_verdict::evidence(&trial, true);
+    assert_eq!(e.origin, observed, "the verdict's origin follows the observed Start");
+    assert!(e.row_checks.iter().all(Result::is_ok), "{:?}", e.row_checks);
+    let class = common::c7_verdict::verdict(&e);
+    assert_eq!(class, common::c7_verdict::Class::Clean, "{}", common::c7_verdict::describe(&class));
+    let datum = common::c7_cells::datum(&trial, &e, &common::c7_verdict::read(&e));
+    assert_eq!(datum.start_moved_samples, -37, "the datum prints observed minus booked");
+    // bt2 fix round 2, item 4(b): the capture link's drop count, read from the Manifest, is its own INCONCLUSIVE reason.
+    assert_eq!(e.link_drops, 0, "the capture link dropped nothing");
+    trial.common.manifest.links[0].drops = Some(4);
+    let dropped = common::c7_verdict::evidence(&trial, true);
+    assert_eq!(dropped.link_drops, 4, "the Manifest's count of the link");
+    assert_eq!(common::c7_verdict::verdict(&dropped), common::c7_verdict::Class::Inconclusive(vec!["the capture link dropped 4 blocks".to_owned()]));
+}
+
+#[test]
+fn c7_rehearsal_a_drop_storm_at_the_default_bound_keeps_going_and_counts_exactly() {
+    // bt2 B3, S8: a Start held 12 ms every cycle at 1 MS/s, m = 10 ms default. Each part is handed at its resume point to a device already past it and dropped late,
+    // so the repeat resumes again: in 20 s it reaches more than 1 000 resumes, the default record bound of 1 000 keeps the first resume rows and counts the rest, the
+    // counters stay exact, no close is held, and nothing is radiated after the first drop.
+    let dir = TempDir::new();
+    let probe = Arc::new(probe_device::ProbeDevice::new(Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }))));
+    let mut storm = common::c7::storm_trial(&profile(&dir, json!({}), json!({}), true), probe, 1e6, common::c7::HW_PERIOD_US, Wall::from_millis(12), common::c7_cells::STORM_MS);
+    let e = common::c7_storm::storm_evidence(&storm, true);
+    assert_eq!(e.scheduled_samples, 600_000, "the capture was booked for 600 ms at 1 MS/s");
+    let class = common::c7_storm::storm_verdict(&e);
+    println!("C7 storm: resumes={} rows_kept={} omitted={} events={}", e.stats_resumes, e.rows_kept, e.omitted_resumes, e.events.len());
+    if let Err(why) = &storm.rows_complete {
+        let mut kinds: Vec<(String, usize)> = Vec::new();
+        for row in &storm.probe {
+            let call = row["call"].as_str().unwrap_or("?").to_owned();
+            match kinds.iter_mut().find(|(name, _)| *name == call) {
+                Some((_, count)) => *count += 1,
+                None => kinds.push((call, 1)),
+            }
+        }
+        panic!("{why}: rows by call kind {kinds:?}");
+    }
+    assert!(e.stats_resumes > 1_000, "the storm reaches more than 1 000 resumes: {} rows", e.stats_resumes);
+    assert_eq!(class, common::c7_verdict::Class::Clean, "{}", common::c7_verdict::describe(&class));
+    assert_eq!(e.rows_kept, 1_000, "the default record bound keeps 1 000 resume rows");
+    assert_eq!(e.omitted_resumes, e.stats_resumes - 1_000, "the bound counts the rest");
+    assert!(failure(&storm.manifest).is_empty(), "the Run ended Fine: {:?}", storm.manifest.termination);
+    assert!(matches!(storm.manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} }), "the Run ended on the client Stop: {:?}", storm.manifest.termination);
+    assert!(storm.probe.iter().filter(|row| row["call"] == "tx_send" && row["class"] == "close").all(|row| row["held_ns"] == 0), "no close is held");
+    // The RF scan's lattice follows the observed first accepted Start: moving the booking does not move it.
+    let at = e.lattice_tick;
+    storm.common.start += 37;
+    let e2 = common::c7_storm::storm_evidence(&storm, true);
+    assert_eq!(e2.lattice_tick, at, "the storm's silence scan keeps the observed origin");
+    assert_eq!(common::c7_storm::storm_verdict(&e2), common::c7_verdict::Class::Clean, "{}", common::c7_verdict::describe(&common::c7_storm::storm_verdict(&e2)));
+    // bt2 fix round 2, item 3: every kept row is judged against the rule range of its own incident. Row 500's R replaced by another lattice point inside its Start
+    // interval (three periods earlier: after the previous part, before its own Start), which the ordering of the kept rows against the Starts cannot see.
+    assert_eq!(e.row_checks.len(), 1_000);
+    assert!(e.row_checks.iter().all(Result::is_ok), "every kept row of a correct storm is on its rule range: {:?}", e.row_checks.iter().find(|check| check.is_err()));
+    let period = storm.period;
+    let original = storm.common.manifest.clone();
+    let mut seen = 0;
+    for section in storm.common.manifest.sections.iter_mut().filter(|section| section.name.as_str() == "ezsdr.radio.uhd.timing") {
+        for row in section.content.as_array_mut().unwrap().iter_mut().filter(|row| row["what"] == "tx_resume") {
+            if seen == 500 {
+                row["resumes_at"] = json!(row["resumes_at"].as_i64().unwrap() - 3 * period);
+            }
+            seen += 1;
+        }
+    }
+    let e3 = common::c7_storm::storm_evidence(&storm, true);
+    assert!(e3.row_checks[500].is_err() && e3.row_checks.iter().enumerate().all(|(index, check)| index == 500 || check.is_ok()), "only the substituted row is off its range");
+    match common::c7_storm::storm_verdict(&e3) {
+        common::c7_verdict::Class::Fail(common::c7_verdict::Fail::ResumeOffRule, text) => assert!(text.starts_with("kept row 500: R "), "{text}"),
+        other => panic!("a substituted kept row is not CLEAN: {}", common::c7_verdict::describe(&other)),
+    }
+    // A row whose own incident has no close in the probe (the sparse record): INCONCLUSIVE, never passed on the ordering of the rows alone.
+    storm.common.manifest = original;
+    storm.common.armed_closes += 100_000;
+    let e4 = common::c7_storm::storm_evidence(&storm, true);
+    match common::c7_storm::storm_verdict(&e4) {
+        common::c7_verdict::Class::Inconclusive(reasons) => assert!(reasons.iter().any(|reason| reason.starts_with("1000 kept row(s) lack the data the R rule needs")), "{reasons:?}"),
+        other => panic!("rows without their incident's data are INCONCLUSIVE: {}", common::c7_verdict::describe(&other)),
+    }
+    // bt2 fix round 2, item 4(b): the capture link's drop count, read from the Manifest, is the first reason.
+    storm.common.armed_closes -= 100_000;
+    storm.common.manifest.links[0].drops = Some(7);
+    let e5 = common::c7_storm::storm_evidence(&storm, true);
+    assert_eq!(e5.link_drops, 7);
+    match common::c7_storm::storm_verdict(&e5) {
+        common::c7_verdict::Class::Inconclusive(reasons) => assert_eq!(reasons, vec!["the capture link dropped 7 blocks".to_owned()]),
+        other => panic!("a link drop is INCONCLUSIVE: {}", common::c7_verdict::describe(&other)),
+    }
+}
+
+#[test]
+fn c7_rehearsal_the_cell_runner_prints_decision_lines_and_every_trial_is_clean_on_the_fake() {
+    // bt2 B3: the bench's cell runner on the manual-clock fake, both modes in the 1 MS/s, 10 ms cell, two trials each: every trial is CLEAN, and the lines the
+    // runner returns are the cell's (one `C7 cell` line, one `VERDICT c7` line, two `C7 trial` lines). The fake's idle sample is its ramp, so the verdict reads
+    // its capture with `fake_ramp`.
+    let device: Arc<dyn Device> = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+    let profile_of = |dir: &TempDir| profile(dir, json!({}), json!({}), true);
+    for mode in [common::c7::Mode::LateStart, common::c7::Mode::Starved] {
+        let (records, lines) = common::c7_cells::run_cell(device.clone(), &profile_of, "fake", mode, 1e6, common::c7::HW_PERIOD_US, 10_000_000, 2, true);
+        assert_eq!(records.len(), 2, "{mode:?}");
+        for record in &records {
+            assert_eq!(record.class, common::c7_verdict::Class::Clean, "{mode:?}: {}", common::c7_verdict::describe(&record.class));
+        }
+        assert_eq!(lines.iter().filter(|line| line.starts_with("C7 cell ")).count(), 1, "{lines:?}");
+        assert_eq!(lines.iter().filter(|line| line.starts_with("C7 trial ")).count(), 2, "{lines:?}");
+        let verdicts: Vec<&String> = lines.iter().filter(|line| line.starts_with("VERDICT c7 ")).collect();
+        assert_eq!(verdicts.len(), 1, "{lines:?}");
+        assert!(verdicts[0].ends_with(": PASS (contract)"), "{}", verdicts[0]);
+    }
+}
+
+#[test]
+fn ur_05_a_resume_margin_is_no_selector_key_and_no_margin_is_negative() {
+    // UR-5, UR-22 (bt2 S1c): the margin is reachable from Rust code only (GZ-9): a Binding selecting it is refused like any unknown key.
+    let error = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "resume_margin_ns": 1_000_000 }), Some(x3xx())), fake(FakeConfig::default())).err().unwrap();
+    assert_eq!(error.message, "UR-5: unsupported selector key `resume_margin_ns`");
+    let negative = std::panic::catch_unwind(|| UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), fake(FakeConfig::default())).unwrap().with_measurement_resume_margin(-1));
+    assert!(negative.is_err(), "a negative margin is refused");
+}
+
 #[test]
 fn ur_28_a_finite_burst_the_device_receives_late_is_dropped_whole() {
     // UR-22, UR-28 (S1): the first send reaches the device 20 ms after it was handed over, past the burst's start. The device drops the whole device

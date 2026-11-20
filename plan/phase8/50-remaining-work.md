@@ -28,9 +28,9 @@
 |---|---|---|---|---|
 | 1 | **4b**（**済** 2026-11-19，`reviews/4b-*`） | overflow の後の再開の gap（`overflow_restart_gap_ns`，今は推定 140 ms，RM-17）と #108（overflow の直後に予約した受信の再開が遅れる：uhd-rx が gap の間 `rx_recv` に止まる） | 高：Vocabulary の規則，両 Provider，受信のスレッドの並行性 | step 0 の設計 → owner の判断 → 危険な段（試験計画と Sol のレビュー，コードの Sol のレビュー） |
 | 2 | 道具の修正（**済** 2026-11-19，`reviews/tools-*`：S4 は公表された header から gap を読み capture は 1 sample，S5 は受信の map を広げてから slot A・B を読む，C2 の 100・200 MS/s は bt2 まで外す） | S4 の 200 MS/s が RS-8a の 5 s に収まらない（capture の後片付け），S5 の 2 channel の pass が走らない（slot A だけの device を開く），C2 の前提（100・200 MS/s では host が遅れを取り戻せず，最後の chunk を期限前に渡せない） | 中：bench の道具だけ | 危険な段の実装役（手作業は規則の決まった段の実装役に出してよい），Opus の小段レビュー．測定の道具なので試験計画は省く |
-| 3 | bt2 | C7 の道具：Module の水準で repeat の再開と m の掃引．production に hook が要る．#106 の実機の確認を兼ねる | 中〜高 | 危険な段，Sol |
+| 3 | bt2（**進行中** 2026-11-19：試験計画 3 回〈Sol，Opus と Terra の再確認 2 回〉の後，B1 hook → B2 止める仕掛けと試行の本体 → B3 判定，の 3 小段で．m を変えた Run は Manifest の `timing` に `resume_margin` を 1 行〈owner 2026-11-19〉．**C2 の 100・200 MS/s は外した**〈orchestrator：作り直しの前提が成り立たない，Sol〉：この 2 rate の遅れた device burst の規則は INFERRED のまま，C7 の後に見直す） | C7 の道具：Module の水準で repeat の再開と m の掃引（10・1・0.2 ms，1・10 MS/s）．production に hook が要る．#106 の実機の確認を兼ねる | 中〜高 | 危険な段，Sol |
 | 4 | D13 の変換 | record suite の記録を `crates/ezsdr-radio/measurements/` の形に（`observations: []`，実際の `selector.args`） | 低 | 規則の決まった小さな段 |
-| 5 | **bench（1 回）** | 4b の値の掃引，両盤の record suite を段階 4 を閉じる commit で（D13），C7，作り直した C2，TXP の B3 | — | 実機．送信の前に owner が att を確かめる |
+| 5 | **bench（1 回，2026-11-26 ごろ）** | 4b の値の掃引，両盤の record suite を段階 4 を閉じる commit で（D13），C7（送信は PN：att と帯域を owner が確かめる），TXP の B3．C2 の 100・200 MS/s は流さない | — | 実機．送信の前に owner が att を確かめる |
 
 ### 流れ 2（worktree：Kernel と規則の sweep のコード側）
 
@@ -47,6 +47,10 @@
 | 7 | #112・#114（**済** 2026-11-19，`reviews/n112-*`） | Python から対でないサロゲートを送ると Session が終わる（クライアントで送る前に止める，owner）；`Violation.requested` に Module の報告値が入る（7 か所） | 低 | Sonnet が DeepSeek を率いる，Sol |
 | 8 | #115・#116（**済** 2026-11-19，`reviews/n115-*`） | Module が偽って報告した `Coercion.requested` を SB-44 で拒否；RF 範囲の検査と Run 中の登録された検査の `requested` は実験者・Action の値 | 低〜中 | Sonnet が DeepSeek を率いる，Sol，Opus と Terra の再確認 |
 | 9 | #111・#119（**済** 2026-11-20，`reviews/n111-*`．三振 `supplied-callback-under-lock` の設計メモ：KC-24a の規則 1 つと lock の記録と sweep で固定） | RS-6 の freeze が受付の lock の中で Provider の cancel を呼ぶ（deadlock）；終わりの処理が machine の lock の中で時計を読む | 高：Kernel の並行性 | 危険な段，Sol，Opus と Terra |
+| 10 | #120・#121（**済** 2026-11-20，`reviews/n120-*`．`supplied-callback-under-lock` の 4・5 件目：KC-24a の規則をコーディネータの全 lock × 全 supplied 呼び出しに広げた） | disconnect の wake が保留中の wake を上書きし freeze の drain から漏れる，`wake_handle` を schedule の間持つ；`DataLink::drops()` が links の mutex を持ったまま止まると cleanup が止まる | 中〜高：Kernel の並行性 | 危険な段，Sol |
+| 11 | #110（**済** 2026-11-20，`reviews/n110-*`） | 受け付けた start の batch が dispatch 前の end で落ちても記録が無い（RS-16）．owner 決定：未配達として記録し，ActionId は受付で振る | 低〜中 | Sonnet が DeepSeek を率いる |
+| 12 | #113（**済** 2026-11-20，`reviews/n110-*`） | MockRadio：clock の無い segment を origin 前で切ると `ended_at` が 0（owner 決定：origin，RM-25/MR-25 の文） | 低 | 規則の決まった小さな段 |
+| 13 | #117（**8b へ**，`phase:8b`）・#118（**済** 2026-11-20，bench 待ちの空き時間で，`reviews/n118-*`．omission の件は #123 で 8b） | uhd-rx の受信の device 呼び出し 3 つが DEVICE_LOST 後に device gate を通らない；prepare の coercion が `accept` で偽の `applied` を残す | 低〜中 | 8b の先頭 |
 
 ### 二つの流れの決まり
 
@@ -60,9 +64,13 @@
 | 出口の棚卸し | [00-overview](00-overview.md) §7 の出口条件 4：H1〜H5 と #56 は 10 月と 11-13 の bench に記録があるが，#56 と handoff §3 の行が開いたまま．記録を確かめて閉じる |
 | **Gate X** | 出口条件の確認．owner に諮る：**条件 5 の BP4b（混在構成）と BP4c（XG）を Phase 8 に含めるか**（§3 の B は汎用性の点検へ回すことを推奨．XG は FPGA image の書き換えが要る） |
 
+### issue の線引き（owner 2026-11-19）
+
+これから出る issue は，出口条件（parity，実機の確認，gate の信頼）にかかるものと P1・P2 だけを Phase 8 で直し，残りの P3 は 8b の先頭に回す（label `phase:8b`，ここに一覧）．既に表にある #110・#113 は owner の決定どおり Phase 8 で．#117・#118・#120・#121 はこの線で仕分ける（orchestrator）．
+
 ### bench までの空いた時間（owner 2026-11-20）
 
-bench は 2026-11-27（丸 1 日）．それまでの順（orchestrator）：#118（流れ 2）→ #117（流れ 1，bt2 と D13 の後）→ #73・#97 の設計（step 0，Opus の下書きから）→ mutation の image を `ezsdr-v4-dev:uhd4.10` に（[52](52-phase8-end-review.md) D2）と生成器の試し（D1．どちらも道具だけなので Gate X の前に）→ 8b の最初の掃除（52 §2d の 12・30・32）→ 8b の step 0 の設計（④ から）．
+bench は 2026-11-27（丸 1 日）．それまでの順（orchestrator）：#118（流れ 2，**済**）→ #117（流れ 1，bt2 と D13 の後）→ #73・#97 の設計（step 0，**決定済み** 2026-11-20：D1〜D10，R1〜R4，O1・O2．実装は Gate X の後）→ mutation の image を `ezsdr-v4-dev:uhd4.10` に（[52](52-phase8-end-review.md) D2）と生成器の試し（D1．どちらも道具だけなので Gate X の前に）→ 8b の最初の掃除（52 §2d の 12・30・32）→ 8b の step 0 の設計（④ から）．
 
 ### owner の判断（出てくる順）
 

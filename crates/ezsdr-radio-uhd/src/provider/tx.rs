@@ -23,7 +23,7 @@ use super::control::ColdConfig;
 use super::core::{Clock, Core, Locked, Streams, burst_key, lock, rejected_key, stream_key};
 use crate::device::{Dir, Iq, TxCode, TxReport};
 use crate::host::HostClock;
-use crate::profile::{DEVICE_LEAD_NS, RESUME_MARGIN_NS};
+use crate::profile::DEVICE_LEAD_NS;
 use ezsdr_radio::timeline::{Channels, StreamKey};
 use ezsdr_radio::x3xx::PACKETS;
 
@@ -1102,7 +1102,7 @@ impl Tx {
             None => book.switch_at_cursor().map(|held| (held.k, held.waveform_len as i64, held.k, true)),
         })?;
         let end = self.close_device_burst(None, handed, clock, self.short_gap(clock));
-        let (margin, lead, now) = (self.core.ticks(RESUME_MARGIN_NS), self.core.device_lead(), self.core.now());
+        let (margin, lead, now) = (self.core.resume_margin(), self.core.device_lead(), self.core.now());
         let planned = self.with_book(|book| {
             if book.open.is_none() {
                 let held = book.list.held.remove(&handed).expect("the switch is held at the cursor");
@@ -7116,6 +7116,11 @@ mod tests {
 
     /// A rig whose transmit clock has `n` root ticks a sample on the 200 MHz root: 1 MS/s at 200, 200 MS/s at 1.
     fn switch_rig_on(waves: Vec<Vec<Iq>>, faults: Vec<FakeFault>, n: i64) -> SwitchRig {
+        switch_rig_with_margin(waves, faults, n, crate::profile::RESUME_MARGIN_NS)
+    }
+
+    /// [`switch_rig_on`] whose resume margin `m` (UR-22) is `margin_ns`.
+    fn switch_rig_with_margin(waves: Vec<Vec<Iq>>, faults: Vec<FakeFault>, n: i64, margin_ns: i64) -> SwitchRig {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() }));
         let mut inputs = BTreeMap::new();
         let mut refs = Vec::new();
@@ -7124,7 +7129,7 @@ mod tests {
             inputs.insert(wave.hash.clone(), Arc::<[u8]>::from(bytes));
             refs.push(wave);
         }
-        let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
+        let (core, time, events) = crate::provider::test_support::rig_on_inputs_with_margin(device.clone(), Vec::new(), 2_000, inputs, margin_ns);
         let guard = clock_guard(&device.host());
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
