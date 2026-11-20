@@ -31125,5 +31125,16 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "c7_an_unresolved_interval_refuses_a_lattice_point_outside_it"
+ },
+ {
+  "id": "TL2-1",
+  "name": "feature `uhd`: a RUNTIME error counts as a lost device on any call, not only a streaming one (UR-29; the first row on `uhd.rs`, tools step 2)",
+  "file": "crates/ezsdr-radio-uhd/src/uhd.rs",
+  "old": "(streaming && code == UHD_ERROR_RUNTIME)",
+  "new": "(code == UHD_ERROR_RUNTIME)",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "uhd_47_is_lost_only_at_the_two_stream_opens",
+  "features": ["uhd"]
  }
 ]

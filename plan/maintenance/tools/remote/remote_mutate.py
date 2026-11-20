@@ -11,7 +11,8 @@ it) is dealt round-robin to the shards; each shard is one container, with its ow
 copy and its own Cargo target directory, that runs its rows list by list, so a shard builds
 the workspace once for all the lists it runs and no two shards share a build directory
 (AGENTS.md §7). Each run uploads into a directory of its own on each host
-(`~/ezsdr-mut/<tag>`) and deletes it at the end, so two runs never overwrite each other.
+(`~/ezsdr-mut/<tag>`), builds the image under its own tag (`ezsdr-mut-<tag>`) and deletes both at the end, so two
+runs, or two checkouts, never overwrite each other's files or image.
 The tree is copied as it is on disk, uncommitted changes included. Prints each shard's log
 and exits 1 unless every row is killed. Needs ssh and rsync locally, docker without sudo on
 each host. `REMOTE_SSH` replaces the ssh command (for a tunnel's config file), and
@@ -26,6 +27,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 
 REMOTE = "ezsdr-mut"
 SSH = os.environ.get("REMOTE_SSH", "ssh").split()  # e.g. "ssh -F tunnels.conf"
@@ -66,29 +68,73 @@ def run(*args, **kw):
     return subprocess.run(args, check=True, text=True, **kw)
 
 
+def image_of(work):
+    """The image tag of one run: named after its work dir, so no other checkout's build can replace the image this run starts."""
+    return f"{REMOTE}-{work.split('/')[-1]}"
+
+
+def new_tag(prefix):
+    """A tag no other run or checkout can share, even in the same second."""
+    return f"{prefix}-{int(time.time())}-{uuid.uuid4().hex[:12]}"
+
+
+def cleanup(host, work):
+    """Remove the run's containers, work dir and image on `host`; raises when a removal fails (a missing container or image is fine)."""
+    tag = work.split("/")[-1]
+    img = image_of(work)
+    script = (f"rc=0; for c in $(docker ps -aq --filter name={REMOTE}-{tag}); do "
+              f"if ! docker rm -f $c >/dev/null 2>&1 && docker inspect $c >/dev/null 2>&1; then rc=1; fi; done; "
+              f"rm -rf {work} || rc=1; "
+              f"if docker image inspect {img} >/dev/null 2>&1 && ! docker rmi -f {img} >/dev/null; then rc=1; fi; exit $rc")
+    subprocess.run([*SSH, host, script], text=True, check=True)
+
+
+def cleanup_all(hosts, work):
+    """Clean every host, one failing (or interrupted) never stops the next; errors are printed. Inside a `finally` the original exception
+    propagates afterwards; otherwise the first cleanup error is raised after the last host."""
+    first = None
+    for host in hosts:
+        try:
+            cleanup(host, work)
+        except BaseException as e:
+            print(f"cleanup of {host}:{work} failed: {e!r}", file=sys.stderr)
+            first = first or e
+    if first and sys.exc_info()[0] is None:
+        raise first
+
+
 def upload(host, work):
+    """Copy the tree to `host:work` and build the run's own image from its Dockerfile; returns the image tag."""
     run(*SSH, host, f"mkdir -p {work}/src {work}/out && chmod 777 {work}/out")  # the container runs as its own user
     run("rsync", "-a", "--chmod=Dgo+rx,Fgo+r", "--delete",  # a 0600 file (umask 0077) is unreadable to the container user
         "-e", " ".join(SSH), *[f"--exclude={e}" for e in EXCLUDES], "./", f"{host}:{work}/src/")
-    run(*SSH, host, f"docker build -q -t {REMOTE} {work}/src/plan/maintenance/tools/remote >/dev/null")
+    built = run(*SSH, host, f"docker build -q -t {image_of(work)} {work}/src/plan/maintenance/tools/remote", capture_output=True).stdout.strip()
+    print(f"image {host} {built}", flush=True)  # gate.py records it: the run's image is removed at the end
+    return image_of(work)
 
 
 def e2e(spec):
     """One container on the first host runs mutate.py's self-test and its --e2e cases in the image the rows run in."""
     host = spec.split(",")[0].split(":")[0]
-    work = f"{REMOTE}/e2e-{int(time.time())}"
-    upload(host, work)
-    inner = ("cd /src && export EZSDR_PYTHON=python3; python3 plan/maintenance/tools/mutate.py --self-test; "
-             "python3 plan/maintenance/tools/mutate.py --e2e /tmp/scratch")
-    out = subprocess.run([*SSH, host, f"docker run --rm --cpus={CPUS} -v ~/{work}/src:/src:ro {REMOTE} bash -c {json.dumps(inner)}"],
-                         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout
-    run(*SSH, host, f"rm -rf {work}")
+    work = f"{REMOTE}/{new_tag('e2e')}"
+    try:
+        out = e2e_run(host, work)
+    finally:
+        cleanup_all([host], work)
     print(out, end="")
     cases = [c for c in (fixed_field(E2E_LINE, line) for line in out.splitlines()) if c and "id" in c]
     bad = [c["id"] for c in cases if c.get("ok") is not True]
     selftest = "mutate.py self-test: ok" in out.splitlines()
     print(f"e2e: {len(cases) - len(bad)}/{len(cases)} ok; failed: {bad}; self-test: {'ok' if selftest else 'FAILED'}")
     return 0 if cases and not bad and selftest else 1
+
+
+def e2e_run(host, work):
+    image = upload(host, work)
+    inner = ("cd /src && export EZSDR_PYTHON=python3; python3 plan/maintenance/tools/mutate.py --self-test; "
+             "python3 plan/maintenance/tools/mutate.py --e2e /tmp/scratch")
+    return subprocess.run([*SSH, host, f"docker run --rm --cpus={CPUS} --name {REMOTE}-{work.split('/')[-1]} -v ~/{work}/src:/src:ro {image} bash -c {json.dumps(inner)}"],
+                          text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout
 
 
 def main():
@@ -107,36 +153,40 @@ def main():
             if not wanted or r["id"] in wanted]
     slots = [(host, i) for host, n in hosts for i in range(n)]
     shards = {slot: rows[k::len(slots)] for k, slot in enumerate(slots)}
-    tag = f"{'-'.join(names) if len(names) < 3 else 'multi'}-{int(time.time())}"
+    tag = new_tag('-'.join(names) if len(names) < 3 else 'multi')
     work = f"{REMOTE}/{tag}"
-    for host in {h for h, _ in hosts}:
-        upload(host, work)
-    for (host, i), chunk in shards.items():
-        if not chunk:
-            continue
-        steps = []
-        for name in names:
-            ids = [rid for n, rid in chunk if n == name]
-            if ids:
-                steps.append(f"python3 plan/maintenance/tools/mutate.py plan/{name}/tools/mutations.json "
-                             f"/tmp/scratch {' '.join(ids)} > /out/{i}-{name}.log 2>&1")
-        inner = "cd /src && export EZSDR_PYTHON=python3; " + "; ".join(steps)
-        run(*SSH, host, f"docker run -d --rm --cpus={CPUS} --name {REMOTE}-{tag}-{i} -v ~/{work}/src:/src:ro "
-                         f"-v ~/{work}/out:/out {REMOTE} bash -c {json.dumps(inner)} >/dev/null")
-    print(f"{len(rows)} rows of {', '.join(names)} on {len(slots)} shards ({tag})", flush=True)
-    for host in {h for h, _ in hosts}:
-        while run(*SSH, host, f"docker ps -q --filter name={REMOTE}-{tag}", capture_output=True).stdout.strip():
-            time.sleep(20)
+    image = image_of(work)
+    uniq = list(dict.fromkeys(h for h, _ in hosts))
     outcomes = {}
-    for host in {h for h, _ in hosts}:
-        for name in names:
-            out = run(*SSH, host, f"cat {work}/out/*-{name}.log 2>/dev/null || true", capture_output=True).stdout
-            if out:
-                print(f"--- {name} ({host})\n{out}", end="")
-            for line in out.splitlines():
-                if found := row_outcome(line):
-                    outcomes[(name, found[0])] = found[1]
-        run(*SSH, host, f"rm -rf {work}")
+    try:  # whatever fails, every host's containers, dir and image are removed
+        for host in uniq:
+            upload(host, work)
+        for (host, i), chunk in shards.items():
+            if not chunk:
+                continue
+            steps = []
+            for name in names:
+                ids = [rid for n, rid in chunk if n == name]
+                if ids:
+                    steps.append(f"python3 plan/maintenance/tools/mutate.py plan/{name}/tools/mutations.json "
+                                 f"/tmp/scratch {' '.join(ids)} > /out/{i}-{name}.log 2>&1")
+            inner = "cd /src && export EZSDR_PYTHON=python3; " + "; ".join(steps)
+            run(*SSH, host, f"docker run -d --rm --cpus={CPUS} --name {REMOTE}-{tag}-{i} -v ~/{work}/src:/src:ro "
+                             f"-v ~/{work}/out:/out {image} bash -c {json.dumps(inner)} >/dev/null")
+        print(f"{len(rows)} rows of {', '.join(names)} on {len(slots)} shards ({tag})", flush=True)
+        for host in uniq:
+            while run(*SSH, host, f"docker ps -q --filter name={REMOTE}-{tag}", capture_output=True).stdout.strip():
+                time.sleep(20)
+        for host in uniq:
+            for name in names:
+                out = run(*SSH, host, f"cat {work}/out/*-{name}.log 2>/dev/null || true", capture_output=True).stdout
+                if out:
+                    print(f"--- {name} ({host})\n{out}", end="")
+                for line in out.splitlines():
+                    if found := row_outcome(line):
+                        outcomes[(name, found[0])] = found[1]
+    finally:
+        cleanup_all(uniq, work)
     missing = [row for row in rows if row not in outcomes]
     bad = sorted(row for row, o in outcomes.items() if o not in PASSED) + missing
     for name in names:

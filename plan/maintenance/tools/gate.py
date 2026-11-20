@@ -58,7 +58,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "remote"))
-from remote_mutate import E2E_LINE, HEADER, KILLED, PASSED, REMOTE, fixed_field, row_outcome, row_record  # one parser for mutate.py's result lines
+from remote_mutate import E2E_LINE, HEADER, KILLED, PASSED, fixed_field, row_outcome, row_record  # one parser for mutate.py's result lines
 from mutate import E2E, RERUNS, Ran, ran_tests, rerunnable, row_line, settle_test, timing_tests  # the timing rule is mutate.py's too
 
 IMAGE = "ezsdr-v4-dev:uhd4.10"
@@ -306,16 +306,10 @@ def toolchain(volume):
             "python314": first([VENV_PYTHON, "-V"]), "python39": first(["docker", "run", "--rm", "python:3.9-slim", "python", "-V"])}
 
 
-def remote_images(hosts):
-    """The image id of remote_mutate's image on each host: it is built there, so it is the toolchain the rows ran with."""
-    images = {}
-    for host in dict.fromkeys(h.split(":")[0] for h in hosts.split(",")):
-        try:
-            images[host] = subprocess.run([*shlex.split(REMOTE_SSH), host, shlex.join(["docker", "image", "inspect", "--format", "{{.Id}}", REMOTE])],
-                                          capture_output=True, text=True, check=True, timeout=300).stdout.strip()
-        except (OSError, subprocess.SubprocessError) as error:
-            images[host] = f"unavailable: {error}"
-    return images
+def remote_images(hosts, text):
+    """The image id remote_mutate built on each host for this run (its `image <host> <id>` lines): the toolchain the rows ran with; the image itself is removed at the run's end."""
+    seen = dict(re.findall(r"^image (\S+) (sha256:[0-9a-f]+)$", text, re.M))
+    return {host: seen.get(host, "unavailable: no image line in the mutation output") for host in dict.fromkeys(h.split(":")[0] for h in hosts.split(","))}
 
 
 def show(argv, env=None):
@@ -501,7 +495,7 @@ def execute(out, record, failures, plan):
         code, seconds, text, log = run_step(name, commands_for(name, ctx), out)
         if name == "mutation":
             counts, mutation, reasons = parse_mutation(text, code, rows, plan.ids, known)
-            images = remote_images(plan.hosts)
+            images = remote_images(plan.hosts, text)
             record["mutation"] = {**(mutation or {}), "hosts": plan.hosts, "images": images}
             reasons += [f"mutation: image id on {host} {image}" for host, image in images.items() if image.startswith("unavailable")]
         else:

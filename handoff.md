@@ -57,6 +57,7 @@
 - [ ] 文書の種類ごとに受け付ける版を設定する（今は共通の `SUPPORTED_VERSIONS`．項目5で凍結時に延期，[24-prefreeze-audit.md](plan/maintenance/24-prefreeze-audit.md) の 2026-10-09 item 5 の行）．
 - [ ] Kernel API を 4.0.0 に，`SCHEMA_CHANGELOG.md` の見出しを凍結後の形式に．凍結までは版を上げず changelog も書かない（AGENTS.md §6）．
 - [ ] 凍結後の OV-12 を道具で守る：`EZSDR_UPDATE_SCHEMAS=1` は形の変わった `*.v1.json` を書き換えず拒否する（説明文の修正だけ許す）．
+- [ ] 生成器の見渡し：workspace 全体は流さない（D1 の試し 2026-11-20，`reviews/tools2-*`：約 14.7 時間で一晩に入らない．owner）．純粋な規則の crate（`ezsdr-radio` など）を crate ごとに `sweep_mutants.py`（`simq` の下）で流し，生き残りを仕分ける（テストを足す／同値と理由／受け入れる）．
 - [ ] 将来の設定エディタ（GUI，[34-future-config-editor.md](plan/maintenance/34-future-config-editor.md)）のために Kernel の型を変える必要がないことを確かめる．
 
 ## 5. 進め方と道具

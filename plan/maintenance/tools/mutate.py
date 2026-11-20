@@ -8,7 +8,8 @@ the file. Rust `.rs` anchors match lexer tokens while ignoring whitespace betwee
 strings remain exact and comments match with internal whitespace collapsed. Other files
 use exact substrings. An optional `scope` uniquely names a Rust block by text before its
 first following balanced `{ ... }`; it limits both `old` and `old2`. A row may add a second
-replacement as `old2` / `new2`. The working tree is never modified. A mutation with a
+replacement as `old2` / `new2`, and a `features` list (cargo features of the row's crate, for
+example `["uhd"]`, which needs libuhd: the remote image has it) that its build and tests get as `--features`. The working tree is never modified. A mutation with a
 `python` field
 instead runs that unittest id (for example `test_easy_api.EasyApi.test_ea_17_two_channels_round_trip`)
 from the scratch copy's `python/tests`, with the interpreter in `EZSDR_PYTHON` (default: this
@@ -133,12 +134,18 @@ def timed(command, cwd, env, timeout, phase):
     return Ran(done.returncode, done.stdout + done.stderr)
 
 
+def test_command(mutation):
+    """The `cargo test` a row's baseline, mutated run and re-runs share; its optional `features` list becomes `--features a,b`."""
+    # `test_bin: "lib"` names the crate's own unit tests (`--lib`).
+    target = ["--lib"] if mutation["test_bin"] == "lib" else ["--test", mutation["test_bin"]]
+    features = ["--features", ",".join(mutation["features"])] if mutation.get("features") else []
+    return ["cargo", "+stable", "test", "-q", "-p", mutation["crate"], *features, *target, mutation["filter"]]
+
+
 def cargo_test(scratch, env, mutation, show_output=False):
     if "python" in mutation:
         return python_test(scratch, env, mutation)
-    # `test_bin: "lib"` names the crate's own unit tests (`--lib`).
-    target = ["--lib"] if mutation["test_bin"] == "lib" else ["--test", mutation["test_bin"]]
-    command = ["cargo", "+stable", "test", "-q", "-p", mutation["crate"], *target, mutation["filter"]]
+    command = test_command(mutation)
     build = timed([*command, "--no-run"], scratch, env, BUILD_TIMEOUT, "build")
     if build.timeout or build.returncode != 0:
         return build
@@ -278,8 +285,8 @@ BASELINES = {}
 ORIGINALS = {}
 
 
-def exact_rerun(scratch, env):
-    return lambda package, binary, path: cargo_test(scratch, env, {"crate": package, "test_bin": binary, "filter": path, "exact": True})
+def exact_rerun(scratch, env, features=None):
+    return lambda package, binary, path: cargo_test(scratch, env, {"crate": package, "test_bin": binary, "filter": path, "exact": True, "features": features})
 
 
 def run_one(scratch, env, mutation):
@@ -287,12 +294,15 @@ def run_one(scratch, env, mutation):
     baseline is re-run alone); its re-runs are added to the first row that uses it."""
     if mutation.get("kill") not in (None, "bound"):
         return f"NOT FOUND: unknown \"kill\" value {mutation['kill']!r}", False, 0, "", False
+    features = mutation.get("features")
+    if features is not None and not (isinstance(features, list) and features and all(isinstance(f, str) for f in features)):
+        return f"NOT FOUND: \"features\" must be a non-empty list of cargo features, not {features!r}", False, 0, "", False
     declared = mutation.get("kill") == "bound"
-    key = mutation.get("python") or (mutation["crate"], mutation["test_bin"], mutation["filter"])
+    key = mutation.get("python") or (mutation["crate"], mutation["test_bin"], mutation["filter"], tuple(features or ()))
     baseline_reruns = 0
     if key not in BASELINES:
         baseline = cargo_test(scratch, dict(env, EZSDR_REAL_CLOCK_PROBE="1"), mutation, show_output=True)
-        outcome, baseline_reruns, _ = judge(baseline, False, exact_rerun(scratch, env))
+        outcome, baseline_reruns, _ = judge(baseline, False, exact_rerun(scratch, env, features))
         BASELINES[key] = (outcome == "SURVIVED" and (baseline_reruns > 0 or ran_tests(baseline.output)), REAL_CLOCK in baseline.output)
     ok, real_clock = BASELINES[key]
     if not ok:
@@ -308,7 +318,7 @@ def run_one(scratch, env, mutation):
     open(path, "w", encoding="utf-8").write(mutated)
     try:
         ran = cargo_test(scratch, env, mutation)
-        outcome, reruns, reason = judge(ran, declared, exact_rerun(scratch, env))
+        outcome, reruns, reason = judge(ran, declared, exact_rerun(scratch, env, features))
         if real_clock and not declared and outcome in ("killed", "SURVIVED"):
             outcome, reason = "ERROR", UNDECLARED
         return outcome, real_clock, baseline_reruns + reruns, reason, declared
@@ -538,6 +548,20 @@ def self_test():
     finally:
         cargo_test = real_cargo_test
         BASELINES.clear(), ORIGINALS.clear()
+    # `features` reach the row's cargo command, its serial re-run and its baseline key; a malformed list is refused.
+    plain, uhd = {"crate": "p", "test_bin": "b", "filter": "t"}, {"crate": "p", "test_bin": "lib", "filter": "t", "features": ["uhd", "x"]}
+    assert test_command(plain) == ["cargo", "+stable", "test", "-q", "-p", "p", "--test", "b", "t"], "self-test: a row without features runs as before"
+    assert test_command(uhd) == ["cargo", "+stable", "test", "-q", "-p", "p", "--features", "uhd,x", "--lib", "t"], "self-test: features become --features"
+    seen_rows = []
+    cargo_test = lambda scratch, env, mutation, show_output=False: seen_rows.append(mutation) or Ran(0, ok)
+    try:
+        exact_rerun(".", {}, ["uhd"])("p", "b", "t::a")
+        assert seen_rows == [{"crate": "p", "test_bin": "b", "filter": "t::a", "exact": True, "features": ["uhd"]}], "self-test: the serial re-run keeps the row's features"
+        BASELINES.clear(), ORIGINALS.clear()
+        assert run_one(".", {}, dict(plain, features="uhd"))[0].startswith("NOT FOUND"), "self-test: features must be a list"
+        assert run_one(".", {}, dict(plain, features=[]))[0].startswith("NOT FOUND") and len(seen_rows) == 1, "self-test: an empty features list is refused, before any build"
+    finally:
+        cargo_test = real_cargo_test
     shown = Ran(101, marker + "thread 'a' panicked at x\n" + failed)
     cell = {"expect": "ERROR", "markers": 1, "panics": 1, "has": [r"EZSDR-INFRA: [^\n]*bound", r"test result: FAILED"]}
     assert e2e_seen(cell, shown, "ERROR", 0)[1] and e2e_seen(dict(cell, lacks=[r"never printed"]), shown, "ERROR", 0)[1], "self-test: an e2e case passes when its `lacks` patterns are absent"
