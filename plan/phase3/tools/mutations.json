@@ -392,33 +392,33 @@
  },
  {
   "id": "M42",
-  "name": "MR-32 missing bytes accepted",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            Some(None) => {\n                self.reject_action_at(Some(id), \"tx_burst\", \"MR-32: the waveform's bytes are not an input of this Run\", now)?;\n                return Ok(());\n            }",
-  "new": "            Some(None) => None,",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_32_waveform"
+  "name": "RM-13 missing bytes accepted",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "let Some(bytes) = bytes else { return Some(\"RM-13: the waveform's bytes are not an input of this Run\") };",
+  "new": "let Some(bytes) = bytes else { return None };",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "rm_13_a_waveform_whose_bytes_are_absent"
  },
  {
   "id": "M43",
-  "name": "MR-32 size mismatch accepted",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "Some(Some(bytes)) if bytes.len() as u64 != size_bytes => {",
-  "new": "Some(Some(bytes)) if false && bytes.len() as u64 != size_bytes => {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_32_waveform"
+  "name": "RM-13 size mismatch accepted",
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": "if bytes.len() as u64 != size_bytes {",
+  "new": "if false && bytes.len() as u64 != size_bytes {",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "rm_13_a_waveform_whose_bytes_are_not_size_bytes"
  },
  {
   "id": "M44",
   "name": "RM-13 non-finite accepted",
-  "file": "crates/ezsdr-mock-radio/src/channel.rs",
-  "old": "if !re.is_finite() || !im.is_finite() {",
-  "new": "if false && (!re.is_finite() || !im.is_finite()) {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_32_waveform"
+  "file": "crates/ezsdr-radio/src/staging.rs",
+  "old": ".all(|word| f32::from_le_bytes(word.try_into().expect(\"four bytes\")).is_finite())",
+  "new": ".all(|_| true)",
+  "crate": "ezsdr-radio",
+  "test_bin": "staging",
+  "filter": "rm_13_a_waveform_with_a_non_finite"
  },
  {
   "id": "M45",

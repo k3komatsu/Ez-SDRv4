@@ -409,6 +409,9 @@ impl Image {
     }
 }
 
+/// The `x3xx` delivery allowance in nanoseconds (RM-14, MR-3, UR-14): the declared command lead less this is the device lead. One value for both Providers.
+pub const DELIVERY_ALLOWANCE_NS: i64 = 3_000_000;
+
 /// The TimingEnvelope every `x3xx` description declares (RM-6, RM-20): one set of values for both Providers.
 pub fn timing() -> TimingEnvelope {
     TimingEnvelope { min_timed_command_lead_ns: 5_000_000, startup_latency_ns: 2_000_000_000, overflow_restart_gap_ns: 140_000_000, rx_start_lead_ns: 10_000_000, tx_in_flight_ns: 10_000_000 }

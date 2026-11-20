@@ -433,26 +433,26 @@ impl Control {
         if waveform.size_bytes == 0 || waveform.size_bytes % unit != 0 {
             return reject("UR-21: the waveform size is not a positive multiple of 8 · channels");
         }
-        let Some(bytes) = self.core.inputs.get(&waveform.hash).filter(|b| b.len() as u64 == waveform.size_bytes) else {
-            return reject("UR-21: the waveform's bytes are not an input of this Run");
-        };
-        let len = bytes.len() / unit as usize;
+        // The order MockRadio's MR-16/MR-32 refuse in, metadata, repeat length (each Provider its own limits), then the bytes (RM-13).
+        if !(metadata.is_empty() || switch) {
+            return reject("UR-21: TxBurst.metadata must be empty or the repeat-switch mark");
+        }
+        let len = (waveform.size_bytes / unit) as usize;
+        if repeat && len as u64 > self.core.description.repeat_max_samples {
+            return reject("UR-21: the repeated waveform exceeds radio.tx.repeat_max_samples");
+        }
+        let bytes = self.core.inputs.get(&waveform.hash);
+        if let Some(reason) = ezsdr_radio::staging::waveform_bytes_refusal(bytes.as_deref(), waveform.size_bytes) {
+            return reject(reason);
+        }
+        let bytes = bytes.expect("present: waveform_bytes_refusal passed");
         let mut samples: Vec<Vec<Iq>> = vec![Vec::with_capacity(len); channels];
         for frame in bytes.chunks_exact(unit as usize) {
             for (chan, pair) in frame.chunks_exact(8).enumerate() {
                 let re = f32::from_le_bytes(pair[0..4].try_into().expect("four bytes"));
                 let im = f32::from_le_bytes(pair[4..8].try_into().expect("four bytes"));
-                if !re.is_finite() || !im.is_finite() {
-                    return reject("UR-21: a waveform sample is not finite");
-                }
                 samples[chan].push([re, im]);
             }
-        }
-        if repeat && len as u64 > self.core.description.repeat_max_samples {
-            return reject("UR-21: the repeated waveform exceeds radio.tx.repeat_max_samples");
-        }
-        if !(metadata.is_empty() || switch) {
-            return reject("UR-21: TxBurst.metadata must be empty or the repeat-switch mark");
         }
         let (generation, values) = self.staging.tx_snapshot(k as u32);
         let settings = Arc::new(ColdConfig::of_tx(values, id, generation));
@@ -883,6 +883,38 @@ mod tests {
             assert_eq!(k, bound.max(ordinary), "received at tick {receipt} (the switch is {switch}): the bound is {bound}, the ordinary start {ordinary}");
         }
         assert!(ordinary_at(switch) >= bound && ordinary_at(switch - 1) < bound, "{switch} is the smallest receipt whose ordinary start reaches the bound");
+    }
+
+    /// RM-13: a burst with invalid metadata and a non-finite sample gets the metadata refusal, as MockRadio's (MR-16 before MR-32): the same first refusal on both Providers.
+    #[test]
+    fn rm_13_the_metadata_refusal_comes_before_the_waveform_bytes() {
+        let bytes: Vec<u8> = [f32::NAN, 0.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
+        let waveform =
+            ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
+        let (core, _device, _time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
+        let mut control = control(&core, &[Dir::Tx]);
+        let clock = tx_clock(&core);
+        control.book(Dispatched::new(
+            ActionId(1),
+            Action::TxBurst {
+                target: super::super::test_support::target_of(&core.tx_id),
+                waveform,
+                repeat: false,
+                at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 0)),
+                requested_at: None,
+                late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+                metadata: BTreeMap::from([(key("radio.note"), ezsdr_kernel::spec::Value::Scalar(Scalar::from("x")))]),
+            },
+            Some(core.tx_id.clone()),
+        ));
+        let reasons: Vec<String> = events
+            .drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0))
+            .iter()
+            .filter(|e| e.kind.as_str() == kinds::COMMAND_REJECTED)
+            .map(|e| e.payload["reason"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(reasons, ["UR-21: TxBurst.metadata must be empty or the repeat-switch mark"]);
     }
 
     #[test]

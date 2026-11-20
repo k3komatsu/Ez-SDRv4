@@ -22297,7 +22297,7 @@
  {
   "id": "N51-2C-17",
   "name": "the production delivery allowance moves alone (note 51 stage 2c)",
-  "file": "crates/ezsdr-radio-uhd/src/profile.rs",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
   "old": "DELIVERY_ALLOWANCE_NS: i64 = 3_000_000",
   "new": "DELIVERY_ALLOWANCE_NS: i64 = 3_500_000",
   "crate": "ezsdr-radio-uhd",
@@ -31306,5 +31306,35 @@
   "crate": "ezsdr-radio",
   "test_bin": "radio_model",
   "filter": "rm_19_a_band_whose_ends_are_one_frequency"
+ },
+ {
+  "id": "N125-1",
+  "name": "MockRadio skips RM-13's waveform bytes check outside channel mode (#125)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "if let Some(reason) = ezsdr_radio::staging::waveform_bytes_refusal(bytes.as_deref(), size_bytes) {",
+  "new": "if let (Some(reason), true) = (ezsdr_radio::staging::waveform_bytes_refusal(bytes.as_deref(), size_bytes), self.channel.is_some()) {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "rm_13_waveform_bytes_are_refused_at_receipt"
+ },
+ {
+  "id": "N125-2",
+  "name": "the UHD Module skips RM-13's waveform bytes check (#125)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "if let Some(reason) = ezsdr_radio::staging::waveform_bytes_refusal(bytes.as_deref(), waveform.size_bytes) {",
+  "new": "if let (Some(reason), true) = (ezsdr_radio::staging::waveform_bytes_refusal(bytes.as_deref(), waveform.size_bytes), false) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_21_txburst_refusals"
+ },
+ {
+  "id": "N125-3",
+  "name": "the UHD Module judges the metadata only after the waveform bytes (the old order; #125)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "if !(metadata.is_empty() || switch) {",
+  "new": "if !(metadata.is_empty() || switch) && ezsdr_radio::staging::waveform_bytes_refusal(self.core.inputs.get(&waveform.hash).as_deref(), waveform.size_bytes).is_none() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_13_the_metadata_refusal_comes_before_the_waveform_bytes"
  }
 ]

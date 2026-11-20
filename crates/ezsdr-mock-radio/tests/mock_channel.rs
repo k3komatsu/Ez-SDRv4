@@ -405,7 +405,7 @@ fn mr_32_waveform_refusals() {
     step(&world, &mut [&mut radio], 2_000_001);
     let rejected = radio.section("rejected");
     let reasons: Vec<&str> = rejected.as_array().unwrap().iter().map(|row| row["reason"].as_str().unwrap()).collect();
-    assert_eq!(reasons, ["MR-32: the waveform's bytes are not an input of this Run", "MR-32: the waveform's bytes do not have its size_bytes", "RM-13: a waveform sample is not finite",]);
+    assert_eq!(reasons, ["RM-13: the waveform's bytes are not an input of this Run", "RM-13: the waveform's bytes do not have its size_bytes", "RM-13: a waveform sample is not finite",]);
     assert_eq!(radio.drain_events().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 3);
     assert!(radio.received(0).iter().all(|(_, re, im)| (*re, *im) == (0.0, 0.0)));
 }
@@ -418,8 +418,7 @@ fn mr_32_a_the_waveform_refusals_hold_their_place_in_handle_tx_burst() {
     // report the absent bytes where the repeat reason belongs. `mr_32_waveform_refusals`
     // cannot see either, because its three bursts are on time and not repeated.
     // `ideal` has no lead, so a target in the past is late and MR-17 would drop it.
-    // MR-32's refusals are channel-mode rules, so only a channelled Mock reads a
-    // waveform at all; on a pattern-mode Mock there is nothing to place.
+    // RM-13's waveform refusals hold in every mode; here the burst is in channel mode, where the bytes are also decoded.
     {
         let world = World::new(loopback(None));
         let mut radio = prepare(&world, Options::default()).unwrap();
@@ -437,7 +436,7 @@ fn mr_32_a_the_waveform_refusals_hold_their_place_in_handle_tx_burst() {
             radio.drain_events().iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR),
             "the MR-32 refusal precedes MR-17's decision, so a late burst with absent bytes is not a TIME_ERROR"
         );
-        assert_eq!(radio.section("rejected")[0]["reason"], "MR-32: the waveform's bytes are not an input of this Run");
+        assert_eq!(radio.section("rejected")[0]["reason"], "RM-13: the waveform's bytes are not an input of this Run");
     }
 
     {

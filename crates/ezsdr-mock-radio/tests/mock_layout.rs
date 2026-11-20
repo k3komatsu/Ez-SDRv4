@@ -72,9 +72,22 @@ fn node_src(path: &str) -> EventSource {
     EventSource::Node { node: rid(path) }
 }
 
+/// The all-zero waveforms the helpers below hand out, readable by hash: RM-13 refuses a burst whose bytes are not an input of the Run, in every mode.
+static ZEROS: Mutex<BTreeMap<ContentHash, Arc<[u8]>>> = Mutex::new(BTreeMap::new());
+
+/// Every `waveform()` registers its bytes process-wide in `ZEROS`, so an "absent bytes" test must use a hash no helper produces.
+struct Inputs(BTreeMap<ContentHash, Arc<[u8]>>);
+
+impl ezsdr_kernel::module_api::InputStore for Inputs {
+    fn get(&self, hash: &ContentHash) -> Option<Arc<[u8]>> {
+        self.0.get(hash).cloned().or_else(|| ZEROS.lock().unwrap().get(hash).cloned())
+    }
+}
+
 fn waveform(samples: usize, channels: usize) -> ArtifactRef {
     let bytes = vec![0; samples * channels * 8];
     let hash = ContentHash::of_bytes(&bytes);
+    ZEROS.lock().unwrap().insert(hash.clone(), bytes.clone().into());
     ArtifactRef {
         id: Ident::parse("waveform").unwrap(),
         kind: Namespace::parse("ezsdr.input").unwrap(),
@@ -276,7 +289,7 @@ fn build_layout(options: Layout<'_>, extra: &[(&str, BackPressure, usize)], inpu
         ctx.run = RunId::from_string("mock-layout".to_owned());
         ctx.class = ExecutionClass::Simulation;
         ctx.environment = environment;
-        ctx.inputs = Arc::new(inputs);
+        ctx.inputs = Arc::new(Inputs(inputs));
         ctx.links = attached;
         ctx.host_budget = RelativeBudget::new(Duration::new(HOST, 5_000_000_000)).unwrap();
         ctx

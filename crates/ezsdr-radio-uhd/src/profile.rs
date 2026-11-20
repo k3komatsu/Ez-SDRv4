@@ -13,7 +13,7 @@ pub const DEVICE_LEAD_NS: i64 = 2_000_000;
 /// bench cells C4 and C7 measure it): its own constant, not the in-flight window.
 pub const RESUME_MARGIN_NS: i64 = 10_000_000;
 /// The delivery allowance: the poll period plus booking the Actions ahead (UR-14).
-pub const DELIVERY_ALLOWANCE_NS: i64 = 3_000_000;
+pub const DELIVERY_ALLOWANCE_NS: i64 = x3xx::DELIVERY_ALLOWANCE_NS;
 /// The default samples per receive block (UR-5, UR-9).
 pub const DEFAULT_BLOCK_LEN: u32 = 2_000;
 

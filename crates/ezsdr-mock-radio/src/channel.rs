@@ -121,18 +121,15 @@ pub(crate) struct RxChannelModel {
     pub path_delay_samples: i64,
 }
 
-/// Decodes a `cf32` waveform, refusing a non-finite component and clipping each
+/// Decodes a finite `cf32` waveform (checked by `ezsdr_radio::staging::waveform_bytes_refusal`), clipping each
 /// component to `[−1, 1]`; returns the samples and how many sample-channel pairs had a
 /// component clipped (RM-13, MR-32, MR-36).
-pub(crate) fn decode_waveform(bytes: &[u8]) -> Result<(Arc<[f32]>, u64), &'static str> {
+pub(crate) fn decode_waveform(bytes: &[u8]) -> (Arc<[f32]>, u64) {
     let mut samples = Vec::with_capacity(bytes.len() / 4);
     let mut clipped = 0;
     for pair in bytes.chunks_exact(8) {
         let re = f32::from_le_bytes(pair[0..4].try_into().expect("four bytes"));
         let im = f32::from_le_bytes(pair[4..8].try_into().expect("four bytes"));
-        if !re.is_finite() || !im.is_finite() {
-            return Err("RM-13: a waveform sample is not finite");
-        }
         let (cre, cim) = (re.clamp(-1.0, 1.0), im.clamp(-1.0, 1.0));
         if cre != re || cim != im {
             clipped += 1;
@@ -140,7 +137,7 @@ pub(crate) fn decode_waveform(bytes: &[u8]) -> Result<(Arc<[f32]>, u64), &'stati
         samples.push(cre);
         samples.push(cim);
     }
-    Ok((samples.into(), clipped))
+    (samples.into(), clipped)
 }
 
 /// A random LO phase in `[0, 2π)` from one draw: `2π · ⌊x / 2^11⌋ · 2^−53` (MR-34).

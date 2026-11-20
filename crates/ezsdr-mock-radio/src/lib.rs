@@ -100,6 +100,8 @@ pub struct MockRadio {
     next_order: u64,
     medium: Option<std::sync::Arc<Medium>>,
     channel: Option<ChannelMode>,
+    /// The Run's inputs, read at every `TxBurst` in every mode (RM-13).
+    inputs: Option<std::sync::Arc<dyn InputStore>>,
 }
 
 /// The channel-coupled state of a Mock whose environment declares `sim.channel` (MR-31).
@@ -107,7 +109,6 @@ pub struct MockRadio {
 struct ChannelMode {
     medium: std::sync::Arc<Medium>,
     fragment: Ident,
-    inputs: std::sync::Arc<dyn InputStore>,
     /// MR-34's fresh phases for a `random` board (design 33 D13), drawn in the order the
     /// applied frequency updates reach the Mock, so its output stays a function of its seed
     /// (MR-30).
@@ -460,6 +461,7 @@ impl MockRadio {
             next_order: 0,
             medium: None,
             channel: None,
+            inputs: None,
         })
     }
 
@@ -1667,24 +1669,12 @@ impl MockRadio {
             self.reject_action_at(Some(id), "tx_burst", "MR-16: repeated waveform violates RM-13's length or alignment limits", now)?;
             return Ok(());
         }
-        let decoded = match self.channel.as_ref().map(|mode| mode.inputs.get(&waveform.hash)) {
-            None => None,
-            Some(None) => {
-                self.reject_action_at(Some(id), "tx_burst", "MR-32: the waveform's bytes are not an input of this Run", now)?;
-                return Ok(());
-            }
-            Some(Some(bytes)) if bytes.len() as u64 != size_bytes => {
-                self.reject_action_at(Some(id), "tx_burst", "MR-32: the waveform's bytes do not have its size_bytes", now)?;
-                return Ok(());
-            }
-            Some(Some(bytes)) => match channel::decode_waveform(&bytes) {
-                Ok(decoded) => Some(decoded),
-                Err(reason) => {
-                    self.reject_action_at(Some(id), "tx_burst", reason, now)?;
-                    return Ok(());
-                }
-            },
-        };
+        let bytes = self.inputs.as_ref().and_then(|inputs| inputs.get(&waveform.hash));
+        if let Some(reason) = ezsdr_radio::staging::waveform_bytes_refusal(bytes.as_deref(), size_bytes) {
+            self.reject_action_at(Some(id), "tx_burst", reason, now)?;
+            return Ok(());
+        }
+        let decoded = self.channel.as_ref().map(|_| channel::decode_waveform(bytes.as_deref().expect("present: waveform_bytes_refusal passed")));
         let clocks = self.clocks.as_ref().expect("prepared clocks");
         // RM-22: a time that does not fit a clock is a refusal of the Action with its id, never a failed Run.
         let instants = || -> Result<_, String> {
@@ -2299,13 +2289,14 @@ impl Provider for MockRadio {
                 for stream in &mut self.tx {
                     stream.plan = Some(tx.clone());
                 }
-                Some(ChannelMode { medium, fragment: f.id.clone(), inputs: ctx.inputs.clone(), lo_retune, rx_channels })
+                Some(ChannelMode { medium, fragment: f.id.clone(), lo_retune, rx_channels })
             }
         };
         if channel_mode.is_some() {
             self.instance.fidelity.rf = ezsdr_kernel::module_api::RfFidelity::ImpairmentModel;
         }
         self.channel = channel_mode;
+        self.inputs = Some(ctx.inputs.clone());
         self.root = Some(root);
         self.clocks = Some(ctx.clocks);
         self.time = Some(ctx.time);
@@ -2509,6 +2500,7 @@ impl Provider for MockRadio {
         self.root = None;
         self.channel = None;
         self.medium = None;
+        self.inputs = None;
     }
 
     fn step(&mut self, until: TimePoint) -> Result<StepOutcome, ModuleError> {

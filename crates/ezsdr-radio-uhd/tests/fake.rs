@@ -2112,7 +2112,7 @@ fn ur_21_txburst_refusals() {
     wait(&mut run, ms(20));
     let manifest = run.finish();
     let reasons = rejections(&manifest);
-    for want in ["UR-21: the waveform size", "UR-21: a waveform sample is not finite"] {
+    for want in ["UR-21: the waveform size", "RM-13: a waveform sample is not finite"] {
         assert!(reasons.iter().any(|r| r.starts_with(want)), "{want}: {reasons:?}");
     }
     let rejected = events_of(&manifest, "radio.COMMAND_REJECTED");

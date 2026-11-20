@@ -150,7 +150,7 @@ impl Profile {
     /// The delivery allowance after that call, in nanoseconds (MR-3).
     pub(crate) fn delivery_allowance_ns(&self) -> i64 {
         match self.kind {
-            ProfileKind::X3xx => 3_000_000,
+            ProfileKind::X3xx => ezsdr_radio::x3xx::DELIVERY_ALLOWANCE_NS,
             ProfileKind::Ideal => 0,
         }
     }

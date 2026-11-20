@@ -3217,3 +3217,32 @@ fn txbook_a_settled_switch_s_row_takes_the_boundary_it_settled_at() {
     write_settled(&mut rows, [Settled { id: ActionId(2), outcome: SwitchOutcome::Applied, boundary: 50 }]);
     assert_eq!((rows[0]["outcome"].as_str(), rows[0]["boundary"].as_i64()), (Some("applied"), Some(50)));
 }
+
+fn cf32(samples: &[f32]) -> Vec<u8> {
+    samples.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+#[test]
+fn rm_13_a_waveform_whose_bytes_are_absent_is_refused() {
+    assert_eq!(ezsdr_radio::staging::waveform_bytes_refusal(None, 8), Some("RM-13: the waveform's bytes are not an input of this Run"));
+}
+
+#[test]
+fn rm_13_a_waveform_whose_bytes_are_not_size_bytes_long_is_refused() {
+    let bytes = cf32(&[0.5, 0.5]);
+    assert_eq!(ezsdr_radio::staging::waveform_bytes_refusal(Some(&bytes), 16), Some("RM-13: the waveform's bytes do not have its size_bytes"));
+    assert_eq!(ezsdr_radio::staging::waveform_bytes_refusal(Some(&bytes), 4), Some("RM-13: the waveform's bytes do not have its size_bytes"));
+}
+
+#[test]
+fn rm_13_a_waveform_with_a_non_finite_component_is_refused_and_a_finite_one_is_not() {
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for position in 0..2 {
+            let mut samples = [0.25f32, 0.5];
+            samples[position] = bad;
+            let bytes = cf32(&samples);
+            assert_eq!(ezsdr_radio::staging::waveform_bytes_refusal(Some(&bytes), 8), Some("RM-13: a waveform sample is not finite"), "{bad} at {position}");
+        }
+    }
+    assert_eq!(ezsdr_radio::staging::waveform_bytes_refusal(Some(&cf32(&[0.25, -3.0])), 8), None);
+}

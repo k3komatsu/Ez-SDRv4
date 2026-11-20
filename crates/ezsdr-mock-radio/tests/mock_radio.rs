@@ -33,9 +33,21 @@ fn module_ref() -> ModuleRef {
     ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) }
 }
 
+/// The all-zero waveforms the helpers below hand out, readable by hash: RM-13 refuses a burst whose bytes are not an input of the Run, in every mode.
+static ZEROS: Mutex<BTreeMap<ContentHash, Arc<[u8]>>> = Mutex::new(BTreeMap::new());
+
+struct Inputs;
+
+impl ezsdr_kernel::module_api::InputStore for Inputs {
+    fn get(&self, hash: &ContentHash) -> Option<Arc<[u8]>> {
+        ZEROS.lock().unwrap().get(hash).cloned()
+    }
+}
+
 fn waveform(samples: usize) -> ArtifactRef {
     let bytes = vec![0; samples * 8];
     let hash = ContentHash::of_bytes(&bytes);
+    ZEROS.lock().unwrap().insert(hash.clone(), bytes.clone().into());
     ArtifactRef {
         id: Ident::parse("waveform").unwrap(),
         kind: Namespace::parse("ezsdr.input").unwrap(),
@@ -311,7 +323,7 @@ impl Harness {
             ctx.run = RunId::from_string("test-run".to_owned());
             ctx.class = class;
             ctx.environment = environment;
-            ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
+            ctx.inputs = Arc::new(Inputs);
             ctx.links = attached;
             ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
             ctx
@@ -691,7 +703,7 @@ fn mr_07_prepare_cases() {
         );
         ctx.run = RunId::from_string("second-prepare-test".to_owned());
         ctx.environment = Arc::new(BTreeMap::new());
-        ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
+        ctx.inputs = Arc::new(Inputs);
         ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
         ctx
     };
@@ -718,7 +730,7 @@ fn mr_07_prepare_cases() {
         );
         ctx.run = RunId::from_string("prepare-after-cleanup-test".to_owned());
         ctx.environment = Arc::new(BTreeMap::new());
-        ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
+        ctx.inputs = Arc::new(Inputs);
         ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
         ctx
     };
@@ -944,6 +956,57 @@ fn mr_14_blocks_appear_when_their_last_sample_has_occurred() {
     harness.mock.step(TimePoint::new(ROOT, 1_999_001)).unwrap();
     assert_eq!(harness.link.as_ref().unwrap().receive().unwrap().0.header().len, 2000);
     assert_eq!(harness.auth.next_due(), Some(TimePoint::new(ROOT, 3_999_001)));
+}
+
+/// RM-13 outside channel mode (the case that was accepted before RM-13's shared check): bytes absent, of another length and non-finite are each refused at receipt.
+#[test]
+fn rm_13_waveform_bytes_are_refused_at_receipt_outside_channel_mode() {
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(2_000_000_000).unwrap();
+    let domain = tx_domain(&harness);
+    let stored = |bytes: Vec<u8>| {
+        let mut reference = waveform(2);
+        reference.hash = ContentHash::of_bytes(&bytes);
+        ZEROS.lock().unwrap().insert(reference.hash.clone(), bytes.into());
+        reference
+    };
+    let mut absent = waveform(2);
+    absent.hash = ContentHash::of_bytes(b"never stored");
+    let mut short = stored(vec![0; 8]);
+    short.size_bytes = 16;
+    let mut nan = f32::NAN.to_le_bytes().to_vec();
+    nan.extend_from_slice(&0f32.to_le_bytes());
+    nan.extend_from_slice(&[0; 8]);
+    let not_finite = stored(nan);
+    for waveform in [absent, short, not_finite] {
+        let mut action = tx_action(domain, 2_010_000, 2, false, LatePolicy::SendAsapAndFlag);
+        if let Action::TxBurst { waveform: slot, .. } = &mut action {
+            *slot = waveform;
+        }
+        harness.actions.push(action);
+    }
+    harness.step(0).unwrap();
+    let rows = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
+    let reasons: Vec<_> = rows.as_array().unwrap().iter().map(|row| row["reason"].as_str().unwrap()).collect();
+    assert_eq!(reasons, ["RM-13: the waveform's bytes are not an input of this Run", "RM-13: the waveform's bytes do not have its size_bytes", "RM-13: a waveform sample is not finite"]);
+}
+
+/// RM-13: invalid metadata and an absent waveform get the metadata refusal, as the UHD Module's: the same first refusal on both Providers.
+#[test]
+fn rm_13_the_metadata_refusal_comes_before_the_waveform_bytes() {
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(2_000_000_000).unwrap();
+    let domain = tx_domain(&harness);
+    let mut action = tx_action(domain, 2_010_000, 2, false, LatePolicy::SendAsapAndFlag);
+    if let Action::TxBurst { waveform, metadata, .. } = &mut action {
+        waveform.hash = ContentHash::of_bytes(b"never stored");
+        metadata.insert(key("test.tag"), Value::from(true));
+    }
+    harness.actions.push(action);
+    harness.step(0).unwrap();
+    let rows = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
+    let reasons: Vec<_> = rows.as_array().unwrap().iter().map(|row| row["reason"].as_str().unwrap()).collect();
+    assert_eq!(reasons, ["MR-16: target, clock, waveform size, channel count or metadata is invalid"]);
 }
 
 #[test]

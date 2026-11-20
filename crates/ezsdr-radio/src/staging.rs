@@ -1713,6 +1713,16 @@ pub fn is_switch(repeat: bool, late_policy: LatePolicy, metadata: &BTreeMap<Key,
         && metadata.get(&Key::parse("radio.repeat_operation").expect("a declared metadata key")) == Some(&Value::Scalar(Scalar::from("switch")))
 }
 
+/// RM-13: the refusal of a `TxBurst` whose waveform bytes (`bytes`, the Run's input under the burst's hash) are absent, do not have `size_bytes` or hold a non-finite component. Both Providers call it at receipt, in every mode.
+pub fn waveform_bytes_refusal(bytes: Option<&[u8]>, size_bytes: u64) -> Option<&'static str> {
+    let Some(bytes) = bytes else { return Some("RM-13: the waveform's bytes are not an input of this Run") };
+    if bytes.len() as u64 != size_bytes {
+        return Some("RM-13: the waveform's bytes do not have its size_bytes");
+    }
+    let finite = bytes.chunks_exact(4).all(|word| f32::from_le_bytes(word.try_into().expect("four bytes")).is_finite());
+    (!finite).then_some("RM-13: a waveform sample is not finite")
+}
+
 /// The values of record: the Run's configuration, changed by the values a stopped receive stream
 /// or an idle transmit stream accepted (RM-21). A `start_rx` or a burst takes a copy of them at
 /// its booking.
