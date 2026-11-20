@@ -4,7 +4,7 @@ and a verdict in <dir>/gate.json.
 
 Usage (from the checkout's root or any directory inside it):
     python3 plan/maintenance/tools/gate.py --out <dir> [--base <commit>] [--renames <file>] [--mutation all|<list>[,<list>...]]
-        [--ids ID,ID,...] [--hosts sim02:8,sim03:8] [--only step,step] [--remote sim02|local]
+        [--ids ID,ID,...] [--hosts sim02:16,sim03:16] [--only step,step] [--remote sim02|local]
     python3 plan/maintenance/tools/gate.py --self-test
 
 Steps, in this order: fmt, test, clippy, rules, rules-self-test, uhd-clippy, uhd-test, hw-build,
@@ -357,8 +357,9 @@ def local_commands_for(name, ctx):
                    "-e", "EZSDR_SERVER=/srv/ezsdr-server", "-v", f"{ROOT}:/work:ro", "-v", f"{ctx.server}:/srv/ezsdr-server:ro",
                    "-w", "/work", "python:3.9-slim", "sh", "-c", "pip -q install --user numpy && python -m unittest discover -s python/tests"], {})],
         "e2e": [(["python3", "plan/maintenance/tools/remote/remote_mutate.py", "--e2e", ctx.hosts], {"REMOTE_SSH": REMOTE_SSH})],
+        # 16 shards x 2 CPUs a host (owner, 2026-11-21: 23 against 30.5 min for the full lists at 8 x 4, no ERROR either way).
         "mutation": [(["python3", "plan/maintenance/tools/remote/remote_mutate.py", ctx.lists, ctx.hosts, *ctx.ids],
-                      {"REMOTE_SSH": REMOTE_SSH})],
+                      {"REMOTE_SSH": REMOTE_SSH, "REMOTE_CPUS": os.environ.get("REMOTE_CPUS", "2")})],
     }
     return table[name]
 
@@ -529,7 +530,7 @@ def main(argv):
     parser.add_argument("--renames")
     parser.add_argument("--mutation")
     parser.add_argument("--ids")
-    parser.add_argument("--hosts", default="sim02:8,sim03:8")
+    parser.add_argument("--hosts", default="sim02:16,sim03:16")
     parser.add_argument("--only")
     parser.add_argument("--remote", default="sim02")
     args = parser.parse_args(argv)
