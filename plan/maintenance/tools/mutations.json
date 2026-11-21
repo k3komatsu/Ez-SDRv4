@@ -31898,5 +31898,35 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_20_the_overflow_follows_the_publish_of_the_block_that_carries_it"
+ },
+ {
+  "id": "N123-1",
+  "name": "SB-44: a report that omits a key `coerce` previewed from `effective` is not refused at prepare",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "violations.push(Violation { check: Namespace::parse(\"ezsdr.effective\").expect(\"a valid literal\"), key: Some(key.clone()), requested: super::coercion::exact_request(Some(req), key), reason: format!(\"SB-44: {name}'s report has no effective {key}, and `coerce` returned {:?} for it at validate\", preview.applied), });",
+  "new": "",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_report_that_omits_a_previewed_key_from_effective_is_refused_at_prepare"
+ },
+ {
+  "id": "N123-2",
+  "name": "SB-44: a report omitting a previewed key names the preview as `requested` instead of the Spec's request",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "requested: super::coercion::exact_request(Some(req), key), reason: format!(\"SB-44: {name}'s report has no effective {key}, and `coerce` returned {:?} for it at validate\", preview.applied),",
+  "new": "requested: Some(preview.applied.clone()), reason: format!(\"SB-44: {name}'s report has no effective {key}, and `coerce` returned {:?} for it at validate\", preview.applied),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_report_that_omits_a_previewed_key_from_effective_is_refused_at_prepare"
+ },
+ {
+  "id": "N123-3",
+  "name": "SB-44: a report omitting a previewed key is refused under the coercion check instead of the effective one",
+  "file": "crates/ezsdr-kernel/src/plan/prepare.rs",
+  "old": "check: Namespace::parse(\"ezsdr.effective\").expect(\"a valid literal\"), key: Some(key.clone()), requested: super::coercion::exact_request(Some(req), key), reason: format!(\"SB-44: {name}'s report has no effective {key}, and `coerce` returned {:?} for it at validate\", preview.applied),",
+  "new": "check: Namespace::parse(\"ezsdr.coercion\").expect(\"a valid literal\"), key: Some(key.clone()), requested: super::coercion::exact_request(Some(req), key), reason: format!(\"SB-44: {name}'s report has no effective {key}, and `coerce` returned {:?} for it at validate\", preview.applied),",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_44_a_previewed_key_is_omitted_beside_a_matching_prepare_coercion"
  }
 ]

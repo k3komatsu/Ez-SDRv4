@@ -276,6 +276,14 @@ pub(super) fn collect_prepare(
                             ),
                         });
                     }
+                } else {
+                    // SB-44: an omitted value is the lie a different one is, since the configuration served to the Run would lack what the Provider claims to apply.
+                    violations.push(Violation {
+                        check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
+                        key: Some(key.clone()),
+                        requested: super::coercion::exact_request(Some(req), key),
+                        reason: format!("SB-44: {name}'s report has no effective {key}, and `coerce` returned {:?} for it at validate", preview.applied),
+                    });
                 }
                 continue;
             }
