@@ -1934,7 +1934,7 @@ done
 docker run --rm --user "$(id -u):$(id -g)" -v "$L:/out" ezsdr-v4-dev:uhd4.10 /out/sync_check selftest   # `selftest ok`（装置なし）
 ```
 
-2026-11-21 に image で 2 つの tool の build と `selftest ok` を確かめた（装置なし）．image に `cc` と libuhd の link の道があることも同じ日に確かめた（01-device-bundle.md:277 の「未確認」は解決）．
+2026-11-21 に image で 2 つの tool の build と `selftest ok` を確かめた（装置なし）．image に `cc` と libuhd の link の道があることも同じ日に確かめた（01-device-bundle.md:277 に記した）．
 
 2 日目の前日（`<COMMIT2>`）：上の 2 つの warm-up を `<COMMIT2>` で繰り返す．C の tool の binary は 1 日目のものを 2 日目の log の dir に写す：`mkdir -p ~/.cache/ezsdr-bench/2026-11-30-8b0 && cp ~/.cache/ezsdr-bench/2026-11-27-8b0/{sync_check,tx_packet_probe} ~/.cache/ezsdr-bench/2026-11-30-8b0/`．
 
@@ -1944,7 +1944,7 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$L:/out" ezsdr-v4-dev:uhd4.10 /ou
 
 ```sh
 cd ~/local_work/Ez-SDRv4-bench           # <COMMIT>（2 日目は <COMMIT2>）の detached checkout．git status が空．hw はここから流す（main tree からは流さない）
-DAY=2026-11-27; D=~/.cache/ezsdr-bench/$DAY; mkdir -p "$D"; export D     # 2 日目は DAY=2026-11-30．hw の log．run-record.sh の出力は別：~/ezsdr-bench/<日付>/<commit12>-<時刻>/
+DAY=$(date +%F); D=~/.cache/ezsdr-bench/$DAY; mkdir -p "$D"; export D     # 2026-11-27 と 2026-11-30 の日付．hw の log．run-record.sh の出力は別：~/ezsdr-bench/<日付>/<commit12>-<時刻>/
 loadcheck() { uptime; ps -eo pid,pcpu,etime,user,comm --sort=-pcpu | head -6; }              # 組み立て
 board1() { export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 EZSDR_BENCH_SUBNET=40; }   # 組み立て（値は bench.md:1438）
 board2() { export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 EZSDR_BENCH_SUBNET=47; }
@@ -2047,6 +2047,11 @@ loadcheck
 # --- owner が #2 UBX slot A の att を確認した．次の 1 本だけ ---
 EZSDR_BENCH_NIC=enp1s0f0np0 EZSDR_BENCH_SUBNET=47 \
   plan/phase8/tools/run-record.sh <COMMIT> addr=192.168.47.37 hw_b1_probe 2>&1 | tee "$D/rec-2.console.log"
+```
+
+`run-record.sh` は att の確認を端末から読む（`yes`）．上の block を貼って `yes` と答え，run が終わってから次を貼る（同じ block に入れると次の行が確認の答えとして読まれる）：
+
+```sh
 recchk "$D/rec-2.console.log"
 ```
 
@@ -2134,6 +2139,11 @@ loadcheck
 # --- owner が #1 OBX slot A の att を確認した．次の 1 本だけ ---
 EZSDR_BENCH_NIC=enp1s0f1np1 EZSDR_BENCH_SUBNET=40 \
   plan/phase8/tools/run-record.sh <COMMIT> addr=192.168.40.36 hw_b1_probe 2>&1 | tee "$D/rec-1a.console.log"
+```
+
+`run-record.sh` は att の確認を端末から読む（`yes`）．上の block を貼って `yes` と答え，run が終わってから次を貼る（同じ block に入れると次の行が確認の答えとして読まれる）：
+
+```sh
 recchk "$D/rec-1a.console.log"
 ```
 
@@ -2255,12 +2265,19 @@ h3 "$EZSDR_UHD_ARGS"                                                            
 
 問い：D13 の #1・2 channel の記録（OBX + UBX の layout）と 2 channel の throughput の値．両 channel とも既定の中心周波数 1 GHz（OBX・UBX とも `default_frequency_hz` = 1 GHz：`x3xx.rs:201-207`）なので ±1 MHz の band に入る．**送信するので，owner が #1 の slot A（OBX）と slot B（UBX）の両方の「TX/RX → ≥30 dB の att → 同じ board の RX2」を確認してから**（`run-record.sh` は selector の tx の全 channel と slot A を名指して 1 回 `yes` を求める）．raw probe は slot A（1 GHz）だけ．
 
+この selector（OBX＋UBX）は FakeDevice で parse・layout・UR-5・record の 8 group・profile の比較まで拒否なく通る（2026-11-21，使い捨ての試験．実機の front end 名と throughput は未確認）．`hw_b1_probe`（preflight）は selector を受けず slot A の OBX だけを動かす．
+
 ```sh
 loadcheck
 # --- owner が #1 の slot A（OBX）と slot B（UBX）の att を確認した．次の 1 本だけ ---
 EZSDR_BENCH_NIC=enp1s0f1np1 EZSDR_BENCH_SUBNET=40 \
 EZSDR_MEASUREMENT_SELECTOR='{"rx":["0:A:obx:0","0:B:ubx:0"],"tx":["0:A:obx:0","0:B:ubx:0"]}' \
   plan/phase8/tools/run-record.sh <COMMIT> addr=192.168.40.36 hw_b1_probe 2>&1 | tee "$D/rec-1b.console.log"       # bench.md:201-207 の形
+```
+
+`run-record.sh` は att の確認を端末から読む（`yes`）．上の block を貼って `yes` と答え，run が終わってから次を貼る（同じ block に入れると次の行が確認の答えとして読まれる）：
+
+```sh
 recchk "$D/rec-1b.console.log"
 ```
 
@@ -2301,16 +2318,18 @@ PYTHONDONTWRITEBYTECODE=1 python3 plan/maintenance/tools/remote/rdev.py -- cargo
 3. **記録**（AGENTS §9 の bench の記録）：`bench/2026-11-27-<topic>/` を 3 つ作る：**`records`**（3 つの record suite），**`4b`**（S4・S9・C7・host の load），**`8b0`**（`sync_check`・`tx_packet_probe`）．各 dir に `conditions.json`，`results/`（log から機械で作る），`README.md`（人の要約と，それが決めたこと），`raw.txt`．
 
 ```sh
-P=~/.cache/ezsdr-bench/2026-11-27-pack; mkdir -p "$P/records" "$P/4b" "$P/8b0"                        # 組み立て
+DAY=2026-11-27; D=~/.cache/ezsdr-bench/$DAY; L=$D-8b0; cd ~/local_work/Ez-SDRv4                       # 2 日目は DAY=2026-11-30（records の行は無い）
+P=~/.cache/ezsdr-bench/$DAY-pack; mkdir -p "$P/records" "$P/4b" "$P/8b0"                        # 組み立て
 for r in <run #2 1ch> <run #1 1ch> <run #1 2ch>; do mkdir -p "$P/records/$(basename "$r")"; (cd "$r" && tar --exclude=./src -cf - .) | tar -xf - -C "$P/records/$(basename "$r")"; done
-cp "$D"/hw_*.log "$D"/h4-load.*.log "$D"/load.log "$D"/rec-*.console.log "$D"/bench-host.*.txt "$D"/probe.*.log "$D"/find.log "$P/4b/" 2>/dev/null
+cp "$D"/hw_*.log "$D"/h4-load.*.log "$D"/load.log "$D"/rec-*.console.log "$D"/bench-host.*.txt "$D"/probe.*.log "$D"/find.*log "$D"/txp-*.log "$P/4b/" 2>/dev/null
 cp "$L"/*.log "$P/8b0/"
-for t in records 4b 8b0; do tar -C "$P" -cJf "$P/2026-11-27-$t.tar.xz" "$t" && sha256sum "$P/2026-11-27-$t.tar.xz"; done
+for t in records 4b 8b0; do [ -n "$(ls -A "$P/$t")" ] && tar -C "$P" -cJf "$P/$DAY-$t.tar.xz" "$t" && sha256sum "$P/$DAY-$t.tar.xz"; done
 # private repo の release（orchestrator／owner．raw.txt の形は bench/2026-11-18-mt3/raw.txt）：
-gh release create 2026-11-27-records "$P/2026-11-27-records.tar.xz" -R k3komatsu/Ez-SDRv4-bench-raw --title 2026-11-27-records --notes "raw logs of the 2026-11-27 bench (records)"   # 4b，8b0 も同じ
+# gh release create $DAY-records "$P/$DAY-records.tar.xz" -R k3komatsu/Ez-SDRv4-bench-raw --title 2026-11-27-records --notes "raw logs of the $DAY bench (records)"   # 4b，8b0 も同じ．確かめてから # を外して 1 行ずつ流す（private repo への公開）
 # results（tree の中の bench/<session>/results/）
-python3 plan/phase8/tools/bench_extract.py "$P/records" bench/2026-11-27-records/results       # 4b，8b0 も同じ形（8b0 の S 行は下の snippet）
-python3 -I - "$L" >bench/2026-11-27-8b0/results/sync_check.jsonl <<'PY'                          # 組み立て：sync_check と H3 の行を JSONL に
+python3 plan/phase8/tools/bench_extract.py "$P/records" bench/$DAY-records/results       # 4b，8b0 も同じ形（8b0 の S 行は下の snippet）
+mkdir -p bench/$DAY-8b0/results
+python3 -I - "$L" >bench/$DAY-8b0/results/sync_check.jsonl <<'PY'                          # 組み立て：sync_check と H3 の行を JSONL に
 import glob, json, re, shlex, sys
 for f in sorted(glob.glob(sys.argv[1] + "/*.log")):
     for line in open(f):
@@ -2377,7 +2396,7 @@ txp_sample() { # $1 = 出力 file．組み立て．hw の container の test pro
     pid=${cid:+$(docker top "$cid" -eo pid,comm 2>/dev/null | awk '$2 ~ /^hardware-/ { print $1; exit }')}
     if [[ -n $pid ]]; then
       for t in /proc/$pid/task/*; do
-        read -r name <"$t/comm" 2>/dev/null || continue
+        { read -r name <"$t/comm"; } 2>/dev/null || continue
         case $name in uhd-*) printf '%s %s %s policy_prio_utime_stime=%s schedstat=%s\n' "$(date +%T.%N)" "${t##*/}" "$name" \
           "$(sed 's/^.*) //' "$t/stat" | awk '{print $39","$16","$12","$13}')" "$(cat "$t/schedstat")" ;; esac
       done >>"$out"
@@ -2394,7 +2413,7 @@ txp_sample "$D/txp-b3a.$BOARD.sched.log" & SP=$!
 EZSDR_S2_CELLS=duplex-rx100msps-tx100msps EZSDR_S2_DUPLEX_TRIALS=3 hw hw_s2_throughput_repeats
 kill "$SP"; wait "$SP" 2>/dev/null
 log=$(ls -t "$D"/hw_s2_throughput_repeats.$BOARD*.log | head -1); grep -h 'S2 decision\|S2 stop\|S2 trial\|EZSDR-INFRA' "$log"
-awk '{ k=$2" "$3; if (!(k in w0)) { w0[k]=$6; p[k]=$4 } w1[k]=$6 } END { for (k in w0) print k, p[k], "wait_ns_delta=" (w1[k]-w0[k]) }' "$D/txp-b3a.$BOARD.sched.log"
+awk '{ k=$2" "$3; if (!(k in w0)) { w0[k]=$6; p0[k]=$4 } p[k]=$4; w1[k]=$6 } END { for (k in w0) print k, "first:" p0[k], "last:" p[k], "wait_ns_delta=" (w1[k]-w0[k]) }' "$D/txp-b3a.$BOARD.sched.log"
 ```
 
 - 判定：**受信の overflow が 3 trial とも 0**（11-16 の duplex は 100+100 で 4/5・3/5，失敗はすべて送信の underflow，受信の overflow は 0）．uhd-tx の `policy` = 2（`policy_prio_utime_stime=2,…`）なら RT で走っている（0 なら効いていない）．uhd-rx・uhd-control の `wait_ns_delta` は実時間の uhd-tx に飢えさせられた兆候（大きさの基準は無い：記録するだけ）．TX の underflow は数える（失敗にしない）．
@@ -2408,10 +2427,10 @@ awk '{ k=$2" "$3; if (!(k in w0)) { w0[k]=$6; p[k]=$4 } w1[k]=$6 } END { for (k 
 loadcheck; board1
 # --- 送信あり．owner が #1 OBX slot A の att（≥30 dB）を確認した．次の 1 本だけ ---
 txp_sample "$D/txp-b3b.$BOARD.sched.log" & SP=$!
-hw <B3-TEST>                                   # <B3-TEST> は 1 日目の後に作る試験の名前．環境変数があればその brief の通り
+hw <B3-TEST>                                   # <B3-TEST> は 1 日目の後に作る試験の名前．その試験が読む環境変数は hw の -e の一覧に足す（hw は固定の -e だけを container に渡す）
 kill "$SP"; wait "$SP" 2>/dev/null
 log=$(ls -t "$D"/<B3-TEST>.$BOARD*.log | head -1); grep -h 'VERDICT\|EZSDR-INFRA' "$log"
-awk '{ k=$2" "$3; if (!(k in w0)) { w0[k]=$6; p[k]=$4 } w1[k]=$6 } END { for (k in w0) print k, p[k], "wait_ns_delta=" (w1[k]-w0[k]) }' "$D/txp-b3b.$BOARD.sched.log"
+awk '{ k=$2" "$3; if (!(k in w0)) { w0[k]=$6; p0[k]=$4 } p[k]=$4; w1[k]=$6 } END { for (k in w0) print k, "first:" p0[k], "last:" p[k], "wait_ns_delta=" (w1[k]-w0[k]) }' "$D/txp-b3b.$BOARD.sched.log"
 ```
 
 - **PASS／FAIL／INCONCLUSIVE は試験の定義に従う**．FAIL（overflow，Stop が 1 s を超える，timed 命令が窓を越える，policy が RT でない）は TXP の効果の前提が崩れた印：log と sampler を保存して orchestrator へ（KL-5 の書き換えは B3 の結果を見てから）．INCONCLUSIVE は何も示さない：理由を読み，ほかの負荷が無いことを確かめて 1 回だけ流し直す．
@@ -2520,7 +2539,7 @@ docker run --rm --name ezsdr-s6-tx --network=host --user "$(id -u):$(id -g)" -v 
   >"$L/s6-tx.log" 2>&1 &
 sleep 8; head -20 "$L/s6-tx.log"             # `Actual TX Rate` 50 MHz，`Actual TX Freq` 1000 MHz，`Actual TX Gain` 0 dB を確認する．違えば止める（下の stop）
 rxcap "$A1" lvl-sig-36.fc32; rxcap "$A2" lvl-sig-37.fc32
-lvl
+lvl | tee -a "$L/lvl.log"
 ```
 
 - **owner が見る level**（基準は INFERRED．owner が決める）：(i) 信号の **peak が 0.5（満点の半分）未満**（飽和しない），(ii) 信号の RMS が床の RMS の **10 倍以上**（約 20 dB 以上の SNR．`peak_db` が高く読めるため），(iii) #1 と #2 の RMS が数 dB 以内．**盤の最大入力の定格は data sheet で owner が確かめる**（この文書に基準は無い：未確認）．足りなければ att を**足す**（level が高いとき）か，splitter の後の枝の att を**外す**（低いとき．splitter の前の ≥30 dB は外さない）．配線を変えたら，もう一度この確認．

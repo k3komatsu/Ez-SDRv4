@@ -274,7 +274,7 @@
 - **何を決めるか**：B の手順（`internal` で開き，源を先に切り替え，一つの縁で時刻を入れる）が lock し，秒が合うか．開き方の危険（S5）は記録だけにする．S6 は装置の間の tick の差を測る．11-27 は Module の code を一行も通らない．`sync_check` が手順を書き写すので，記録には「UHD の振る舞いを確認．Module の道は未試験」と分けて書く．
 - **owner の確認が要るもの**：USRP の送信はどの段にも無い．S6 だけは外の信号源を RX に入れるので，各 RX port に入る level を owner が確かめる．#1 の `ref_locked` が false のままなら（S0），REF OUT・PPS OUT と入力の cable を付け替えて #2 を源にする．これは owner の手の作業で，以後の `A1` と `A2` を入れ替える．
 - **回数**：各段 10 回．一回が新しい process（新しい container）である．KL-1 の lock の失敗（open あたり約 4 %）が出たら，その回は数えずに記録だけ残す．
-- **準備**：`sync_check` は 11-27 より**前に** build し，`sc probe` を一台に一度流して，image に `cc` と libuhd への link の道があることを確かめておく（未確認）．source は木の中に置き，read-only で mount する．binary と log は木の外の `$L` に置く（Safety core：build の出力は木の外）．container は自分の uid で走らせる（bench.md と同じ `--user`）．
+- **準備**：`sync_check` は 11-27 より**前に** build し，`sc probe` を一台に一度流して，image に `cc` と libuhd への link の道があることを確かめておく（2026-11-21 に image で build と `selftest ok` を確かめた．`sc probe` は装置が要るので 11-27 の前日準備で）．source は木の中に置き，read-only で mount する．binary と log は木の外の `$L` に置く（Safety core：build の出力は木の外）．container は自分の uid で走らせる（bench.md と同じ `--user`）．
 
 ```sh
 plan/phase8/tools/bench-host.sh --nic enp1s0f1np1 --subnet 40     # #1．bench.md BP1 のとおり
